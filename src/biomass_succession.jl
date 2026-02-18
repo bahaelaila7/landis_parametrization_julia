@@ -110,10 +110,12 @@ module SuccessionModule
             bio = site.c_bio[i]
             B += bio
             comp = bio ^ 0.95f0
+            #println("Bio $bio, Comp $(comp)")
             if comp < 1.0f0
                 comp = 1.0f0
             end
             C += comp
+            @assert !isnan(C) "$bio"
             site.c_comp[i] = comp
             site.c_m_tot[i] = bio
             max_age = params.LONGEVITY[sp]
@@ -156,12 +158,14 @@ module SuccessionModule
             b_ap = bio / b_pot
             b_ap_s = b_ap ^ params.S[sp]
             anpp_act = b_ap_s * exp(1.0f0 - b_ap_s)
+            #@assert !isnan(anpp_act) "$b_ap_s, $(params.S[sp])"
             if anpp_act > 1.0f0
                 anpp_act = 1.0f0
             end
             site.c_comp[i] /= C
 
             anpp_max_c = params.ANPP_MAX_SPP[site.ecocode, sp] * site.c_comp[i]
+            #@assert !isnan(anpp_max_c) "$C, $(site.c_comp[i]), $(params.ANPP_MAX_SPP[site.ecocode, sp])"
             anpp_act *= anpp_max_c
 
             if site.growthReduction > 0.0f0
@@ -200,6 +204,7 @@ module SuccessionModule
             site.c_m_tot[i] = m_tot
 
             nbio = bio + anpp_act - m_tot
+            @assert !isnan(nbio) "$bio, mtot  $m_tot, $m_age, $m_bio anpp_act $anpp_act, $anpp_max_c, $C, $(site.c_comp[i])"
             
             site.c_bio[i] = nbio
             senescent = (nbio <= 1.0f-8)
@@ -234,7 +239,7 @@ module SuccessionModule
         b_am = B_ACT / site_b_max
         shade_classes = @view params.MIN_REL_BIOMASS[:, site.ecocode]
         shade_class = 1
-        for sc in 1:length(shade_classes)
+        for sc in 1:(length(shade_classes) - 1)
             if b_am > shade_classes[sc]
                 shade_class += 1
             else

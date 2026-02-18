@@ -126,10 +126,10 @@ function generate_biomass_params(rng::Random.AbstractRNG, n_species::UInt, n_eco
     SPINUP_MORTALITY_FRACTION = 0.15f0 #rand(Dists.Uniform(0f0,0.20f0))
     println(typeof(SPINUP_MORTALITY_FRACTION))
 
-    D = rand(rng, Dists.truncated(Dists.Normal(0.5,1.0), 0.01,1.0), n_species) .|> Float32 #Random.rand(rng, Float32, n_species),#
-    println(typeof(D))
-    S = rand(rng, Dists.truncated(Dists.Normal(15,10),5,25), n_species) .|> Float32
+    S = rand(rng, Dists.truncated(Dists.Normal(0.5,1.0), 0.01,1.0), n_species) .|> Float32 #Random.rand(rng, Float32, n_species),#
     println(typeof(S))
+    D = rand(rng, Dists.truncated(Dists.Normal(15,10),5,25), n_species) .|> Float32
+    println(typeof(D))
     LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200,100), 100,300), n_species) .|> Float32
     println(typeof(LONGEVITY))
     SHADE_TOL = rand(rng, Dists.DiscreteUniform(1,5), n_species) .|> UInt32 # ::Vector{Float32}
@@ -205,8 +205,8 @@ function mutate_biomass_params(p)
 
     d = [
     (:SPINUP_MORTALITY_FRACTION, Dists.Uniform(0f0,0.20f0), Float32, false, false),
-    (:D, Dists.truncated(Dists.Normal(0.5,1.0), 0.01,1.0), Float32, true, false),
-    (:S, Dists.truncated(Dists.Normal(15,10),5,25), Float32, true, false),
+    (:S, Dists.truncated(Dists.Normal(0.5,1.0), 0.01,1.0), Float32, true, false),
+    (:D, Dists.truncated(Dists.Normal(15,10),5,25), Float32, true, false),
     (:LONGEVITY, Dists.truncated(Dists.Normal(200,100), 100,300), Float32, true, false),
     (:SHADE_TOL, Dists.DiscreteUniform(1,5), Float32, true, false),
      (:MATURITY, Dists.DiscreteUniform(3,40), Float32, true, false),
@@ -236,6 +236,9 @@ function main(args)
     sites = make_sites(splots, RNG)
     println("###Sites made, beginning spinup")
     spinup_cohorts!(splots, sites, p ) #[splots.measdate .== splots.start_measdate,:])
+    for site in sites
+        @assert site.old <= site.live <= site.cap "$site"
+    end
     return
     
     println("Hello ", p, args)
