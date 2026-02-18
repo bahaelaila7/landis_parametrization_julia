@@ -10,7 +10,7 @@ module SuccessionModule
 
     Base.@kwdef mutable struct Site
         active::Bool
-        rng_state::UInt64
+        rng::Random.Xoshiro
         ecocode::UInt
         mapcode::UInt
 
@@ -96,7 +96,7 @@ module SuccessionModule
     function succession_step!(current_time::Int, params::BiomassSuccessionParams, site::Site)
         B = 0.0f0
         C = 0.0f0
-        RNG = Random.seed!(site.rng_state)
+        #RNG = site.rng Random.seed!(site.rng_state)
         site.sp_mature .= false
 
         # advancing age, summing site biomass, computing competition, mortality due to age or random act of god
@@ -121,7 +121,7 @@ module SuccessionModule
             max_age = params.LONGEVITY[sp]
             if age < max_age
                 # not max age yet
-                mort_rng = Random.rand(RNG, Float32)
+                mort_rng = rand(site.rng, Float32)
                 if mort_rng > params.PROB_MORT_SPP[site.ecocode, sp]
                     m_age_factor = exp(params.D[sp] * (age/max_age - 1.0f0))
                     if current_time <= 0
@@ -258,10 +258,10 @@ module SuccessionModule
             for sp in 1:length(site.sp_mature)
                 if site.sp_mature[sp]
                     sp_light_prob = shade_probs[params.SHADE_TOL[sp]]
-                    light_rng = rand(RNG, Float32)
+                    light_rng = rand(site.rng, Float32)
                     if light_rng <= sp_light_prob
                         sp_estab_prob = params.PROB_ESTAB_SPP[site.ecocode, sp]
-                        sp_estab_rng = rand(RNG, Float32)
+                        sp_estab_rng = rand(site.rng, Float32)
                         if sp_estab_rng <= sp_estab_prob
                             new_biomass= calculate_initial_biomass(params.ANPP_MAX_SPP[site.ecocode, sp],
                                                                               new_B, site_b_max)

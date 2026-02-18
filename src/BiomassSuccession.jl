@@ -38,7 +38,7 @@ function make_sites(splots::DataFrame, rng::Random.AbstractRNG)
     #index = eco_id * plot_id
     sites = [ Site(
             active = false,
-            rng_state = Random.rand(rng, UInt64),
+            rng = Random.Xoshiro(rand(rng, UInt64)),
             ecocode = UInt(row.eco_id),
             mapcode = UInt(row.plot_id),
 
@@ -62,7 +62,30 @@ function make_sites(splots::DataFrame, rng::Random.AbstractRNG)
         for (i, row) in enumerate(eachrow(plot_eco_ids))]
     return sites
 end
-function spinup_cohorts!(df::DataFrame, sites::Vector{Site}, params::BiomassSuccessionParams)
+
+function get_spinup_cohorts(df::DataFrame)
+    spinup_cohorts = df[df.year_deficit .<= 0, :]
+    spinup_cohorts = sort!(spinup_cohorts, :year_deficit)
+    return spinup_cohorts
+end
+function get_initial_cohorts(df::DataFrame)
+    return df[df.year_deficit .== 0, :]
+end
+function initialize_sites!(initial_cohorts::DataFrame, sites::Vector{Site})
+    ## current_year will go down to -1, since the last estab cohort
+    ## would be 1 year old, so a year before the last start_measdate
+    for row in eachrow(initial_cohorts)
+        #check and add cohort
+        site = sites[row.plot_id]
+        #print(site)
+        # make it active if not already
+        site.active = true
+        add_new_cohort!(site, row.species_id, row.age_calc, row.agb_sum)
+        #println("Adding cohort $(row.species_symbol_map) to ", row.plot_id)
+    end
+
+end
+function mark_estab_year!(df::DataFrame)
     println(minimum(df.age_calc))
     #show(df[df.age_calc .< 0,:]) #.age_calc .= 1
     year_estab = df.measdate .- (df.age_calc .|> Dates.Year)
@@ -71,18 +94,15 @@ function spinup_cohorts!(df::DataFrame, sites::Vector{Site}, params::BiomassSucc
     println("Oldest cohort established: $oldest")
     println("First measurement date: $last")
     df.year_deficit .= Dates.value.(year_estab .- last)./365.25 .|> round .|> Int
+end
 
-    spinup_cohorts = df[df.year_deficit .<= 0, :]
-    spinup_cohorts = sort!(spinup_cohorts, :year_deficit)
+function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, params::BiomassSuccessionParams)
     #show(spinup_cohorts.year_deficit)
-    current_year = minimum(df.year_deficit)
-
-    
-
-    ## will go down to -1, since the last estab cohort
+    current_year = minimum(spinup_cohorts.year_deficit)
+    ## current_year will go down to -1, since the last estab cohort
     ## would be 1 year old, so a year before the last start_measdate
-    pbar = ProgressBar(total = -current_year)
-    for row in ProgressBar(eachrow(spinup_cohorts))
+    #pbar = ProgressBar(total = -current_year)
+    for row in eachrow(spinup_cohorts)
         while current_year < row.year_deficit
             #grow all active
             Threads.@threads for site in sites
@@ -92,7 +112,7 @@ function spinup_cohorts!(df::DataFrame, sites::Vector{Site}, params::BiomassSucc
                 end
             end
             current_year += 1
-            update(pbar)
+            #update(pbar)
         end
         #check and add cohort
         site = sites[row.plot_id]
@@ -116,6 +136,8 @@ function spinup_cohorts!(df::DataFrame, sites::Vector{Site}, params::BiomassSucc
         end
         #println("Adding cohort $(row.species_symbol_map) to ", row.plot_id)
     end
+    #update(pbar)
+    # cohorts with year_deficit = 0 will have been added but not succeeded yet
 
     
 end
@@ -124,30 +146,30 @@ end
 function generate_biomass_params(rng::Random.AbstractRNG, n_species::UInt, n_ecoregions::UInt)
     # TODO: species that do not show up for a specific ecoregion, make all their prob_estab = 0
     SPINUP_MORTALITY_FRACTION = 0.15f0 #rand(Dists.Uniform(0f0,0.20f0))
-    println(typeof(SPINUP_MORTALITY_FRACTION))
+    #println(typeof(SPINUP_MORTALITY_FRACTION))
 
     S = rand(rng, Dists.truncated(Dists.Normal(0.5,1.0), 0.01,1.0), n_species) .|> Float32 #Random.rand(rng, Float32, n_species),#
-    println(typeof(S))
+    #println(typeof(S))
     D = rand(rng, Dists.truncated(Dists.Normal(15,10),5,25), n_species) .|> Float32
-    println(typeof(D))
+    #println(typeof(D))
     LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200,100), 100,300), n_species) .|> Float32
-    println(typeof(LONGEVITY))
+    #println(typeof(LONGEVITY))
     SHADE_TOL = rand(rng, Dists.DiscreteUniform(1,5), n_species) .|> UInt32 # ::Vector{Float32}
-    println(typeof(SHADE_TOL))
+    #println(typeof(SHADE_TOL))
     MATURITY = rand(rng, Dists.DiscreteUniform(3,40), n_species) .|> Float32 #::Vector{Float32}
-    println(typeof(MATURITY))
+    #println(typeof(MATURITY))
 
     PROB_MORT_SPP = rand(rng, Dists.Uniform(), n_ecoregions, n_species) .|> Float32  #::Matrix{Float32}
-    println(typeof(PROB_MORT_SPP))
+    #println(typeof(PROB_MORT_SPP))
     PROB_ESTAB_SPP = rand(rng, Dists.Uniform(), n_ecoregions, n_species) .|> Float32  #::Matrix{Float32}
-    println(typeof(PROB_ESTAB_SPP))
+    #println(typeof(PROB_ESTAB_SPP))
     ANPP_MAX_SPP = rand(rng, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), n_ecoregions, n_species) .|> Float32 
-    println(typeof(ANPP_MAX_SPP))
+    #println(typeof(ANPP_MAX_SPP))
     B_MAX_SPP = rand(rng, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), n_ecoregions, n_species) .|> Float32 
-    println(typeof(B_MAX_SPP))
+    #println(typeof(B_MAX_SPP))
     #println(B_MAX_SPP)
     B_MAX_ECO = vec(maximum(B_MAX_SPP; dims=2)) #Float32[0.0,0.0],#::Vector{Float32}
-    println(typeof(B_MAX_ECO))
+    #println(typeof(B_MAX_ECO))
     #println(B_MAX_ECO)
     # (shade_tol x shade_class) -> prob of sufficient light
     # julia is column major, much faster to pickout the site's shade class as one chunk
@@ -158,7 +180,7 @@ function generate_biomass_params(rng::Random.AbstractRNG, n_species::UInt, n_eco
                         1.00 1.00 1.00 0.50 0.25 0.00;
                         1.00 1.00 1.00 1.00 0.50 0.25;
                         1.00 1.00 1.00 1.00 1.00 0.50 ]
-    println(typeof(SUFFICIENT_LIGHT))
+    #println(typeof(SUFFICIENT_LIGHT))
 
     # by ecoregion
     firstMINRel = rand(rng, Dists.Uniform(0.0,0.5), n_ecoregions) .|> Float32 
@@ -168,7 +190,7 @@ function generate_biomass_params(rng::Random.AbstractRNG, n_species::UInt, n_eco
     MIN_REL_BIOMASS = [fmin+k*0.10f0
                         for k in 0:5,
                         fmin in firstMINRel]
-    println(typeof(MIN_REL_BIOMASS))
+    #println(typeof(MIN_REL_BIOMASS))
     #println(MIN_REL_BIOMASS)
 
     p = BiomassSuccessionParams(
@@ -230,14 +252,30 @@ function main(args)
     println("###loading data")
     splots, n_plots, n_species, n_ecoregions =load_cohorts()
     println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
-    p = generate_biomass_params(RNG, UInt(n_species), UInt(n_ecoregions))
-    println(p)
-    println("###making sites")
-    sites = make_sites(splots, RNG)
-    println("###Sites made, beginning spinup")
-    spinup_cohorts!(splots, sites, p ) #[splots.measdate .== splots.start_measdate,:])
-    for site in sites
-        @assert site.old <= site.live <= site.cap "$site"
+    mark_estab_year!(splots)
+    spinup_cohorts = get_spinup_cohorts(splots)
+    initial_cohorts = get_initial_cohorts(splots)
+    println("beginning trials")
+    for trials in ProgressBar(1:100)
+        params = generate_biomass_params(RNG, UInt(n_species), UInt(n_ecoregions))
+        #println(params)
+        #println("###making sites")
+        sites = make_sites(splots, RNG)
+        #println("###Sites made, beginning spinup")
+        spinup_cohorts!(spinup_cohorts, sites, params ) #[splots.measdate .== splots.start_measdate,:])
+        #println("Sites spun up")
+        
+        for current_year in 0:50 #ProgressBar(0:50)
+            Threads.@threads for site in sites
+                if site.active
+                    #println(site.mapcode)
+                    succession_step!(current_year, params, site)
+                end
+            end
+        end
+        for site in sites
+            @assert site.old <= site.live <= site.cap "$site"
+        end
     end
     return
     
