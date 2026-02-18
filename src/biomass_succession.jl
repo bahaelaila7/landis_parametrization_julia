@@ -4,7 +4,7 @@ module SuccessionModule
     #   spin up
     # report outcome
     # compare outcome
-    export Site, BiomassSuccessionParams, succession_step;
+    export Site, BiomassSuccessionParams, succession_step!, add_new_cohort!;
     using Base
     using Random
 
@@ -15,6 +15,7 @@ module SuccessionModule
         mapcode::UInt
 
         cap:: UInt
+        old::UInt
         live:: UInt
         B::Float32
         AGNPP::Float32
@@ -25,7 +26,7 @@ module SuccessionModule
 
         c_species::Vector{UInt32}
         c_age::Vector{Float32}
-        c_biomass::Vector{Float32}
+        c_bio::Vector{Float32}
         c_m_tot::Vector{Float32}
         c_comp::Vector{Float32}
         sp_mature::Vector{Bool}
@@ -40,7 +41,7 @@ module SuccessionModule
         S::Vector{Float32}
         
         LONGEVITY::Vector{Float32}
-        SHADE_TOL::Vector{Float32}
+        SHADE_TOL::Vector{UInt32}
         MATURITY::Vector{Float32}
         B_MAX_ECO::Vector{Float32}
         
@@ -55,32 +56,44 @@ module SuccessionModule
         
         
     end
-    function ensure_site_cap(site::Site, live::UInt)
+    function ensure_site_cap!(site::Site, live::UInt)
         cap = site.cap
         if cap < live
+            #print("RESIZING $cap to ")
             cap *= 2
+            #println("$cap")
+            #println("$(site.c_age)")
             site.c_age = resize!(site.c_age, cap)
+            #println("$(site.c_age)")
             site.c_bio = resize!(site.c_bio, cap)
             site.c_species = resize!(site.c_species, cap)
             site.c_m_tot = resize!(site.c_m_tot, cap)
             site.c_comp = resize!(site.c_comp, cap)
+            site.cap = cap
         end
     end
 
-    function calculate_initial_biomass(sp_max_anpp, site_b, b_max_eco)
+    function calculate_initial_biomass(sp_max_anpp::Float32, site_b::Float32, b_max_eco::Float32)::Float32
         b = exp(-1.6f0 * site_b / b_max_eco)
-        if b < 1.0
-            b = 1.0
+        if b < 1.0f0
+            b = 1.0f0
         end
         b *= sp_max_anpp
-        if b < 2.0
-            b = 2.0
+        if b < 2.0f0
+            b = 2.0f0
         end
         return b
     end
-            
+    
+    function add_new_cohort!(site::Site, species::UInt32, age::Float32, biomass::Float32)
+        ensure_site_cap!(site,site.live + 1)
+        site.live += 1
+        site.c_species[site.live] = species
+        site.c_age[site.live] = 1.0f0
+        site.c_bio[site.live] = biomass
+    end
 
-    function succession_step(current_time::Int, params::BiomassSuccessionParams, site::Site)
+    function succession_step!(current_time::Int, params::BiomassSuccessionParams, site::Site)
         B = 0.0f0
         C = 0.0f0
         RNG = Random.seed!(site.rng_state)
@@ -96,7 +109,7 @@ module SuccessionModule
             end
             bio = site.c_bio[i]
             B += bio
-            comp = power(bio, 0.95)
+            comp = bio ^ 0.95f0
             if comp < 1.0f0
                 comp = 1.0f0
             end
@@ -113,7 +126,7 @@ module SuccessionModule
                         m_age_factor += params.SPINUP_MORTALITY_FRACTION
                     end
                     if m_age_factor < 1.0f0
-                        c_m_tot[i] *= m_age_factor
+                        site.c_m_tot[i] *= m_age_factor
                     end
                 end
             end
@@ -136,17 +149,17 @@ module SuccessionModule
                 b_pot = 1.0f0
             end
             # TODO: check this condition
-            if capacityReduction >= 1.0f0 && b_pot < site.prevYearMortality
+            if site.capacityReduction >= 1.0f0 && b_pot < site.prevYearMortality
                 b_pot = site.prevYearMortality
             end
             
             b_ap = bio / b_pot
-            b_ap_s = power(b_ap, params.S[sp])
+            b_ap_s = b_ap ^ params.S[sp]
             anpp_act = b_ap_s * exp(1.0f0 - b_ap_s)
             if anpp_act > 1.0f0
                 anpp_act = 1.0f0
             end
-            site.comp[i] /= C
+            site.c_comp[i] /= C
 
             anpp_max_c = params.ANPP_MAX_SPP[site.ecocode, sp] * site.c_comp[i]
             anpp_act *= anpp_max_c
@@ -176,7 +189,7 @@ module SuccessionModule
             end
             m_bio -= m_age
             if m_bio < 0.0f0
-                m_bio = 0.0
+                m_bio = 0.0f0
             end
             if m_bio < anpp_act
                 m_bio = anpp_act
@@ -209,6 +222,7 @@ module SuccessionModule
             site.live = last
         end
 
+
         # calculating shade class
         site_b_max = params.B_MAX_ECO[site.ecocode]
         site_b_pot = site_b_max - site.prevYearMortality
@@ -218,8 +232,8 @@ module SuccessionModule
             B_ACT = site_b_pot
         end
         b_am = B_ACT / site_b_max
-        shade_classes = params.MIN_REL_BIOMASS[site.ecocode]
-        shade_class = 0
+        shade_classes = @view params.MIN_REL_BIOMASS[:, site.ecocode]
+        shade_class = 1
         for sc in 1:length(shade_classes)
             if b_am > shade_classes[sc]
                 shade_class += 1
@@ -227,24 +241,26 @@ module SuccessionModule
                 break
             end
         end
+
+        # before reproduction, all cohorts on site are now old
+        site.old = site.live
         
         # reproduction if live cohorts
         if site.live > 0
-            shade_probs = params.SUFFICIENT_LIGHT[shade_class]
-            for sp in 1:site.sp_mature.length
+            #println(shade_class, params.SUFFICIENT_LIGHT)
+            shade_probs = @view params.SUFFICIENT_LIGHT[:, shade_class]
+            #println(shade_probs)
+            for sp in 1:length(site.sp_mature)
                 if site.sp_mature[sp]
                     sp_light_prob = shade_probs[params.SHADE_TOL[sp]]
-                    light_rng = Random.rand(site.rng_state, Float32)
+                    light_rng = rand(RNG, Float32)
                     if light_rng <= sp_light_prob
                         sp_estab_prob = params.PROB_ESTAB_SPP[site.ecocode, sp]
-                        sp_estab_rng = Random.rand(site.rng_state, Float32)
+                        sp_estab_rng = rand(RNG, Float32)
                         if sp_estab_rng <= sp_estab_prob
-                            ensure_site_cap(site,site.live + 1)
-                            site.live += 1
-                            site.c_species[site.live] = sp
-                            site.c_age[site.live] = 1.0f0
-                            site.c_bio[site.live] = calculate_initial_biomass(params.ANPP_MAX_SPP[site.ecocode, sp],
+                            new_biomass= calculate_initial_biomass(params.ANPP_MAX_SPP[site.ecocode, sp],
                                                                               new_B, site_b_max)
+                            add_new_cohort!(site, UInt32(sp),1f0,new_biomass)
                         end
                     end
                 end
