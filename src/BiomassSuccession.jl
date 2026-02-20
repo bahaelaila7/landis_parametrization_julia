@@ -8,7 +8,9 @@ using ProgressBars, DataFrames
 
 function load_cohorts()
     all_df = CSV.read("../data_eco_cohorts.csv", DataFrame)
-    cdf = all_df[all_df.eco .== "8.3.4.45a", :]
+    FL5_counties_ecos = ["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
+    filtered_plots = in(FL5_counties_ecos).(all_df.eco)
+    cdf = all_df[filtered_plots,:]
 
     #println(species)
     plots = combine(groupby(cdf, [:statecd, :unitcd, :countycd, :plot, :eco, :measdate, :start_measdate, :species_symbol_map, :age_calc]), nrow => :count, :agb => sum =>:agb_sum)
@@ -265,11 +267,21 @@ function main(args)
         spinup_cohorts!(spinup_cohorts, sites, params ) #[splots.measdate .== splots.start_measdate,:])
         #println("Sites spun up")
         
+        #
+        ## 
+        ##
+        ##
+        ##
+        ##
+        #
         for current_year in 0:50 #ProgressBar(0:50)
             Threads.@threads for site in sites
                 if site.active
                     #println(site.mapcode)
                     succession_step!(current_year, params, site)
+                    # what years to check for this site
+                    aggregate_results(current_year, site)
+                    
                 end
             end
         end

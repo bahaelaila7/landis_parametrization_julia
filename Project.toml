@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["BahaaEddin AlAila <bahaelaila7@gmail.com>"]
 
 [deps]
+ArchGDAL = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
@@ -12,10 +13,12 @@ PackageCompiler = "9b87118b-4619-50d2-8e1e-99f35a4d4d9d"
 ProgressBars = "49802e3a-d2f1-5c88-81d8-b72133a6f568"
 Query = "1a8c2f83-1ff3-5112-b086-8aa67b057ba1"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Rasters = "a3a2b9e3-a471-40c9-b274-f788e487c689"
 SQLdf = "1d9d1391-8b3d-499a-a06e-5da8adbf6ef0"
 SQLite = "0aa819cd-b072-5ff4-a722-6bc24af294d9"
 
 [compat]
+ArchGDAL = "0.10.11"
 CSV = "0.10.15"
 DataFrames = "1.8.1"
 Dates = "1.11.0"
@@ -24,5 +27,6 @@ PackageCompiler = "2.2.4"
 ProgressBars = "1.5.1"
 Query = "1.0.0"
 Random = "1.11.0"
+Rasters = "0.14.7"
 SQLdf = "0.2.0"
 SQLite = "1.8.0"
