@@ -3,7 +3,7 @@ module BiomassSuccession
 
 include("biomass_succession.jl")
 import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, calculate_initial_biomass, add_new_cohort!
-import CSV, Random, Dates, Distributions as Dists
+import CSV, Random, Dates, Distributions as Dists, ImageFiltering
 using ProgressBars, DataFrames
 
 function load_cohorts()
@@ -63,6 +63,60 @@ function make_sites(splots::DataFrame, rng::Random.AbstractRNG)
         )
         for (i, row) in enumerate(eachrow(plot_eco_ids))]
     return sites
+end
+
+function get_smoothing_window(;smoothing_window::Int = Int(3), smoothing_variance::Float32 =1.0f0)
+    w = ((-smoothing_window:smoothing_window) ./ smoothing_variance) .^ 2.0f0 .* -0.5f0 .|> exp
+    w ./= sum(w)
+    return w
+end
+
+function smoothen_bin_cdf(p; w::Vector{Float32}=get_smoothing_window(), age_bins::Vector{Int}= [5,8,13,20,25,40,60,80])
+    pc = smooth_ages(;ages = p, smoothing_window = w)
+    pc_bin = bin_ages(pc; age_bins = age_bins)
+    pc_bin_cdf = cumsum(pc_bin)
+    if pc_bin_cdf[end] > 0.0f0
+        pc_bin_cdf ./= pc_bin_cdf[end]
+    end
+    return pc_bin_cdf
+    
+end
+
+function wasser1(pc_bin_cdf::Vector{Float32}, qc_bin_cdf::Vector{Float32}; age_bins ::Vector{Int}= [5,8,13,20,25,40,60,80])
+    bin_widths = age_bins .- [0;age_bins[begin:end-1]]
+    wasser_1 = bin_widths .* abs.(qc_bin_cdf - pc_bin_cdf)[begin:end-1]
+    return sum(wasser_1)
+end
+#function smoothen_ages(;smoothing_window,
+function smooth_ages(;ages, smoothing_window)
+    smoothed_ages = ImageFiltering.imfilter(ages, smoothing_window, "symmetric")
+    smoothed_ages ./= sum(smoothed_ages)
+end
+
+function bin_ages(ages; age_bins=[5,8,13,20,25,40,60,80], open_last=true)
+    bins = length(age_bins)
+    if open_last
+        bins += 1
+    end
+    bs = zeros(bins)
+    current_bin = 1
+    current_age = age_bins[current_bin]
+    for (i, a) in enumerate(ages)
+        if i >= current_age
+            current_bin += 1
+            if current_bin > length(age_bins)
+                if open_last
+                    current_age = Inf
+                else
+                    break
+                end
+            else
+                current_age = age_bins[current_bin]
+            end
+        end
+        bs[current_bin] += ages[i]
+    end
+    return bs
 end
 
 function get_spinup_cohorts(df::DataFrame)
