@@ -4,7 +4,7 @@ module SuccessionModule
     #   spin up
     # report outcome
     # compare outcome
-    export Site, BiomassSuccessionParams, succession_step!, add_new_cohort!;
+    export Site, BiomassSuccessionParams, succession_step!, add_new_cohort!, reproduction_step!;
     using Base
     using Random
 
@@ -56,7 +56,7 @@ module SuccessionModule
         
         
     end
-    function ensure_site_cap!(site::Site, live::UInt)
+    @inline function ensure_site_cap!(site::Site, live::UInt)
         cap = site.cap
         if cap < live
             #print("RESIZING $cap to ")
@@ -73,7 +73,7 @@ module SuccessionModule
         end
     end
 
-    function calculate_initial_biomass(sp_max_anpp::Float32, site_b::Float32, b_max_eco::Float32)::Float32
+    @inline function calculate_initial_biomass(sp_max_anpp::Float32, site_b::Float32, b_max_eco::Float32)::Float32
         b = exp(-1.6f0 * site_b / b_max_eco)
         if b < 1.0f0
             b = 1.0f0
@@ -85,12 +85,39 @@ module SuccessionModule
         return b
     end
     
-    function add_new_cohort!(site::Site, species::UInt32, age::Float32, biomass::Float32)
+    @inline function add_new_cohort!(site::Site, species::UInt32, age::Float32, biomass::Float32)
         ensure_site_cap!(site,site.live + 1)
         site.live += 1
         site.c_species[site.live] = species
         site.c_age[site.live] = 1.0f0
         site.c_bio[site.live] = biomass
+    end
+
+
+    function reproduction_step!(current_time::Int, params::BiomassSuccessionParams, site::Site)
+        # reproduction if live cohorts
+        if site.live > 0
+            #println(shade_class, params.SUFFICIENT_LIGHT)
+            shade_probs = @view params.SUFFICIENT_LIGHT[:, site.shade_class]
+            #println(shade_probs)
+            for sp in 1:length(site.sp_mature)
+                if site.sp_mature[sp]
+                    sp_light_prob = shade_probs[params.SHADE_TOL[sp]]
+                    light_rng = rand(site.rng, Float32)
+                    if light_rng <= sp_light_prob
+                        sp_estab_prob = params.PROB_ESTAB_SPP[site.ecocode, sp]
+                        sp_estab_rng = rand(site.rng, Float32)
+                        if sp_estab_rng <= sp_estab_prob
+                            new_biomass= calculate_initial_biomass(params.ANPP_MAX_SPP[site.ecocode, sp],
+                                                                              site.B, params.B_MAX_ECO[site.ecocode])
+                            add_new_cohort!(site, UInt32(sp),1f0,new_biomass)
+                            site.B += new_biomass
+                        end
+                    end
+                end
+
+            end
+        end
     end
 
     function succession_step!(current_time::Int, params::BiomassSuccessionParams, site::Site)
@@ -247,31 +274,17 @@ module SuccessionModule
             end
         end
 
+         ######################
+        # Updating site data
+        #####################
         # before reproduction, all cohorts on site are now old
         site.old = site.live
+        site.B = new_B
+        site.AGNPP = AGNPP
+        #site.defoliationLoss = defoliationLoss_ij.sum()
+        site.prevYearMortality = M_TOT #M_TOT_ij.sum()
+        site.shade_class = shade_class
         
-        # reproduction if live cohorts
-        if site.live > 0
-            #println(shade_class, params.SUFFICIENT_LIGHT)
-            shade_probs = @view params.SUFFICIENT_LIGHT[:, shade_class]
-            #println(shade_probs)
-            for sp in 1:length(site.sp_mature)
-                if site.sp_mature[sp]
-                    sp_light_prob = shade_probs[params.SHADE_TOL[sp]]
-                    light_rng = rand(site.rng, Float32)
-                    if light_rng <= sp_light_prob
-                        sp_estab_prob = params.PROB_ESTAB_SPP[site.ecocode, sp]
-                        sp_estab_rng = rand(site.rng, Float32)
-                        if sp_estab_rng <= sp_estab_prob
-                            new_biomass= calculate_initial_biomass(params.ANPP_MAX_SPP[site.ecocode, sp],
-                                                                              new_B, site_b_max)
-                            add_new_cohort!(site, UInt32(sp),1f0,new_biomass)
-                        end
-                    end
-                end
-
-            end
-        end
             
     #println(current_time, "done")
     end
