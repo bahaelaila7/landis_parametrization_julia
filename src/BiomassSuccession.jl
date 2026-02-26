@@ -1,12 +1,29 @@
 module BiomassSuccession
 
 
-using Base: AbstractArrayOrBroadcasted
 include("biomass_succession.jl")
 import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, reproduction_step!, calculate_initial_biomass, add_new_cohort!
 import CSV, Random, Dates, Distributions as Dists, ImageFiltering, StatsBase, Term.Progress as TProgress
 using DataFrames
 #using ProgressBars
+
+struct AgeBins
+    bins_idx::Vector{Int}
+    bin_widths::Vector{Float32}
+    last_bin_open::Bool
+    function AgeBins(; bins_idx::Vector{Int}, last_bin_open::Bool)
+        new(bins_idx,
+            get_bin_widths(; age_bins=bins_idx, last_bin_open=last_bin_open),
+            last_bin_open)
+    end
+end
+
+Base.@kwdef struct LossParams
+    age_bins::AgeBins
+    smoothing_weights::Vector{Float32}
+    lambda::Float32 = 1.0f-2
+    EPS::Float32 = 1.0f-8
+end
 
 function load_cohorts()
     all_df = CSV.read("../data_eco_cohorts.csv", DataFrame)
@@ -69,9 +86,9 @@ end
     return w
 end
 
-@inline function smoothen_bin_cdf(p; w::Vector{Float32}, age_bins::Vector{Int}, last_bin_open::Bool)::Vector{Float32}
+@inline function smoothen_bin_cdf(p; w::Vector{Float32}, age_bins::AgeBins)::Vector{Float32}
     pc = smooth_ages(; ages=p, smoothing_window=w)
-    pc_bin = bin_ages(pc; age_bins=age_bins, last_bin_open=last_bin_open)
+    pc_bin = bin_ages(pc; age_bins=age_bins.bins_idx, last_bin_open=age_bins.last_bin_open)
     pc_bin_cdf = cumsum(pc_bin)
     if pc_bin_cdf[end] > 0.0f0
         pc_bin_cdf ./= pc_bin_cdf[end]
@@ -80,18 +97,29 @@ end
 
 end
 
-@inline function bins_loss(pc_bin_cdf::Vector{Float32}, qc_bin_cdf::Vector{Float32}; age_bins::Vector{Int}, bin_widths::Vector{Float32}, lambda::Float32=1.0f-2, EPS::Float32=1.0f-8)::Float32
+@inline function bins_loss(pc_bin_cdf::Union{Missing,Vector{Float32}}, qc_bin_cdf::Union{Missing,Vector{Float32}}; loss_params::LossParams)::Float32
     # warning: 
     # Technically W1 is not defined if one or both distribution collapsed (0 everywhere)
     # 0 distance if both are collapsed while +Inf if only one is sensible,
     # BUT Inf will make all aggregates useless and will make the search directionless
     # tagging along a small log(m+eps) such that if aggregate is 0 eps penalize it heavily
     wasser1 = 0.0f0
-    a, b = qc_bin_cdf[end], pc_bin_cdf[end]
-    if a > EPS && b > EPS
-        wasser1 += sum(bin_widths .* abs.(qc_bin_cdf - pc_bin_cdf)[begin:end-1])
+    a, b = 0.0f0, 0.0f0
+    if pc_bin_cdf !== missing && pc_bin_cdf[end] > loss_params.EPS
+        a = pc_bin_cdf[end]
     end
-    wasser1 += lambda * abs(log10(a + eps) - log10(b + eps))
+
+    if qc_bin_cdf !== missing && qc_bin_cdf[end] > loss_params.EPS
+        b = qc_bin_cdf[end]
+    end
+
+    if a > loss_params.EPS && b > loss_params.EPS
+        wasser1 += sum(loss_params.age_bins.bin_widths .* abs.(qc_bin_cdf - pc_bin_cdf)[begin:end-1])
+    end
+
+    if a > loss_params.EPS || b > loss_params.EPS
+        wasser1 += loss_params.lambda * abs(log10(a + loss_params.EPS) - log10(b + loss_params.EPS))
+    end
 
     return wasser1
 end
@@ -102,17 +130,17 @@ end
     return smoothed_ages
 end
 
-function smoothen_ref_years(df::DataFrame, w::Vector{Float32}, age_bins::Vector{Int64}, last_bin_open::Bool, max_age::Int)::DataFrame
+function smoothen_ref_years(df::DataFrame, loss_params::LossParams, max_age::Int)::DataFrame
     spdf = combine(groupby(df, [:plot_id, :eco_id, :measdate, :start_measdate, :species_id])) do rows
         ages = zeros(Float32, max_age)
         for row in eachrow(rows)
             ages[row.age_calc] += row.agb_sum
         end
-        row = rows[1,:]
-        sim_year = Dates.value( row.measdate - row.start_measdate) ./ 365.25 .|> round .|> Int
-        @assert sim_year >=0 "negative sim_year $row"
-        cdf = smoothen_bin_cdf(ages; w=w, age_bins=age_bins, last_bin_open=last_bin_open)
-        (; sim_year = [sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf])
+        row = rows[1, :]
+        sim_year = Dates.value(row.measdate - row.start_measdate) ./ 365.25 .|> round .|> Int
+        @assert sim_year >= 0 "negative sim_year $row"
+        cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
+        (; sim_year=[sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf])
     end
     return spdf
 
@@ -122,7 +150,7 @@ function smoothen_ref_years(df::DataFrame, w::Vector{Float32}, age_bins::Vector{
     #plot_id x eco_id, measdate, sim_year, swhd -> biomass by age
 
 end
-function get_bin_widths(;age_bins::Vector{Int}, last_bin_open::Bool)
+function get_bin_widths(; age_bins::Vector{Int}, last_bin_open::Bool)
     # returns the bin widths for wasser1 (ie K-1 widths)
     if last_bin_open
         @assert length(age_bins) > 0 "insufficint bins, must be at least 1"
@@ -184,7 +212,7 @@ function initialize_sites!(initial_cohorts::DataFrame, sites::Vector{Site})
 end
 function get_site_sim_years(df::DataFrame)::DataFrame
     return combine(groupby(df, [:plot_id, :eco_id])) do rows
-        (; sim_years = [unique(sort(rows.sim_year))])
+        (; sim_years=[unique(sort(rows.sim_year))])
     end
 
 end
@@ -341,36 +369,63 @@ function mutate_biomass_params(p)
 
 end
 
-function process_site_results(current_year::Int, site::BiomassSuccession.SuccessionModule.Site, age_bins::Vector{Int}, w::Vector{Float32}, last_bin_open::Bool)::DataFrame
+function process_site_results(current_year::Int, site::Site, loss_params::LossParams)::DataFrame
 
-    if site.live == 0
-        return DataFrame()
-    end
-    
+    #if site.live == 0
+    #    return DataFrame(plot_id=UInt32[], eco_id=UInt32[], species_id = UInt32, sim_agb_sum=Float32[], sim_agbs_cdf=Float32[])
+    #end
+
     c_age = (@view site.c_age[1:site.live]) .|> Int
     c_bio = @view site.c_bio[1:site.live]
     c_species = @view site.c_species[1:site.live]
-    @assert abs(site.B - sum(c_bio)) < 1f-2 "Site[$(site.mapcode)]: B $(site.B) not equal sum(c_bio) $(sum(c_bio)), $(site)"
+    @assert abs(site.B - sum(c_bio)) < 1.0f-2 "Site[$(site.mapcode)]: B $(site.B) not equal sum(c_bio) $(sum(c_bio)), $(site)"
     df = DataFrame(:species_id => c_species, :sim_age => c_age, :sim_agb => c_bio)
-    sort!(df,[:sim_age])
+    sort!(df, [:sim_age])
+
+    if nrow(df) == 0
+        return DataFrame(plot_id=UInt32, eco_id=UInt32, sim_year=Int, species_id=UInt32, agb_total=Float32, sim_agb_sum=Float32, sim_agbs_cdf=Float32[])
+    end
 
     site_df = combine(groupby(df, [:species_id])) do rows
-            
+
         max_age = maximum(rows.sim_age)
 
         ages = zeros(Float32, max_age)
         for row in eachrow(rows)
             ages[row.sim_age] += row.sim_agb
         end
-        cdf = smoothen_bin_cdf(ages; w=w, age_bins=age_bins, last_bin_open=last_bin_open)
+        cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
         (; sim_agb_sum=[sum(rows.sim_agb)], sim_agbs_cdf=[cdf])
     end
-
     site_df.plot_id .= site.mapcode
     site_df.eco_id .= site.ecocode
     site_df.sim_year .= current_year
     site_df.agb_total .= site.B
+
     return site_df
+end
+
+function calculate_site_loss(current_sim_year::Int, spdf::DataFrame, site::Site, loss_params::LossParams)
+    site_results = process_site_results(current_sim_year, site, loss_params)
+    #if nrow(site_results) == 0
+    #    println(site_results)
+    #end
+    df = outerjoin(spdf, site_results, on=[:plot_id, :eco_id, :sim_year, :species_id])
+    #println(df)
+    by_species_id = combine(groupby(df, [:plot_id, :eco_id, :sim_year, :species_id])) do rows
+        w_loss = 0.0f0
+        agb_loss = 0.0f0
+        for row in eachrow(rows)
+            #println(row)
+
+            w_loss += bins_loss(row.data_agbs_cdf, row.sim_agbs_cdf; loss_params=loss_params)
+            agb_loss += abs(coalesce(row.data_agb_sum, 0) - coalesce(row.sim_agb_sum, 0))
+        end
+        (; w_loss=[w_loss], agb_loss=[agb_loss])
+
+    end
+    return by_species_id
+
 end
 
 @inline skipundef(xs::AbstractArray) = (xs[i] for i in eachindex(xs) if isassigned(xs, i))
@@ -386,7 +441,6 @@ function reset_pjob!(pbar::TProgress.ProgressBar, job::TProgress.ProgressJob; N:
     job.startime = Dates.now()
     desc === nothing || (job.description = desc)
 
-    # Refresh columns that cache N (CompletedColumn does) :contentReference[oaicite:1]{index=1}
     for k in eachindex(job.columns)
         c = job.columns[k]
         if c isa TProgress.CompletedColumn
@@ -396,13 +450,12 @@ function reset_pjob!(pbar::TProgress.ProgressBar, job::TProgress.ProgressJob; N:
         end
     end
 
-    # Recompute progress-bar width allocation (mirrors start! logic) :contentReference[oaicite:2]{index=2}
     spaces = length(job.columns) - 1
-    colwidths =  sum(c.measure.w for c in job.columns if !(c isa TProgress.ProgressColumn))
+    colwidths = sum(c.measure.w for c in job.columns if !(c isa TProgress.ProgressColumn))
     bcol_width = max(1, job.width - colwidths - spaces)
 
     for c in job.columns
-        c isa TProgress.ProgressColumn && TProgress.setwidth!(c,bcol_width)
+        c isa TProgress.ProgressColumn && TProgress.setwidth!(c, bcol_width)
 
     end
 
@@ -421,36 +474,40 @@ end
 function main(args)
     #greet()
     RNG = Random.Xoshiro(1337)
-    age_bins = [5, 8, 13, 20, 25, 40, 60, 80] .|> Int
-    last_bin_open = true
-    bin_widths = get_bin_widths(;age_bins= age_bins, last_bin_open=last_bin_open)
-    w = get_smoothing_window(; smoothing_window=1, smoothing_variance=1.0f0)
+    age_bins = loss_params = LossParams(
+        age_bins=AgeBins(
+            bins_idx=[5, 8, 13, 20, 25, 40, 60, 80] .|> Int,
+            last_bin_open=true
+        ),
+        smoothing_weights=get_smoothing_window(; smoothing_window=1, smoothing_variance=1.0f0)
+    )
     #return
     println("###loading data")
     splots, n_plots, n_species, n_ecoregions = load_cohorts()
     println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
     mark_estab_year!(splots)
     max_age = maximum(splots.age_calc)
-    spdf = smoothen_ref_years(splots,w,age_bins,last_bin_open, max_age)
-    show(spdf)
+    #precomupte loss for missing entries
+    spdf = smoothen_ref_years(splots, loss_params, max_age)
+    #show(spdf)
     site_sim_years = get_site_sim_years(spdf)
-    show(site_sim_years)
-    
+    #show(site_sim_years)
+
     spinup_cohorts = get_spinup_cohorts(splots)
     initial_cohorts = get_initial_cohorts(splots)
     println("beginning trials")
     SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
     TRIALS = 100
-    pbar = TProgress.ProgressBar(;expand=true)
-    trials_pbar = TProgress.addjob!(pbar; N = TRIALS, description = "Trials")
-    run_pbar = TProgress.addjob!(pbar; N=1, description = "Years")
-    TProgress.with(pbar) do 
+    pbar = TProgress.ProgressBar(; expand=true)
+    trials_pbar = TProgress.addjob!(pbar; N=TRIALS, description="Trials")
+    run_pbar = TProgress.addjob!(pbar; N=1, description="Years")
+    TProgress.with(pbar) do
         for trials in 1:TRIALS #ProgressBar(1:100)
             params = generate_biomass_params(RNG, UInt(n_species), UInt(n_ecoregions))
             #println(params)
             #println("###making sites")
             sites = make_sites(splots, RNG)
-            chosen_sites = StatsBase.sample(RNG,1:length(sites), SITES_PER_RUN, replace=false, ordered=true)
+            chosen_sites = StatsBase.sample(RNG, 1:length(sites), SITES_PER_RUN, replace=false, ordered=true)
             max_sim_year = site_sim_years.sim_years[chosen_sites] .|> maximum |> maximum
             #println("###Sites made, beginning spinup")
             spinup_cohorts!(spinup_cohorts, sites, params) #[splots.measdate .== splots.start_measdate,:])
@@ -466,39 +523,39 @@ function main(args)
 
 
 
-            reset_pjob!(pbar, run_pbar;N=max_sim_year+1)
+            reset_pjob!(pbar, run_pbar; N=max_sim_year + 1)
 
             years_results = [DataFrame() for _ in 0:max_sim_year] #Vector{MDataFrame}(missing,max_sim_year+1)
             for current_sim_year in 0:max_sim_year #ProgressBar(0:max_sim_year) #ProgressBar(0:50)
                 sites_results = [DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
                 #any_site_results = falses(Threads.nthreads())
                 Threads.@threads for i in eachindex(chosen_sites)
-                        @inbounds mapcode = chosen_sites[i]
-                        @inbounds site = sites[mapcode]
-                        @inbounds sim_years = site_sim_years.sim_years[mapcode]
-                        if site.active
-                            #println(site.mapcode)
-                            succession_step!(current_sim_year, params, site)
-                            reproduction_step!(current_sim_year, params, site)
-                            # what years to check for this site
-                            if current_sim_year in sim_years
-                                site_results =process_site_results(current_sim_year, site, age_bins, w, last_bin_open)
-                                @inbounds sites_results[i] = site_results
-                                #@inbounds any_site_results[Threads.threadid()] = true
-                            end
+                    @inbounds mapcode = chosen_sites[i]
+                    @inbounds site = sites[mapcode]
+                    @inbounds sim_years = site_sim_years.sim_years[mapcode]
+                    if site.active
+                        #println(site.mapcode)
+                        succession_step!(current_sim_year, params, site)
+                        reproduction_step!(current_sim_year, params, site)
+                        # what years to check for this site
+                        if current_sim_year in sim_years
+                            sloss = calculate_site_loss(current_sim_year, spdf, site, loss_params)
+                            @inbounds sites_results[i] = sloss
                         end
-                        @assert site.old <= site.live <= site.cap "$site"
+                    end
+                    @assert site.old <= site.live <= site.cap "$site"
                 end
                 #current_year_results = DataFrame()
                 #if any(any_site_results)
-                    #current_year_results=reduce(vcat, collect(skipundef(sites_results)))
-                current_year_results=reduce(vcat, sites_results)
+                #current_year_results=reduce(vcat, collect(skipundef(sites_results)))
+                current_year_results = reduce(vcat, sites_results)
                 years_results[current_sim_year+1] = current_year_results
                 #end
                 TProgress.update!(run_pbar)
 
             end
             run_result = reduce(vcat, years_results)
+            show(run_result)
             TProgress.update!(trials_pbar)
         end
     end
