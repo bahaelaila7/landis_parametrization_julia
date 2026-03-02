@@ -7,56 +7,76 @@ module SuccessionModule
     export Site, BiomassSuccessionParams, succession_step!, add_new_cohort!, reproduction_step!;
     using Base
     using Random
+    
+    FloatType = Float32
+    UIntType = UInt32
+    #struct FloatType
+    #    val::__FloatType
+    #end
+    #struct UIntType
+    #    val::__UIntType
+    #end
+
+    #@inline UIntType(val::__UIntType) = UIntType(val)
+    ##@inline __UIntType(a::UIntType) = a.val
+    #@inline Base.convert(::Type{UIntType}, val::__UIntType) = UIntType(val)
+    #@inline Base.convert(::Type{__UIntType}, a::UIntType) = a.val
+
+    #@inline FloatType(val::__FloatType) = FloatType(val)
+    ##@inline __FloatType(a::FloatType) = a.val
+    #@inline Base.convert(::Type{FloatType}, val::__FloatType) = FloatType(val)
+    #@inline Base.convert(::Type{__FloatType}, a::FloatType) = a.val
 
     Base.@kwdef mutable struct Site
         active::Bool
         rng::Random.Xoshiro
-        ecocode::UInt
-        mapcode::UInt
+        ecocode::UIntType
+        mapcode::UIntType
+        ref_cn::UIntType
 
-        cap:: UInt
-        old::UInt
-        live:: UInt
-        B::Float32
-        AGNPP::Float32
-        capacityReduction::Float32
-        growthReduction::Float32
-        prevYearMortality::Float32
-        shade_class::UInt
+        cap:: UIntType
+        old::UIntType
+        live:: UIntType
+        B::FloatType
+        AGNPP::FloatType
+        capacityReduction::FloatType
+        growthReduction::FloatType
+        prevYearMortality::FloatType
+        shade_class::UIntType
 
-        c_species::Vector{UInt32}
-        c_age::Vector{Float32}
-        c_bio::Vector{Float32}
-        c_m_tot::Vector{Float32}
-        c_comp::Vector{Float32}
+        c_species::Vector{UIntType}
+        c_age::Vector{FloatType}
+        c_bio::Vector{FloatType}
+        c_m_tot::Vector{FloatType}
+        c_comp::Vector{FloatType}
         sp_mature::Vector{Bool}
 
         
         
     end
     Base.@kwdef struct BiomassSuccessionParams
-        SPINUP_MORTALITY_FRACTION::Float32
+        SPINUP_MORTALITY_FRACTION::FloatType
 
-        D::Vector{Float32}
-        S::Vector{Float32}
+        D::Vector{FloatType}
+        S::Vector{FloatType}
         
-        LONGEVITY::Vector{Float32}
-        SHADE_TOL::Vector{UInt32}
-        MATURITY::Vector{Float32}
-        B_MAX_ECO::Vector{Float32}
+        LONGEVITY::Vector{FloatType}
+        SHADE_TOL::Vector{UIntType}
+        MATURITY::Vector{FloatType}
+        B_MAX_ECO::Vector{FloatType}
         
         
-        ANPP_MAX_SPP::Matrix{Float32}
-        B_MAX_SPP::Matrix{Float32}
-        PROB_MORT_SPP::Matrix{Float32}
-        PROB_ESTAB_SPP::Matrix{Float32}
+        ANPP_MAX_SPP::Matrix{FloatType}
+        B_MAX_SPP::Matrix{FloatType}
+        PROB_MORT_SPP::Matrix{FloatType}
+        PROB_ESTAB_SPP::Matrix{FloatType}
 
-        SUFFICIENT_LIGHT::Matrix{Float32}
-        MIN_REL_BIOMASS::Matrix{Float32}
+        SUFFICIENT_LIGHT::Matrix{FloatType}
+        MIN_REL_BIOMASS::Matrix{FloatType}
         
         
     end
-    @inline function ensure_site_cap!(site::Site, live::UInt)
+    @inline function ensure_site_cap!(site::Site, live::UIntType)
         cap = site.cap
         if cap < live
             #print("RESIZING $cap to ")
@@ -73,7 +93,7 @@ module SuccessionModule
         end
     end
 
-    @inline function calculate_initial_biomass(sp_max_anpp::Float32, site_b::Float32, b_max_eco::Float32)::Float32
+    @inline function calculate_initial_biomass(sp_max_anpp::FloatType, site_b::Float32, b_max_eco::Float32)::Float32
         b = exp(-1.6f0 * site_b / b_max_eco)
         if b < 1.0f0
             b = 1.0f0
@@ -85,8 +105,8 @@ module SuccessionModule
         return b
     end
     
-    @inline function add_new_cohort!(site::Site, species::UInt32, age::Float32, biomass::Float32)
-        ensure_site_cap!(site,site.live + 1)
+    @inline function add_new_cohort!(site::Site, species::UIntType, age::FloatType, biomass::Float32)
+        ensure_site_cap!(site,UIntType(site.live + 1))
         site.live += 1
         site.c_species[site.live] = species
         site.c_age[site.live] = 1.0f0
@@ -103,14 +123,14 @@ module SuccessionModule
             for sp in 1:length(site.sp_mature)
                 if site.sp_mature[sp]
                     sp_light_prob = shade_probs[params.SHADE_TOL[sp]]
-                    light_rng = rand(site.rng, Float32)
+                    light_rng = rand(site.rng, FloatType)
                     if light_rng <= sp_light_prob
                         sp_estab_prob = params.PROB_ESTAB_SPP[site.ecocode, sp]
-                        sp_estab_rng = rand(site.rng, Float32)
+                        sp_estab_rng = rand(site.rng, FloatType)
                         if sp_estab_rng <= sp_estab_prob
                             new_biomass= calculate_initial_biomass(params.ANPP_MAX_SPP[site.ecocode, sp],
                                                                               site.B, params.B_MAX_ECO[site.ecocode])
-                            add_new_cohort!(site, UInt32(sp),1f0,new_biomass)
+                            add_new_cohort!(site, UIntType(sp),1f0,new_biomass)
                             site.B += new_biomass
                         end
                     end
@@ -148,7 +168,7 @@ module SuccessionModule
             max_age = params.LONGEVITY[sp]
             if age < max_age
                 # not max age yet
-                mort_rng = rand(site.rng, Float32)
+                mort_rng = rand(site.rng, FloatType)
                 if mort_rng > params.PROB_MORT_SPP[site.ecocode, sp]
                     m_age_factor = exp(params.D[sp] * (age/max_age - 1.0f0))
                     if current_time <= 0
