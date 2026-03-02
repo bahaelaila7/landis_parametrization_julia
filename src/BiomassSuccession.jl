@@ -5,6 +5,7 @@ include("biomass_succession.jl")
 import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, reproduction_step!, calculate_initial_biomass, add_new_cohort!
 import CSV, Random, Dates, Distributions as Dists, ImageFiltering, StatsBase, Term.Progress as TProgress
 using DataFrames
+#using Profile, ProfileSVG
 #using ProgressBars
 
 struct AgeBins
@@ -406,10 +407,10 @@ function process_site_results(current_year::Int, site::Site, loss_params::LossPa
 end
 
 function calculate_site_loss(current_sim_year::Int, spdf::DataFrame, site::Site, loss_params::LossParams)
-    site_results = process_site_results(current_sim_year, site, loss_params)
     #if nrow(site_results) == 0
     #    println(site_results)
     #end
+    site_results = process_site_results(current_sim_year, site, loss_params)
     df = outerjoin(spdf, site_results, on=[:plot_id, :eco_id, :sim_year, :species_id])
     #println(df)
     by_species_id = combine(groupby(df, [:plot_id, :eco_id, :sim_year, :species_id])) do rows
@@ -490,6 +491,13 @@ function main(args)
     #precomupte loss for missing entries
     spdf = smoothen_ref_years(splots, loss_params, max_age)
     #show(spdf)
+    spdf_plts = Dict( #{Int, Dict{Int,DataFrame}}()
+        plt_key.plot_id => Dict( #( {Int, DataFrame}(
+            year_key.sim_year => DataFrame(year_df)
+            for (year_key, year_df) in pairs(groupby(plt_df, [:sim_year], sort=false))
+        )
+        for (plt_key, plt_df) in pairs(groupby(spdf, [:plot_id], sort=false))
+    )
     site_sim_years = get_site_sim_years(spdf)
     #show(site_sim_years)
 
@@ -497,12 +505,15 @@ function main(args)
     initial_cohorts = get_initial_cohorts(splots)
     println("beginning trials")
     SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
+    #Profile.clear()
+    #Profile.init(n=10^7, delay=0.001)
     TRIALS = 100
+    first_run = true
     pbar = TProgress.ProgressBar(; expand=true)
     trials_pbar = TProgress.addjob!(pbar; N=TRIALS, description="Trials")
     run_pbar = TProgress.addjob!(pbar; N=1, description="Years")
     TProgress.with(pbar) do
-        for trials in 1:TRIALS #ProgressBar(1:100)
+        for trial in 1:TRIALS #ProgressBar(1:100)
             params = generate_biomass_params(RNG, UInt(n_species), UInt(n_ecoregions))
             #println(params)
             #println("###making sites")
@@ -529,9 +540,10 @@ function main(args)
             for current_sim_year in 0:max_sim_year #ProgressBar(0:max_sim_year) #ProgressBar(0:50)
                 sites_results = [DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
                 #any_site_results = falses(Threads.nthreads())
-                Threads.@threads for i in eachindex(chosen_sites)
+                Threads.@threads for i in eachindex(chosen_sites) #
                     @inbounds mapcode = chosen_sites[i]
                     @inbounds site = sites[mapcode]
+                    @inbounds spdf_plt = spdf_plts[mapcode]
                     @inbounds sim_years = site_sim_years.sim_years[mapcode]
                     if site.active
                         #println(site.mapcode)
@@ -539,7 +551,15 @@ function main(args)
                         reproduction_step!(current_sim_year, params, site)
                         # what years to check for this site
                         if current_sim_year in sim_years
-                            sloss = calculate_site_loss(current_sim_year, spdf, site, loss_params)
+                            sloss = calculate_site_loss(current_sim_year, spdf_plt[current_sim_year], site, loss_params)
+
+                            #if first_run
+                            #    first_run = false
+                            #else
+                            #    begin
+                            #        sloss = calculate_site_loss(current_sim_year, spdf_plt[current_sim_year], site, loss_params)
+                            #    end
+                            #end
                             @inbounds sites_results[i] = sloss
                         end
                     end
@@ -551,12 +571,14 @@ function main(args)
                 current_year_results = reduce(vcat, sites_results)
                 years_results[current_sim_year+1] = current_year_results
                 #end
+
                 TProgress.update!(run_pbar)
 
             end
             run_result = reduce(vcat, years_results)
-            show(run_result)
+            #show(run_result)
             TProgress.update!(trials_pbar)
+            #ProfileSVG.save("profile_$(trial).svg")
         end
     end
 
