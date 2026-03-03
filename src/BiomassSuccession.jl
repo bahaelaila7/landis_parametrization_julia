@@ -109,8 +109,10 @@ end
 
 @inline function smoothen_bin_cdf(p; w::Vector{FloatType}, age_bins::AgeBins)::Vector{FloatType}
     pc = smooth_ages(; ages=p, smoothing_window=w)
+    @assert !any(isnan.(pc)) "smooth NaN"
     pc_bin = bin_ages(pc; age_bins=age_bins.bins_idx, last_bin_open=age_bins.last_bin_open)
     pc_bin_cdf = cumsum(pc_bin)
+    @assert !any(isnan.(pc_bin_cdf)) "cumsum NaN"
     if pc_bin_cdf[end] > zero(FloatType)
         pc_bin_cdf ./= pc_bin_cdf[end]
     end
@@ -173,7 +175,11 @@ end
 #function smoothen_ages(;smoothing_window,
 @inline function smooth_ages(; ages::Vector{FloatType}, smoothing_window::Vector{FloatType})::Vector{FloatType}
     smoothed_ages = ImageFiltering.imfilter(ages, smoothing_window, "symmetric")
-    smoothed_ages ./= sum(smoothed_ages)
+    @assert !any(isnan.(smoothed_ages)) "filter NaN"
+    s = sum(smoothed_ages)
+    if s > zero(FloatType)
+        smoothed_ages ./= s
+    end
     return smoothed_ages
 end
 
@@ -466,8 +472,10 @@ function calculate_site_loss2(current_year::Int, site::Site, spdf_plt::SPDFGroun
                         ages[UIntType(site.c_age[a])] = site.c_bio[a]
                     end
                     sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
+                    @assert ! any( isnan.(sim_age_cdf)) "cdf NaN"
                     @assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
                     sp_w_loss[sp] = sum(loss_params.age_bins.bin_widths .* abs.(sim_age_cdf - rec.sp_age_cdf)[begin:end-1])
+                    @assert ! any( isnan.(sp_w_loss[sp])) "NaN"
                     log_diff -= log10(rec.sp_agb_sum + loss_params.EPS)
                     sp_agb_loss[sp] = abs(sim_agb_sum - rec.sp_agb_sum)
                     site_agb_loss -= rec.sp_agb_sum
@@ -551,6 +559,12 @@ function calculate_site_loss(current_sim_year::Int, spdf::DataFrame, site::Site,
 end
 
 @inline skipundef(xs::AbstractArray) = (xs[i] for i in eachindex(xs) if isassigned(xs, i))
+
+@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
+
+    FloatType(alpha*sum(loss.sp_w_loss)) + FloatType(beta*sum(loss.sp_agb_loss)) + FloatType(loss.site_agb_loss)
+
+end
 
 function reset_pjob!(pbar::TProgress.ProgressBar, job::TProgress.ProgressJob; N::Int, desc::Union{Nothing,String}=nothing)
     pbar.paused = true
@@ -660,7 +674,11 @@ function main(args)
     #Profile.clear()
     #Profile.init(n=10^7, delay=0.001)
     TRIALS = 100
-    first_run = true
+    
+    best_loss = FloatType(Inf)
+    best_result = SiteLoss(FloatType[],FloatType[],FloatType(Inf))
+    best_params = generate_biomass_params(RNG, UInt(n_species), UInt(n_ecoregions))
+
     pbar = TProgress.ProgressBar(; expand=true)
     trials_pbar = TProgress.addjob!(pbar; N=TRIALS, description="Trials")
     run_pbar = TProgress.addjob!(pbar; N=1, description="Years")
@@ -734,13 +752,31 @@ function main(args)
             end
             #run_result = reduce(vcat, years_results)
             run_result = sum(skipundef(years_results))
+            @assert ! any(isnan.(run_result.sp_w_loss)) "run NaN"
+
+            run_loss::FloatType = get_total_loss(run_result)
+            if best_loss == Inf || run_loss < best_loss
+                best_loss = run_loss
+                best_result = run_result
+                best_params = params
+            end
+
             #show(run_result)
-            println("Run $(trial): $(run_result)")
+            #println("Run $(trial): $(run_result)")
             TProgress.update!(trials_pbar)
             #ProfileSVG.save("profile_$(trial).svg")
         end
     end
 
+    println(best_loss, best_result, best_params)
+end
+
+function load_raster()
+    #load raster
+    #load CN
+    #match with available CN
+    #grow for 30 years
+    #save to raster agb
 end
 
 
