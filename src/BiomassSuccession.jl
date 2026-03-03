@@ -22,8 +22,8 @@ end
 Base.@kwdef struct LossParams
     age_bins::AgeBins
     smoothing_weights::Vector{FloatType}
-    lambda::FloatType = 1.0f-2
-    EPS::FloatType = 1.0f-8
+    lambda::FloatType = FloatType(1.0f-2)
+    EPS::FloatType = FloatType(1.0f-8)
 end
 
 Base.@kwdef struct SPDFRecord
@@ -36,12 +36,12 @@ Base.@kwdef struct SPDFGroundTruth
 end
 Base.@kwdef struct SiteLoss
     sp_w_loss::Vector{FloatType}
-    sp_age_loss::Vector{FloatType}
+    sp_agb_loss::Vector{FloatType}
     site_agb_loss::FloatType
 end
 
 function load_cohorts()
-    all_df = CSV.read("../data_eco_cohorts_cn.csv", DataFrame)
+    all_df = CSV.read("../data_eco_cohorts_cn_fl5.csv", DataFrame)
     FL5_counties_ecos = ["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
     filtered_plots = in(FL5_counties_ecos).(all_df.eco)
     cdf = all_df[filtered_plots, :]
@@ -81,28 +81,28 @@ function make_sites(splots::DataFrame, rng::Random.AbstractRNG)
         active=false,
         rng=Random.Xoshiro(rand(rng, UInt64)),
         ecocode=UIntType(row.eco_id),
-        mapcode=UIntType(row.plot_id), cap=UInt(2),
+        mapcode=UIntType(row.plot_id), cap=UIntType(2),
         ref_cn=UIntType(row.plot_id),
-        old=UIntType(0),
-        live=UIntType(0),
-        B=0.0f0,
-        AGNPP=0.0f0,
-        capacityReduction=1.0f0,
-        growthReduction=1.0f0,
-        prevYearMortality=0.0f0,
-        shade_class=UIntType(1), c_species=UIntType[0, 0],
-        c_age=FloatType[0.0, 0.0],
-        c_bio=FloatType[0.0, 0.0],
-        c_m_tot=FloatType[0.0, 0.0],
-        c_comp=FloatType[0.0, 0.0],
+        old=zero(UIntType),
+        live=zero(UIntType),
+        B=zero(FloatType),
+        AGNPP=zero(FloatType),
+        capacityReduction=one(FloatType),
+        growthReduction=one(FloatType),
+        prevYearMortality=zero(FloatType),
+        shade_class=one(UIntType), c_species=zeros(UIntType,2),
+        c_age=zeros(FloatType, 2),
+        c_bio=zeros(FloatType, 2),
+        c_m_tot=zeros(FloatType, 2),
+        c_comp=zeros(FloatType,2),
         sp_mature=falses(n_species),
     )
              for (i, row) in enumerate(eachrow(plot_eco_ids))]
     return sites
 end
 
-@inline function get_smoothing_window(; smoothing_window::Int=Int(3), smoothing_variance::FloatType=1.0f0)
-    w = ((-smoothing_window:smoothing_window) ./ smoothing_variance) .^ 2.0f0 .* -0.5f0 .|> exp
+@inline function get_smoothing_window(; smoothing_window::Int=Int(3), smoothing_variance::FloatType=FloatType(1.0f0))
+    w = ((-smoothing_window:smoothing_window) ./ smoothing_variance) .^ FloatType(2.0f0) .* FloatType(-0.5f0) .|> exp
     w ./= sum(w)
     return w
 end
@@ -111,21 +111,21 @@ end
     pc = smooth_ages(; ages=p, smoothing_window=w)
     pc_bin = bin_ages(pc; age_bins=age_bins.bins_idx, last_bin_open=age_bins.last_bin_open)
     pc_bin_cdf = cumsum(pc_bin)
-    if pc_bin_cdf[end] > 0.0f0
+    if pc_bin_cdf[end] > zero(FloatType)
         pc_bin_cdf ./= pc_bin_cdf[end]
     end
     return pc_bin_cdf
 
 end
 
-@inline function bins_loss2(pc_bin_cdf::Vector{FloatType}, qc_bin_cdf::Vector{FloatType}; loss_params::LossParams)::Float32
+@inline function bins_loss2(pc_bin_cdf::Vector{FloatType}, qc_bin_cdf::Vector{FloatType}; loss_params::LossParams)::FloatType
     # warning: 
     # Technically W1 is not defined if one or both distribution collapsed (0 everywhere)
     # 0 distance if both are collapsed while +Inf if only one is sensible,
     # BUT Inf will make all aggregates useless and will make the search directionless
     # tagging along a small log(m+eps) such that if aggregate is 0 eps penalize it heavily
-    wasser1 = 0.0f0
-    a, b = 0.0f0, 0.0f0
+    wasser1 =zero(FloatType)
+    a, b = zero(FloatType),zero(FloatType)
     if pc_bin_cdf[end] > loss_params.EPS
         a = pc_bin_cdf[end]
     end
@@ -144,14 +144,14 @@ end
 
     return wasser1
 end
-@inline function bins_loss(pc_bin_cdf::Union{Missing,Vector{FloatType}}, qc_bin_cdf::Union{Missing,Vector{FloatType}}; loss_params::LossParams)::Float32
+@inline function bins_loss(pc_bin_cdf::Union{Missing,Vector{FloatType}}, qc_bin_cdf::Union{Missing,Vector{FloatType}}; loss_params::LossParams)::FloatType
     # warning: 
     # Technically W1 is not defined if one or both distribution collapsed (0 everywhere)
     # 0 distance if both are collapsed while +Inf if only one is sensible,
     # BUT Inf will make all aggregates useless and will make the search directionless
     # tagging along a small log(m+eps) such that if aggregate is 0 eps penalize it heavily
-    wasser1 = 0.0f0
-    a, b = 0.0f0, 0.0f0
+    wasser1 =zero(FloatType)
+    a, b = zero(FloatType),zero(FloatType)
     if pc_bin_cdf !== missing && pc_bin_cdf[end] > loss_params.EPS
         a = pc_bin_cdf[end]
     end
@@ -171,7 +171,7 @@ end
     return wasser1
 end
 #function smoothen_ages(;smoothing_window,
-@inline function smooth_ages(; ages::Vector{FloatType}, smoothing_window::Vector{FloatType})::Vector{Float32}
+@inline function smooth_ages(; ages::Vector{FloatType}, smoothing_window::Vector{FloatType})::Vector{FloatType}
     smoothed_ages = ImageFiltering.imfilter(ages, smoothing_window, "symmetric")
     smoothed_ages ./= sum(smoothed_ages)
     return smoothed_ages
@@ -310,7 +310,7 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, params:
         end
         if add_new_cohort
             initial_biomass = calculate_initial_biomass(params.B_MAX_SPP[site.ecocode, sp], site.B, params.B_MAX_ECO[site.ecocode])
-            add_new_cohort!(site, sp, 1.0f0, initial_biomass)
+            add_new_cohort!(site, sp, one(FloatType), initial_biomass)
         end
         #println("Adding cohort $(row.species_symbol_map) to ", row.plot_id)
     end
@@ -332,7 +332,7 @@ function generate_biomass_params(rng::Random.AbstractRNG, n_species::UInt, n_eco
     #println(typeof(D))
     LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200, 100), 100, 300), n_species) .|> FloatType
     #println(typeof(LONGEVITY))
-    SHADE_TOL = rand(rng, Dists.DiscreteUniform(1, 5), n_species) .|> UInt32 # ::Vector{FloatType}
+    SHADE_TOL = rand(rng, Dists.DiscreteUniform(1, 5), n_species) .|> UIntType # ::Vector{FloatType}
     #println(typeof(SHADE_TOL))
     MATURITY = rand(rng, Dists.DiscreteUniform(3, 40), n_species) .|> FloatType #::Vector{FloatType}
     #println(typeof(MATURITY))
@@ -417,70 +417,73 @@ function mutate_biomass_params(p)
 end
 function calculate_site_loss2(current_year::Int, site::Site, spdf_plt::SPDFGroundTruth, loss_params::LossParams)::SiteLoss
     #Sort by species
-    c_species = @view site.c_species[1:site.live]
-    max_age = maximum(@view site.c_age[1:site.live])
-    #get indices of species sorted
-    p = sortperm(c_species)
     n_species = length(site.sp_mature)
-
-    @assert n_species == length(spdf_plt.keys) "species numbers do not match"
-
-    ages = Vector{FloatType}(undef, max_age)
-    sp_start_idx = 1
-    last_sp = sps[sp_start_idx]
-
     insite = falses(n_species)
-
-    #initialize losses 
+    @assert n_species == length(spdf_plt.keys) "species numbers do not match"
     sp_w_loss = zeros(FloatType, n_species)
     sp_agb_loss = zeros(FloatType, n_species)
-    site_agb_loss = 0.0f0
-    # process sp's in site, sorted by species
-    for i in 1:length(p)
+    site_agb_loss = zero(FloatType)
 
-        # get the 
-        sp = @inbounds c_species[i]
-        insite[sp] = true
-        if i == length(p) && last_sp != sp
-            last_sp = sp
-            sp_start_idx = i
-        end
+    if site.live > 0
 
-        if sp != last_sp || i == length(p)
-            # conclude sp 
-            sp_end_idx = i - 1
-            if sp == last_sp
-                # when length(p) was the cause only
-                sp_end_idx += 1
+        c_species = @view site.c_species[1:site.live]
+        max_age = UIntType(ceil(maximum(@view site.c_age[1:site.live])))
+        #get indices of species sorted
+        p = sortperm(c_species)
+
+        ages = Vector{FloatType}(undef, max_age)
+        sp_start_idx = 1
+        last_sp = site.c_species[p[sp_start_idx]]
+
+
+        #initialize losses 
+        # process sp's in site, sorted by species
+        for i in 1:length(p)
+
+            # get the 
+            sp = @inbounds c_species[i]
+            insite[sp] = true
+            if i == length(p) && last_sp != sp
+                last_sp = sp
+                sp_start_idx = i
             end
-            sim_agb_sum = sum(@view site.agbs[p])
-            log_diff = log10(sim_agb_sum + loss_params.EPS)
-            sp_agb_loss[sp] = sim_agb_sum
-            site_agb_loss += sim_agb_sum
-            if spdf_plt.keys[sp]
-                rec = @inbounds spdf_plt.records[sp]
-                ages .= 0.0f0
-                for a in @view p[sp_start_idx:i]
-                    ages[UIntType(site.c_age[a])] = site.c_bio[a]
+
+            if sp != last_sp || i == length(p)
+                # conclude sp 
+                sp_end_idx = i - 1
+                if sp == last_sp
+                    # when length(p) was the cause only
+                    sp_end_idx += 1
                 end
-                sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
-                @assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
-                sp_w_loss[sp] = sum(loss_params.age_bins.bin_widths .* abs.(sim_age_cdf - rec.sp_age_cdf)[begin:end-1])
-                log_diff -= log10(rec.sp_agb_sum + loss_params.EPS)
-                sp_agb_loss[sp] = abs(sim_agb_sum - rec.sp_agb_sum)
-                site_agb_loss -= rec.sp_agb_sum
-            end
-            sp_w_loss[sp] += loss_params.lambda * abs(log_diff)
+                sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
+                log_diff = log10(sim_agb_sum + loss_params.EPS)
+                sp_agb_loss[sp] = sim_agb_sum
+                site_agb_loss += sim_agb_sum
+                if spdf_plt.keys[sp]
+                    rec = @inbounds spdf_plt.records[sp]
+                    ages .= zero(FloatType)
+                    for a in @view p[sp_start_idx:sp_end_idx]
+                        ages[UIntType(site.c_age[a])] = site.c_bio[a]
+                    end
+                    sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
+                    @assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
+                    sp_w_loss[sp] = sum(loss_params.age_bins.bin_widths .* abs.(sim_age_cdf - rec.sp_age_cdf)[begin:end-1])
+                    log_diff -= log10(rec.sp_agb_sum + loss_params.EPS)
+                    sp_agb_loss[sp] = abs(sim_agb_sum - rec.sp_agb_sum)
+                    site_agb_loss -= rec.sp_agb_sum
+                end
+                sp_w_loss[sp] += loss_params.lambda * abs(log_diff)
 
-            last_sp = sp
-            sp_start_idx = i
+                last_sp = sp
+                sp_start_idx = i
+            end
         end
     end
 
-    for sp in (1:length(spdf_plt.keys))[spdf_plt.keys&!insite]
+    for sp in (1:length(spdf_plt.keys))[spdf_plt.keys .& (.! insite)]
         @inbounds rec = spdf_plt.records[UIntType(sp)]
         sp_agb_loss[sp] = rec.sp_agb_sum
-        sp_w_loss -= loss_params.lambda * abs(log10(rec.sp_agb_sum + loss_params.EPS))
+        sp_w_loss[sp] += loss_params.lambda * abs(log10(rec.sp_agb_sum + loss_params.EPS))
         site_agb_loss -= rec.sp_agb_sum
     end
 
@@ -502,7 +505,7 @@ function process_site_results(current_year::Int, site::Site, loss_params::LossPa
     sort!(df, [:sim_age])
 
     if nrow(df) == 0
-        return DataFrame(plot_id=UInt32, eco_id=UInt32, sim_year=Int, species_id=UInt32, agb_total=FloatType, sim_agb_sum=FloatType, sim_agbs_cdf=Float32[])
+        return DataFrame(plot_id=UIntType, eco_id=UIntType, sim_year=Int, species_id=UIntType, agb_total=FloatType, sim_agb_sum=FloatType, sim_agbs_cdf=FloatType[])
     end
 
     site_df = combine(groupby(df, [:species_id])) do rows
@@ -532,8 +535,8 @@ function calculate_site_loss(current_sim_year::Int, spdf::DataFrame, site::Site,
     df = outerjoin(spdf, site_results, on=[:plot_id, :eco_id, :sim_year, :species_id])
     #println(df)
     by_species_id = combine(groupby(df, [:plot_id, :eco_id, :sim_year, :species_id])) do rows
-        w_loss = 0.0f0
-        agb_loss = 0.0f0
+        w_loss = zero(FloatType)
+        agb_loss = zero(FloatType)
         for row in eachrow(rows)
             #println(row)
 
@@ -594,6 +597,11 @@ function inspect(x)
     println(typeof(x))
     x
 end
+@inline function Base.:+(loss1::SiteLoss, loss2::SiteLoss)
+    SiteLoss(sp_w_loss = loss1.sp_w_loss .+ loss2.sp_w_loss, 
+             sp_agb_loss = loss1.sp_agb_loss .+ loss2.sp_agb_loss,
+             site_agb_loss = loss1.site_agb_loss .+ loss2.site_agb_loss)
+end
 function make_spdf_dict(spdf::DataFrame)::Dict{UIntType,Dict{Int,SPDFGroundTruth}}
     n_species = length(unique(spdf.species_id))
     spdf_plts = Dict( #{Int, Dict{Int,DataFrame}}()
@@ -629,7 +637,7 @@ function main(args)
             bins_idx=[5, 8, 13, 20, 25, 40, 60, 80] .|> Int,
             last_bin_open=true
         ),
-        smoothing_weights=get_smoothing_window(; smoothing_window=1, smoothing_variance=1.0f0)
+        smoothing_weights=get_smoothing_window(; smoothing_window=1, smoothing_variance=FloatType(1.0f0))
     )
     #return
     println("###loading data")
@@ -680,9 +688,10 @@ function main(args)
 
             reset_pjob!(pbar, run_pbar; N=max_sim_year + 1)
 
-            years_results = [DataFrame() for _ in 0:max_sim_year] #Vector{MDataFrame}(missing,max_sim_year+1)
+            #years_results = [DataFrame() for _ in 0:max_sim_year] #Vector{MDataFrame}(missing,max_sim_year+1)
+            years_results = Vector{SiteLoss}(undef, max_sim_year + 1)
             for current_sim_year in 0:max_sim_year #ProgressBar(0:max_sim_year) #ProgressBar(0:50)
-                sites_results = [DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
+                sites_results = Vector{SiteLoss}(undef, length(chosen_sites)) #[DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
                 #any_site_results = falses(Threads.nthreads())
                 Threads.@threads for i in eachindex(chosen_sites) #
                     @inbounds mapcode = chosen_sites[i]
@@ -712,15 +721,21 @@ function main(args)
                 #current_year_results = DataFrame()
                 #if any(any_site_results)
                 #current_year_results=reduce(vcat, collect(skipundef(sites_results)))
-                current_year_results = reduce(vcat, sites_results)
-                years_results[current_sim_year+1] = current_year_results
+                #current_year_results = reduce(vcat, skipundef(sites_results))
+                year_results_no_missing = collect(skipundef(sites_results))
+                if length(year_results_no_missing) > 0
+                    current_year_results = sum(year_results_no_missing)
+                    years_results[current_sim_year+1] = current_year_results
+                end
                 #end
 
                 TProgress.update!(run_pbar)
 
             end
-            run_result = reduce(vcat, years_results)
+            #run_result = reduce(vcat, years_results)
+            run_result = sum(skipundef(years_results))
             #show(run_result)
+            println("Run $(trial): $(run_result)")
             TProgress.update!(trials_pbar)
             #ProfileSVG.save("profile_$(trial).svg")
         end

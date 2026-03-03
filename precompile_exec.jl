@@ -1,2 +1,2 @@
 using BiomassSuccession
-BiomassSuccession.greet(["--warmup"])
+BiomassSuccession.main("")
