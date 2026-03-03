@@ -5,6 +5,7 @@ include("biomass_succession.jl")
 import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, reproduction_step!, calculate_initial_biomass, add_new_cohort!, FloatType, UIntType
 import CSV, Random, Dates, Distributions as Dists, ImageFiltering, StatsBase, Term.Progress as TProgress
 using DataFrames
+import Rasters, ArchGDAL, CairoMakie, GeoMakie
 #using Profile, ProfileSVG
 #using ProgressBars
 
@@ -23,7 +24,7 @@ Base.@kwdef struct LossParams
     age_bins::AgeBins
     smoothing_weights::Vector{FloatType}
     lambda::FloatType = FloatType(1.0f-2)
-    EPS::FloatType = FloatType(1.0f-8)
+    EPS::FloatType = FloatType(1.0f-7)
 end
 
 Base.@kwdef struct SPDFRecord
@@ -562,7 +563,11 @@ end
 
 @inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
 
-    FloatType(alpha*sum(loss.sp_w_loss)) + FloatType(beta*sum(loss.sp_agb_loss)) + FloatType(loss.site_agb_loss)
+    w = (alpha*sum(loss.sp_w_loss)) 
+    sp = (beta*sum(loss.sp_agb_loss))
+    site = (loss.site_agb_loss)
+    all = w+sp+site
+    return all
 
 end
 
@@ -642,8 +647,7 @@ function make_spdf_dict(spdf::DataFrame)::Dict{UIntType,Dict{Int,SPDFGroundTruth
 
 end
 
-#actual entry
-function main(args)
+function parametrize()
     #greet()
     RNG = Random.Xoshiro(1337)
     age_bins = loss_params = LossParams(
@@ -755,7 +759,7 @@ function main(args)
             @assert ! any(isnan.(run_result.sp_w_loss)) "run NaN"
 
             run_loss::FloatType = get_total_loss(run_result)
-            if best_loss == Inf || run_loss < best_loss
+            if run_loss <= best_loss
                 best_loss = run_loss
                 best_result = run_result
                 best_params = params
@@ -768,17 +772,41 @@ function main(args)
         end
     end
 
+    println(typeof(best_loss), best_loss)
     println(best_loss, best_result, best_params)
 end
 
 function load_raster()
+    CairoMakie.activate!()
     #load raster
+
+    path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"
+#labels = AG.read(path) do ds
+#    band = AG.getband(ds, 3)
+#    AG.getcategorynames(band)   # Vector of strings (value 0 at index 1)
+#end
+#    println(labels)
+    r = Rasters.Raster(path)#; lazy=true)
+    fig = GeoMakie.Figure()
+    ga = GeoMakie.GeoAxis(fig[1, 1], aspect = GeoMakie.DataAspect()) # Create a geographic axis
+    GeoMakie.heatmap!(ga, r)
+    Rasters.plot(fig)
+
+    
+
+
     #load CN
     #match with available CN
     #grow for 30 years
     #save to raster agb
 end
 
+#actual entry
+function main(args)
+    parametrize()
+    #load_raster()
+
+end
 
 #stub C entry
 function julia_main()::Cint
