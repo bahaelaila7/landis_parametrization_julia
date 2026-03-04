@@ -6,6 +6,7 @@ import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, repro
 import CSV, Random, Dates, Distributions as Dists, ImageFiltering, StatsBase, Term.Progress as TProgress
 using DataFrames
 import Rasters, ArchGDAL, CairoMakie, GeoMakie
+const AG = ArchGDAL
 #using Profile, ProfileSVG
 #using ProgressBars
 
@@ -42,10 +43,10 @@ Base.@kwdef struct SiteLoss
 end
 
 function load_cohorts()
-    all_df = CSV.read("../data_eco_cohorts_cn_fl5.csv", DataFrame)
+    all_df = CSV.read("../data_eco_cohorts_cn.csv", DataFrame)
     FL5_counties_ecos = ["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
     filtered_plots = in(FL5_counties_ecos).(all_df.eco)
-    cdf = all_df[filtered_plots, :]
+    cdf = all_df#[filtered_plots, :]
 
     plots = combine(groupby(cdf, [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco, :measdate, :species_symbol_map, :age_calc], sort=false), nrow => :count, :agb => sum => :agb_sum)
     # start_measdate = 
@@ -91,11 +92,11 @@ function make_sites(splots::DataFrame, rng::Random.AbstractRNG)
         capacityReduction=one(FloatType),
         growthReduction=one(FloatType),
         prevYearMortality=zero(FloatType),
-        shade_class=one(UIntType), c_species=zeros(UIntType,2),
+        shade_class=one(UIntType), c_species=zeros(UIntType, 2),
         c_age=zeros(FloatType, 2),
         c_bio=zeros(FloatType, 2),
         c_m_tot=zeros(FloatType, 2),
-        c_comp=zeros(FloatType,2),
+        c_comp=zeros(FloatType, 2),
         sp_mature=falses(n_species),
     )
              for (i, row) in enumerate(eachrow(plot_eco_ids))]
@@ -127,8 +128,8 @@ end
     # 0 distance if both are collapsed while +Inf if only one is sensible,
     # BUT Inf will make all aggregates useless and will make the search directionless
     # tagging along a small log(m+eps) such that if aggregate is 0 eps penalize it heavily
-    wasser1 =zero(FloatType)
-    a, b = zero(FloatType),zero(FloatType)
+    wasser1 = zero(FloatType)
+    a, b = zero(FloatType), zero(FloatType)
     if pc_bin_cdf[end] > loss_params.EPS
         a = pc_bin_cdf[end]
     end
@@ -153,8 +154,8 @@ end
     # 0 distance if both are collapsed while +Inf if only one is sensible,
     # BUT Inf will make all aggregates useless and will make the search directionless
     # tagging along a small log(m+eps) such that if aggregate is 0 eps penalize it heavily
-    wasser1 =zero(FloatType)
-    a, b = zero(FloatType),zero(FloatType)
+    wasser1 = zero(FloatType)
+    a, b = zero(FloatType), zero(FloatType)
     if pc_bin_cdf !== missing && pc_bin_cdf[end] > loss_params.EPS
         a = pc_bin_cdf[end]
     end
@@ -290,7 +291,7 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, params:
     for row in eachrow(spinup_cohorts)
         while current_year < row.year_deficit
             #grow all active
-            Threads.@threads for site in sites
+            Threads.@threads for site in sites # 
                 if site.active
                     #println(site.mapcode)
                     succession_step!(current_year, params, site)
@@ -328,7 +329,7 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, params:
 end
 
 
-function generate_biomass_params(rng::Random.AbstractRNG, n_species::UInt, n_ecoregions::UInt)
+function generate_biomass_params(rng::Random.AbstractRNG, n_species::UIntType, n_ecoregions::UIntType)
     # TODO: species that do not show up for a specific ecoregion, make all their prob_estab = 0
     SPINUP_MORTALITY_FRACTION = 0.15f0 #rand(Dists.Uniform(0f0,0.20f0))
     #println(typeof(SPINUP_MORTALITY_FRACTION))
@@ -473,10 +474,10 @@ function calculate_site_loss2(current_year::Int, site::Site, spdf_plt::SPDFGroun
                         ages[UIntType(site.c_age[a])] = site.c_bio[a]
                     end
                     sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
-                    @assert ! any( isnan.(sim_age_cdf)) "cdf NaN"
+                    @assert !any(isnan.(sim_age_cdf)) "cdf NaN"
                     @assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
                     sp_w_loss[sp] = sum(loss_params.age_bins.bin_widths .* abs.(sim_age_cdf - rec.sp_age_cdf)[begin:end-1])
-                    @assert ! any( isnan.(sp_w_loss[sp])) "NaN"
+                    @assert !any(isnan.(sp_w_loss[sp])) "NaN"
                     log_diff -= log10(rec.sp_agb_sum + loss_params.EPS)
                     sp_agb_loss[sp] = abs(sim_agb_sum - rec.sp_agb_sum)
                     site_agb_loss -= rec.sp_agb_sum
@@ -489,7 +490,7 @@ function calculate_site_loss2(current_year::Int, site::Site, spdf_plt::SPDFGroun
         end
     end
 
-    for sp in (1:length(spdf_plt.keys))[spdf_plt.keys .& (.! insite)]
+    for sp in (1:length(spdf_plt.keys))[spdf_plt.keys.&(.!insite)]
         @inbounds rec = spdf_plt.records[UIntType(sp)]
         sp_agb_loss[sp] = rec.sp_agb_sum
         sp_w_loss[sp] += loss_params.lambda * abs(log10(rec.sp_agb_sum + loss_params.EPS))
@@ -563,10 +564,10 @@ end
 
 @inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
 
-    w = (alpha*sum(loss.sp_w_loss)) 
-    sp = (beta*sum(loss.sp_agb_loss))
+    w = (alpha * sum(loss.sp_w_loss))
+    sp = (beta * sum(loss.sp_agb_loss))
     site = (loss.site_agb_loss)
-    all = w+sp+site
+    all = w + sp + site
     return all
 
 end
@@ -617,9 +618,9 @@ function inspect(x)
     x
 end
 @inline function Base.:+(loss1::SiteLoss, loss2::SiteLoss)
-    SiteLoss(sp_w_loss = loss1.sp_w_loss .+ loss2.sp_w_loss, 
-             sp_agb_loss = loss1.sp_agb_loss .+ loss2.sp_agb_loss,
-             site_agb_loss = loss1.site_agb_loss .+ loss2.site_agb_loss)
+    SiteLoss(sp_w_loss=loss1.sp_w_loss .+ loss2.sp_w_loss,
+        sp_agb_loss=loss1.sp_agb_loss .+ loss2.sp_agb_loss,
+        site_agb_loss=loss1.site_agb_loss .+ loss2.site_agb_loss)
 end
 function make_spdf_dict(spdf::DataFrame)::Dict{UIntType,Dict{Int,SPDFGroundTruth}}
     n_species = length(unique(spdf.species_id))
@@ -647,20 +648,11 @@ function make_spdf_dict(spdf::DataFrame)::Dict{UIntType,Dict{Int,SPDFGroundTruth
 
 end
 
-function parametrize()
+function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=100)::Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
+    if isnothing(RNG)
+        RNG = Random.default_rng()
+    end
     #greet()
-    RNG = Random.Xoshiro(1337)
-    age_bins = loss_params = LossParams(
-        age_bins=AgeBins(
-            bins_idx=[5, 8, 13, 20, 25, 40, 60, 80] .|> Int,
-            last_bin_open=true
-        ),
-        smoothing_weights=get_smoothing_window(; smoothing_window=1, smoothing_variance=FloatType(1.0f0))
-    )
-    #return
-    println("###loading data")
-    splots, n_plots, n_species, n_ecoregions = load_cohorts()
-    println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
     mark_estab_year!(splots)
     max_age = maximum(splots.age_calc)
     #precomupte loss for missing entries
@@ -677,18 +669,20 @@ function parametrize()
     SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
     #Profile.clear()
     #Profile.init(n=10^7, delay=0.001)
-    TRIALS = 100
-    
+
     best_loss = FloatType(Inf)
-    best_result = SiteLoss(FloatType[],FloatType[],FloatType(Inf))
-    best_params = generate_biomass_params(RNG, UInt(n_species), UInt(n_ecoregions))
+    best_result = SiteLoss(FloatType[], FloatType[], FloatType(Inf))
+    best_params = generate_biomass_params(RNG, n_species, n_ecoregions)
+    if TRIALS < 1
+        return best_loss, best_result, best_params
+    end
 
     pbar = TProgress.ProgressBar(; expand=true)
     trials_pbar = TProgress.addjob!(pbar; N=TRIALS, description="Trials")
     run_pbar = TProgress.addjob!(pbar; N=1, description="Years")
     TProgress.with(pbar) do
         for trial in 1:TRIALS #ProgressBar(1:100)
-            params = generate_biomass_params(RNG, UInt(n_species), UInt(n_ecoregions))
+            params = generate_biomass_params(RNG, n_species, n_ecoregions)
             #println(params)
             #println("###making sites")
             sites = make_sites(splots, RNG)
@@ -715,7 +709,7 @@ function parametrize()
             for current_sim_year in 0:max_sim_year #ProgressBar(0:max_sim_year) #ProgressBar(0:50)
                 sites_results = Vector{SiteLoss}(undef, length(chosen_sites)) #[DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
                 #any_site_results = falses(Threads.nthreads())
-                Threads.@threads for i in eachindex(chosen_sites) #
+                Threads.@threads for i in eachindex(chosen_sites) # 
                     @inbounds mapcode = chosen_sites[i]
                     @inbounds site = sites[mapcode]
                     @inbounds spdf_plt = spdf_plts[site.ref_cn]
@@ -726,7 +720,7 @@ function parametrize()
                         reproduction_step!(current_sim_year, params, site)
                         # what years to check for this site
                         if current_sim_year in sim_years
-                            sloss = calculate_site_loss2(current_sim_year, site, spdf_plt[current_sim_year] , loss_params)
+                            sloss = calculate_site_loss2(current_sim_year, site, spdf_plt[current_sim_year], loss_params)
 
                             #if first_run
                             #    first_run = false
@@ -756,7 +750,7 @@ function parametrize()
             end
             #run_result = reduce(vcat, years_results)
             run_result = sum(skipundef(years_results))
-            @assert ! any(isnan.(run_result.sp_w_loss)) "run NaN"
+            @assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
 
             run_loss::FloatType = get_total_loss(run_result)
             if run_loss <= best_loss
@@ -772,27 +766,140 @@ function parametrize()
         end
     end
 
-    println(typeof(best_loss), best_loss)
-    println(best_loss, best_result, best_params)
+    #println(typeof(best_loss), best_loss)
+    #println(best_loss, best_result, best_params)
+    return best_loss, best_result, best_params
 end
 
-function load_raster()
-    CairoMakie.activate!()
+function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessionParams}, splots_dict::Dict{Int64,DataFrame}, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG})
+    if isnothing(RNG)
+        RNG = Random.default_rng()
+    end
+    #CairoMakie.activate!()
     #load raster
 
-    path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"
-#labels = AG.read(path) do ds
-#    band = AG.getband(ds, 3)
-#    AG.getcategorynames(band)   # Vector of strings (value 0 at index 1)
-#end
-#    println(labels)
-    r = Rasters.Raster(path)#; lazy=true)
-    fig = GeoMakie.Figure()
-    ga = GeoMakie.GeoAxis(fig[1, 1], aspect = GeoMakie.DataAspect()) # Create a geographic axis
-    GeoMakie.heatmap!(ga, r)
-    Rasters.plot(fig)
+    #labels = AG.read(path) do ds
+    #    band = AG.getband(ds, 3)
+    #    AG.getcategorynames(band)   # Vector of strings (value 0 at index 1)
+    #end
+    #    println(labels)
+    AttrDict = Dict{String,Union{Int32,Float64,String}}
 
-    
+    AG.readraster(raster_path) do ds
+        band = AG.getband(ds, 1)
+        rat = AG.getdefaultRAT(band)
+        nrows = AG.nrow(rat)
+        ncols = AG.ncolumn(rat)
+
+        colnames = [AG.columnname(rat, c) for c in 0:ncols-1]
+
+        valcol = findfirst(==("Value"), colnames) #AG.findcolumnindex(rat, AG.GFU_MinMax)
+        isnothing(valcol) && error("No GFU_MinMax/'Value' column in RAT.")
+        valcol -= 1 # gdal is 0 based
+        BandType = AG.pixeltype(band)
+        function rat_get(r::Int, c::Int)
+            t = AG.columntype(rat, c)
+            if t == AG.GFT_Integer
+                return AG.asint(rat, r, c)
+            elseif t == AG.GFT_Real
+                return AG.asdouble(rat, r, c)
+            else
+                return AG.asstring(rat, r, c)
+            end
+        end
+        val_att_dict = Dict{BandType,AttrDict}()
+
+
+        for r in 0:nrows-1
+            px = BandType(rat_get(r, valcol))
+            attrs = AttrDict()
+            for c in 0:ncols-1
+                attrs[colnames[c+1]] = rat_get(r, c)
+            end
+            val_att_dict[px] = attrs
+        end
+
+
+        A = AG.read(band)
+        NO_DATA = AG.getnodatavalue(band)
+        println(size(A), typeof(A))
+        println(length(A))
+
+        outA = Array{Union{Missing,Site}}(missing, size(A))
+        tRNGs = [Random.Xoshiro(rand(RNG, UInt64)) for _ in 1:Threads.maxthreadid()]
+        totalpixels = zeros(UInt, Threads.maxthreadid())
+        totalmissing = zeros(UInt, Threads.maxthreadid())
+
+        #AA = map(A) do cell
+        #rand(RNG, UInt64)
+        # skip NODATA
+        begin
+            Threads.@threads for i in eachindex(A, outA)
+                @inbounds cell = A[i]
+                if ismissing(cell) || cell == NO_DATA
+                    @inbounds outA[i] = missing
+                else
+                    tid = Threads.threadid()
+                    @inbounds totalpixels[tid] += 1
+                    @inbounds totalmissing[tid] += 1
+                    plt_attr = get(val_att_dict, cell, missing)
+                    if ismissing(plt_attr)
+                        @inbounds outA[i] = missing
+                    else
+                        @inbounds tRNG = tRNGs[tid]
+                        plt_cn = get(plt_attr, "PLT_CN", missing)
+                        #ismissing(plt_cn) && error("cannot get CN out of $(plt_attr)")
+                        initial_cohorts = get(splots_dict, plt_cn, missing)
+                        if ismissing(initial_cohorts) || nrow(initial_cohorts) < 1
+                            @inbounds outA[i] = missing
+                        else
+                            p = first(initial_cohorts)
+                            n_cohorts = nrow(initial_cohorts)
+                            site = Site(
+                                active=false,
+                                rng=Random.Xoshiro(rand(tRNG, UInt64)),
+                                ecocode=UIntType(p.eco_id),
+                                mapcode=UIntType(p.plot_id), cap=UIntType(n_cohorts),
+                                ref_cn=UIntType(p.plot_id),
+                                old=zero(UIntType),
+                                live=zero(UIntType),
+                                B=zero(FloatType),
+                                AGNPP=zero(FloatType),
+                                capacityReduction=one(FloatType),
+                                growthReduction=one(FloatType),
+                                prevYearMortality=zero(FloatType),
+                                shade_class=one(UIntType), c_species=zeros(UIntType, n_cohorts),
+                                c_age=zeros(FloatType, n_cohorts),
+                                c_bio=zeros(FloatType, n_cohorts),
+                                c_m_tot=zeros(FloatType, n_cohorts),
+                                c_comp=zeros(FloatType, n_cohorts),
+                                sp_mature=falses(n_species),
+                            )
+                            for row in eachrow(initial_cohorts)
+                                add_new_cohort!(site, row.species_id, FloatType(row.age_calc), FloatType(row.agb_sum))
+                            end
+                            @inbounds outA[i] = site
+                            @inbounds totalmissing[tid] -= 1
+                        end
+                    end
+                end
+            end
+        end
+        println("Missing CNs: $(sum(totalmissing)/sum(totalpixels) * 100)")
+    end
+
+
+
+    #outR = Rasters.Raster(outA, Rasters.dims(r); name=Rasters.name(r), metadata=Rasters.metadata(r))
+    #return outR
+
+
+    #fig = GeoMakie.Figure()
+    #ga = GeoMakie.GeoAxis(fig[1, 1], aspect = GeoMakie.DataAspect()) # Create a geographic axis
+    #GeoMakie.heatmap!(ga, r)
+    #Rasters.plot(fig)
+
+
 
 
     #load CN
@@ -803,9 +910,32 @@ end
 
 #actual entry
 function main(args)
-    parametrize()
-    #load_raster()
+    RNG = Random.Xoshiro(1337)
+    all = true
+    best_params = nothing
+    splots, n_plots, n_species, n_ecoregions = DataFrame(), UIntType(400), UIntType(2), UIntType(1)
+    if all
+        loss_params = LossParams(
+            age_bins=AgeBins(
+                bins_idx=[5, 8, 13, 20, 25, 40, 60, 80] .|> Int,
+                last_bin_open=true
+            ),
+            smoothing_weights=get_smoothing_window(; smoothing_window=1, smoothing_variance=FloatType(1.0f0))
+        )
+        #return
+        println("###loading data")
+        splots, n_plots, n_species, n_ecoregions = load_cohorts()
+        println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
+        @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=1)
+        println("Best Loss: $(best_loss)")
+    end
+    raster_path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"
 
+    splots_dict = Dict(
+        plt_key.plt_cn => DataFrame(plt_df)
+        for (plt_key, plt_df) in pairs(groupby(splots, :plt_cn, sort=false))
+    )
+    @time load_raster(raster_path, best_params, splots_dict, n_plots, n_species, n_ecoregions; RNG=RNG)
 end
 
 #stub C entry
