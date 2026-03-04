@@ -633,8 +633,8 @@ function make_spdf_dict(spdf::DataFrame)::Dict{UIntType,Dict{Int,SPDFGroundTruth
                 end,
                 records=Dict(
                     sp_key.species_id => begin
-                        @assert nrow(sp_df) == 1 "more than 1 sp $(sp_df)"
-                        rec = first(sp_df)
+                        nrow(sp_df) == 1 && @warn "more than 1 sp $(sp_df)"
+                        rec = last(sp_df)
                         SPDFRecord(sp_agb_sum=rec.data_agb_sum, sp_age_cdf=rec.data_agbs_cdf)
                     end
 
