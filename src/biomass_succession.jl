@@ -76,9 +76,9 @@ Base.@kwdef struct BiomassSuccessionParams
 
 
 end
-@inline function ensure_site_cap!(site::Site, live::UIntType)
+@inline function ensure_site_cap!(site::Site, new_cap::UIntType)
     cap = site.cap
-    if cap < live
+    if cap < new_cap
         #print("RESIZING $cap to ")
         cap *= 2
         #println("$cap")
@@ -91,6 +91,20 @@ end
         resize!(site.c_comp, cap)
         site.cap = cap
     end
+end
+
+@inline function compact_site!(site::Site)
+    new_cap = max(site.live, 2)
+    if new_cap < site.cap
+            
+            site.c_age = copy(resize!(site.c_age, new_cap))
+            site.c_bio = copy(resize!(site.c_bio, new_cap))
+            site.c_species = copy(resize!(site.c_species, new_cap))
+            site.c_m_tot = copy(resize!(site.c_m_tot, new_cap))
+            site.c_comp = copy(resize!(site.c_comp, new_cap))
+            site.cap = new_cap
+    end
+
 end
 
 @inline function calculate_initial_biomass(sp_max_anpp::FloatType, site_b::FloatType, b_max_eco::FloatType)::FloatType

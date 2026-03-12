@@ -2,12 +2,17 @@ module BiomassSuccession
 
 
 include("biomass_succession.jl")
-import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, reproduction_step!, calculate_initial_biomass, add_new_cohort!, FloatType, UIntType
+import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, reproduction_step!, calculate_initial_biomass, add_new_cohort!, compact_site!, FloatType, UIntType
 import CSV, Random, Dates, Distributions as Dists, ImageFiltering, StatsBase, Term.Progress as TProgress
 using DataFrames
 import SQLite
 import Rasters, ArchGDAL, CairoMakie, GeoMakie
+import Parquet2
 const AG = ArchGDAL
+BandType = Union{String,Real}
+ValType = Union{String,Real}
+AttrDict = Dict{String,BandType}
+AttrTable = Dict{BandType,AttrDict}
 #using Profile, ProfileSVG
 #using ProgressBars
 
@@ -71,6 +76,7 @@ function load_cohorts()
     #starting_plots = splots[splots.measdate .== splots.start_measdate, :]
     #println(starting_plots)
 end
+
 function make_sites(splots::DataFrame, rng::Random.AbstractRNG)
     eco_ids = unique(select(splots, [:eco_id]))
     n_species = maximum(splots.species_id)
@@ -149,6 +155,7 @@ end
 
     return wasser1
 end
+
 @inline function bins_loss(pc_bin_cdf::Union{Missing,Vector{FloatType}}, qc_bin_cdf::Union{Missing,Vector{FloatType}}; loss_params::LossParams)::FloatType
     # warning: 
     # Technically W1 is not defined if one or both distribution collapsed (0 everywhere)
@@ -175,7 +182,7 @@ end
 
     return wasser1
 end
-#function smoothen_ages(;smoothing_window,
+
 @inline function smooth_ages(; ages::Vector{FloatType}, smoothing_window::Vector{FloatType})::Vector{FloatType}
     smoothed_ages = ImageFiltering.imfilter(ages, smoothing_window, "symmetric")
     @assert !any(isnan.(smoothed_ages)) "filter NaN"
@@ -206,6 +213,7 @@ function smoothen_ref_years(df::DataFrame, loss_params::LossParams, max_age::Int
     #plot_id x eco_id, measdate, sim_year, swhd -> biomass by age
 
 end
+
 function get_bin_widths(; age_bins::Vector{Int}, last_bin_open::Bool)
     # returns the bin widths for wasser1 (ie K-1 widths)
     if last_bin_open
@@ -249,9 +257,11 @@ function get_spinup_cohorts(df::DataFrame)
     spinup_cohorts = sort!(spinup_cohorts, :year_deficit)
     return spinup_cohorts
 end
+
 function get_initial_cohorts(df::DataFrame)
     return df[df.year_deficit.==0, :]
 end
+
 function initialize_sites!(initial_cohorts::DataFrame, sites::Vector{Site})
     ## current_year will go down to -1, since the last estab cohort
     ## would be 1 year old, so a year before the last start_measdate
@@ -424,6 +434,7 @@ function mutate_biomass_params(p)
     println(d)
 
 end
+
 function calculate_site_loss2(current_year::Int, site::Site, spdf_plt::SPDFGroundTruth, loss_params::LossParams)::SiteLoss
     #Sort by species
     n_species = length(site.sp_mature)
@@ -649,20 +660,30 @@ function make_spdf_dict(spdf::DataFrame)::Dict{UIntType,Dict{Int,SPDFGroundTruth
 
 end
 
-function export_sites!(db::SQLite.DB, current_year::Int,sites)
+function export_sites!(db::SQLite.DB, current_year::Int, sites)
+
+    sqls = Array{Union{Missing,SQLite.DB}}(missing, Threads.maxthreadid())
     DBI = SQLite.DBInterface
-    stmt = """CREATE TABLE IF NOT EXISTS output_communities(
-                            year INTEGER,
-                            mapcode INTEGER,
-                            ecocode INTEGER,
-                            species_symbol INTEGER,
-                            AGE INTEGER,
-                            BIOMASS REAL
-                         );
-                         """
-    DBI.execute(db, stmt)
+    
 
     Threads.@threads for I in eachindex(sites)
+        tid = Threads.threadid()
+        @inbounds con = sqls[tid]
+        if ismissing(con) 
+            con = SQLite.DB(":memory:")
+            @inbounds sql[tid] = con
+            stmt = """CREATE TABLE IF NOT EXISTS output_communities(
+                                    year INTEGER,
+                                    mapcode INTEGER,
+                                    ecocode INTEGER,
+                                    species_symbol INTEGER,
+                                    AGE INTEGER,
+                                    BIOMASS REAL
+                                 );
+                                 """
+            DBI.execute(con, stmt)
+        end
+
         @inbounds site = sites[I]
         if !ismissing(site) && site.active
             for i in 1:site.live
@@ -675,11 +696,12 @@ function export_sites!(db::SQLite.DB, current_year::Int,sites)
                                 $(Int(site.c_age[i])),
                                 $(site.c_bio[i])
                                 );"""
-                DBI.execute(db,stmt )
+                DBI.execute(con, stmt)
             end
         end
     end
 end
+
 function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5)::Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
     if isnothing(RNG)
         RNG = Random.default_rng()
@@ -803,10 +825,7 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
     return best_loss, best_result, best_params
 end
 
-function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessionParams}, splots_dict::Dict{Int64,DataFrame}, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG})
-    if isnothing(RNG)
-        RNG = Random.default_rng()
-    end
+function load_treemap_raster(raster_path::String; CN_FIELD_NAME::String="PLT_CN")::Tuple{Array{Union{Missing,Int64}},AttrTable}
     #CairoMakie.activate!()
     #load raster
 
@@ -815,7 +834,6 @@ function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessio
     #    AG.getcategorynames(band)   # Vector of strings (value 0 at index 1)
     #end
     #    println(labels)
-    AttrDict = Dict{String,Union{Int32,Float64,String}}
 
     AG.readraster(raster_path) do ds
         band = AG.getband(ds, 1)
@@ -828,7 +846,7 @@ function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessio
         valcol = findfirst(==("Value"), colnames) #AG.findcolumnindex(rat, AG.GFU_MinMax)
         isnothing(valcol) && error("No GFU_MinMax/'Value' column in RAT.")
         valcol -= 1 # gdal is 0 based
-        BandType = AG.pixeltype(band)
+        bandType = AG.pixeltype(band)
         function rat_get(r::Int, c::Int)
             t = AG.columntype(rat, c)
             if t == AG.GFT_Integer
@@ -839,11 +857,11 @@ function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessio
                 return AG.asstring(rat, r, c)
             end
         end
-        val_att_dict = Dict{BandType,AttrDict}()
+        val_att_dict = AttrTable()
 
 
         for r in 0:nrows-1
-            px = BandType(rat_get(r, valcol))
+            px = bandType(rat_get(r, valcol))
             attrs = AttrDict()
             for c in 0:ncols-1
                 attrs[colnames[c+1]] = rat_get(r, c)
@@ -857,10 +875,7 @@ function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessio
         println(size(A), typeof(A))
         println(length(A))
 
-        outA = Array{Union{Missing,Site}}(missing, size(A))
-        tRNGs = [Random.Xoshiro(rand(RNG, UInt64)) for _ in 1:Threads.maxthreadid()]
-        totalpixels = zeros(UInt, Threads.maxthreadid())
-        totalmissing = zeros(UInt, Threads.maxthreadid())
+        outA = Array{Union{Missing,Int64}}(missing, size(A))
 
         #AA = map(A) do cell
         #rand(RNG, UInt64)
@@ -868,95 +883,217 @@ function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessio
         begin
             Threads.@threads for i in eachindex(A, outA)
                 @inbounds cell = A[i]
-                if ismissing(cell) || cell == NO_DATA
-                    @inbounds outA[i] = missing
-                else
-                    tid = Threads.threadid()
-                    @inbounds totalpixels[tid] += 1
-                    @inbounds totalmissing[tid] += 1
+                if !ismissing(cell) && cell != NO_DATA
                     plt_attr = get(val_att_dict, cell, missing)
-                    if ismissing(plt_attr)
-                        @inbounds outA[i] = missing
-                    else
-                        @inbounds tRNG = tRNGs[tid]
-                        plt_cn = get(plt_attr, "PLT_CN", missing)
-                        #ismissing(plt_cn) && error("cannot get CN out of $(plt_attr)")
-                        initial_cohorts = get(splots_dict, plt_cn, missing)
-                        if ismissing(initial_cohorts) || nrow(initial_cohorts) < 1
-                            @inbounds outA[i] = missing
-                        else
-                            p = first(initial_cohorts)
-                            n_cohorts = nrow(initial_cohorts)
-                            cap = UIntType(2^ceil(log2(n_cohorts)))
-                            site = Site(
-                                active=true,
-                                rng=Random.Xoshiro(rand(tRNG, UInt64)),
-                                ecocode=UIntType(p.eco_id),
-                                mapcode=UIntType(p.plot_id), cap=UIntType(cap),
-                                ref_cn=UIntType(p.plot_id),
-                                old=zero(UIntType),
-                                live=zero(UIntType),
-                                B=zero(FloatType),
-                                AGNPP=zero(FloatType),
-                                capacityReduction=one(FloatType),
-                                growthReduction=one(FloatType),
-                                prevYearMortality=zero(FloatType),
-                                shade_class=one(UIntType), 
-                                c_species=zeros(UIntType, cap),
-                                c_age=zeros(FloatType, cap),
-                                c_bio=zeros(FloatType, cap),
-                                c_m_tot=zeros(FloatType, cap),
-                                c_comp=zeros(FloatType, cap),
-                                sp_mature=falses(n_species),
-                            )
-                            for row in eachrow(initial_cohorts)
-                                add_new_cohort!(site, row.species_id, FloatType(row.age_calc), FloatType(row.agb_sum))
-                            end
-                            @inbounds outA[i] = site
-                            @inbounds totalmissing[tid] -= 1
-                        end
+                    if !ismissing(plt_attr)
+                        plt_cn = get(plt_attr, CN_FIELD_NAME, missing)
+                        @inbounds outA[i] = UInt64(plt_cn)
                     end
                 end
             end
         end
-        println("Missing CNs: $(sum(totalmissing)/sum(totalpixels) * 100)")
+        return outA, val_att_dict
+    end
+end
 
-        db = SQLite.DB("tst.db")
-        TProgress.@track for current_sim_year in 1:30
-            Threads.@threads for I in eachindex(outA)
-                @inbounds site = outA[I]
-                if !ismissing(site)
-                #println(I)
-                    succession_step!(current_sim_year, params, site)
-                    reproduction_step!(current_sim_year,params, site)
-                end
-            end
-            #export_sites!(db,current_sim_year, outA)
-        end
-        SQLite.DBInterface.close(db)
+function populate_initial_treemap_communities(plt_cn_raster::Array{Union{Missing,Int64}}, splots_dict::Dict{Int64,DataFrame}, n_species::UIntType; RNG::Union{Nothing,Random.AbstractRNG})::Array{Union{Missing,Site}}
+    if isnothing(RNG)
+        RNG = Random.default_rng()
     end
 
+    tRNGs = [Random.Xoshiro(rand(RNG, UInt64)) for _ in 1:Threads.maxthreadid()]
+    totalpixels = zeros(UInt, Threads.maxthreadid())
+    totalmissing = zeros(UInt, Threads.maxthreadid())
+    outA = Array{Union{Missing,Site}}(missing, size(plt_cn_raster))
 
+    begin
+        Threads.@threads for i in eachindex(plt_cn_raster, outA)
+            tid = Threads.threadid()
+            @inbounds plt_cn = plt_cn_raster[i]
 
+            if !ismissing(plt_cn)
+                @inbounds totalpixels[tid] += 1
+                @inbounds totalmissing[tid] += 1
+                initial_cohorts = get(splots_dict, plt_cn, missing)
+                if !ismissing(initial_cohorts) && nrow(initial_cohorts) > 0
+                    @inbounds tRNG = tRNGs[tid]
+                    p = first(initial_cohorts)
+                    n_cohorts = nrow(initial_cohorts)
+                    cap = UIntType(2^ceil(log2(n_cohorts)))
+                    site = Site(
+                        active=true,
+                        rng=Random.Xoshiro(rand(tRNG, UInt64)),
+                        ecocode=UIntType(p.eco_id),
+                        mapcode=UIntType(p.plot_id), cap=UIntType(cap),
+                        ref_cn=UIntType(p.plot_id),
+                        old=zero(UIntType),
+                        live=zero(UIntType),
+                        B=zero(FloatType),
+                        AGNPP=zero(FloatType),
+                        capacityReduction=one(FloatType),
+                        growthReduction=one(FloatType),
+                        prevYearMortality=zero(FloatType),
+                        shade_class=one(UIntType),
+                        c_species=zeros(UIntType, cap),
+                        c_age=zeros(FloatType, cap),
+                        c_bio=zeros(FloatType, cap),
+                        c_m_tot=zeros(FloatType, cap),
+                        c_comp=zeros(FloatType, cap),
+                        sp_mature=falses(n_species),
+                    )
+                    for row in eachrow(initial_cohorts)
+                        add_new_cohort!(site, row.species_id, FloatType(row.age_calc), FloatType(row.agb_sum))
+                    end
 
+                    @inbounds outA[i] = site
+                    @inbounds totalmissing[tid] -= 1
+                end
 
-    #outR = Rasters.Raster(outA, Rasters.dims(r); name=Rasters.name(r), metadata=Rasters.metadata(r))
-    #return outR
-
-
-    #fig = GeoMakie.Figure()
-    #ga = GeoMakie.GeoAxis(fig[1, 1], aspect = GeoMakie.DataAspect()) # Create a geographic axis
-    #GeoMakie.heatmap!(ga, r)
-    #Rasters.plot(fig)
-
-
-
-
-    #load CN
-    #match with available CN
-    #grow for 30 years
-    #save to raster agb
+                #ismissing(plt_cn) && error("cannot get CN out of $(plt_attr)")
+            end
+        end
+    end
+    println("Missing CNs: $(sum(totalmissing)/sum(totalpixels) * 100)")
+    return outA
 end
+
+struct SiteRecord
+    year::UIntType
+    mapcode::UIntType
+    ecocode::UIntType
+    species::UIntType
+    age::UIntType
+    biomass::FloatType
+end
+function run_simulation(site_raster::Array{Union{Missing,Site}}, params::BiomassSuccessionParams; years::Int=30, RNG=RNG)
+    FLUSH_THRESHOLD = 1000
+    writer_buffer = Vector{SiteRecord}()
+    sizehint!(writer_buffer, FLUSH_THRESHOLD)
+    flush_task = nothing
+    chunk = 1
+
+    thread_buffers = [Vector{SiteRecord}() for _ in 1:Threads.maxthreadid()]
+    TProgress.@track for current_sim_year in 1:years
+        Threads.@threads for I in eachindex(site_raster)
+            @inbounds site = site_raster[I]
+            if !ismissing(site)
+                #println(I)
+                succession_step!(current_sim_year, params, site)
+                reproduction_step!(current_sim_year, params, site)
+                if current_sim_year % 5 == 0
+                    compact_site!(site)
+                end
+                if current_sim_year > 0
+                    tid = Threads.threadid()
+                    @inbounds buf = thread_buffers[tid]
+
+                    for i in 1:site.live
+                        push!(buf, SiteRecord(current_sim_year,site.mapcode,site.ecocode,site.c_species[i],site.c_age[i],site.c_bio[i]))
+                    end
+                end
+            end
+        end
+        for buf in thread_buffers
+            append!(writer_buffer, buf)
+            empty!(buf)
+        end
+        if length(writer_buffer) > FLUSH_THRESHOLD
+            payload = writer_buffer
+            flush_task = @async begin
+                Parquet2.writefile("chunk_$(chunk).parquet", payload)
+                @info "Flushed chunk $(chunk): $(length(payload))"
+                chunk+=1
+            end
+            writer_buffer = Vector{SiteRecord}()
+            sizehint!(writer_buffer,FLUSH_THRESHOLD)
+        end
+    end
+    for buf in thread_buffers
+        append!(writer_buffer, buf)
+    end
+    flush_task !== nothing && wait(flush_task)
+    if !isempty(writer_buffer)
+            Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
+            @info "Flushed final chunk $(chunk): $(length(writer_buffer))"
+    end
+end
+function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::BiomassSuccessionParams; years::Int=30, RNG=RNG)
+    FLUSH_THRESHOLD = 1000
+    BUFF_LEN = 2048
+    ch = Channel{Vector{SiteRecord}}(BUFF_LEN)
+    writer_thread = Threads.@spawn begin
+        writer_buffer = Vector{SiteRecord}()
+        sizehint!(writer_buffer, FLUSH_THRESHOLD)
+        chunk = 1 
+
+        for rec_buff in ch
+            append!(writer_buffer,rec_buff)
+            if length(writer_buffer) > FLUSH_THRESHOLD
+                Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
+                @info "Flushed chunk $(chunk)"
+                chunk+=1
+                empty!(writer_buffer)
+            end
+        end
+
+        if !isempty(writer_buffer)
+                Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
+                @info "Flushed final chunk $(chunk)"
+        end
+    end
+
+    thread_buffers = [Vector{SiteRecord}() for _ in 1:Threads.maxthreadid()]
+    TProgress.@track for current_sim_year in 1:years
+        Threads.@threads for I in eachindex(site_raster)
+            @inbounds site = site_raster[I]
+            if !ismissing(site)
+                #println(I)
+                succession_step!(current_sim_year, params, site)
+                reproduction_step!(current_sim_year, params, site)
+                if current_sim_year % 5 == 0
+                    compact_site!(site)
+                end
+                if current_sim_year > 0
+                    tid = Threads.threadid()
+                    @inbounds buf = thread_buffers[tid]
+
+                    for i in 1:site.live
+                        push!(buf, SiteRecord(current_sim_year,site.mapcode,site.ecocode,site.c_species[i],site.c_age[i],site.c_bio[i]))
+                    end
+                    if length(buf) >= FLUSH_THRESHOLD/10
+
+                        put!(ch, buf)
+                        @inbounds thread_buffers[tid] = Vector{SiteRecord}()
+                    end
+                end
+            end
+        end
+    end
+    thread_buffers .|> x -> put!(ch,x)
+    close(ch)
+    wait(writer_thread)
+end
+
+
+
+
+
+#outR = Rasters.Raster(outA, Rasters.dims(r); name=Rasters.name(r), metadata=Rasters.metadata(r))
+#return outR
+
+
+#fig = GeoMakie.Figure()
+#ga = GeoMakie.GeoAxis(fig[1, 1], aspect = GeoMakie.DataAspect()) # Create a geographic axis
+#GeoMakie.heatmap!(ga, r)
+#Rasters.plot(fig)
+
+
+
+
+#load CN
+#match with available CN
+#grow for 30 years
+#save to raster agb
 
 #actual entry
 function main(args)
@@ -976,7 +1113,7 @@ function main(args)
         println("###loading data")
         splots, n_plots, n_species, n_ecoregions = load_cohorts()
         println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
-        @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=10)
+        @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=2)
         println("Best Loss: $(best_loss)")
     end
     raster_path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"
@@ -985,7 +1122,14 @@ function main(args)
         plt_key.plt_cn => DataFrame(plt_df)
         for (plt_key, plt_df) in pairs(groupby(splots, :plt_cn, sort=false))
     )
-    @time load_raster(raster_path, best_params, splots_dict, n_plots, n_species, n_ecoregions; RNG=RNG)
+    println("Loading Raster")
+    @time cn_raster, vat = load_treemap_raster(raster_path)
+    println("Populating Raster")
+    @time site_raster = populate_initial_treemap_communities(cn_raster, splots_dict, n_species; RNG=RNG)
+    println("Running simulation")
+    @time run_simulation(site_raster, best_params; RNG=RNG)
+
+
 end
 
 #stub C entry
