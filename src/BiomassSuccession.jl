@@ -5,6 +5,7 @@ include("biomass_succession.jl")
 import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, reproduction_step!, calculate_initial_biomass, add_new_cohort!, FloatType, UIntType
 import CSV, Random, Dates, Distributions as Dists, ImageFiltering, StatsBase, Term.Progress as TProgress
 using DataFrames
+import SQLite
 import Rasters, ArchGDAL, CairoMakie, GeoMakie
 const AG = ArchGDAL
 #using Profile, ProfileSVG
@@ -46,7 +47,7 @@ function load_cohorts()
     all_df = CSV.read("../data_eco_cohorts_cn.csv", DataFrame)
     FL5_counties_ecos = ["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
     filtered_plots = in(FL5_counties_ecos).(all_df.eco)
-    cdf = all_df#[filtered_plots, :]
+    cdf = all_df[filtered_plots, :]
 
     plots = combine(groupby(cdf, [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco, :measdate, :species_symbol_map, :age_calc], sort=false), nrow => :count, :agb => sum => :agb_sum)
     # start_measdate = 
@@ -633,7 +634,7 @@ function make_spdf_dict(spdf::DataFrame)::Dict{UIntType,Dict{Int,SPDFGroundTruth
                 end,
                 records=Dict(
                     sp_key.species_id => begin
-                        nrow(sp_df) == 1 && @warn "more than 1 sp $(sp_df)"
+                        nrow(sp_df) > 1 && @warn "more than 1 sp $(sp_df)"
                         rec = last(sp_df)
                         SPDFRecord(sp_agb_sum=rec.data_agb_sum, sp_age_cdf=rec.data_agbs_cdf)
                     end
@@ -648,7 +649,38 @@ function make_spdf_dict(spdf::DataFrame)::Dict{UIntType,Dict{Int,SPDFGroundTruth
 
 end
 
-function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=100)::Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
+function export_sites!(db::SQLite.DB, current_year::Int,sites)
+    DBI = SQLite.DBInterface
+    stmt = """CREATE TABLE IF NOT EXISTS output_communities(
+                            year INTEGER,
+                            mapcode INTEGER,
+                            ecocode INTEGER,
+                            species_symbol INTEGER,
+                            AGE INTEGER,
+                            BIOMASS REAL
+                         );
+                         """
+    DBI.execute(db, stmt)
+
+    Threads.@threads for I in eachindex(sites)
+        @inbounds site = sites[I]
+        if !ismissing(site) && site.active
+            for i in 1:site.live
+                stmt = """INSERT INTO output_communities(year, mapcode, ecocode, species_symbol, age, biomass)
+                                VALUES (
+                                $(current_year),
+                                $(site.mapcode),
+                                $(site.ecocode),
+                                $(site.c_species[i]),
+                                $(Int(site.c_age[i])),
+                                $(site.c_bio[i])
+                                );"""
+                DBI.execute(db,stmt )
+            end
+        end
+    end
+end
+function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5)::Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
     if isnothing(RNG)
         RNG = Random.default_rng()
     end
@@ -855,11 +887,12 @@ function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessio
                         else
                             p = first(initial_cohorts)
                             n_cohorts = nrow(initial_cohorts)
+                            cap = UIntType(2^ceil(log2(n_cohorts)))
                             site = Site(
-                                active=false,
+                                active=true,
                                 rng=Random.Xoshiro(rand(tRNG, UInt64)),
                                 ecocode=UIntType(p.eco_id),
-                                mapcode=UIntType(p.plot_id), cap=UIntType(n_cohorts),
+                                mapcode=UIntType(p.plot_id), cap=UIntType(cap),
                                 ref_cn=UIntType(p.plot_id),
                                 old=zero(UIntType),
                                 live=zero(UIntType),
@@ -868,11 +901,12 @@ function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessio
                                 capacityReduction=one(FloatType),
                                 growthReduction=one(FloatType),
                                 prevYearMortality=zero(FloatType),
-                                shade_class=one(UIntType), c_species=zeros(UIntType, n_cohorts),
-                                c_age=zeros(FloatType, n_cohorts),
-                                c_bio=zeros(FloatType, n_cohorts),
-                                c_m_tot=zeros(FloatType, n_cohorts),
-                                c_comp=zeros(FloatType, n_cohorts),
+                                shade_class=one(UIntType), 
+                                c_species=zeros(UIntType, cap),
+                                c_age=zeros(FloatType, cap),
+                                c_bio=zeros(FloatType, cap),
+                                c_m_tot=zeros(FloatType, cap),
+                                c_comp=zeros(FloatType, cap),
                                 sp_mature=falses(n_species),
                             )
                             for row in eachrow(initial_cohorts)
@@ -886,7 +920,23 @@ function load_raster(raster_path::String, params::Union{Nothing,BiomassSuccessio
             end
         end
         println("Missing CNs: $(sum(totalmissing)/sum(totalpixels) * 100)")
+
+        db = SQLite.DB("tst.db")
+        TProgress.@track for current_sim_year in 1:30
+            Threads.@threads for I in eachindex(outA)
+                @inbounds site = outA[I]
+                if !ismissing(site)
+                #println(I)
+                    succession_step!(current_sim_year, params, site)
+                    reproduction_step!(current_sim_year,params, site)
+                end
+            end
+            #export_sites!(db,current_sim_year, outA)
+        end
+        SQLite.DBInterface.close(db)
     end
+
+
 
 
 
@@ -926,7 +976,7 @@ function main(args)
         println("###loading data")
         splots, n_plots, n_species, n_ecoregions = load_cohorts()
         println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
-        @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=1)
+        @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=10)
         println("Best Loss: $(best_loss)")
     end
     raster_path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"

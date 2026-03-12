@@ -230,7 +230,7 @@ uuid = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
 version = "0.2.8"
 
 [[deps.BiomassSuccession]]
-deps = ["ArchGDAL", "CSV", "CairoMakie", "DSP", "DataFrames", "Dates", "Distributions", "Flux", "ImageFiltering", "PackageCompiler", "Profile", "ProfileCanvas", "ProfileSVG", "ProgressBars", "Query", "Random", "Rasters", "SQLdf", "SQLite", "StatsBase", "Term"]
+deps = ["ArchGDAL", "CSV", "CairoMakie", "DSP", "DataFrames", "Dates", "Distributions", "Flux", "GeoMakie", "ImageFiltering", "PackageCompiler", "Profile", "ProfileCanvas", "ProfileSVG", "ProgressBars", "Query", "Random", "Rasters", "SQLdf", "SQLite", "StatsBase", "Term"]
 path = "."
 uuid = "8553e388-fbea-4c1b-8f1a-b886db56f5e1"
 version = "0.1.0"

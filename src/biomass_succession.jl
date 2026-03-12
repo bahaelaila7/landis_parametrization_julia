@@ -83,12 +83,12 @@ end
         cap *= 2
         #println("$cap")
         #println("$(site.c_age)")
-        site.c_age = resize!(site.c_age, cap)
+        resize!(site.c_age, cap)
         #println("$(site.c_age)")
-        site.c_bio = resize!(site.c_bio, cap)
-        site.c_species = resize!(site.c_species, cap)
-        site.c_m_tot = resize!(site.c_m_tot, cap)
-        site.c_comp = resize!(site.c_comp, cap)
+        resize!(site.c_bio, cap)
+        resize!(site.c_species, cap)
+        resize!(site.c_m_tot, cap)
+        resize!(site.c_comp, cap)
         site.cap = cap
     end
 end
