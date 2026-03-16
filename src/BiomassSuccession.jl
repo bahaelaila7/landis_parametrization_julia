@@ -8,6 +8,8 @@ using DataFrames
 import SQLite
 import Rasters, ArchGDAL, CairoMakie, GeoMakie
 import Parquet2
+import Setfield
+
 const AG = ArchGDAL
 BandType = Union{String,Real}
 ValType = Union{String,Real}
@@ -340,9 +342,9 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, params:
 end
 
 
-function generate_biomass_params(rng::Random.AbstractRNG, n_species::UIntType, n_ecoregions::UIntType)
+function generate_biomass_params(n_species::UIntType, n_ecoregions::UIntType; rng::Random.AbstractRNG)
     # TODO: species that do not show up for a specific ecoregion, make all their prob_estab = 0
-    SPINUP_MORTALITY_FRACTION = 0.15f0 #rand(Dists.Uniform(0f0,0.20f0))
+    SPINUP_MORTALITY_FRACTION = [0.15f0] #rand(Dists.Uniform(0f0,0.20f0))
     #println(typeof(SPINUP_MORTALITY_FRACTION))
 
     S = rand(rng, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), n_species) .|> FloatType #Random.rand(rng, FloatType, n_species),#
@@ -408,7 +410,50 @@ function generate_biomass_params(rng::Random.AbstractRNG, n_species::UIntType, n
 
 end
 
-function mutate_biomass_params(p)
+struct BiomassParam
+    name
+    dist
+    type::Type
+    species::Bool
+    ecoregion::Bool
+end
+struct BiomassParamDists
+    params::Array{BiomassParam}
+    weights_cumsum::Array{Float64}
+    n_species::UIntType
+    n_ecoregions::UIntType
+    interaction_matrix::Matrix{UIntType}
+end
+
+function make_biomass_param_dists(n_species::UIntType, n_ecoregions::UIntType)
+    BIOMASS_PARAM_DISTS = [
+        BiomassParam(:SPINUP_MORTALITY_FRACTION, Dists.Uniform(0.0f0, 0.20f0), FloatType, false, false),
+        BiomassParam(:S, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), FloatType, true, false),
+        BiomassParam(:D, Dists.truncated(Dists.Normal(15, 10), 5, 25), FloatType, true, false),
+        BiomassParam(:LONGEVITY, Dists.truncated(Dists.Normal(200, 100), 100, 300), FloatType, true, false),
+        BiomassParam(:SHADE_TOL, Dists.DiscreteUniform(1, 5), FloatType, true, false),
+        BiomassParam(:MATURITY, Dists.DiscreteUniform(3, 40), FloatType, true, false),
+        BiomassParam(:PROB_MORT_SPP, Dists.Uniform(), FloatType, true, true),
+        BiomassParam(:PROB_ESTAB_SPP, Dists.Uniform(), FloatType, true, true),
+        BiomassParam(:ANPP_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
+        BiomassParam(:B_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
+        BiomassParam(:firstMINRel, Dists.Uniform(0.0, 0.5), FloatType, false, true),
+    ]
+    interaction_matrix = [1 n_ecoregions; n_species n_species*n_ecoregions]
+    BIOMASS_PARAM_WEIGHTS_RAW = [
+        begin
+            a, b = UIntType(UIntType(p.species) + 1), UIntType(UIntType(p.ecoregion) + 1)
+            dims = interaction_matrix[(a, b)...]
+            15.0 + FloatType(dims)
+        end
+        for p in BIOMASS_PARAM_DISTS]
+    BIOMASS_PARAM_WEIGHTS = BIOMASS_PARAM_WEIGHTS_RAW / sum(BIOMASS_PARAM_WEIGHTS_RAW)
+
+    return BiomassParamDists(BIOMASS_PARAM_DISTS, cumsum(BIOMASS_PARAM_WEIGHTS), n_species, n_ecoregions, interaction_matrix)
+
+end
+
+function mutate_biomass_params(p::BiomassSuccessionParams, param_dists::BiomassParamDists; rng::Random.AbstractRNG)
     # Only mutate for species in ecoregion, no point in mutating others
     # schema: variable, element-wise pdf, final type, species-specific, ecoregion-specific
     #
@@ -418,21 +463,21 @@ function mutate_biomass_params(p)
     # EA:
     # - bundle mutation rate, mutation angle.
 
-    d = [
-        (:SPINUP_MORTALITY_FRACTION, Dists.Uniform(0.0f0, 0.20f0), FloatType, false, false),
-        (:S, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), FloatType, true, false),
-        (:D, Dists.truncated(Dists.Normal(15, 10), 5, 25), FloatType, true, false),
-        (:LONGEVITY, Dists.truncated(Dists.Normal(200, 100), 100, 300), FloatType, true, false),
-        (:SHADE_TOL, Dists.DiscreteUniform(1, 5), FloatType, true, false),
-        (:MATURITY, Dists.DiscreteUniform(3, 40), FloatType, true, false),
-        (:PROB_MORT_SPP, Dists.Uniform(), FloatType, true, true),
-        (:PROB_ESTAB_SPP, Dists.Uniform(), FloatType, true, true),
-        (:ANPP_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
-        (:B_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
-        (:firstMINRel, Dists.Uniform(0.0, 0.5), FloatType, false, true),
-    ]
-    println(d)
+    # select one of the params
+    s = rand(rng, Float64)
+    param_idx = something(findlast(param_dists.weights_cumsum .<= s), 1)
+    selected_param = param_dists.params[param_idx]
+    v = getproperty(p, selected_param.name)
+    dims = length(v)
+    param_val = rand(rng, selected_param.dist) |> selected_param.type
 
+
+    param_idx = dims == 1 ? 1 : rand(rng, 1:dims)
+    nv = similar(v)
+    nv .= v
+    nv[param_idx...] = param_val
+    np = Setfield.@set p.$(selected_param.name) = nv
+    return np
 end
 
 function calculate_site_loss2(current_year::Int, site::Site, spdf_plt::SPDFGroundTruth, loss_params::LossParams)::SiteLoss
@@ -664,12 +709,12 @@ function export_sites!(db::SQLite.DB, current_year::Int, sites)
 
     sqls = Array{Union{Missing,SQLite.DB}}(missing, Threads.maxthreadid())
     DBI = SQLite.DBInterface
-    
+
 
     Threads.@threads for I in eachindex(sites)
         tid = Threads.threadid()
         @inbounds con = sqls[tid]
-        if ismissing(con) 
+        if ismissing(con)
             con = SQLite.DB(":memory:")
             @inbounds sql[tid] = con
             stmt = """CREATE TABLE IF NOT EXISTS output_communities(
@@ -988,7 +1033,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
                     @inbounds buf = thread_buffers[tid]
 
                     for i in 1:site.live
-                        push!(buf, SiteRecord(current_sim_year,site.mapcode,site.ecocode,site.c_species[i],site.c_age[i],site.c_bio[i]))
+                        push!(buf, SiteRecord(current_sim_year, site.mapcode, site.ecocode, site.c_species[i], site.c_age[i], site.c_bio[i]))
                     end
                 end
             end
@@ -1002,10 +1047,10 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
             flush_task = @async begin
                 Parquet2.writefile("chunk_$(chunk).parquet", payload)
                 @info "Flushed chunk $(chunk): $(length(payload))"
-                chunk+=1
+                chunk += 1
             end
             writer_buffer = Vector{SiteRecord}()
-            sizehint!(writer_buffer,FLUSH_THRESHOLD)
+            sizehint!(writer_buffer, FLUSH_THRESHOLD)
         end
     end
     for buf in thread_buffers
@@ -1013,8 +1058,8 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
     end
     flush_task !== nothing && wait(flush_task)
     if !isempty(writer_buffer)
-            Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
-            @info "Flushed final chunk $(chunk): $(length(writer_buffer))"
+        Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
+        @info "Flushed final chunk $(chunk): $(length(writer_buffer))"
     end
 end
 function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::BiomassSuccessionParams; years::Int=30, RNG=RNG)
@@ -1024,21 +1069,21 @@ function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::Biomas
     writer_thread = Threads.@spawn begin
         writer_buffer = Vector{SiteRecord}()
         sizehint!(writer_buffer, FLUSH_THRESHOLD)
-        chunk = 1 
+        chunk = 1
 
         for rec_buff in ch
-            append!(writer_buffer,rec_buff)
+            append!(writer_buffer, rec_buff)
             if length(writer_buffer) > FLUSH_THRESHOLD
                 Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
                 @info "Flushed chunk $(chunk)"
-                chunk+=1
+                chunk += 1
                 empty!(writer_buffer)
             end
         end
 
         if !isempty(writer_buffer)
-                Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
-                @info "Flushed final chunk $(chunk)"
+            Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
+            @info "Flushed final chunk $(chunk)"
         end
     end
 
@@ -1058,9 +1103,9 @@ function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::Biomas
                     @inbounds buf = thread_buffers[tid]
 
                     for i in 1:site.live
-                        push!(buf, SiteRecord(current_sim_year,site.mapcode,site.ecocode,site.c_species[i],site.c_age[i],site.c_bio[i]))
+                        push!(buf, SiteRecord(current_sim_year, site.mapcode, site.ecocode, site.c_species[i], site.c_age[i], site.c_bio[i]))
                     end
-                    if length(buf) >= FLUSH_THRESHOLD/10
+                    if length(buf) >= FLUSH_THRESHOLD / 10
 
                         put!(ch, buf)
                         @inbounds thread_buffers[tid] = Vector{SiteRecord}()
@@ -1069,7 +1114,7 @@ function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::Biomas
             end
         end
     end
-    thread_buffers .|> x -> put!(ch,x)
+    thread_buffers .|> x -> put!(ch, x)
     close(ch)
     wait(writer_thread)
 end
@@ -1101,6 +1146,17 @@ function main(args)
     all = true
     best_params = nothing
     splots, n_plots, n_species, n_ecoregions = DataFrame(), UIntType(400), UIntType(2), UIntType(1)
+    BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
+    println(BIOMASS_PARAM_DISTS)
+    pp = generate_biomass_params(n_species, n_ecoregions; rng=RNG)
+    println(pp)
+    ppp = pp
+    for _ in 1:400
+        ppp = mutate_biomass_params(ppp, BIOMASS_PARAM_DISTS; rng=RNG)
+    end
+    println(pp)
+    println(ppp)
+    return
     if all
         loss_params = LossParams(
             age_bins=AgeBins(
@@ -1113,6 +1169,7 @@ function main(args)
         println("###loading data")
         splots, n_plots, n_species, n_ecoregions = load_cohorts()
         println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
+        BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
         @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=2)
         println("Best Loss: $(best_loss)")
     end

@@ -55,7 +55,7 @@ Base.@kwdef mutable struct Site
 
 end
 Base.@kwdef struct BiomassSuccessionParams
-    SPINUP_MORTALITY_FRACTION::FloatType
+    SPINUP_MORTALITY_FRACTION::Vector{FloatType}
 
     D::Vector{FloatType}
     S::Vector{FloatType}
@@ -186,7 +186,7 @@ function succession_step!(current_time::Int, params::BiomassSuccessionParams, si
             if mort_rng > params.PROB_MORT_SPP[site.ecocode, sp]
                 m_age_factor = exp(params.D[sp] * (age / max_age - one(FloatType)))
                 if current_time <= 0
-                    m_age_factor += params.SPINUP_MORTALITY_FRACTION
+                    m_age_factor += params.SPINUP_MORTALITY_FRACTION[]
                 end
                 if m_age_factor < one(FloatType)
                     site.c_m_tot[i] *= m_age_factor
