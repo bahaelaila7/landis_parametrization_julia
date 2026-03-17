@@ -2,7 +2,9 @@ module BiomassSuccession
 
 
 include("biomass_succession.jl")
+include("SA.jl")
 import .SuccessionModule: Site, BiomassSuccessionParams, succession_step!, reproduction_step!, calculate_initial_biomass, add_new_cohort!, compact_site!, FloatType, UIntType
+import .SA: SACandidate, SAState, simulated_annealing_acceptance_rule, threshold_accepting_acceptance_rule, search_cmp!, search_update_rule!
 import CSV, Random, Dates, Distributions as Dists, ImageFiltering, StatsBase, Term.Progress as TProgress
 using DataFrames
 import SQLite
@@ -49,6 +51,17 @@ Base.@kwdef struct SiteLoss
     sp_agb_loss::Vector{FloatType}
     site_agb_loss::FloatType
 end
+@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
+
+    w = (alpha * sum(loss.sp_w_loss))
+    sp = (beta * sum(loss.sp_agb_loss))
+    site = (loss.site_agb_loss)
+    all = w + sp + site
+    return all
+
+end
+@inline Base.convert(::Type{Float64},a::SiteLoss) = Float64(get_total_loss(a))
+#@inline Base.promote_rule(::Type{SiteLoss}, ::Type{Float64}) = Float64
 
 function load_cohorts()
     all_df = CSV.read("../data_eco_cohorts_cn.csv", DataFrame)
@@ -619,15 +632,6 @@ end
 
 @inline skipundef(xs::AbstractArray) = (xs[i] for i in eachindex(xs) if isassigned(xs, i))
 
-@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
-
-    w = (alpha * sum(loss.sp_w_loss))
-    sp = (beta * sum(loss.sp_agb_loss))
-    site = (loss.site_agb_loss)
-    all = w + sp + site
-    return all
-
-end
 
 function reset_pjob!(pbar::TProgress.ProgressBar, job::TProgress.ProgressJob; N::Int, desc::Union{Nothing,String}=nothing)
     pbar.paused = true
@@ -747,7 +751,7 @@ function export_sites!(db::SQLite.DB, current_year::Int, sites)
     end
 end
 
-function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5)::Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
+function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5, params_dist::BiomassParamDists)::Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
     if isnothing(RNG)
         RNG = Random.default_rng()
     end
@@ -769,105 +773,125 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
     #Profile.clear()
     #Profile.init(n=10^7, delay=0.001)
 
-    best_loss = FloatType(Inf)
+    #best_loss = FloatType(Inf)
     best_result = SiteLoss(FloatType[], FloatType[], FloatType(Inf))
-    best_params = generate_biomass_params(RNG, n_species, n_ecoregions)
+    best_params = generate_biomass_params(n_species, n_ecoregions; rng = RNG)
+    cur = SACandidate(best_params, best_result)
+    search_state = SAState(best = cur,current = cur, rng=RNG, max_iter=TRIALS)
     if TRIALS < 1
-        return best_loss, best_result, best_params
+        return search_state #best_loss, best_result, best_params
     end
 
     pbar = TProgress.ProgressBar(; expand=true)
     trials_pbar = TProgress.addjob!(pbar; N=TRIALS, description="Trials")
     run_pbar = TProgress.addjob!(pbar; N=1, description="Years")
     TProgress.with(pbar) do
-        for trial in 1:TRIALS #ProgressBar(1:100)
-            params = generate_biomass_params(RNG, n_species, n_ecoregions)
-            #println(params)
-            #println("###making sites")
-            sites = make_sites(splots, RNG)
-            chosen_sites = StatsBase.sample(RNG, 1:length(sites), SITES_PER_RUN, replace=false, ordered=true)
-            max_sim_year = site_sim_years.sim_years[chosen_sites] .|> maximum |> maximum
-            #println("###Sites made, beginning spinup")
-            spinup_cohorts!(spinup_cohorts, sites, params) #[splots.measdate .== splots.start_measdate,:])
-            #println("Sites spun up")
+        try
+            iter = 0
+            while true #for trial in 1:TRIALS #ProgressBar(1:100)
+                iter += 1
+                search_state.i = iter
+                #params = generate_biomass_params(RNG, n_species, n_ecoregions)
+                params = mutate_biomass_params(search_state.current.x, params_dist;rng=RNG)
+                #println(params)
+                #println("###making sites")
+                sites = make_sites(splots, RNG)
+                chosen_sites = StatsBase.sample(RNG, 1:length(sites), SITES_PER_RUN, replace=false, ordered=true)
+                max_sim_year = site_sim_years.sim_years[chosen_sites] .|> maximum |> maximum
+                #println("###Sites made, beginning spinup")
+                spinup_cohorts!(spinup_cohorts, sites, params) #[splots.measdate .== splots.start_measdate,:])
+                #println("Sites spun up")
 
-            #
-            ## 
-            ##
-            ##
-            ##
-            ##
-            #
+                #
+                ## 
+                ##
+                ##
+                ##
+                ##
+                #
 
 
 
-            reset_pjob!(pbar, run_pbar; N=max_sim_year + 1)
+                reset_pjob!(pbar, run_pbar; N=max_sim_year + 1)
 
-            #years_results = [DataFrame() for _ in 0:max_sim_year] #Vector{MDataFrame}(missing,max_sim_year+1)
-            years_results = Vector{SiteLoss}(undef, max_sim_year + 1)
-            for current_sim_year in 0:max_sim_year #ProgressBar(0:max_sim_year) #ProgressBar(0:50)
-                sites_results = Vector{SiteLoss}(undef, length(chosen_sites)) #[DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
-                #any_site_results = falses(Threads.nthreads())
-                Threads.@threads for i in eachindex(chosen_sites) # 
-                    @inbounds mapcode = chosen_sites[i]
-                    @inbounds site = sites[mapcode]
-                    @inbounds spdf_plt = spdf_plts[site.ref_cn]
-                    @inbounds sim_years = site_sim_years.sim_years[mapcode]
-                    if site.active
-                        #println(site.mapcode)
-                        succession_step!(current_sim_year, params, site)
-                        reproduction_step!(current_sim_year, params, site)
-                        # what years to check for this site
-                        if current_sim_year in sim_years
-                            sloss = calculate_site_loss2(current_sim_year, site, spdf_plt[current_sim_year], loss_params)
+                #years_results = [DataFrame() for _ in 0:max_sim_year] #Vector{MDataFrame}(missing,max_sim_year+1)
+                years_results = Vector{SiteLoss}(undef, max_sim_year + 1)
+                for current_sim_year in 0:max_sim_year #ProgressBar(0:max_sim_year) #ProgressBar(0:50)
+                    sites_results = Vector{SiteLoss}(undef, length(chosen_sites)) #[DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
+                    #any_site_results = falses(Threads.nthreads())
+                    Threads.@threads for i in eachindex(chosen_sites) # 
+                        @inbounds mapcode = chosen_sites[i]
+                        @inbounds site = sites[mapcode]
+                        @inbounds spdf_plt = spdf_plts[site.ref_cn]
+                        @inbounds sim_years = site_sim_years.sim_years[mapcode]
+                        if site.active
+                            #println(site.mapcode)
+                            succession_step!(current_sim_year, params, site)
+                            reproduction_step!(current_sim_year, params, site)
+                            # what years to check for this site
+                            if current_sim_year in sim_years
+                                sloss = calculate_site_loss2(current_sim_year, site, spdf_plt[current_sim_year], loss_params)
 
-                            #if first_run
-                            #    first_run = false
-                            #else
-                            #    begin
-                            #        sloss = calculate_site_loss(current_sim_year, spdf_plt[current_sim_year], site, loss_params)
-                            #    end
-                            #end
-                            @inbounds sites_results[i] = sloss
+                                #if first_run
+                                #    first_run = false
+                                #else
+                                #    begin
+                                #        sloss = calculate_site_loss(current_sim_year, spdf_plt[current_sim_year], site, loss_params)
+                                #    end
+                                #end
+                                @inbounds sites_results[i] = sloss
+                            end
                         end
+                        @assert site.old <= site.live <= site.cap "$site"
                     end
-                    @assert site.old <= site.live <= site.cap "$site"
+                    #current_year_results = DataFrame()
+                    #if any(any_site_results)
+                    #current_year_results=reduce(vcat, collect(skipundef(sites_results)))
+                    #current_year_results = reduce(vcat, skipundef(sites_results))
+                    year_results_no_missing = collect(skipundef(sites_results))
+                    if length(year_results_no_missing) > 0
+                        current_year_results = sum(year_results_no_missing)
+                        years_results[current_sim_year+1] = current_year_results
+                    end
+                    #end
+
+                    TProgress.update!(run_pbar)
+
                 end
-                #current_year_results = DataFrame()
-                #if any(any_site_results)
-                #current_year_results=reduce(vcat, collect(skipundef(sites_results)))
-                #current_year_results = reduce(vcat, skipundef(sites_results))
-                year_results_no_missing = collect(skipundef(sites_results))
-                if length(year_results_no_missing) > 0
-                    current_year_results = sum(year_results_no_missing)
-                    years_results[current_sim_year+1] = current_year_results
+                #run_result = reduce(vcat, years_results)
+                run_result = sum(skipundef(years_results))
+                @assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
+
+
+
+                next = SACandidate(params, run_result)
+
+                if search_cmp!(next, search_state)
+                    println(convert(Float64,search_state.best.fx))
                 end
+                if search_update_rule!(search_state)
+                    break
+                end
+                #run_loss::FloatType = get_total_loss(run_result)
+                #if run_loss <= best_loss
+                #    best_loss = run_loss
+                #    best_result = run_result
+                #    best_params = params
                 #end
 
-                TProgress.update!(run_pbar)
-
+                #show(run_result)
+                #println("Run $(trial): $(run_result)")
+                TProgress.update!(trials_pbar)
+                #ProfileSVG.save("profile_$(trial).svg")
             end
-            #run_result = reduce(vcat, years_results)
-            run_result = sum(skipundef(years_results))
-            @assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
-
-            run_loss::FloatType = get_total_loss(run_result)
-            if run_loss <= best_loss
-                best_loss = run_loss
-                best_result = run_result
-                best_params = params
-            end
-
-            #show(run_result)
-            #println("Run $(trial): $(run_result)")
-            TProgress.update!(trials_pbar)
-            #ProfileSVG.save("profile_$(trial).svg")
+        finally
+            println(search_state)
         end
     end
 
     #println(typeof(best_loss), best_loss)
     #println(best_loss, best_result, best_params)
-    return best_loss, best_result, best_params
+    return search_state #best_loss, best_result, best_params
 end
 
 function load_treemap_raster(raster_path::String; CN_FIELD_NAME::String="PLT_CN")::Tuple{Array{Union{Missing,Int64}},AttrTable}
@@ -1147,16 +1171,6 @@ function main(args)
     best_params = nothing
     splots, n_plots, n_species, n_ecoregions = DataFrame(), UIntType(400), UIntType(2), UIntType(1)
     BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
-    println(BIOMASS_PARAM_DISTS)
-    pp = generate_biomass_params(n_species, n_ecoregions; rng=RNG)
-    println(pp)
-    ppp = pp
-    for _ in 1:400
-        ppp = mutate_biomass_params(ppp, BIOMASS_PARAM_DISTS; rng=RNG)
-    end
-    println(pp)
-    println(ppp)
-    return
     if all
         loss_params = LossParams(
             age_bins=AgeBins(
@@ -1170,7 +1184,7 @@ function main(args)
         splots, n_plots, n_species, n_ecoregions = load_cohorts()
         println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
         BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
-        @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=2)
+        @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=2000000, params_dist=BIOMASS_PARAM_DISTS)
         println("Best Loss: $(best_loss)")
     end
     raster_path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"
