@@ -317,7 +317,7 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, params:
     for row in eachrow(spinup_cohorts)
         while current_year < row.year_deficit
             #grow all active
-            Threads.@threads for site in sites # 
+            Threads.@threads :static for site in sites # 
                 if site.active
                     #println(site.mapcode)
                     succession_step!(current_year, params, site)
@@ -751,7 +751,7 @@ function export_sites!(db::SQLite.DB, current_year::Int, sites)
     end
 end
 
-function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5, params_dist::BiomassParamDists)::Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
+function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5, params_dist::BiomassParamDists)::SAState#Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
     if isnothing(RNG)
         RNG = Random.default_rng()
     end
@@ -784,9 +784,10 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
 
     pbar = TProgress.ProgressBar(; expand=true)
     trials_pbar = TProgress.addjob!(pbar; N=TRIALS, description="Trials")
-    run_pbar = TProgress.addjob!(pbar; N=1, description="Years")
-    TProgress.with(pbar) do
-        try
+    #run_pbar = TProgress.addjob!(pbar; N=1, description="Years")
+    canceled = Threads.Atomic{Bool}(false)
+    try
+        TProgress.with(pbar) do
             iter = 0
             while true #for trial in 1:TRIALS #ProgressBar(1:100)
                 iter += 1
@@ -812,14 +813,15 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
 
 
 
-                reset_pjob!(pbar, run_pbar; N=max_sim_year + 1)
+                #reset_pjob!(pbar, run_pbar; N=max_sim_year + 1)
 
                 #years_results = [DataFrame() for _ in 0:max_sim_year] #Vector{MDataFrame}(missing,max_sim_year+1)
                 years_results = Vector{SiteLoss}(undef, max_sim_year + 1)
                 for current_sim_year in 0:max_sim_year #ProgressBar(0:max_sim_year) #ProgressBar(0:50)
                     sites_results = Vector{SiteLoss}(undef, length(chosen_sites)) #[DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
                     #any_site_results = falses(Threads.nthreads())
-                    Threads.@threads for i in eachindex(chosen_sites) # 
+                    Threads.@threads :static for i in eachindex(chosen_sites) # 
+                        canceled[] && break
                         @inbounds mapcode = chosen_sites[i]
                         @inbounds site = sites[mapcode]
                         @inbounds spdf_plt = spdf_plts[site.ref_cn]
@@ -855,7 +857,7 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
                     end
                     #end
 
-                    TProgress.update!(run_pbar)
+                    #TProgress.update!(run_pbar)
 
                 end
                 #run_result = reduce(vcat, years_results)
@@ -884,9 +886,12 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
                 TProgress.update!(trials_pbar)
                 #ProfileSVG.save("profile_$(trial).svg")
             end
-        finally
-            println(search_state)
         end
+    catch e 
+        e isa InterruptException || rethrow(e)
+        canceled[] = true
+    finally
+        println(search_state)
     end
 
     #println(typeof(best_loss), best_loss)
@@ -950,7 +955,7 @@ function load_treemap_raster(raster_path::String; CN_FIELD_NAME::String="PLT_CN"
         #rand(RNG, UInt64)
         # skip NODATA
         begin
-            Threads.@threads for i in eachindex(A, outA)
+            Threads.@threads :static for i in eachindex(A, outA)
                 @inbounds cell = A[i]
                 if !ismissing(cell) && cell != NO_DATA
                     plt_attr = get(val_att_dict, cell, missing)
@@ -1043,7 +1048,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
 
     thread_buffers = [Vector{SiteRecord}() for _ in 1:Threads.maxthreadid()]
     TProgress.@track for current_sim_year in 1:years
-        Threads.@threads for I in eachindex(site_raster)
+        Threads.@threads :static for I in eachindex(site_raster)
             @inbounds site = site_raster[I]
             if !ismissing(site)
                 #println(I)
@@ -1069,7 +1074,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
         if length(writer_buffer) > FLUSH_THRESHOLD
             payload = writer_buffer
             flush_task = @async begin
-                Parquet2.writefile("chunk_$(chunk).parquet", payload)
+                Parquet2.writefile("./outputs/chunk_$(chunk).parquet", payload)
                 @info "Flushed chunk $(chunk): $(length(payload))"
                 chunk += 1
             end
@@ -1082,7 +1087,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
     end
     flush_task !== nothing && wait(flush_task)
     if !isempty(writer_buffer)
-        Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
+        Parquet2.writefile("./outputs/chunk_$(chunk).parquet", writer_buffer)
         @info "Flushed final chunk $(chunk): $(length(writer_buffer))"
     end
 end
@@ -1098,7 +1103,7 @@ function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::Biomas
         for rec_buff in ch
             append!(writer_buffer, rec_buff)
             if length(writer_buffer) > FLUSH_THRESHOLD
-                Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
+                Parquet2.writefile("./outputs/chunk_$(chunk).parquet", writer_buffer)
                 @info "Flushed chunk $(chunk)"
                 chunk += 1
                 empty!(writer_buffer)
@@ -1106,14 +1111,15 @@ function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::Biomas
         end
 
         if !isempty(writer_buffer)
-            Parquet2.writefile("chunk_$(chunk).parquet", writer_buffer)
+            Parquet2.writefile("./outputs/chunk_$(chunk).parquet", writer_buffer)
             @info "Flushed final chunk $(chunk)"
         end
     end
 
     thread_buffers = [Vector{SiteRecord}() for _ in 1:Threads.maxthreadid()]
     TProgress.@track for current_sim_year in 1:years
-        Threads.@threads for I in eachindex(site_raster)
+        Threads.@threads :static for I in eachindex(site_raster)
+            cancelled[] && break
             @inbounds site = site_raster[I]
             if !ismissing(site)
                 #println(I)
@@ -1184,8 +1190,9 @@ function main(args)
         splots, n_plots, n_species, n_ecoregions = load_cohorts()
         println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
         BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
-        @time best_loss, best_result, best_params = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=2000000, params_dist=BIOMASS_PARAM_DISTS)
-        println("Best Loss: $(best_loss)")
+        @time search_state = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=2000000, params_dist=BIOMASS_PARAM_DISTS)
+        println("Best Loss: $(search_state.best.fx)")
+        best_params = search_state.best.x
     end
     raster_path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"
 
