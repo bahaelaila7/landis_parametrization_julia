@@ -60,7 +60,7 @@ end
     return all
 
 end
-@inline Base.convert(::Type{Float64},a::SiteLoss) = Float64(get_total_loss(a))
+@inline Base.convert(::Type{Float64}, a::SiteLoss) = Float64(get_total_loss(a))
 #@inline Base.promote_rule(::Type{SiteLoss}, ::Type{Float64}) = Float64
 
 function load_cohorts()
@@ -775,9 +775,10 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
 
     #best_loss = FloatType(Inf)
     best_result = SiteLoss(FloatType[], FloatType[], FloatType(Inf))
-    best_params = generate_biomass_params(n_species, n_ecoregions; rng = RNG)
+    best_params = generate_biomass_params(n_species, n_ecoregions; rng=RNG)
     cur = SACandidate(best_params, best_result)
-    search_state = SAState(best = cur,current = cur, rng=RNG, max_iter=TRIALS)
+    search_state = SAState(best=cur, current=cur, rng=RNG, max_iter=TRIALS,
+        initial_t=3e6, t=3e6)
     if TRIALS < 1
         return search_state #best_loss, best_result, best_params
     end
@@ -793,7 +794,7 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
                 iter += 1
                 search_state.i = iter
                 #params = generate_biomass_params(RNG, n_species, n_ecoregions)
-                params = mutate_biomass_params(search_state.current.x, params_dist;rng=RNG)
+                params = mutate_biomass_params(search_state.current.x, params_dist; rng=RNG)
                 #println(params)
                 #println("###making sites")
                 sites = make_sites(splots, RNG)
@@ -869,7 +870,10 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
                 next = SACandidate(params, run_result)
 
                 if search_cmp!(next, search_state)
-                    println(convert(Float64,search_state.best.fx))
+                    println(convert(Float64, search_state.best.fx))
+                end
+                if search_state.i % 10 == 0
+                    println("Best@$(search_state.best_iteration): $(convert(Float64, search_state.best.fx)), Avg diff: $(search_state.diff_avg), Temp: $(search_state.t), ratio $(search_state.diff_avg/search_state.t), Prob: $(exp(-search_state.diff_avg/search_state.t))")
                 end
                 if search_update_rule!(search_state)
                     break
@@ -887,7 +891,7 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
                 #ProfileSVG.save("profile_$(trial).svg")
             end
         end
-    catch e 
+    catch e
         e isa InterruptException || rethrow(e)
         canceled[] = true
     finally

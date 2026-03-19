@@ -1,7 +1,7 @@
 module SA
 import Random
 
-export  SACandidate, SAState, simulated_annealing_acceptance_rule, threshold_accepting_acceptance_rule, search_cmp!, search_update_rule!
+export SACandidate, SAState, simulated_annealing_acceptance_rule, threshold_accepting_acceptance_rule, search_cmp!, search_update_rule!
 
 Base.@kwdef struct SACandidate{Tx,Tf}
     x::Tx
@@ -11,21 +11,27 @@ end
 @inline simulated_annealing_acceptance_rule(rng, diff_fit, t) = exp(-diff_fit / t) > rand(Float64)
 @inline threshold_accepting_acceptance_rule(rng, diff_fit, t) = diff_fit < t
 @inline function search_cmp!(next, state)
-        diff_fit = convert(Float64, next.fx) - convert(Float64,state.current.fx)
-        if diff_fit < 0 || state.acceptance_rule(state.rng, diff_fit, state.t)
-            state.current = next
-            state.current_iteration = state.i
-            if convert(Float64, state.current.fx) < convert(Float64, state.best.fx)
-                state.best = state.current
-                state.best_iteration = state.i
-                return true
-            end
+    diff_fit = convert(Float64, next.fx) - convert(Float64, state.current.fx)
+    if isinf(state.diff_avg) || state.i == 1
+        state.diff_avg = diff_fit
+    else
+        state.diff_avg = state.running_average_ratio * (state.diff_avg - diff_fit) + diff_fit
+    end
+
+    if diff_fit < 0 || state.acceptance_rule(state.rng, diff_fit, state.t)
+        state.current = next
+        state.current_iteration = state.i
+        if convert(Float64, state.current.fx) < convert(Float64, state.best.fx)
+            state.best = state.current
+            state.best_iteration = state.i
+            return true
         end
-        return false
+    end
+    return false
 end
 @inline function search_update_rule!(state)::Bool
-        state.t *= state.alpha
-        state.t < state.min_t || state.i >= state.max_iter
+    state.t *= state.alpha
+    state.t < state.min_t || state.i >= state.max_iter
 end
 
 Base.@kwdef mutable struct SAState{Tx,Tf}
@@ -41,7 +47,9 @@ Base.@kwdef mutable struct SAState{Tx,Tf}
     min_t::Float64 = 0.01
     alpha::Float64 = 0.9992
     trials_per_iter::Int = 3
-    acceptance_rule = simulated_annealing_acceptance_rule
+    acceptance_rule = threshold_accepting_acceptance_rule
+    running_average_ratio = 0.9
+    diff_avg::Float64 = 0.0
 end
 
 
