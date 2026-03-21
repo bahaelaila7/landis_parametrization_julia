@@ -17,8 +17,9 @@ end
     else
         state.diff_avg = state.running_average_ratio * (state.diff_avg - diff_fit) + diff_fit
     end
+    acceptance_rule = state.acceptance_rule == "TA" ? threshold_accepting_acceptance_rule : simulated_annealing_acceptance_rule
 
-    if diff_fit < 0 || state.acceptance_rule(state.rng, diff_fit, state.t)
+    if diff_fit < 0 || acceptance_rule(state.rng, diff_fit, state.t)
         state.current = next
         state.current_iteration = state.i
         if convert(Float64, state.current.fx) < convert(Float64, state.best.fx)
@@ -47,7 +48,7 @@ Base.@kwdef mutable struct SAState{Tx,Tf}
     min_t::Float64 = 0.01
     alpha::Float64 = 0.9992
     trials_per_iter::Int = 3
-    acceptance_rule = threshold_accepting_acceptance_rule
+    acceptance_rule = "TA"# threshold_accepting_acceptance_rule
     running_average_ratio = 0.9
     diff_avg::Float64 = 0.0
 end

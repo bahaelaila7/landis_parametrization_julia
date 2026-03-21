@@ -2,7 +2,7 @@
 
 julia_version = "1.12.4"
 manifest_format = "2.0"
-project_hash = "aacfef8ed978eb44bd5bf3849304b727e8a97f2f"
+project_hash = "22796d13b0e6d24119dc14a2d6650cb11e1e6868"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "f7304359109c768cf32dc5fa2d371565bb63b68a"
@@ -88,16 +88,12 @@ deps = ["CEnum", "ColorTypes", "Dates", "DiskArrays", "Extents", "GDAL", "GeoFor
 git-tree-sha1 = "c7a14ea875986e2e6a7d29139674e2e09a37a722"
 uuid = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
 version = "0.10.11"
+weakdeps = ["JLD2", "Makie", "RecipesBase"]
 
     [deps.ArchGDAL.extensions]
     ArchGDALJLD2Ext = "JLD2"
     ArchGDALMakieExt = "Makie"
     ArchGDALRecipesBaseExt = "RecipesBase"
-
-    [deps.ArchGDAL.weakdeps]
-    JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
-    Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
-    RecipesBase = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
 
 [[deps.ArgCheck]]
 git-tree-sha1 = "f9e9a66c9b7be1ad7372bbd9b062d9230c30c5ce"
@@ -252,7 +248,7 @@ uuid = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
 version = "0.2.8"
 
 [[deps.BiomassSuccession]]
-deps = ["ArchGDAL", "Arrow", "CSV", "CairoMakie", "DSP", "DataFrames", "Dates", "Distributions", "Flux", "GeoMakie", "ImageFiltering", "PackageCompiler", "Parquet2", "Profile", "ProfileCanvas", "ProfileSVG", "ProgressBars", "Query", "Random", "Rasters", "SQLdf", "SQLite", "StatsBase", "Term"]
+deps = ["ArchGDAL", "Arrow", "CSV", "CairoMakie", "DSP", "DataFrames", "Dates", "Distributions", "Flux", "GeoMakie", "ImageFiltering", "JLD2", "JSON3", "PackageCompiler", "Parquet2", "Profile", "ProfileCanvas", "ProfileSVG", "ProgressBars", "Query", "Random", "Rasters", "SQLdf", "SQLite", "Setfield", "StatsBase", "StructTypes", "Term"]
 path = "."
 uuid = "8553e388-fbea-4c1b-8f1a-b886db56f5e1"
 version = "0.1.0"
@@ -1342,6 +1338,16 @@ version = "1.0.0"
 git-tree-sha1 = "a3f24677c21f5bbe9d2a714f95dcd58337fb2856"
 uuid = "82899510-4779-5014-852e-03e436cf321d"
 version = "1.0.0"
+
+[[deps.JLD2]]
+deps = ["ChunkCodecLibZlib", "ChunkCodecLibZstd", "FileIO", "MacroTools", "Mmap", "OrderedCollections", "PrecompileTools", "ScopedValues"]
+git-tree-sha1 = "8f8ff711442d1f4cfc0d86133e7ee03d62ec9b98"
+uuid = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+version = "0.6.3"
+weakdeps = ["UnPack"]
+
+    [deps.JLD2.extensions]
+    UnPackExt = "UnPack"
 
 [[deps.JLLWrappers]]
 deps = ["Artifacts", "Preferences"]

@@ -11,6 +11,11 @@ import SQLite
 import Rasters, ArchGDAL, CairoMakie, GeoMakie
 import Parquet2
 import Setfield
+import JLD2
+import StructTypes
+import JSON3
+import Glob
+
 
 const AG = ArchGDAL
 BandType = Union{String,Real}
@@ -62,6 +67,29 @@ end
 end
 @inline Base.convert(::Type{Float64}, a::SiteLoss) = Float64(get_total_loss(a))
 #@inline Base.promote_rule(::Type{SiteLoss}, ::Type{Float64}) = Float64
+
+#StructTypes.StructType(::Type{SAState}) = StructTypes.Struct()
+#StructTypes.StructType(::Type{SACandidate}) = StructTypes.Struct()
+#StructTypes.StructType(::Type{SiteLoss}) = StructTypes.Struct()
+#StructTypes.StructType(::Type{Random.Xoshiro}) = StructTypes.Struct()
+#
+#function save_json(path::String, s)
+#    open(path, "w") do io
+#        JSON3.write(io, s)
+#    end
+#end
+#function load_succession_params(path::String)::BiomassSuccessionParams
+#    data = open(path, "r") do io
+#        read(io, String)
+#    end
+#    JSON3.read(data, BiomassSuccessionParams)
+#end
+#function load_search_state(path::String)::SAState
+#    data = open(path, "r") do io
+#        read(io, String)
+#    end
+#    JSON3.read(data, SAState; allow_inf=true)
+#end
 
 function load_cohorts()
     all_df = CSV.read("../data_eco_cohorts_cn.csv", DataFrame)
@@ -874,6 +902,8 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
                 end
                 if search_state.i % 10 == 0
                     println("Best@$(search_state.best_iteration): $(convert(Float64, search_state.best.fx)), Avg diff: $(search_state.diff_avg), Temp: $(search_state.t), ratio $(search_state.diff_avg/search_state.t), Prob: $(exp(-search_state.diff_avg/search_state.t))")
+                    JLD2.save_object("best_params.jld2", search_state.best.x)
+                    JLD2.save_object("search_state.jld2", search_state)
                 end
                 if search_update_rule!(search_state)
                     break
@@ -895,7 +925,11 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
         e isa InterruptException || rethrow(e)
         canceled[] = true
     finally
-        println(search_state)
+        #save_json("best_params.json", search_state.best)
+        #save_json("search_state.json", search_state)
+        #JLD2.save_object("best_params.jld2", search_state.best)
+        JLD2.save_object("search_state.jld2", search_state)
+        #println(search_state)
     end
 
     #println(typeof(best_loss), best_loss)
@@ -903,7 +937,9 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
     return search_state #best_loss, best_result, best_params
 end
 
-function load_treemap_raster(raster_path::String; CN_FIELD_NAME::String="PLT_CN")::Tuple{Array{Union{Missing,Int64}},AttrTable}
+function load_treemap_raster(raster_path::String; treemap_version::Int=2022)::Tuple{Array{Union{Missing,Int64}},Array{Union{Missing,Int64}},AttrTable}
+
+    CN_FIELD_NAME = (treemap_version == 2016 ? "CN" : "PLT_CN")
     #CairoMakie.activate!()
     #load raster
 
@@ -970,7 +1006,7 @@ function load_treemap_raster(raster_path::String; CN_FIELD_NAME::String="PLT_CN"
                 end
             end
         end
-        return outA, val_att_dict
+        return outA, outA, val_att_dict
     end
 end
 
@@ -1002,7 +1038,7 @@ function populate_initial_treemap_communities(plt_cn_raster::Array{Union{Missing
                         active=true,
                         rng=Random.Xoshiro(rand(tRNG, UInt64)),
                         ecocode=UIntType(p.eco_id),
-                        mapcode=UIntType(p.plot_id), cap=UIntType(cap),
+                        mapcode=UIntType(i), cap=UIntType(cap),
                         ref_cn=UIntType(p.plot_id),
                         old=zero(UIntType),
                         live=zero(UIntType),
@@ -1043,15 +1079,16 @@ struct SiteRecord
     age::UIntType
     biomass::FloatType
 end
-function run_simulation(site_raster::Array{Union{Missing,Site}}, params::BiomassSuccessionParams; years::Int=30, RNG=RNG)
+function run_simulation(site_raster::Array{Union{Missing,Site}}, params::BiomassSuccessionParams; timehorizon::Int=30, RNG=Random.AbstractRNG)
     FLUSH_THRESHOLD = 1000
     writer_buffer = Vector{SiteRecord}()
     sizehint!(writer_buffer, FLUSH_THRESHOLD)
     flush_task = nothing
     chunk = 1
+    
 
     thread_buffers = [Vector{SiteRecord}() for _ in 1:Threads.maxthreadid()]
-    TProgress.@track for current_sim_year in 1:years
+    TProgress.@track for current_sim_year in 1:timehorizon
         Threads.@threads :static for I in eachindex(site_raster)
             @inbounds site = site_raster[I]
             if !ismissing(site)
@@ -1078,7 +1115,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
         if length(writer_buffer) > FLUSH_THRESHOLD
             payload = writer_buffer
             flush_task = @async begin
-                Parquet2.writefile("./outputs/chunk_$(chunk).parquet", payload)
+                Parquet2.writefile("./outputs/year_$(current_sim_year)_chunk_$(chunk).parquet", payload)
                 @info "Flushed chunk $(chunk): $(length(payload))"
                 chunk += 1
             end
@@ -1091,7 +1128,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
     end
     flush_task !== nothing && wait(flush_task)
     if !isempty(writer_buffer)
-        Parquet2.writefile("./outputs/chunk_$(chunk).parquet", writer_buffer)
+        Parquet2.writefile("year_$(timehorizon)_chunk_$(chunk).parquet", writer_buffer)
         @info "Flushed final chunk $(chunk): $(length(writer_buffer))"
     end
 end
@@ -1153,6 +1190,71 @@ function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::Biomas
     wait(writer_thread)
 end
 
+function write_raster(src_path::String, output_path::String, output::Array{Union{Missing,Float32}} ; nodata::Float32=-9999.0f0)
+    ArchGDAL.read(src_path) do src
+        data = replace(output, missing => nodata)
+        ArchGDAL.create(
+            output_path,
+            driver = ArchGDAL.getdriver("GTiff"),
+            width  = ArchGDAL.width(src),
+            height = ArchGDAL.height(src),
+            nbands = 1,
+            dtype  = Float32,
+        ) do dst
+            ArchGDAL.setgeotransform!(dst, ArchGDAL.getgeotransform(src))
+            ArchGDAL.setproj!(dst, ArchGDAL.getproj(src))
+            ArchGDAL.write!(ArchGDAL.getband(dst, 1), data)
+        end
+    end
+end
+function generate_rasters_from_output(;src_raster_path::String, parquet_dir::String, output_dir::String, nodata=0.0f0)
+    files = Glob.glob(joinpath(parquet_dir,"year_*_chunk_*.parquet"))
+    re = r"year_(\d+)_chunk_\d+\.parquet"
+    @inline extract_year = filename::String -> parse(Int, match(re,filename).captures[1])
+    years_files = Dict{Int,Vector{String}}()
+    for f in files
+        year = extract_year(f)
+        push!(get!(years_files, year, String[]), f)
+    end
+    years_files = sort(collect(years_files), by=first)
+
+    ArchGDAL.read(src_raster_path) do src
+        src_band = ArchGDAL.getband(src,1)
+        src_data = ArchGDAL.read(src_band)
+        TProgress.@track for (year, files) in years_files
+            dst_data = zeros(size(src_data))
+            for f in files
+                ds = Parquet2.Dataset(f)
+                for chunk in Parquet2.Tables.partitions(ds)
+                    mapcode = Parquet2.Tables.getcolumn(chunk, :mapcode)
+                    biomass = Parquet2.Tables.getcolumn(chunk, :biomass)
+                    for i in eachindex(mapcode)
+                        @inbounds dst_data[mapcode[i]] += Float32(biomass[i])
+                    end
+                end
+            end
+            #dst_data = replace(output)
+            ArchGDAL.create(
+                joinpath(output_dir,"agb_$(year).tif"),
+                driver = ArchGDAL.getdriver("GTiff"),
+                width  = ArchGDAL.width(src),
+                height = ArchGDAL.height(src),
+                nbands = 1,
+                dtype  = Float32,
+            ) do dst
+                ArchGDAL.setgeotransform!(dst, ArchGDAL.getgeotransform(src))
+                dst_band = ArchGDAL.getband(dst,1)
+                ArchGDAL.setnodatavalue!(dst_band, 0.0f0)
+                ArchGDAL.setproj!(dst, ArchGDAL.getproj(src))
+                ArchGDAL.write!(ArchGDAL.getband(dst, 1), dst_data)
+            end
+        end
+
+
+
+    end
+
+end
 
 
 
@@ -1199,19 +1301,28 @@ function main(args)
         best_params = search_state.best.x
     end
     raster_path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"
+    simulate_raster(raster_path=raster_path, params_path="best_params.jld2"; RNG_seed=123)
 
+
+
+end
+function simulate_raster(;raster_path::String, params_path::String, RNG_seed=1337, timehorizon=timehorizon, treemap_version=2022)
+    RNG = Random.Xoshiro(RNG_seed)
+    params = JLD2.load_object(params_path)
+    println("Loading Raster")
+    @time cn_raster, eco_raster, vat = load_treemap_raster(raster_path, treemap_version=treemap_version)
+    println("extracting plots")
+    # extract ecoregion map for raster, extract plots 
+    splots, n_plots, n_species, n_ecoregions = load_cohorts()
+    println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
     splots_dict = Dict(
         plt_key.plt_cn => DataFrame(plt_df)
         for (plt_key, plt_df) in pairs(groupby(splots, :plt_cn, sort=false))
     )
-    println("Loading Raster")
-    @time cn_raster, vat = load_treemap_raster(raster_path)
     println("Populating Raster")
     @time site_raster = populate_initial_treemap_communities(cn_raster, splots_dict, n_species; RNG=RNG)
     println("Running simulation")
-    @time run_simulation(site_raster, best_params; RNG=RNG)
-
-
+    @time run_simulation(site_raster, params; RNG=RNG, timehorizon=timehorizon)
 end
 
 #stub C entry
