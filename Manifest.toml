@@ -2,7 +2,7 @@
 
 julia_version = "1.12.4"
 manifest_format = "2.0"
-project_hash = "22796d13b0e6d24119dc14a2d6650cb11e1e6868"
+project_hash = "ae7e35a955b70eb5fcaa3d93ce09c110834c5dcf"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "f7304359109c768cf32dc5fa2d371565bb63b68a"
@@ -248,7 +248,7 @@ uuid = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
 version = "0.2.8"
 
 [[deps.BiomassSuccession]]
-deps = ["ArchGDAL", "Arrow", "CSV", "CairoMakie", "DSP", "DataFrames", "Dates", "Distributions", "Flux", "GeoMakie", "ImageFiltering", "JLD2", "JSON3", "PackageCompiler", "Parquet2", "Profile", "ProfileCanvas", "ProfileSVG", "ProgressBars", "Query", "Random", "Rasters", "SQLdf", "SQLite", "Setfield", "StatsBase", "StructTypes", "Term"]
+deps = ["ArchGDAL", "Arrow", "CSV", "CairoMakie", "DSP", "DataFrames", "Dates", "Distributions", "Flux", "GeoMakie", "Glob", "ImageFiltering", "JLD2", "JSON3", "PackageCompiler", "Parquet2", "Profile", "ProfileCanvas", "ProfileSVG", "ProgressBars", "Query", "Random", "Rasters", "SQLdf", "SQLite", "Setfield", "StatsBase", "StructTypes", "Term"]
 path = "."
 uuid = "8553e388-fbea-4c1b-8f1a-b886db56f5e1"
 version = "0.1.0"
@@ -712,6 +712,12 @@ deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "e3290f2d49e661fbd94046d7e3726ffcb2d41053"
 uuid = "5ae413db-bbd1-5e63-b57d-d24a61df00f5"
 version = "2.2.4+0"
+
+[[deps.EllipsisNotation]]
+deps = ["PrecompileTools", "StaticArrayInterface"]
+git-tree-sha1 = "df3c9e8000ee77c6b81955025cf18722c95c41a4"
+uuid = "da5c29d0-fa7d-589e-88eb-ea29b0a81949"
+version = "1.9.0"
 
 [[deps.EnumX]]
 git-tree-sha1 = "c49898e8438c828577f04b92fc9368c388ac783c"

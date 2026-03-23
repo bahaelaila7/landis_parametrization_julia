@@ -4,7 +4,7 @@ module SuccessionModule
 #   spin up
 # report outcome
 # compare outcome
-export Site, BiomassSuccessionParams, succession_step!, add_new_cohort!, reproduction_step!
+export Site, BiomassSuccessionParams, BiomassSuccessionEcoParams, succession_step!, add_new_cohort!, reproduction_step!
 using Base
 using Random
 
@@ -54,6 +54,26 @@ Base.@kwdef mutable struct Site
 
 
 end
+Base.@kwdef struct BiomassSuccessionEcoParams
+    SPINUP_MORTALITY_FRACTION::Vector{FloatType}
+
+    D::Vector{FloatType}
+    S::Vector{FloatType}
+
+    LONGEVITY::Vector{FloatType}
+    SHADE_TOL::Vector{UIntType}
+    MATURITY::Vector{FloatType}
+
+    ANPP_MAX_SPP::Vector{FloatType}
+    B_MAX_SPP::Vector{FloatType}
+    B_MAX_ECO::FloatType
+    PROB_MORT_SPP::Vector{FloatType}
+    PROB_ESTAB_SPP::Vector{FloatType}
+
+    MIN_REL_BIOMASS::Vector{FloatType}
+    SUFFICIENT_LIGHT::Matrix{FloatType}
+
+end
 Base.@kwdef struct BiomassSuccessionParams
     SPINUP_MORTALITY_FRACTION::Vector{FloatType}
 
@@ -63,16 +83,18 @@ Base.@kwdef struct BiomassSuccessionParams
     LONGEVITY::Vector{FloatType}
     SHADE_TOL::Vector{UIntType}
     MATURITY::Vector{FloatType}
-    B_MAX_ECO::Vector{FloatType}
 
 
-    ANPP_MAX_SPP::Matrix{FloatType}
     B_MAX_SPP::Matrix{FloatType}
+    ANPP_MAX_SPP::Matrix{FloatType}
     PROB_MORT_SPP::Matrix{FloatType}
     PROB_ESTAB_SPP::Matrix{FloatType}
 
-    SUFFICIENT_LIGHT::Matrix{FloatType}
     MIN_REL_BIOMASS::Matrix{FloatType}
+    SUFFICIENT_LIGHT::Matrix{FloatType}
+
+    # eco -> species_ids (ids of the species in ecoregions)
+    ECO_SPECIES_IDS::Vector{Vector{UIntType}}
 
 
 end
@@ -128,7 +150,8 @@ end
 end
 
 
-function reproduction_step!(current_time::Int, params::BiomassSuccessionParams, site::Site)
+function reproduction_step!(current_time::Int, eco_params::Array{BiomassSuccessionParams}, site::Site)
+    params = eco_params[site.ecocode]
     # reproduction if live cohorts
     if site.live > zero(UIntType)
         #println(shade_class, params.SUFFICIENT_LIGHT)
@@ -139,11 +162,11 @@ function reproduction_step!(current_time::Int, params::BiomassSuccessionParams, 
                 sp_light_prob = shade_probs[params.SHADE_TOL[sp]]
                 light_rng = rand(site.rng, FloatType)
                 if light_rng <= sp_light_prob
-                    sp_estab_prob = params.PROB_ESTAB_SPP[site.ecocode, sp]
+                    sp_estab_prob = params.PROB_ESTAB_SPP[sp]
                     sp_estab_rng = rand(site.rng, FloatType)
                     if sp_estab_rng <= sp_estab_prob
-                        new_biomass = calculate_initial_biomass(params.ANPP_MAX_SPP[site.ecocode, sp],
-                            site.B, params.B_MAX_ECO[site.ecocode])
+                        new_biomass = calculate_initial_biomass(params.ANPP_MAX_SPP[sp],
+                            site.B, params.B_MAX_ECO)
                         add_new_cohort!(site, UIntType(sp), one(FloatType), new_biomass)
                         site.B += new_biomass
                     end
@@ -154,7 +177,8 @@ function reproduction_step!(current_time::Int, params::BiomassSuccessionParams, 
     end
 end
 
-function succession_step!(current_time::Int, params::BiomassSuccessionParams, site::Site)
+function succession_step!(current_time::Int, eco_params::Array{BiomassSuccessionEcoParams}, site::Site)
+    params = eco_params[site.ecocode]
     B = zero(FloatType)
     C = zero(FloatType)
     #RNG = site.rng Random.seed!(site.rng_state)
@@ -183,7 +207,7 @@ function succession_step!(current_time::Int, params::BiomassSuccessionParams, si
         if age < max_age
             # not max age yet
             mort_rng = rand(site.rng, FloatType)
-            if mort_rng > params.PROB_MORT_SPP[site.ecocode, sp]
+            if mort_rng > params.PROB_MORT_SPP[sp]
                 m_age_factor = exp(params.D[sp] * (age / max_age - one(FloatType)))
                 if current_time <= 0
                     m_age_factor += params.SPINUP_MORTALITY_FRACTION[]
@@ -206,7 +230,7 @@ function succession_step!(current_time::Int, params::BiomassSuccessionParams, si
         age = site.c_age[i]
         bio = site.c_bio[i]
         sp = site.c_species[i]
-        b_max = params.B_MAX_SPP[site.ecocode, sp] * site.capacityReduction
+        b_max = params.B_MAX_SPP[sp] * site.capacityReduction
         b_pot = b_max - B - bio
         if b_pot < one(FloatType)
             b_pot = one(FloatType)
@@ -225,7 +249,7 @@ function succession_step!(current_time::Int, params::BiomassSuccessionParams, si
         end
         site.c_comp[i] /= C
 
-        anpp_max_c = params.ANPP_MAX_SPP[site.ecocode, sp] * site.c_comp[i]
+        anpp_max_c = params.ANPP_MAX_SPP[sp] * site.c_comp[i]
         #@assert !isnan(anpp_max_c) "$C, $(site.c_comp[i]), $(params.ANPP_MAX_SPP[site.ecocode, sp])"
         anpp_act *= anpp_max_c
 
@@ -290,7 +314,7 @@ function succession_step!(current_time::Int, params::BiomassSuccessionParams, si
 
 
     # calculating shade class
-    site_b_max = params.B_MAX_ECO[site.ecocode]
+    site_b_max = params.B_MAX_ECO
     site_b_pot = site_b_max - site.prevYearMortality
     #println(typeof(B_ACT), B_ACT)
     #println(typeof(site_b_pot), site_b_pot)
@@ -298,10 +322,10 @@ function succession_step!(current_time::Int, params::BiomassSuccessionParams, si
         B_ACT = site_b_pot
     end
     b_am = B_ACT / site_b_max
-    shade_classes = @view params.MIN_REL_BIOMASS[:, site.ecocode]
+    #shade_classes = @view params.MIN_REL_BIOMASS[:, site.ecocode]
     shade_class = one(UIntType)
-    for sc in 1:(length(shade_classes)-1)
-        if b_am > shade_classes[sc]
+    for sc in 1:(length(params.MIN_REL_BIOMASS)-1)
+        if b_am > params.MIN_REL_BIOMASS#shade_classes[sc]
             shade_class += 1
         else
             break
