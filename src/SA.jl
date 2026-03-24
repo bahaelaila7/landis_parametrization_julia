@@ -8,14 +8,17 @@ Base.@kwdef struct SACandidate{Tx,Tf}
     fx::Tf
 end
 
-@inline simulated_annealing_acceptance_rule(rng, diff_fit, t) = exp(-diff_fit / t) > rand(Float64)
+@inline simulated_annealing_acceptance_rule(rng, diff_fit, t) = exp(-diff_fit / t) > rand(rng,Float64)
 @inline threshold_accepting_acceptance_rule(rng, diff_fit, t) = diff_fit < t
 @inline function search_cmp!(next, state)
     diff_fit = convert(Float64, next.fx) - convert(Float64, state.current.fx)
+    prob = (diff_fit <= 0 ? 1.0 : exp(-diff_fit/state.t))
     if isinf(state.diff_avg) || state.i == 1
         state.diff_avg = diff_fit
+        state.prob_avg = prob
     else
         state.diff_avg = state.running_average_ratio * (state.diff_avg - diff_fit) + diff_fit
+        state.prob_avg = state.running_average_ratio * (state.prob_avg - prob) + prob
     end
     acceptance_rule = state.acceptance_rule == "TA" ? threshold_accepting_acceptance_rule : simulated_annealing_acceptance_rule
 
@@ -48,9 +51,10 @@ Base.@kwdef mutable struct SAState{Tx,Tf}
     min_t::Float64 = 0.01
     alpha::Float64 = 0.9992
     trials_per_iter::Int = 3
-    acceptance_rule = "TA"# threshold_accepting_acceptance_rule
+    acceptance_rule = "SA"# threshold_accepting_acceptance_rule
     running_average_ratio = 0.9
     diff_avg::Float64 = 0.0
+    prob_avg::Float64 = 0.0
 end
 
 

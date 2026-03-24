@@ -55,6 +55,7 @@ Base.@kwdef struct SiteLoss
     sp_w_loss::Vector{FloatType}
     sp_agb_loss::Vector{FloatType}
     site_agb_loss::FloatType
+    num_sites::Int = 1
 end
 @inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
 
@@ -62,7 +63,7 @@ end
     sp = (beta * sum(loss.sp_agb_loss))
     site = (loss.site_agb_loss)
     all = w + sp + site
-    return all
+    return all/loss.num_sites
 
 end
 @inline Base.convert(::Type{Float64}, a::SiteLoss) = Float64(get_total_loss(a))
@@ -769,7 +770,7 @@ function calculate_site_loss2(current_year::Int, site::Site, n_species::Int, eco
     end
 
 
-    return SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=abs(site_agb_loss))
+    return SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=abs(site_agb_loss), num_sites=1)
 
 end
 
@@ -883,7 +884,8 @@ end
 @inline function Base.:+(loss1::SiteLoss, loss2::SiteLoss)
     SiteLoss(sp_w_loss=loss1.sp_w_loss .+ loss2.sp_w_loss,
         sp_agb_loss=loss1.sp_agb_loss .+ loss2.sp_agb_loss,
-        site_agb_loss=loss1.site_agb_loss .+ loss2.site_agb_loss)
+        site_agb_loss=loss1.site_agb_loss + loss2.site_agb_loss,
+        num_sites=loss1.num_sites + loss2.num_sites)
 end
 function make_spdf_dict(spdf::DataFrame, eco_species_ids::Array{Array{Int}})::Dict{UIntType,Dict{Int,SPDFGroundTruth}}
     #n_species = length(unique(spdf.species_id))
@@ -963,7 +965,16 @@ function parametrize(db_path::String, tablename::String, loss_params::LossParams
     if isnothing(RNG)
         RNG = Random.default_rng()
     end
-    cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
+    #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
+    db = SQLite.DB(db_path)
+    sql = "SELECT * FROM $(tablename)"
+    if length(filter_ecos) > 0
+        sql *= " WHERE subp_has_dstrb='f' AND eco in ('$(join(filter_ecos,"','"))')"
+    end
+    println(sql)
+    cohorts_df = SQLite.DBInterface.execute(db, sql) |> DataFrame
+    SQLite.close(db)
+
     splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df; species_field=:species_symbol_map, eco_field=:eco)
     n_species = length(species_list)
     n_ecoregions = length(eco_list)
@@ -999,11 +1010,11 @@ function parametrize(db_path::String, tablename::String, loss_params::LossParams
     #Profile.init(n=10^7, delay=0.001)
 
     #best_loss = FloatType(Inf)
-    best_result = SiteLoss(FloatType[], FloatType[], FloatType(Inf))
+    best_result = SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
     best_params = generate_biomass_params(species_list, eco_list, eco_species_ids; rng=RNG)
     cur = SACandidate(best_params, best_result)
     search_state = SAState(best=cur, current=cur, rng=RNG, max_iter=TRIALS,
-        initial_t=3e6, t=3e6)
+        initial_t=1e3, t=1e3)
     if TRIALS < 1
         return search_state #best_loss, best_result, best_params
     end
@@ -1024,7 +1035,7 @@ function parametrize(db_path::String, tablename::String, loss_params::LossParams
                 #println(params)
                 #println("###making sites")
                 sites = make_sites(splots, eco_species_ids; rng=RNG)
-                chosen_sites = StatsBase.sample(RNG, 1:length(sites), SITES_PER_RUN, replace=false, ordered=true)
+                chosen_sites = 1:length(sites)#StatsBase.sample(RNG, 1:length(sites), SITES_PER_RUN, replace=false, ordered=true)
                 max_sim_year = site_sim_years.sim_years[chosen_sites] .|> maximum |> maximum
                 #println(sites[chosen_sites])
                 #println(max_sim_year)
@@ -1101,7 +1112,7 @@ function parametrize(db_path::String, tablename::String, loss_params::LossParams
                     println(convert(Float64, search_state.best.fx))
                 end
                 if search_state.i % 10 == 0
-                    println("Best@$(search_state.best_iteration): $(convert(Float64, search_state.best.fx)), Avg diff: $(search_state.diff_avg), Temp: $(search_state.t), ratio $(search_state.diff_avg/search_state.t), Prob: $(exp(-search_state.diff_avg/search_state.t))")
+                    println("Best@$(search_state.best_iteration): $(convert(Float64, search_state.best.fx)), Avg diff: $(search_state.diff_avg), Temp: $(search_state.t), ratio $(search_state.diff_avg/search_state.t), Prob: $(search_state.prob_avg)")
                     JLD2.save_object("best_params.jld2", search_state.best.x)
                     JLD2.save_object("search_state.jld2", search_state)
                 end
