@@ -30,9 +30,12 @@ UIntType = UInt32
 Base.@kwdef mutable struct Site
     active::Bool
     rng::Random.Xoshiro
-    ecocode::UIntType
-    mapcode::UIntType
-    ref_cn::UIntType
+
+    mapcode::UIntType # index from raster
+    ecocode::UIntType # value from eco_raster
+
+    eco_id::Int # internal index into defined ecoregions
+    ref_cn::UIntType # for debug purposes
 
     cap::UIntType
     old::UIntType
@@ -50,10 +53,8 @@ Base.@kwdef mutable struct Site
     c_m_tot::Vector{FloatType}
     c_comp::Vector{FloatType}
     sp_mature::Vector{Bool}
-
-
-
 end
+
 Base.@kwdef struct BiomassSuccessionEcoParams
     SPINUP_MORTALITY_FRACTION::Vector{FloatType}
 
@@ -75,24 +76,29 @@ Base.@kwdef struct BiomassSuccessionEcoParams
 
 end
 Base.@kwdef struct BiomassSuccessionParams
+    # Global
     SPINUP_MORTALITY_FRACTION::Vector{FloatType}
+    SUFFICIENT_LIGHT::Matrix{FloatType}
 
+    # ecoregion specific
+    MIN_REL_BIOMASS::Vector{Vector{FloatType}}
+
+    # Species Specific
     D::Vector{FloatType}
     S::Vector{FloatType}
-
     LONGEVITY::Vector{FloatType}
     SHADE_TOL::Vector{UIntType}
     MATURITY::Vector{FloatType}
 
 
+    # ecoregion x species 
     B_MAX_SPP::Vector{Vector{FloatType}}
     ANPP_MAX_SPP::Vector{Vector{FloatType}}
     PROB_MORT_SPP::Vector{Vector{FloatType}}
     PROB_ESTAB_SPP::Vector{Vector{FloatType}}
 
-    MIN_REL_BIOMASS::Vector{Vector{FloatType}}
-    SUFFICIENT_LIGHT::Matrix{FloatType}
 
+    # Metadata
     # eco -> species_ids (ids of the species in ecoregions)
     ECO_SPECIES_IDS::Vector{Vector{UIntType}}
     SPECIES_LIST::Vector{String}
@@ -152,7 +158,7 @@ end
 end
 
 
-function reproduction_step!(current_time::Int, eco_params::Array{BiomassSuccessionParams}, site::Site)
+function reproduction_step!(current_time::Int, eco_params::Array{BiomassSuccessionEcoParams}, site::Site)
     params = eco_params[site.ecocode]
     # reproduction if live cohorts
     if site.live > zero(UIntType)
@@ -327,7 +333,7 @@ function succession_step!(current_time::Int, eco_params::Array{BiomassSuccession
     #shade_classes = @view params.MIN_REL_BIOMASS[:, site.ecocode]
     shade_class = one(UIntType)
     for sc in 1:(length(params.MIN_REL_BIOMASS)-1)
-        if b_am > params.MIN_REL_BIOMASS#shade_classes[sc]
+        if b_am > params.MIN_REL_BIOMASS[sc]#shade_classes[sc]
             shade_class += 1
         else
             break
