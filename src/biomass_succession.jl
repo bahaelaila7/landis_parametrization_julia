@@ -85,16 +85,18 @@ Base.@kwdef struct BiomassSuccessionParams
     MATURITY::Vector{FloatType}
 
 
-    B_MAX_SPP::Matrix{FloatType}
-    ANPP_MAX_SPP::Matrix{FloatType}
-    PROB_MORT_SPP::Matrix{FloatType}
-    PROB_ESTAB_SPP::Matrix{FloatType}
+    B_MAX_SPP::Vector{Vector{FloatType}}
+    ANPP_MAX_SPP::Vector{Vector{FloatType}}
+    PROB_MORT_SPP::Vector{Vector{FloatType}}
+    PROB_ESTAB_SPP::Vector{Vector{FloatType}}
 
-    MIN_REL_BIOMASS::Matrix{FloatType}
+    MIN_REL_BIOMASS::Vector{Vector{FloatType}}
     SUFFICIENT_LIGHT::Matrix{FloatType}
 
     # eco -> species_ids (ids of the species in ecoregions)
     ECO_SPECIES_IDS::Vector{Vector{UIntType}}
+    SPECIES_LIST::Vector{String}
+    ECO_LIST::Vector{String}
 
 
 end

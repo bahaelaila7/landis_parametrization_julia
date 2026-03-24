@@ -90,7 +90,7 @@ end
 #    end
 #    JSON3.read(data, SAState; allow_inf=true)
 #end
-function process_cohorts_csv(csv_path::String="../data_eco_l4_cohorts.csv", output_db::String="../data_eco_l4_cohorts.db";filter_ecos::Array{String}=String[])
+function process_cohorts_csv(csv_path::String="../data_eco_l4_cohorts.csv", output_db::String="../data_eco_l4_cohorts.db"; filter_ecos::Array{String}=String[])
     all_df = CSV.read(csv_path, DataFrame)
     cdf = all_df
     if length(filter_ecos) > 0
@@ -102,7 +102,7 @@ function process_cohorts_csv(csv_path::String="../data_eco_l4_cohorts.csv", outp
     # start_measdate = 
     start_measdates = combine(groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)) do rows
         (; start_measdate=[minimum(rows.measdate)])
-    end 
+    end
     plots_measdate = innerjoin(plots, start_measdates, on=[:statecd, :unitcd, :countycd, :plot])
     splots = sort!(plots_measdate, [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc, :species_symbol])
 
@@ -113,7 +113,7 @@ function process_cohorts_csv(csv_path::String="../data_eco_l4_cohorts.csv", outp
     splots.species_id .= groupindices(groupby(splots, [:species_symbol])) .|> Int
 
     db = SQLite.DB(output_db)
-    SQLite.drop!(db,"splots", ifexists=true)
+    SQLite.drop!(db, "splots", ifexists=true)
     splots |> SQLite.load!(db, "splots")
     SQLite.close(db)
 
@@ -129,19 +129,19 @@ function process_cohorts_csv(csv_path::String="../data_eco_l4_cohorts.csv", outp
     #println(starting_plots)
 end
 
-function load_cohorts_sqlite(db_path::String="../data_eco_l4_cohorts.db", tablename::String = "data_eco_l4_cohorts";filter_ecos::Array{String}=String[])
+function load_cohorts_sqlite(db_path::String="../data_eco_l4_cohorts.db", tablename::String="data_eco_l4_cohorts"; filter_ecos::Array{String}=String[])::DataFrame
     db = SQLite.DB(db_path)
     sql = "SELECT * FROM $(tablename)"
-    if length(filter_ecos) > 0 
+    if length(filter_ecos) > 0
         sql *= " WHERE eco in ('$(join(filter_ecos,"','"))')"
     end
     println(sql)
     df = SQLite.DBInterface.execute(db, sql) |> DataFrame
     SQLite.close(db)
-    println(df)
+    return df
 
 end
-function load_cohorts_csv(csv_path::String="../data_eco_cohorts_cn.csv";filter_ecos::Array{String}=String[])
+function load_cohorts_csv(csv_path::String="../data_eco_cohorts_cn.csv"; filter_ecos::Array{String}=String[])
     all_df = CSV.read(csv_path, DataFrame)
     cdf = all_df
     if length(filter_ecos) > 0
@@ -389,13 +389,13 @@ function mark_estab_year!(df::DataFrame)
 end
 
 @generated function _dimslice(A::AbstractArray{T,N}, indices::Vararg{Any,M}) where {T,N,M}
-    colons = ntuple(_ -> :, N-M)
+    colons = ntuple(_ -> :, N - M)
     #println("A[$(indices)..., $(colons)...]\n")
     #println("N=$N, M=$M, indices=$indices, colons=$colons, A[$(indices)..., $(colons)...] \n")
     quote
         begin
             println("A[$(indices)..., $($(colons))...]\n")
-            kk = A[ indices... , $(colons)... ]
+            kk = A[indices..., $(colons)...]
             println(kk)
             kk
         end
@@ -409,27 +409,50 @@ macro dimslice(A, indices...)
     end
 end
 
-function generate_eco_params(params::BiomassSuccessionParams)::Array{BiomassSuccessionEcoParams}
+function generate_eco_params1(params::BiomassSuccessionParams)::Array{BiomassSuccessionEcoParams}
     #eco_id-> species_ids
     eco_params = [
-       BiomassSuccessionEcoParams(
-            SPINUP_MORTALITY_FRACTION = params.SPINUP_MORTALITY_FRACTION,
-            D = (@dimslice params.D species),
-            S = (@dimslice params.S species),
-            LONGEVITY = (@dimslice params.LONGEVITY species),
-            MATURITY = (@dimslice params.MATURITY species ),
-            SHADE_TOL = (@dimslice params.SHADE_TOL species ),
-
-            ANPP_MAX_SPP = (@dimslice params.ANPP_MAX_SPP eco_id species),
-            B_MAX_SPP =  (@dimslice params.B_MAX_SPP eco_id species),
-            B_MAX_ECO = max((@dimslice params.B_MAX_SPP eco_id species)),
-            PROB_MORT_SPP = (@dimslice params.PROB_MORT_SPP eco_id species),
-            PROB_ESTAB_SPP = (@dimslice params.PROB_ESTAB_SPP eco_id species),
-            SUFFICIENT_LIGHT = params.SUFFICIENT_LIGHT,
-            MIN_REL_BIOMASS = (@dimslice params.MIN_REL_BIOMASS eco_id),
+        BiomassSuccessionEcoParams(
+            SPINUP_MORTALITY_FRACTION=params.SPINUP_MORTALITY_FRACTION,
+            D=(@dimslice params.D species),
+            S=(@dimslice params.S species),
+            LONGEVITY=(@dimslice params.LONGEVITY species),
+            MATURITY=(@dimslice params.MATURITY species),
+            SHADE_TOL=(@dimslice params.SHADE_TOL species), ANPP_MAX_SPP=(@dimslice params.ANPP_MAX_SPP eco_id species),
+            B_MAX_SPP=(@dimslice params.B_MAX_SPP eco_id species),
+            B_MAX_ECO=max((@dimslice params.B_MAX_SPP eco_id species)),
+            PROB_MORT_SPP=(@dimslice params.PROB_MORT_SPP eco_id species),
+            PROB_ESTAB_SPP=(@dimslice params.PROB_ESTAB_SPP eco_id species),
+            SUFFICIENT_LIGHT=params.SUFFICIENT_LIGHT,
+            MIN_REL_BIOMASS=(@dimslice params.MIN_REL_BIOMASS eco_id),
         )
         for (eco_id, species) in enumerate(params.ECO_SPECIES_IDS)]
     return eco_params
+
+end
+function generate_eco_params(params::BiomassSuccessionParams)::Array{BiomassSuccessionEcoParams}
+
+    return [
+        BiomassSuccessionEcoParams(
+            SPINUP_MORTALITY_FRACTION=params.SPINUP_MORTALITY_FRACTION,
+            D=(@dimslice params.D species),
+            S=(@dimslice params.S species),
+            LONGEVITY=(@dimslice params.LONGEVITY species),
+            MATURITY=(@dimslice params.MATURITY species),
+            SHADE_TOL=(@dimslice params.SHADE_TOL species), ANPP_MAX_SPP=(@dimslice params.ANPP_MAX_SPP[eco_id] species),
+            B_MAX_SPP=(@dimslice params.B_MAX_SPP[eco_id] species),
+            B_MAX_ECO=max((@dimslice params.B_MAX_SPP[eco_id] species)),
+            PROB_MORT_SPP=(@dimslice params.PROB_MORT_SPP[eco_id] species),
+            PROB_ESTAB_SPP=(@dimslice params.PROB_ESTAB_SPP[eco_id] species),
+            SUFFICIENT_LIGHT=params.SUFFICIENT_LIGHT,
+            MIN_REL_BIOMASS=(@dimslice params.MIN_REL_BIOMASS[eco_id]),
+        )
+
+
+
+
+        for (eco_id, species) in enumerate(params.ECO_SPECIES_IDS)]
+
 
 end
 
@@ -480,7 +503,10 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, eco_par
 end
 
 
-function generate_biomass_params(n_species::UIntType, n_ecoregions::UIntType, eco_species_ids::Vector{Vector{UIntType}}; rng::Random.AbstractRNG)
+#TODO: use BiomassParamDists
+function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{UIntType}}; rng::Random.AbstractRNG)
+    n_species = length(species_list) |> UIntType
+    n_ecoregions = length(eco_list) |> UIntType
     # TODO: species that do not show up for a specific ecoregion, make all their prob_estab = 0
     SPINUP_MORTALITY_FRACTION = [0.15f0] #rand(Dists.Uniform(0f0,0.20f0))
     #println(typeof(SPINUP_MORTALITY_FRACTION))
@@ -496,16 +522,22 @@ function generate_biomass_params(n_species::UIntType, n_ecoregions::UIntType, ec
     MATURITY = rand(rng, Dists.DiscreteUniform(3, 40), n_species) .|> FloatType #::Vector{FloatType}
     #println(typeof(MATURITY))
 
-    PROB_MORT_SPP = rand(rng, Dists.Uniform(), n_ecoregions, n_species) .|> FloatType  #::Matrix{FloatType}
+    PROB_MORT_SPP = [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
+                     for eco_species in eco_species_ids]
     #println(typeof(PROB_MORT_SPP))
-    PROB_ESTAB_SPP = rand(rng, Dists.Uniform(), n_ecoregions, n_species) .|> FloatType  #::Matrix{FloatType}
+    PROB_ESTAB_SPP = [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
+                      for eco_species in eco_species_ids]
     #println(typeof(PROB_ESTAB_SPP))
-    ANPP_MAX_SPP = rand(rng, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), n_ecoregions, n_species) .|> FloatType
+    ANPP_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), length(eco_species)) .|> FloatType
+                    for eco_species in eco_species_ids]
     #println(typeof(ANPP_MAX_SPP))
-    B_MAX_SPP = rand(rng, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), n_ecoregions, n_species) .|> FloatType
+    B_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), length(eco_species)) .|> FloatType
+                 for eco_species in eco_species_ids]
+
+
     #println(typeof(B_MAX_SPP))
     #println(B_MAX_SPP)
-    B_MAX_ECO = vec(maximum(B_MAX_SPP; dims=2)) #FloatType[0.0,0.0],#::Vector{FloatType}
+    #B_MAX_ECO = [maximum(b_max_spp_eco) for b_max_spp_eco in B_MAX_SPP] #FloatType[0.0,0.0],#::Vector{FloatType}
     #println(typeof(B_MAX_ECO))
     #println(B_MAX_ECO)
     # (shade_tol x shade_class) -> prob of sufficient light
@@ -538,11 +570,13 @@ function generate_biomass_params(n_species::UIntType, n_ecoregions::UIntType, ec
         SHADE_TOL=SHADE_TOL,
         MATURITY=MATURITY, ANPP_MAX_SPP=ANPP_MAX_SPP,
         B_MAX_SPP=B_MAX_SPP,
-        B_MAX_ECO=B_MAX_ECO,
+        #B_MAX_ECO=B_MAX_ECO,
         PROB_MORT_SPP=PROB_MORT_SPP,
         PROB_ESTAB_SPP=PROB_ESTAB_SPP, SUFFICIENT_LIGHT=SUFFICIENT_LIGHT,
         MIN_REL_BIOMASS=MIN_REL_BIOMASS,
-        ECO_SPECIES_IDS = eco_species_ids,
+        ECO_SPECIES_IDS=eco_species_ids,
+        SPECIES_LIST=species_list,
+        ECO_LIST=eco_list,
     )
     return p
 
@@ -564,7 +598,7 @@ struct BiomassParamDists
     interaction_matrix::Matrix{UIntType}
 end
 
-function make_biomass_param_dists(n_species::UIntType, n_ecoregions::UIntType)
+function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species_ids::Array{Array{Int}})
     BIOMASS_PARAM_DISTS = [
         BiomassParam(:SPINUP_MORTALITY_FRACTION, Dists.Uniform(0.0f0, 0.20f0), FloatType, false, false),
         BiomassParam(:S, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), FloatType, true, false),
@@ -578,13 +612,20 @@ function make_biomass_param_dists(n_species::UIntType, n_ecoregions::UIntType)
         BiomassParam(:B_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
         BiomassParam(:firstMINRel, Dists.Uniform(0.0, 0.5), FloatType, false, true),
     ]
-    interaction_matrix = [1 n_ecoregions; n_species n_species*n_ecoregions]
+    #interaction_matrix = [1 n_ecoregions; n_species n_species*n_ecoregions]
+    n_species_ecoregions = sum(length(species) for species in eco_species_ids)
     BIOMASS_PARAM_WEIGHTS_RAW = [
-        begin
-            a, b = UIntType(UIntType(p.species) + 1), UIntType(UIntType(p.ecoregion) + 1)
-            dims = interaction_matrix[(a, b)...]
-            15.0 + FloatType(dims)
-        end
+        Float64(15 + begin
+            if p.species && p.ecoregions
+                n_species_ecoregions
+            elseif p.species
+                n_species
+            elseif p.ecoregions
+                n_ecoregions
+            else
+                1
+            end
+        end)
         for p in BIOMASS_PARAM_DISTS]
     BIOMASS_PARAM_WEIGHTS = BIOMASS_PARAM_WEIGHTS_RAW / sum(BIOMASS_PARAM_WEIGHTS_RAW)
 
@@ -608,20 +649,23 @@ function mutate_biomass_params(p::BiomassSuccessionParams, param_dists::BiomassP
     param_idx = something(findlast(param_dists.weights_cumsum .<= s), 1)
     selected_param = param_dists.params[param_idx]
     param_val = rand(rng, selected_param.dist) |> selected_param.type
-    param_idx = [1]
-    if selected_param.species_specific || selected_param.ecoregion_specific
-        eco_id = rand(rng, 1:length(p.ECO_SPECIES_IDS))
-        #TODO biasing the search for common species <-- need to rehaul
-        param_idx = [eco_id]
-        if selected_param.species_specific
-            sp = rand(rng,p.ECO_SPECIES_IDS[eco_id])
-            param_idx = (eco_id,sp)
-        end
-    end
     v = getproperty(p, selected_param.name)
-    nv = similar(v)
-    nv .= v
-    nv[param_idx...] = param_val
+    nv = deepcopy(v)
+    if selected_param.ecoregion_specific
+        eco_id = rand(rng, 1:length(p.ECO_SPECIES_IDS))
+        if selected_param.species_specific
+            species_id = rand(rng, p.ECO_SPECIES_IDS[eco_id])
+            nv[eco_id][species_id] = param_val
+        else
+            nv[eco_id] = param_val
+        end
+    elseif selected_param.species_specific
+        species_id = rand(rng, 1:length(p.SPECIES_LIST))
+        nv[species_id] = param_val
+    else
+        nv[] = param_val
+    end
+
     np = Setfield.@set p.$(selected_param.name) = nv
     return np
 end
@@ -884,10 +928,17 @@ function export_sites!(db::SQLite.DB, current_year::Int, sites)
     end
 end
 
-function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntType, n_species::UIntType, n_ecoregions::UIntType; RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5, params_dist::BiomassParamDists)::SAState#Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
+function parametrize(db_path::String, tablename::String, loss_params::LossParams; filter_ecos::Array{String}=String[], RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5)::SAState#Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
     if isnothing(RNG)
         RNG = Random.default_rng()
     end
+    cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
+    splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df;species_field=:species_symbol_map, eco_field=:eco)
+    n_species = length(species_list)
+    n_ecoregions = length(eco_list)
+    n_plots = maximum(splots.plot_id)
+    println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
+    params_dist = make_biomass_param_dists(n_species, n_ecoregions, eco_species_ids)
     #greet()
     mark_estab_year!(splots)
     max_age = maximum(splots.age_calc)
@@ -900,7 +951,7 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
     #show(site_sim_years)
 
     spinup_cohorts = get_spinup_cohorts(splots)
-    initial_cohorts = get_initial_cohorts(splots)
+    #initial_cohorts = get_initial_cohorts(splots)
     println("beginning trials")
     SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
     #Profile.clear()
@@ -908,7 +959,7 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
 
     #best_loss = FloatType(Inf)
     best_result = SiteLoss(FloatType[], FloatType[], FloatType(Inf))
-    best_params = generate_biomass_params(n_species, n_ecoregions, eco_species_ids; rng=RNG)
+    best_params = generate_biomass_params(species_list, eco_list, eco_species_ids; rng=RNG)
     cur = SACandidate(best_params, best_result)
     search_state = SAState(best=cur, current=cur, rng=RNG, max_iter=TRIALS,
         initial_t=3e6, t=3e6)
@@ -928,6 +979,7 @@ function parametrize(loss_params::LossParams, splots::DataFrame, n_plots::UIntTy
                 search_state.i = iter
                 #params = generate_biomass_params(RNG, n_species, n_ecoregions)
                 params = mutate_biomass_params(search_state.current.x, params_dist; rng=RNG)
+                eco_params = generate_eco_params(params)
                 #println(params)
                 #println("###making sites")
                 sites = make_sites(splots, RNG)
@@ -1115,7 +1167,7 @@ function load_treemap_raster(raster_path::String; treemap_version::Int=2022)::Tu
     end
 end
 
-function populate_initial_treemap_communities(plt_cn_raster::Array{Union{Missing,Int64}}, splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; RNG::Union{Nothing,Random.AbstractRNG})::Array{Union{Missing,Site}}
+function populate_initial_treemap_communities(plt_cn_raster::Array{Union{Missing,Int64}}, splots::DataFrame, eco_species_ids::Array{Array{Int}}; RNG::Union{Nothing,Random.AbstractRNG})::Array{Union{Missing,Site}}
     if isnothing(RNG)
         RNG = Random.default_rng()
     end
@@ -1195,7 +1247,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
     sizehint!(writer_buffer, FLUSH_THRESHOLD)
     flush_task = nothing
     chunk = 1
-    
+
 
     thread_buffers = [Vector{SiteRecord}() for _ in 1:Threads.maxthreadid()]
     TProgress.@track for current_sim_year in 1:timehorizon
@@ -1300,16 +1352,16 @@ function run_simulation2(site_raster::Array{Union{Missing,Site}}, params::Biomas
     wait(writer_thread)
 end
 
-function write_raster(src_path::String, output_path::String, output::Array{Union{Missing,Float32}} ; nodata::Float32=-9999.0f0)
+function write_raster(src_path::String, output_path::String, output::Array{Union{Missing,Float32}}; nodata::Float32=-9999.0f0)
     ArchGDAL.read(src_path) do src
         data = replace(output, missing => nodata)
         ArchGDAL.create(
             output_path,
-            driver = ArchGDAL.getdriver("GTiff"),
-            width  = ArchGDAL.width(src),
-            height = ArchGDAL.height(src),
-            nbands = 1,
-            dtype  = Float32,
+            driver=ArchGDAL.getdriver("GTiff"),
+            width=ArchGDAL.width(src),
+            height=ArchGDAL.height(src),
+            nbands=1,
+            dtype=Float32,
         ) do dst
             ArchGDAL.setgeotransform!(dst, ArchGDAL.getgeotransform(src))
             ArchGDAL.setproj!(dst, ArchGDAL.getproj(src))
@@ -1317,10 +1369,10 @@ function write_raster(src_path::String, output_path::String, output::Array{Union
         end
     end
 end
-function generate_rasters_from_output(;src_raster_path::String, parquet_dir::String, output_dir::String, nodata=0.0f0)
-    files = Glob.glob(joinpath(parquet_dir,"year_*_chunk_*.parquet"))
+function generate_rasters_from_output(; src_raster_path::String, parquet_dir::String, output_dir::String, nodata=0.0f0)
+    files = Glob.glob(joinpath(parquet_dir, "year_*_chunk_*.parquet"))
     re = r"year_(\d+)_chunk_\d+\.parquet"
-    @inline extract_year = filename::String -> parse(Int, match(re,filename).captures[1])
+    @inline extract_year = filename::String -> parse(Int, match(re, filename).captures[1])
     years_files = Dict{Int,Vector{String}}()
     for f in files
         year = extract_year(f)
@@ -1329,7 +1381,7 @@ function generate_rasters_from_output(;src_raster_path::String, parquet_dir::Str
     years_files = sort(collect(years_files), by=first)
 
     ArchGDAL.read(src_raster_path) do src
-        src_band = ArchGDAL.getband(src,1)
+        src_band = ArchGDAL.getband(src, 1)
         src_data = ArchGDAL.read(src_band)
         TProgress.@track for (year, files) in years_files
             dst_data = zeros(size(src_data))
@@ -1345,15 +1397,15 @@ function generate_rasters_from_output(;src_raster_path::String, parquet_dir::Str
             end
             #dst_data = replace(output)
             ArchGDAL.create(
-                joinpath(output_dir,"agb_$(year).tif"),
-                driver = ArchGDAL.getdriver("GTiff"),
-                width  = ArchGDAL.width(src),
-                height = ArchGDAL.height(src),
-                nbands = 1,
-                dtype  = Float32,
+                joinpath(output_dir, "agb_$(year).tif"),
+                driver=ArchGDAL.getdriver("GTiff"),
+                width=ArchGDAL.width(src),
+                height=ArchGDAL.height(src),
+                nbands=1,
+                dtype=Float32,
             ) do dst
                 ArchGDAL.setgeotransform!(dst, ArchGDAL.getgeotransform(src))
-                dst_band = ArchGDAL.getband(dst,1)
+                dst_band = ArchGDAL.getband(dst, 1)
                 ArchGDAL.setnodatavalue!(dst_band, 0.0f0)
                 ArchGDAL.setproj!(dst, ArchGDAL.getproj(src))
                 ArchGDAL.write!(ArchGDAL.getband(dst, 1), dst_data)
@@ -1391,9 +1443,9 @@ function main(args)
     RNG = Random.Xoshiro(1337)
     all = true
     best_params = nothing
-    splots, n_plots, n_species, n_ecoregions = DataFrame(), UIntType(400), UIntType(15), UIntType(5)
-    load_cohorts_sqlite(;filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"])
-    return
+    #splots, n_plots, n_species, n_ecoregions = DataFrame(), UIntType(400), UIntType(15), UIntType(5)
+    #load_cohorts_sqlite(;filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"])
+    #return
 
     #eco_species_ids = [sort!(Random.randperm(rng, n_species)[1:rand(rng,1:n_species)])
     #                        for _ in 1:n_ecoregions]
@@ -1401,7 +1453,7 @@ function main(args)
     #generate_eco_params(params)
 
     #return
-    BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
+    #BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
     if all
         loss_params = LossParams(
             age_bins=AgeBins(
@@ -1412,10 +1464,8 @@ function main(args)
         )
         #return
         println("###loading data")
-        splots, n_plots, n_species, n_ecoregions = load_cohorts_csv(filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"])
-        println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
-        BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
-        @time search_state = parametrize(loss_params, splots, n_plots, n_species, n_ecoregions; RNG=RNG, TRIALS=2000000, params_dist=BIOMASS_PARAM_DISTS)
+        #splots, n_plots, n_species, n_ecoregions = load_cohorts_csv(filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"])
+        @time search_state = parametrize("../data_eco_l4_cohorts.db", "data_eco_l4_cohorts", loss_params; filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"], RNG=RNG, TRIALS=2000000)
         println("Best Loss: $(search_state.best.fx)")
         best_params = search_state.best.x
     end
@@ -1434,14 +1484,50 @@ function load_eco_raster(raster_eco_path::String)::Matrix{Int16}
     AG.destroy(ds)
     return A
 end
+function make_splots(df::DataFrame; species_field=:effective_species_symbol_map, eco_field=:eco)::Tuple{DataFrame,Array{String},Array{String},Array{Array{Int}}}
+
+
+    #df.species_id = groupindices(groupby(df,:species_field))
+    #df.eco_id = groupindices(groupby(df,:eco))
+
+    eco_vals = sort(unique(getproperty(df, eco_field)))
+    eco_dict = Dict(eco => i for (i, eco) in enumerate(eco_vals))
+    effective_species_symbol_map_vals = sort(unique(getproperty(df, species_field)))
+    effective_species_symbol_map_dict = Dict(ssm => i for (i, ssm) in enumerate(effective_species_symbol_map_vals))
+
+    df.species_id = getindex.(Ref(effective_species_symbol_map_dict), getproperty(df, species_field))
+    df.eco_id = getindex.(Ref(eco_dict), getproperty(df, eco_field))
+    #println(df)
+    #
+    #
+
+    ddf = combine(groupby(df, :eco_id, sort=true)) do rows
+        (; species_ids=[sort(unique(rows.species_id))])
+    end
+
+    #maps list species text
+    #maps list eco_text
+
+    plots = combine(groupby(df, [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :species_id, :age_calc], sort=false), nrow => :count, :agb => sum => :agb_sum)
+    # start_measdate = 
+    start_measdates = combine(groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)) do rows
+        (; start_measdate=[minimum(rows.measdate)])
+    end
+    plots_measdate = innerjoin(plots, start_measdates, on=[:statecd, :unitcd, :countycd, :plot])
+    splots = sort!(plots_measdate, [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc, :species_id])
+
+    splots.plot_id .= groupindices(groupby(splots, [:statecd, :unitcd, :countycd, :plot])) .|> UIntType
+    return splots, eco_vals, effective_species_symbol_map_vals, ddf.species_ids
+
+end
 
 function get_treemap_cohorts(cn_raster, eco_raster, cohorts_db, eco_id_mapping_csv)
     eco_id_mapping_df = CSV.read(eco_id_mapping_csv, DataFrame)
 
-    cn_eco::Dict{Tuple{Int64,Int16},Int64} = StatsBase.countmap( (cn, eco) for (cn,eco) in  zip(cn_raster, eco_raster) if !ismissing(cn))
-    cn_eco_df = DataFrame(CN = [k[1] for k in keys(cn_eco)],
-                          eco = [Int64(k[2]) for k in keys(cn_eco)], #sqlite freaks out if not int64
-                   count = collect(values(cn_eco)))
+    cn_eco::Dict{Tuple{Int64,Int16},Int64} = StatsBase.countmap((cn, eco) for (cn, eco) in zip(cn_raster, eco_raster) if !ismissing(cn))
+    cn_eco_df = DataFrame(CN=[k[1] for k in keys(cn_eco)],
+        ecocode=[Int64(k[2]) for k in keys(cn_eco)], #sqlite freaks out if not int64
+        count=collect(values(cn_eco)))
     #splots, n_plots, n_species, n_ecoregions = load_raster_cohorts()
     #df (cn, eco) => join splots O on O.PLT_CN = df.CN => Left outer join species_mapping M on df.eco = M.eco AND O.species = M.species (some species_symbol_map nulls) => actual_eco =if M.species_symbol_map is null (O.eco, O.species_symbol_map) else (M.eco, M.species_symbol_map)
     #load_cohorts_sqlite/
@@ -1457,7 +1543,7 @@ function get_treemap_cohorts(cn_raster, eco_raster, cohorts_db, eco_id_mapping_c
         (CASE WHEN m.species_symbol_map IS NULL THEN o.species_symbol_map ELSE m.species_symbol_map END) effective_species_symbol_map
 
         FROM cn_eco df
-        JOIN eco_id_map e ON df.eco = e.id
+        JOIN eco_id_map e ON df.ecocode = e.id
         JOIN data_eco_l4_cohorts o ON df.CN = o.PLT_CN
         JOIN eco_id_map eo ON o.eco = eo.epa_l4
         LEFT OUTER JOIN data_species_epa_l4_map m ON m.eco = e.epa_l4 AND o.species_symbol = m.species_symbol"
@@ -1465,45 +1551,11 @@ function get_treemap_cohorts(cn_raster, eco_raster, cohorts_db, eco_id_mapping_c
     df = SQLite.DBInterface.execute(db, sql) |> DataFrame
     #println(df)
     SQLite.close(db)
-    df.species_id = groupindices(groupby(df,:effective_species_symbol_map))
-    df.eco_id = groupindices(groupby(df,:effective_eco))
-
-    eco_vals = sort(unique(df.eco))
-    eco_dict = Dict( eco => i for (i,eco) in enumerate(eco_vals))
-    effective_species_symbol_map_vals = sort(unique(df.effective_species_symbol_map))
-    effective_species_symbol_map_dict = Dict(ssm => i for (i,ssm) in enumerate(effective_species_symbol_map_vals))
-
-    df.species_id = getindex.(Ref(effective_species_symbol_map_dict),df.effective_species_symbol_map)
-    df.eco_id = getindex.(Ref(eco_dict),df.eco)
-    #println(df)
-    #
-    #
-
-    ddf = combine(groupby(df, :eco_id, sort=true)) do rows
-        (;species_ids=[sort(unique(rows.species_id))])
-    end
-
-    #maps list species text
-    #maps list eco_text
-
-    plots = combine(groupby(df, [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :species_id, :age_calc], sort=false), nrow => :count, :agb => sum => :agb_sum)
-    # start_measdate = 
-    start_measdates = combine(groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)) do rows
-        (; start_measdate=[minimum(rows.measdate)])
-    end
-    plots_measdate = innerjoin(plots, start_measdates, on=[:statecd, :unitcd, :countycd, :plot])
-    splots = sort!(plots_measdate, [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc, :species_id])
-
-    splots.plot_id .= groupindices(groupby(splots, [:statecd, :unitcd, :countycd, :plot])) .|> UIntType
-
-    #println(splots.species_id)
-    #ecoxspecies
-    #Build params
-    return splots, eco_vals, effective_species_symbol_map_vals, ddf.species_ids
+    @time return make_splots(df; eco_field=:epa_l4)
 
 end
 
-function simulate_raster(;raster_path::String, raster_eco_path::String, eco_id_mapping_csv::String, params_path::String, RNG_seed=1337, timehorizon=timehorizon, treemap_version=2022)
+function simulate_raster(; raster_path::String, raster_eco_path::String, eco_id_mapping_csv::String, params_path::String, RNG_seed=1337, timehorizon=timehorizon, treemap_version=2022)
     RNG = Random.Xoshiro(RNG_seed)
     params = JLD2.load_object(params_path)
     println("Loading Raster")
@@ -1528,7 +1580,7 @@ function simulate_raster(;raster_path::String, raster_eco_path::String, eco_id_m
     @time site_raster = populate_initial_treemap_communities(cn_raster, splots, eco_species_ids; RNG=RNG)
     println("Running simulation")
     #load right params
-    return
+    # generate_eco_params
     @time run_simulation(site_raster, params; RNG=RNG, timehorizon=timehorizon)
 end
 
