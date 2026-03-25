@@ -76,6 +76,12 @@ Base.@kwdef struct BiomassSuccessionEcoParams
 
 end
 Base.@kwdef struct BiomassSuccessionParams
+    # Metadata
+    # eco -> species_ids (ids of the species in ecoregions)
+    ECO_LIST::Vector{String}
+    SPECIES_LIST::Vector{String}
+    ECO_SPECIES_IDS::Vector{Vector{UIntType}}
+
     # Global
     SPINUP_MORTALITY_FRACTION::Vector{FloatType}
     SUFFICIENT_LIGHT::Vector{Vector{FloatType}}
@@ -96,14 +102,6 @@ Base.@kwdef struct BiomassSuccessionParams
     ANPP_MAX_SPP::Vector{Vector{FloatType}}
     PROB_MORT_SPP::Vector{Vector{FloatType}}
     PROB_ESTAB_SPP::Vector{Vector{FloatType}}
-
-
-    # Metadata
-    # eco -> species_ids (ids of the species in ecoregions)
-    ECO_SPECIES_IDS::Vector{Vector{UIntType}}
-    SPECIES_LIST::Vector{String}
-    ECO_LIST::Vector{String}
-
 
 end
 @inline function ensure_site_cap!(site::Site, new_cap::UIntType)
