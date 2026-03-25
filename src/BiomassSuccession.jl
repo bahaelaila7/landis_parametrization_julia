@@ -63,7 +63,7 @@ end
     sp = (beta * sum(loss.sp_agb_loss))
     site = (loss.site_agb_loss)
     all = w + sp + site
-    return all/loss.num_sites
+    return all / loss.num_sites
 
 end
 @inline Base.convert(::Type{Float64}, a::SiteLoss) = Float64(get_total_loss(a))
@@ -74,11 +74,11 @@ end
 #StructTypes.StructType(::Type{SiteLoss}) = StructTypes.Struct()
 #StructTypes.StructType(::Type{Random.Xoshiro}) = StructTypes.Struct()
 #
-#function save_json(path::String, s)
-#    open(path, "w") do io
-#        JSON3.write(io, s)
-#    end
-#end
+function save_json(path::String, s)
+    open(path, "w") do io
+        JSON3.write(io, s)
+    end
+end
 #function load_succession_params(path::String)::BiomassSuccessionParams
 #    data = open(path, "r") do io
 #        read(io, String)
@@ -91,7 +91,7 @@ end
 #    end
 #    JSON3.read(data, SAState; allow_inf=true)
 #end
-function process_cohorts_csv(csv_path::String="../data_eco_l4_cohorts.csv", output_db::String="../data_eco_l4_cohorts.db"; filter_ecos::Array{String}=String[])
+function process_cohorts_csv(csv_path::String="../data_eco_cohorts.csv", output_db::String="../data_eco_cohorts.db"; filter_ecos::Array{String}=String[])
     all_df = CSV.read(csv_path, DataFrame)
     cdf = all_df
     if length(filter_ecos) > 0
@@ -130,7 +130,7 @@ function process_cohorts_csv(csv_path::String="../data_eco_l4_cohorts.csv", outp
     #println(starting_plots)
 end
 
-function load_cohorts_sqlite(db_path::String="../data_eco_l4_cohorts.db", tablename::String="data_eco_l4_cohorts"; filter_ecos::Array{String}=String[])::DataFrame
+function load_cohorts_sqlite(db_path::String="../data_eco_cohorts.db", tablename::String="data_eco_cohorts"; filter_ecos::Array{String}=String[])::DataFrame
     db = SQLite.DB(db_path)
     sql = "SELECT * FROM $(tablename)"
     if length(filter_ecos) > 0
@@ -446,7 +446,8 @@ function generate_eco_params(params::BiomassSuccessionParams)::Array{BiomassSucc
     return [
         BiomassSuccessionEcoParams(
             SPINUP_MORTALITY_FRACTION=params.SPINUP_MORTALITY_FRACTION,
-            SUFFICIENT_LIGHT=params.SUFFICIENT_LIGHT, D=(@dimslice params.D species),
+            SUFFICIENT_LIGHT=params.SUFFICIENT_LIGHT,
+            D=(@dimslice params.D species),
             S=(@dimslice params.S species),
             LONGEVITY=(@dimslice params.LONGEVITY species),
             MATURITY=(@dimslice params.MATURITY species),
@@ -520,7 +521,6 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, eco_par
 
 end
 
-
 #TODO: use BiomassParamDists
 function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Array{Array{Int}}; rng::Random.AbstractRNG)
     n_species = length(species_list) |> UIntType
@@ -558,15 +558,27 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
     #B_MAX_ECO = [maximum(b_max_spp_eco) for b_max_spp_eco in B_MAX_SPP] #FloatType[0.0,0.0],#::Vector{FloatType}
     #println(typeof(B_MAX_ECO))
     #println(B_MAX_ECO)
-    # (shade_tol x shade_class) -> prob of sufficient light
+    # (species.shade_tol 1-5 X (site.shade_class+1) 1-6) -> prob of sufficient light
+    # shade_tol: 1 (least tolerant to shade) to 5 (most tolerant to shade)
+    # shade_class: 1 (no shade on site) to 6 (full shade)
+    # Biomass Documentation shadeclass 0 (no shade) to 5 (full shade) but julia arrays are 1-indexed
     # julia is column major, much faster to pickout the site's shade class as one chunk
     # then reference the species' shade_tol within
-    SUFFICIENT_LIGHT = FloatType[
+    SUFFICIENT_LIGHT_MATRIX = FloatType[
         1.00 0.50 0.25 0.00 0.00 0.00;
         1.00 1.00 0.50 0.25 0.00 0.00;
         1.00 1.00 1.00 0.50 0.25 0.00;
         1.00 1.00 1.00 1.00 0.50 0.25;
         1.00 1.00 1.00 1.00 1.00 0.50]
+    # transforming to (shade_class -> shade_tol) to be able to save to json Vector{Vector{FloatType}}, Matrix{FloatType} is not easily serde'd
+    SUFFICIENT_LIGHT = [vec(SUFFICIENT_LIGHT_MATRIX[:, shade_class]) for shade_class in axes(SUFFICIENT_LIGHT_MATRIX, 2)]
+    #[1.0, 1.0, 1.0, 1.0, 1.0]  for shade_class = 1 (no shade), plants of all shade tolerance can reproduce
+    #[0.5, 1.0, 1.0, 1.0, 1.0]
+    #[0.25, 0.5, 1.0, 1.0, 1.0]
+    #[0.0, 0.25, 0.5, 1.0, 1.0]
+    #[0.0, 0.0, 0.25, 0.5, 1.0]
+    #[0.0, 0.0, 0.0, 0.25, 0.5] for shade_class = 6 (full shade), only plants with highest shade tol (4,5) have a chance
+
     #println(typeof(SUFFICIENT_LIGHT))
 
     # by ecoregion
@@ -575,9 +587,10 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
     # (shade_class x eco) -> bio percent
     # again, column major, pickout the relevant column for ecoregion
     #MIN_REL_BIOMASS = [fmin + k * 0.10f0
-    #                   for k in 0:5,
+    #                   for k in 0:4,
     #                   fmin in firstMINRel]
-    MIN_REL_BIOMASS = [[fmin + k * 0.10f0 for k in 0:5]
+    # transforming to eco -> shade_class
+    MIN_REL_BIOMASS = [[fmin + k * 0.10f0 for k in 0:4]
                        for fmin in firstMINRel]
     #println(typeof(MIN_REL_BIOMASS))
     #println(MIN_REL_BIOMASS)
@@ -628,7 +641,7 @@ function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species
         BiomassParam(:PROB_ESTAB_SPP, Dists.Uniform(), FloatType, true, true),
         BiomassParam(:ANPP_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
         BiomassParam(:B_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
-        BiomassParam(:firstMINRel, Dists.Uniform(0.0, 0.5), FloatType, false, true),
+        #BiomassParam(:firstMINRel, Dists.Uniform(0.0, 0.5), FloatType, false, true),
     ]
     #interaction_matrix = [1 n_ecoregions; n_species n_species*n_ecoregions]
     n_species_ecoregions = sum(length(species) for species in eco_species_ids)
@@ -961,12 +974,12 @@ function export_sites!(db::SQLite.DB, current_year::Int, sites)
     end
 end
 
-function parametrize(db_path::String, tablename::String, loss_params::LossParams; filter_ecos::Array{String}=String[], RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5)::SAState#Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
+function parametrize(; cohorts_db_path::String, tablename::String, output_dir::String, loss_params::LossParams, filter_ecos::Array{String}=String[], RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5)::SAState#Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
     if isnothing(RNG)
         RNG = Random.default_rng()
     end
     #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
-    db = SQLite.DB(db_path)
+    db = SQLite.DB(cohorts_db_path)
     sql = "SELECT * FROM $(tablename)"
     if length(filter_ecos) > 0
         sql *= " WHERE subp_has_dstrb='f' AND eco in ('$(join(filter_ecos,"','"))')"
@@ -1113,8 +1126,9 @@ function parametrize(db_path::String, tablename::String, loss_params::LossParams
                 end
                 if search_state.i % 10 == 0
                     println("Best@$(search_state.best_iteration): $(convert(Float64, search_state.best.fx)), Avg diff: $(search_state.diff_avg), Temp: $(search_state.t), ratio $(search_state.diff_avg/search_state.t), Prob: $(search_state.prob_avg)")
-                    JLD2.save_object("best_params.jld2", search_state.best.x)
-                    JLD2.save_object("search_state.jld2", search_state)
+                    save_json(joinpath(output_dir, "best_params.json"), search_state.best.x)
+                    JLD2.save_object(joinpath(output_dir, "best_params.jld2"), search_state.best.x)
+                    JLD2.save_object(joinpath(output_dir, "search_state.jld2"), search_state)
                 end
                 if search_update_rule!(search_state)
                     break
@@ -1139,7 +1153,7 @@ function parametrize(db_path::String, tablename::String, loss_params::LossParams
         #save_json("best_params.json", search_state.best)
         #save_json("search_state.json", search_state)
         #JLD2.save_object("best_params.jld2", search_state.best)
-        JLD2.save_object("search_state.jld2", search_state)
+        JLD2.save_object(joinpath(output_dir, "search_state.jld2"), search_state)
         #println(search_state)
     end
 
@@ -1297,7 +1311,8 @@ struct SiteRecord
     age::UIntType
     biomass::FloatType
 end
-function run_simulation(site_raster::Array{Union{Missing,Site}}, params::BiomassSuccessionParams; timehorizon::Int=30, RNG=Random.AbstractRNG)
+function run_simulation(site_raster::Array{Union{Missing,Site}}, params::BiomassSuccessionParams, output_dir::String; timehorizon::Int=30, RNG=Random.AbstractRNG)
+    eco_params = generate_eco_params(params)
     FLUSH_THRESHOLD = 1000
     writer_buffer = Vector{SiteRecord}()
     sizehint!(writer_buffer, FLUSH_THRESHOLD)
@@ -1333,7 +1348,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
         if length(writer_buffer) > FLUSH_THRESHOLD
             payload = writer_buffer
             flush_task = @async begin
-                Parquet2.writefile("./outputs/year_$(current_sim_year)_chunk_$(chunk).parquet", payload)
+                Parquet2.writefile(joinpath(output_dir, "year_$(current_sim_year)_chunk_$(chunk).parquet"), payload)
                 @info "Flushed chunk $(chunk): $(length(payload))"
                 chunk += 1
             end
@@ -1346,7 +1361,7 @@ function run_simulation(site_raster::Array{Union{Missing,Site}}, params::Biomass
     end
     flush_task !== nothing && wait(flush_task)
     if !isempty(writer_buffer)
-        Parquet2.writefile("year_$(timehorizon)_chunk_$(chunk).parquet", writer_buffer)
+        Parquet2.writefile(joinpath(output_dir, "year_$(timehorizon)_chunk_$(chunk).parquet"), writer_buffer)
         @info "Flushed final chunk $(chunk): $(length(writer_buffer))"
     end
 end
@@ -1425,8 +1440,8 @@ function write_raster(src_path::String, output_path::String, output::Array{Union
         end
     end
 end
-function generate_rasters_from_output(; src_raster_path::String, parquet_dir::String, output_dir::String, nodata=0.0f0)
-    files = Glob.glob(joinpath(parquet_dir, "year_*_chunk_*.parquet"))
+function generate_rasters_from_output(; ref_raster_path::String, output_dir::String)
+    files = Glob.glob(joinpath(output_dir, "year_*_chunk_*.parquet"))
     re = r"year_(\d+)_chunk_\d+\.parquet"
     @inline extract_year = filename::String -> parse(Int, match(re, filename).captures[1])
     years_files = Dict{Int,Vector{String}}()
@@ -1436,9 +1451,9 @@ function generate_rasters_from_output(; src_raster_path::String, parquet_dir::St
     end
     years_files = sort(collect(years_files), by=first)
 
-    ArchGDAL.read(src_raster_path) do src
-        src_band = ArchGDAL.getband(src, 1)
-        src_data = ArchGDAL.read(src_band)
+    AG.read(ref_raster_path) do src
+        src_band = AG.getband(src, 1)
+        src_data = AG.read(src_band)
         TProgress.@track for (year, files) in years_files
             dst_data = zeros(size(src_data))
             for f in files
@@ -1452,19 +1467,19 @@ function generate_rasters_from_output(; src_raster_path::String, parquet_dir::St
                 end
             end
             #dst_data = replace(output)
-            ArchGDAL.create(
+            AG.create(
                 joinpath(output_dir, "agb_$(year).tif"),
-                driver=ArchGDAL.getdriver("GTiff"),
-                width=ArchGDAL.width(src),
-                height=ArchGDAL.height(src),
+                driver=AG.getdriver("GTiff"),
+                width=AG.width(src),
+                height=AG.height(src),
                 nbands=1,
                 dtype=Float32,
             ) do dst
-                ArchGDAL.setgeotransform!(dst, ArchGDAL.getgeotransform(src))
-                dst_band = ArchGDAL.getband(dst, 1)
-                ArchGDAL.setnodatavalue!(dst_band, 0.0f0)
-                ArchGDAL.setproj!(dst, ArchGDAL.getproj(src))
-                ArchGDAL.write!(ArchGDAL.getband(dst, 1), dst_data)
+                AG.setgeotransform!(dst, AG.getgeotransform(src))
+                dst_band = AG.getband(dst, 1)
+                AG.setnodatavalue!(dst_band, 0.0f0)
+                AG.setproj!(dst, AG.getproj(src))
+                AG.write!(AG.getband(dst, 1), dst_data)
             end
         end
 
@@ -1510,25 +1525,17 @@ function main(args)
 
     #return
     #BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
-    if all
-        loss_params = LossParams(
-            age_bins=AgeBins(
-                bins_idx=[5, 8, 13, 20, 25, 40, 60, 80] .|> Int,
-                last_bin_open=true
-            ),
-            smoothing_weights=get_smoothing_window(; smoothing_window=1, smoothing_variance=FloatType(1.0f0))
-        )
-        #return
-        println("###loading data")
-        #splots, n_plots, n_species, n_ecoregions = load_cohorts_csv(filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"])
-        search_state = parametrize("../data_eco_l4_cohorts.db", "data_eco_l4_cohorts", loss_params; filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"], RNG=RNG, TRIALS=2000000)
-        println("Best Loss: $(search_state.best.fx)")
-        best_params = search_state.best.x
-    end
-    raster_path = "/home/bahaa/Downloads/FL_extents/FL5_extent_shapefile/FL_Baker22.tif"
-    simulate_raster(raster_path=raster_path, params_path="best_params.jld2"; RNG_seed=123)
-
-
+    loss_params = LossParams(
+        age_bins=AgeBins(
+            bins_idx=[5, 8, 13, 20, 25, 40, 60, 80] .|> Int,
+            last_bin_open=true
+        ),
+        smoothing_weights=get_smoothing_window(; smoothing_window=1, smoothing_variance=FloatType(1.0f0))
+    )
+    #return
+    #splots, n_plots, n_species, n_ecoregions = load_cohorts_csv(filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"])
+    search_state = parametrize(; cohorts_db_path="../data_eco_l4_cohorts.db", tablename="data_eco_cohorts", output_dir = "./outputs", loss_params=loss_params, filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"], RNG=RNG, TRIALS=2000000)
+    println("Best Loss: $(search_state.best.fx)")
 
 end
 function load_eco_raster(raster_eco_path::String)::Matrix{Int16}
@@ -1600,36 +1607,42 @@ function get_treemap_cohorts(cn_raster, eco_raster, cohorts_db, eco_ecocode_mapp
     SQLite.load!(eco_ecocode_mapping_df, db, "eco_ecocode_map"; temp=true)
     #TODO:  Actually not all species_symbol_maps are available neither in extent eco (disturb) nor the original eco (not parametrized or disturbed)
     #Probably also have another step of adding the species to target eco's catch all eco_H/S
-    sql = "SELECT df.*,e.epa_l4, o.*, m.species_symbol_map,
-        (CASE WHEN m.species_symbol_map IS NULL THEN o.eco ELSE e.epa_l4 END) effective_eco,
+    sql = "SELECT df.*,e.ecocode, o.*, m.species_symbol_map,
+        (CASE WHEN m.species_symbol_map IS NULL THEN o.eco ELSE e.ecocode END) effective_eco,
         (CASE WHEN m.species_symbol_map IS NULL THEN eo.ecocode ELSE e.ecocode END) effective_eco_code,
         (CASE WHEN m.species_symbol_map IS NULL THEN o.species_symbol_map ELSE m.species_symbol_map END) effective_species_symbol_map
 
         FROM cn_eco df
         JOIN eco_ecocode_map e ON df.ecocode = e.ecocode
-        JOIN data_eco_l4_cohorts o ON df.CN = o.PLT_CN
-        JOIN eco_ecocode_map eo ON o.eco = eo.epa_l4
-        LEFT OUTER JOIN data_species_epa_l4_map m ON m.eco = e.epa_l4 AND o.species_symbol = m.species_symbol"
+        JOIN data_eco_cohorts o ON df.CN = o.PLT_CN
+        JOIN eco_ecocode_map eo ON o.eco = eo.ecocode
+        LEFT OUTER JOIN data_species_eco_map m ON m.eco = e.ecocode AND o.species_symbol = m.species_symbol"
     #println(sql)
     df = SQLite.DBInterface.execute(db, sql) |> DataFrame
     #println(df)
     SQLite.close(db)
-    @time return make_splots(df; eco_field=:epa_l4)
+    @time return make_splots(df; eco_field=:ecocode)
 
 end
 
-function simulate_raster(; raster_path::String, raster_eco_path::String, eco_ecocode_mapping_csv::String, params_path::String, RNG_seed=1337, timehorizon=timehorizon, treemap_version=2022)
+function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts_db::String, treemap_raster::String, eco_raster::String, eco_ecocode_mapping::String, biomass_succession_parameters::String, RNG_seed=1337, timehorizon_years::Int=50, treemap_version=2022)
+    biomass_succession_parameters_path = joinpath(data_dir, biomass_succession_parameters)
+    treemap_raster_path = joinpath(data_dir, treemap_raster)
+    cohorts_db_path = joinpath(data_dir, cohorts_db)
+    eco_raster_path = joinpath(data_dir, eco_raster)
+    eco_ecocode_mapping_path = joinpath(data_dir, eco_ecocode_mapping)
+
     RNG = Random.Xoshiro(RNG_seed)
-    params = JLD2.load_object(params_path)
+    params = JLD2.load_object(biomass_succession_parameters_path)
     println("Loading Raster")
-    @time cn_raster, vat = load_treemap_raster(raster_path, treemap_version=treemap_version)
+    @time cn_raster, vat = load_treemap_raster(treemap_raster_path, treemap_version=treemap_version)
 
     println("Loading Eco Raster")
-    @time eco_raster = load_eco_raster(raster_eco_path)
+    @time eco_raster = load_eco_raster(eco_raster_path)
 
     @assert size(cn_raster) == size(eco_raster) "Size mismatch treemap Raster $(size(cn_raster)) != Eco raster $(size(eco_raster))"
     println("Extracting plots")
-    @time splots, eco_list, species_list, eco_species_ids = get_treemap_cohorts(cn_raster, eco_raster, "../data_eco_l4_cohorts.db", eco_ecocode_mapping_csv)
+    @time splots, eco_list, species_list, eco_species_ids = get_treemap_cohorts(cn_raster, eco_raster, cohorts_db_path, eco_ecocode_mapping_path)
     n_species = length(species_list)
     n_ecoregions = length(eco_list)
     n_plots = maximum(splots.plot_id)
@@ -1644,7 +1657,7 @@ function simulate_raster(; raster_path::String, raster_eco_path::String, eco_eco
     println("Running simulation")
     #load right params
     # generate_eco_params
-    @time run_simulation(site_raster, params; RNG=RNG, timehorizon=timehorizon)
+    @time run_simulation(site_raster, param, output_dir; RNG=RNG, timehorizon=timehorizon_years)
 end
 
 #stub C entry

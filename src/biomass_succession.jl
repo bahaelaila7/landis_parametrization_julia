@@ -72,13 +72,13 @@ Base.@kwdef struct BiomassSuccessionEcoParams
     PROB_ESTAB_SPP::Vector{FloatType}
 
     MIN_REL_BIOMASS::Vector{FloatType}
-    SUFFICIENT_LIGHT::Matrix{FloatType}
+    SUFFICIENT_LIGHT::Vector{Vector{FloatType}}
 
 end
 Base.@kwdef struct BiomassSuccessionParams
     # Global
     SPINUP_MORTALITY_FRACTION::Vector{FloatType}
-    SUFFICIENT_LIGHT::Matrix{FloatType}
+    SUFFICIENT_LIGHT::Vector{Vector{FloatType}}
 
     # ecoregion specific
     MIN_REL_BIOMASS::Vector{Vector{FloatType}}
@@ -163,7 +163,8 @@ function reproduction_step!(current_time::Int, eco_params::Array{BiomassSuccessi
     # reproduction if live cohorts
     if site.live > zero(UIntType)
         #println(shade_class, params.SUFFICIENT_LIGHT)
-        shade_probs = @view params.SUFFICIENT_LIGHT[:, site.shade_class]
+        #shade_probs = @view params.SUFFICIENT_LIGHT[:, site.shade_class]
+        shade_probs = params.SUFFICIENT_LIGHT[site.shade_class + 1] #julia is 1-indexed
         #println(shade_probs)
         for sp in 1:length(site.sp_mature)
             if site.sp_mature[sp]
@@ -331,12 +332,15 @@ function succession_step!(current_time::Int, eco_params::Array{BiomassSuccession
     end
     b_am = B_ACT / site_b_max
     #shade_classes = @view params.MIN_REL_BIOMASS[:, site.ecocode]
-    shade_class = one(UIntType)
-    for sc in 1:(length(params.MIN_REL_BIOMASS)-1)
-        if b_am > params.MIN_REL_BIOMASS[sc]#shade_classes[sc]
-            shade_class += 1
+
+    shade_class = zero(UIntType)
+    for sc_threshold in params.MIN_REL_BIOMASS
+        if b_am > sc_threshold
+            #clears the threshold, so at least has this shade_class
+            shade_class +=1
         else
             break
+
         end
     end
 
