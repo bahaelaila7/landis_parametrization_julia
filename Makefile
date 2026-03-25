@@ -2,6 +2,9 @@ THREADS ?= auto
 
 all: run
 
+prepare:
+	julia --project=. --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate()'
+
 run1:
 	julia --project=. --threads=1 -e 'using BiomassSuccession;BiomassSuccession.main("")'
 
