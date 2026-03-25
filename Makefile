@@ -5,6 +5,9 @@ all: run
 prepare:
 	julia --project=. --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate()'
 
+update:
+	julia --project=. --threads=$(THREADS) -e 'using Pkg; Pkg.update()'
+
 run1:
 	julia --project=. --threads=1 -e 'using BiomassSuccession;BiomassSuccession.main("")'
 
