@@ -1,21 +1,22 @@
 THREADS ?= auto
+JULIA_CMD ?= ./julia_gdal.sh --project=.
 
 all: run
 
 prepare:
-	julia --project=. --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate()'
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate()'
 
 update:
-	julia --project=. --threads=$(THREADS) -e 'using Pkg; Pkg.update()'
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.update()'
 
 run1:
-	julia --project=. --threads=1 -e 'using BiomassSuccession;BiomassSuccession.main("")'
+	$(JULIA_CMD) --threads=1 -e 'using BiomassSuccession;BiomassSuccession.main("")'
 
 run:
-	julia --project=. --threads=$(THREADS) -e 'using BiomassSuccession;BiomassSuccession.main("")'
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using BiomassSuccession;BiomassSuccession.main("")'
                                      
 exec:                                
-	julia --project=. --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler;create_app(".", "build";filter_stdlibs=true,precompile_execution_file="src/entry.jl")'
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler;create_app(".", "build";filter_stdlibs=true,precompile_execution_file="src/entry.jl")'
                                      
 sysimage:                            
-	julia --project=. --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler; create_sysimage(["BiomassSuccession"]; sysimage_path="BiomassSuccession.so",precompile_execution_file="precompile_exec.jl")'
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler; create_sysimage(["BiomassSuccession"]; sysimage_path="BiomassSuccession.so",precompile_execution_file="precompile_exec.jl")'
