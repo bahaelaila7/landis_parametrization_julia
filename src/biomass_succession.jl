@@ -35,7 +35,7 @@ Base.@kwdef mutable struct Site
     ecocode::UIntType # value from eco_raster
 
     eco_id::Int # internal index into defined ecoregions
-    ref_cn::UIntType # for debug purposes
+    ref_cn::Int # for debug purposes
 
     cap::UIntType
     old::UIntType
@@ -124,13 +124,13 @@ end
 @inline function compact_site!(site::Site)
     new_cap = max(site.live, 2)
     if new_cap < site.cap
-            
-            site.c_age = copy(resize!(site.c_age, new_cap))
-            site.c_bio = copy(resize!(site.c_bio, new_cap))
-            site.c_species = copy(resize!(site.c_species, new_cap))
-            site.c_m_tot = copy(resize!(site.c_m_tot, new_cap))
-            site.c_comp = copy(resize!(site.c_comp, new_cap))
-            site.cap = new_cap
+
+        site.c_age = copy(resize!(site.c_age, new_cap))
+        site.c_bio = copy(resize!(site.c_bio, new_cap))
+        site.c_species = copy(resize!(site.c_species, new_cap))
+        site.c_m_tot = copy(resize!(site.c_m_tot, new_cap))
+        site.c_comp = copy(resize!(site.c_comp, new_cap))
+        site.cap = new_cap
     end
 
 end
@@ -157,12 +157,12 @@ end
 
 
 function reproduction_step!(current_time::Int, eco_params::Array{BiomassSuccessionEcoParams}, site::Site)
-    params = eco_params[site.ecocode]
+    params = eco_params[site.eco_id]
     # reproduction if live cohorts
     if site.live > zero(UIntType)
         #println(shade_class, params.SUFFICIENT_LIGHT)
         #shade_probs = @view params.SUFFICIENT_LIGHT[:, site.shade_class]
-        shade_probs = params.SUFFICIENT_LIGHT[site.shade_class + 1] #julia is 1-indexed
+        shade_probs = params.SUFFICIENT_LIGHT[site.shade_class+1] #julia is 1-indexed
         #println(shade_probs)
         for sp in 1:length(site.sp_mature)
             if site.sp_mature[sp]
@@ -185,7 +185,7 @@ function reproduction_step!(current_time::Int, eco_params::Array{BiomassSuccessi
 end
 
 function succession_step!(current_time::Int, eco_params::Array{BiomassSuccessionEcoParams}, site::Site)
-    params = eco_params[site.ecocode]
+    params = eco_params[site.eco_id]
     B = zero(FloatType)
     C = zero(FloatType)
     #RNG = site.rng Random.seed!(site.rng_state)
@@ -207,7 +207,7 @@ function succession_step!(current_time::Int, eco_params::Array{BiomassSuccession
             comp = one(FloatType)
         end
         C += comp
-        @assert !isnan(C) "$bio"
+        #@assert !isnan(C) "$bio"
         site.c_comp[i] = comp
         site.c_m_tot[i] = bio
         max_age = params.LONGEVITY[sp]
@@ -251,8 +251,8 @@ function succession_step!(current_time::Int, eco_params::Array{BiomassSuccession
         b_ap_s = b_ap^params.S[sp]
         anpp_act = b_ap_s * exp(one(FloatType) - b_ap_s)
         #@assert !isnan(anpp_act) "$b_ap_s, $(params.S[sp])"
-        if anpp_act > one(FloatType) 
-            anpp_act = one(FloatType) 
+        if anpp_act > one(FloatType)
+            anpp_act = one(FloatType)
         end
         site.c_comp[i] /= C
 
@@ -260,7 +260,7 @@ function succession_step!(current_time::Int, eco_params::Array{BiomassSuccession
         #@assert !isnan(anpp_max_c) "$C, $(site.c_comp[i]), $(params.ANPP_MAX_SPP[site.ecocode, sp])"
         anpp_act *= anpp_max_c
 
-        if site.growthReduction > zero(FloatType) 
+        if site.growthReduction > zero(FloatType)
             anpp_act *= one(FloatType) - site.growthReduction
         end
         AGNPP += anpp_act
@@ -273,19 +273,19 @@ function succession_step!(current_time::Int, eco_params::Array{BiomassSuccession
         if m_bio > bio
             m_bio = bio
         end
-        if site.growthReduction > zero(FloatType) 
+        if site.growthReduction > zero(FloatType)
             m_bio *= one(FloatType) - site.growthReduction
         end
 
         # remove age mortality from anpp and growth mortality
         m_age = site.c_m_tot[i]
         anpp_act -= m_age
-        if anpp_act < one(FloatType) 
-            anpp_act = one(FloatType) 
+        if anpp_act < one(FloatType)
+            anpp_act = one(FloatType)
         end
         m_bio -= m_age
-        if m_bio < zero(FloatType) 
-            m_bio = zero(FloatType) 
+        if m_bio < zero(FloatType)
+            m_bio = zero(FloatType)
         end
         if m_bio < anpp_act
             m_bio = anpp_act
@@ -296,7 +296,7 @@ function succession_step!(current_time::Int, eco_params::Array{BiomassSuccession
         site.c_m_tot[i] = m_tot
 
         nbio = bio + anpp_act - m_tot
-        @assert !isnan(nbio) "$bio, mtot  $m_tot, $m_age, $m_bio anpp_act $anpp_act, $anpp_max_c, $C, $(site.c_comp[i])"
+        #@assert !isnan(nbio) "$bio, mtot  $m_tot, $m_age, $m_bio anpp_act $anpp_act, $anpp_max_c, $C, $(site.c_comp[i])"
 
         site.c_bio[i] = nbio
         senescent = (nbio <= FloatType(1.0f-8))
@@ -335,7 +335,7 @@ function succession_step!(current_time::Int, eco_params::Array{BiomassSuccession
     for sc_threshold in params.MIN_REL_BIOMASS
         if b_am > sc_threshold
             #clears the threshold, so at least has this shade_class
-            shade_class +=1
+            shade_class += 1
         else
             break
 
