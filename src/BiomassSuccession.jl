@@ -100,7 +100,7 @@ function process_cohorts_csv(csv_path::String="../data_eco_cohorts.csv", output_
     end
 
     plots = combine(groupby(cdf, [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco, :measdate, :species_symbol, :age_calc], sort=false), nrow => :count, :agb => sum => :agb_sum)
-    # start_measdate = 
+    # start_measdate =
     start_measdates = combine(groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)) do rows
         (; start_measdate=[minimum(rows.measdate)])
     end
@@ -151,7 +151,7 @@ function load_cohorts_csv(csv_path::String="../data_eco_cohorts_cn.csv"; filter_
     end
 
     plots = combine(groupby(cdf, [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco, :measdate, :species_symbol_map, :age_calc], sort=false), nrow => :count, :agb => sum => :agb_sum)
-    # start_measdate = 
+    # start_measdate =
     start_measdates = combine(groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)) do rows
         (; start_measdate=[minimum(rows.measdate)])
     end
@@ -235,7 +235,7 @@ end
 end
 
 @inline function bins_loss2(pc_bin_cdf::Vector{FloatType}, qc_bin_cdf::Vector{FloatType}; loss_params::LossParams)::FloatType
-    # warning: 
+    # warning:
     # Technically W1 is not defined if one or both distribution collapsed (0 everywhere)
     # 0 distance if both are collapsed while +Inf if only one is sensible,
     # BUT Inf will make all aggregates useless and will make the search directionless
@@ -262,7 +262,7 @@ end
 end
 
 @inline function bins_loss(pc_bin_cdf::Union{Missing,Vector{FloatType}}, qc_bin_cdf::Union{Missing,Vector{FloatType}}; loss_params::LossParams)::FloatType
-    # warning: 
+    # warning:
     # Technically W1 is not defined if one or both distribution collapsed (0 everywhere)
     # 0 distance if both are collapsed while +Inf if only one is sensible,
     # BUT Inf will make all aggregates useless and will make the search directionless
@@ -476,7 +476,7 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, eco_par
         #println(row)
         while current_year < row.year_deficit
             #grow all active
-            Threads.@threads :static for site in sites # 
+            Threads.@threads :static for site in sites #
                 if site.active
                     #println(site.mapcode)
                     succession_step!(current_year, eco_params, site)
@@ -669,7 +669,7 @@ function mutate_biomass_params(p::BiomassSuccessionParams, param_dists::BiomassP
     # schema: variable, element-wise pdf, final type, species-specific, ecoregion-specific
     #
     # schemes to mutate:
-    # - pick one variable, pick one element or more, 
+    # - pick one variable, pick one element or more,
     # - types of mutation: creep, redraw
     # EA:
     # - bundle mutation rate, mutation angle.
@@ -727,11 +727,11 @@ function calculate_site_loss2(current_year::Int, site::Site, n_species::Int, eco
         last_sp = site.c_species[p[sp_start_idx]]
 
 
-        #initialize losses 
+        #initialize losses
         # process sp's in site, sorted by species
         for i in 1:length(p)
 
-            # get the 
+            # get the
             sp = @inbounds c_species[i]
             insite[sp] = true
             if i == length(p) && last_sp != sp
@@ -740,7 +740,7 @@ function calculate_site_loss2(current_year::Int, site::Site, n_species::Int, eco
             end
 
             if sp != last_sp || i == length(p)
-                # conclude sp 
+                # conclude sp
                 sp_end_idx = i - 1
                 if sp == last_sp
                     # when length(p) was the cause only
@@ -1061,7 +1061,7 @@ function parametrize(; cohorts_db_path::String, tablename::String, output_dir::S
                 #println("Sites spun up")
 
                 #
-                ## 
+                ##
                 ##
                 ##
                 ##
@@ -1077,7 +1077,7 @@ function parametrize(; cohorts_db_path::String, tablename::String, output_dir::S
                 for current_sim_year in 0:max_sim_year #ProgressBar(0:max_sim_year) #ProgressBar(0:50)
                     sites_results = Vector{SiteLoss}(undef, length(chosen_sites)) #[DataFrame() for _ in 1:length(chosen_sites)] #Vector{MDataFrame}(missing, length(chosen_sites))
                     #any_site_results = falses(Threads.nthreads())
-                    Threads.@threads :static for i in eachindex(chosen_sites) # 
+                    Threads.@threads :static for i in eachindex(chosen_sites) #
                         canceled[] && break
                         @inbounds mapcode = chosen_sites[i]
                         @inbounds site = sites[mapcode]
@@ -1593,7 +1593,7 @@ function make_effective_splots(df::DataFrame)#::Tuple{DataFrame,Array{String},Ar
 
     fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :raster_ecocode, :eco_id, :effective_eco_id, :measdate, :species_id, :age_calc]
     plots = combine(groupby(df, fields, sort=false), nrow => :count, :agb => sum => :agb_sum)
-    # start_measdate = 
+    # start_measdate =
     start_measdates = combine(groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)) do rows
         (; start_measdate=[minimum(rows.measdate)])
     end
@@ -1665,7 +1665,7 @@ function make_splots(df::DataFrame)::Tuple{DataFrame,Array{String},Array{String}
 
     fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :species_id, :age_calc]
     plots = combine(groupby(df, fields, sort=false), nrow => :count, :agb => sum => :agb_sum)
-    # start_measdate = 
+    # start_measdate =
     start_measdates = combine(groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)) do rows
         (; start_measdate=[minimum(rows.measdate)])
     end
@@ -1743,7 +1743,7 @@ function get_treemap_cohorts(cn_raster, eco_raster, cohorts_db, eco_ecocode_mapp
             GROUP BY raster_ecocode, effective_species_symbol_map, effective_eco, effective_ecocode
             ),
         dominant AS (
-        SELECT 
+        SELECT
                 raster_ecocode,
                 effective_eco,
                 effective_ecocode,
@@ -1821,7 +1821,7 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
 
     #reorder eco_species_ids
 
-    #remapping 
+    #remapping
     #println(length(params.SPECIES_LIST))
     #println(length(species_list))
     params_species_df = DataFrame(param_species=params.SPECIES_LIST, param_species_id=1:length(params.SPECIES_LIST))
@@ -1869,6 +1869,7 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
     sort!(mapped_splots_df, [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc])
     disallowmissing!(mapped_splots_df)
     #println("uuuOK?")
+    println(mapped_splots_dff)
 
 
     eco_param_species_ids_df = combine(groupby(mapped_splots_df, [:eco_id], sort=true)) do rows
@@ -1896,7 +1897,7 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
     ## now we need to know how the eco_species_ids line up
     ## we need each species_id with its corresponding param_species_id (now we know "PIEL" species_id for both)
     ## # now we need param_eco_species_id which is the index of param_species_id within param_eco param
-    ## for each data eco param -> [(effective_eco_id, species_id)] -> [(param_eco_id, param_eco_species_id)] 
+    ## for each data eco param -> [(effective_eco_id, species_id)] -> [(param_eco_id, param_eco_species_id)]
     ## join effective
     ## do not need effective_eco_id, only eco_id
     ## eco,effective_eco, param_eco, param_eco_id, param_sp_id, effective_sp_id , effective_param_sp_id
@@ -2019,7 +2020,7 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
 
 
 
-    # extract ecoregion map for raster, extract plots 
+    # extract ecoregion map for raster, extract plots
     #splots, n_plots, n_species, n_ecoregions = load_cohorts_csv()
     println("Populating Raster")
     @time site_raster = populate_initial_treemap_communities(cn_raster, eco_raster, mapped_splots_df, mod_params.ECO_SPECIES_IDS; RNG=RNG)
