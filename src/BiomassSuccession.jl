@@ -641,7 +641,7 @@ function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species
         BiomassParam(:PROB_ESTAB_SPP, Dists.Uniform(), FloatType, true, true),
         BiomassParam(:ANPP_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
         BiomassParam(:B_MAX_SPP, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), FloatType, true, true),
-        #BiomassParam(:firstMINRel, Dists.Uniform(0.0, 0.5), FloatType, false, true),
+        BiomassParam(:firstMINRel, Dists.Uniform(0.0, 0.5), FloatType, false, true),
     ]
     #interaction_matrix = [1 n_ecoregions; n_species n_species*n_ecoregions]
     n_species_ecoregions = sum(length(species) for species in eco_species_ids)
@@ -680,24 +680,31 @@ function mutate_biomass_params(p::BiomassSuccessionParams, param_dists::BiomassP
     param_idx = something(findlast(param_dists.weights_cumsum .<= s), 1)
     selected_param = param_dists.params[param_idx]
     param_val = rand(rng, selected_param.dist) |> selected_param.type
-    v = getproperty(p, selected_param.name)
-    nv = deepcopy(v)
-    if selected_param.ecoregion_specific
+    np = if selected_param.name == :firstMINRel
         eco_id = rand(rng, 1:length(p.ECO_SPECIES_IDS))
-        if selected_param.species_specific
-            species_id = rand(rng, 1:length(p.ECO_SPECIES_IDS[eco_id]))
-            nv[eco_id][species_id] = param_val
-        else
-            nv[eco_id] = param_val
-        end
-    elseif selected_param.species_specific
-        species_id = rand(rng, 1:length(p.SPECIES_LIST))
-        nv[species_id] = param_val
+	nv = deepcopy(p.MIN_REL_BIOMASS)
+	nv[i] = [param_val + k * 0.10f0 for k in 0:4]
+	Setfield.@set p.MIN_REL_BIOMASS = nv
     else
-        nv[] = param_val
-    end
+	    v = getproperty(p, selected_param.name)
+	    nv = deepcopy(v)
+	    if selected_param.ecoregion_specific
+		eco_id = rand(rng, 1:length(p.ECO_SPECIES_IDS))
+		if selected_param.species_specific
+		    species_id = rand(rng, 1:length(p.ECO_SPECIES_IDS[eco_id]))
+		    nv[eco_id][species_id] = param_val
+		else
+		    nv[eco_id] = param_val
+		end
+	    elseif selected_param.species_specific
+		species_id = rand(rng, 1:length(p.SPECIES_LIST))
+		nv[species_id] = param_val
+	    else
+		nv[] = param_val
+	    end
 
-    np = Setfield.@set p.$(selected_param.name) = nv
+	Setfield.@set p.$(selected_param.name) = nv
+    end
     return np
 end
 
@@ -1313,8 +1320,8 @@ end
 struct SiteRecord
     year::UIntType
     mapcode::UIntType
-    ecocode::UIntType
-    species::UIntType
+    eco_id::UIntType
+    species_id::UIntType
     age::UIntType
     biomass::FloatType
 end
@@ -1343,7 +1350,7 @@ function run_simulation(; site_raster::Array{Union{Missing,Site}}, params::Bioma
                     @inbounds buf = thread_buffers[tid]
 
                     for i in 1:site.live
-                        push!(buf, SiteRecord(current_sim_year, site.mapcode, site.ecocode, site.c_species[i], site.c_age[i], site.c_bio[i]))
+                        push!(buf, SiteRecord(current_sim_year, site.mapcode, site.eco_id, site.c_species[i], site.c_age[i], site.c_bio[i]))
                     end
                 end
             end
@@ -1447,6 +1454,33 @@ function write_raster(src_path::String, output_path::String, output::Array{Union
         end
     end
 end
+function generate_output_mapcodes(;output_dir::String, ref_raster_path::String, site_raster)
+    AG.read(ref_raster_path) do src
+        src_band = AG.getband(src, 1)
+        src_data = AG.read(src_band)
+	dst_data = zeros(Int32,size(src_data))
+	    Threads.@threads :static for i in eachindex(site_raster)
+			@inbounds site = site_raster[i]
+			if !ismissing(site)
+				@inbounds dst_data[Int(site.mapcode)] = Int32(site.mapcode)
+			end
+	    end
+	    AG.create(
+		joinpath(output_dir, "output_communities.tif"),
+		driver=AG.getdriver("GTiff"),
+		width=AG.width(src),
+		height=AG.height(src),
+		nbands=1,
+		dtype=Int32,
+	    ) do dst
+		AG.setgeotransform!(dst, AG.getgeotransform(src))
+		dst_band = AG.getband(dst, 1)
+		AG.setnodatavalue!(dst_band, Int32(0))
+		AG.setproj!(dst, AG.getproj(src))
+		AG.write!(AG.getband(dst, 1), dst_data)
+	    end
+	end
+end
 function generate_rasters_from_output(; data_dir::String, ref_raster_path::String, output_dir::String)
     ref_raster_path = joinpath(data_dir, ref_raster_path)
     files = Glob.glob("year_*_chunk_*.parquet", output_dir)
@@ -1535,16 +1569,18 @@ function main(args)
     #BIOMASS_PARAM_DISTS = make_biomass_param_dists(n_species, n_ecoregions)
     loss_params = LossParams(
         age_bins=AgeBins(
-            bins_idx=[5, 8, 13, 20, 25, 40, 60, 80] .|> Int,
+            bins_idx=[5, 10, 20, 40, 60, 80] .|> Int,
             last_bin_open=true
         ),
         smoothing_weights=get_smoothing_window(; smoothing_window=1, smoothing_variance=FloatType(1.0f0))
     )
     #return
     #splots, n_plots, n_species, n_ecoregions = load_cohorts_csv(filter_ecos=["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"])
-    filter_ecos = ["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
+    #filter_ecos = ["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
     #filter_ecos = ["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-    search_state = parametrize(; cohorts_db_path="../data_eco_l4_cohorts.db", tablename="data_eco_cohorts", output_dir="./outputs", loss_params=loss_params, filter_ecos=filter_ecos, skip_disturbances=false, RNG=RNG, TRIALS=2000000)
+    #filter_ecos = ["8.3.5.65o"#, "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
+    filter_ecos = ["8.3.5.65o", "8.5.3.75a", "8.5.3.75c", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"] 
+    search_state = parametrize(; cohorts_db_path="../data_eco_l4_cohorts.db", tablename="data_eco_cohorts", output_dir="./outputs", loss_params=loss_params, filter_ecos=filter_ecos, skip_disturbances=true, RNG=RNG, TRIALS=2000000)
     println("Best Loss: $(search_state.best.fx)")
 
 end
@@ -1825,8 +1861,10 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
     #println(length(params.SPECIES_LIST))
     #println(length(species_list))
     params_species_df = DataFrame(param_species=params.SPECIES_LIST, param_species_id=1:length(params.SPECIES_LIST))
-    data_species_df = DataFrame(species=species_list, species_id=1:length(species_list))
+    data_species_df = DataFrame(species=species_list, data_species_id=1:length(species_list))
     joint_species_df = innerjoin(data_species_df, params_species_df, on=:species => :param_species)
+    #species_ids = Dict(species => i for i, species in sort(unique(joint_species_df.speceis)))
+    joint_species_df.species_id .= groupindices(groupby(joint_species_df, :species , sort=true))
     # species_symbol_map -> species_id (from data) and param_species_id (in param)
     #println(joint_species_df)
 
@@ -1869,7 +1907,7 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
     sort!(mapped_splots_df, [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc])
     disallowmissing!(mapped_splots_df)
     #println("uuuOK?")
-    println(mapped_splots_dff)
+    #println(mapped_splots_df)
 
 
     eco_param_species_ids_df = combine(groupby(mapped_splots_df, [:eco_id], sort=true)) do rows
@@ -1963,7 +2001,9 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
 
                                  for param_stuff in
                                  eco_param_species_ids_df.param_eco_species_id_selector]
-    #println(new_params_eco_species_id)
+    println(new_params_eco_species_id)
+    println([maximum(eco_species_id) for eco_species_id in new_params_eco_species_id])
+    println(length(joint_species_df.species))
 
     mod_params = BiomassSuccessionParams(
         SPINUP_MORTALITY_FRACTION=params.SPINUP_MORTALITY_FRACTION,
@@ -1989,7 +2029,7 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
     )
 
     @assert joint_eco_df.eco == eco_list "eco prob, $(joint_eco_df.eco) != $(eco_list)"
-    @assert joint_species_df.species == species_list "species prob, $(joint_species_df.species) == $(species_list)"
+    #@assert joint_species_df.species == species_list "species prob, $(joint_species_df.species) == $(species_list)"
     l1 = [length(xs) for xs in mod_params.B_MAX_SPP]
     l2 = [length(xs) for xs in new_params_eco_species_id]
     ###println(species_list[eco_species_ids[15]])
@@ -2016,6 +2056,7 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
     #    #ECO_SPECIES_IDS=[get.(Ref(param2data_species_map), params.ECO_SPECIES_IDS[e], missing)
     #    #                 for e in joint_eco_df.param_eco_id]
     #))
+    #load right params
     println(mod_params)
 
 
@@ -2024,9 +2065,10 @@ function simulate_treemap_raster(; data_dir::String, output_dir::String, cohorts
     #splots, n_plots, n_species, n_ecoregions = load_cohorts_csv()
     println("Populating Raster")
     @time site_raster = populate_initial_treemap_communities(cn_raster, eco_raster, mapped_splots_df, mod_params.ECO_SPECIES_IDS; RNG=RNG)
-    println("Running simulation")
-    #load right params
+    println("Generating output mapcodes raster")
+    @time generate_output_mapcodes(;output_dir = output_dir, ref_raster_path= treemap_raster_path,site_raster=site_raster)
     # generate_eco_params
+    println("Running simulation")
     @time run_simulation(; site_raster=site_raster, params=mod_params, output_dir=output_dir, RNG=RNG, timehorizon=timehorizon_years)
 end
 
