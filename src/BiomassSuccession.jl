@@ -173,7 +173,7 @@ function load_cohorts_csv(csv_path::String="../data_eco_cohorts_cn.csv"; filter_
     #println(starting_plots)
 end
 
-function make_sites(splots::DataFrame, eco_species_ids::Array{Array{Int}}; rng::Random.AbstractRNG)
+function make_sites(splots::DataFrame, eco_species_ids::Array{Array{Int}}; rng::Random.AbstractRNG, spinup::Bool = true)
     #eco_ids = unique(select(splots, [:eco_id]))
     #n_species = maximum(splots.species_id)
     #plot_ids = unique(select(splots, [:plot_id]))
@@ -189,30 +189,81 @@ function make_sites(splots::DataFrame, eco_species_ids::Array{Array{Int}}; rng::
     #    plt_key.plt_cn => DataFrame(plt_df)
     #    for (plt_key, plt_df) in pairs(groupby(splots, :plt_cn, sort=false))
     #)
+    if spinup
 
-    sites = [Site(
-        active=false,
-        rng=Random.Xoshiro(rand(rng, UInt64)),
-        ecocode=UIntType(row.eco_id), # no ecocode coming from raster, relying on eco_id
-        eco_id=row.eco_id,
-        mapcode=UIntType(row.plot_id), # for parametrization, plot_id is global index, no raster
-        cap=UIntType(2),
-        ref_cn=UIntType(row.plot_id),
-        old=zero(UIntType),
-        live=zero(UIntType),
-        B=zero(FloatType),
-        AGNPP=zero(FloatType),
-        capacityReduction=one(FloatType),
-        growthReduction=one(FloatType),
-        prevYearMortality=zero(FloatType),
-        shade_class=one(UIntType), c_species=zeros(UIntType, 2),
-        c_age=zeros(FloatType, 2),
-        c_bio=zeros(FloatType, 2),
-        c_m_tot=zeros(FloatType, 2),
-        c_comp=zeros(FloatType, 2), sp_mature=falses(length(eco_species_ids[row.eco_id])),
-    )
-             for (i, row) in enumerate(eachrow(plot_eco_ids))]
-    return sites
+        sites = [Site(
+            active=false,
+            rng=Random.Xoshiro(rand(rng, UInt64)),
+            ecocode=UIntType(row.eco_id), # no ecocode coming from raster, relying on eco_id
+            eco_id=row.eco_id,
+            mapcode=UIntType(row.plot_id), # for parametrization, plot_id is global index, no raster
+            cap=UIntType(2),
+            ref_cn=UIntType(row.plot_id),
+            old=zero(UIntType),
+            live=zero(UIntType),
+            B=zero(FloatType),
+            AGNPP=zero(FloatType),
+            capacityReduction=one(FloatType),
+            growthReduction=one(FloatType),
+            prevYearMortality=zero(FloatType),
+            shade_class=one(UIntType), c_species=zeros(UIntType, 2),
+            c_age=zeros(FloatType, 2),
+            c_bio=zeros(FloatType, 2),
+            c_m_tot=zeros(FloatType, 2),
+            c_comp=zeros(FloatType, 2), sp_mature=falses(length(eco_species_ids[row.eco_id])),
+        )
+                for (i, row) in enumerate(eachrow(plot_eco_ids))]
+        
+        return sites
+    else
+        sites = []
+        splots_dict = Dict(
+            (plt_key.plot_id, plt_key.eco_id) => begin 
+            plt_df = DataFrame(plt_df)
+            plt_df.sim_year = Dates.value.(Dates.Day.(plt_df.measdate - plt_df.start_measdate)) ./ 365.25 .|> round .|> Int
+            plt_df
+    end
+            for (plt_key, plt_df) in pairs(groupby(splots, [:plot_id, :eco_id], sort=false))
+        )
+        for key in sort(collect(keys(splots_dict)))
+                    plt_df = splots_dict[key]
+                    (plot_id, eco_id) = key
+                    initial_cohorts=get_initial_cohorts(plt_df)
+                    p = first(initial_cohorts)
+                    n_cohorts = nrow(initial_cohorts)
+                    cap = UIntType(2^ceil(log2(n_cohorts)))
+            site = Site(
+                            active=true,
+                            rng=Random.Xoshiro(rand(rng, UInt64)),
+                            ecocode=UIntType(eco_id), #UIntType(getproperty(p, ecocode_field)),
+                            eco_id=eco_id,
+                            mapcode=UIntType(plot_id),
+                            ref_cn=plot_id,
+                            cap=UIntType(cap),
+                            old=zero(UIntType),
+                            live=zero(UIntType),
+                            B=zero(FloatType),
+                            AGNPP=zero(FloatType),
+                            capacityReduction=one(FloatType),
+                            growthReduction=one(FloatType),
+                            prevYearMortality=zero(FloatType),
+                            shade_class=one(UIntType),
+                            c_species=zeros(UIntType, cap),
+                            c_age=zeros(FloatType, cap),
+                            c_bio=zeros(FloatType, cap),
+                            c_m_tot=zeros(FloatType, cap),
+                            c_comp=zeros(FloatType, cap),
+                            sp_mature=falses(length(eco_species_ids[p.eco_id])),
+                        )
+                        for row in eachrow(initial_cohorts)
+                            #@assert row.eco_species_id <= length(eco_species_ids[p.eco_id]) "$(length(eco_species_ids[p.eco_id])),\n$(p),\n$(row),\n$(initial_cohorts)"
+                            add_new_cohort!(site, UIntType(row.eco_species_id), FloatType(row.age_calc), FloatType(row.agb_sum))
+                        end
+
+            push!(sites, site)
+        end
+        return sites
+    end
 end
 
 @inline function get_smoothing_window(; smoothing_window::Int=Int(3), smoothing_variance::FloatType=FloatType(1.0f0))
@@ -298,7 +349,7 @@ end
     return smoothed_ages
 end
 
-function smoothen_ref_years(df::DataFrame, loss_params::LossParams, max_age::Int)::DataFrame
+function smoothen_ref_years(df::DataFrame, loss_params::LossParams, max_age::Int; debug = false)::DataFrame
     spdf = combine(groupby(df, [:plot_id, :eco_id, :measdate, :start_measdate, :eco_species_id])) do rows
         ages = zeros(FloatType, max_age)
         for row in eachrow(rows)
@@ -308,7 +359,14 @@ function smoothen_ref_years(df::DataFrame, loss_params::LossParams, max_age::Int
         sim_year = Dates.value.(Dates.Day.(row.measdate - row.start_measdate)) ./ 365.25 .|> round .|> Int
         @assert sim_year >= 0 "negative sim_year $row"
         cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
-        (; sim_year=[sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf])
+        if debug
+            smoothed_ages = smooth_ages(;ages=ages, smoothing_window = loss_params.smoothing_weights)
+            binned_ages = bin_ages(smoothed_ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
+            (; sim_year=[sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf],
+             ages=[ages], smoothed_ages = [smoothed_ages], binned_ages = [binned_ages])
+        else
+            (; sim_year=[sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf])
+        end
     end
     return spdf
 
@@ -358,13 +416,14 @@ end
 end
 
 function get_spinup_cohorts(df::DataFrame)
-    spinup_cohorts = df[df.year_deficit.<=0, :]
+    spinup_cohorts = df[df.year_deficit.<-1, :]
     spinup_cohorts = sort!(spinup_cohorts, :year_deficit)
     return spinup_cohorts
 end
 
 function get_initial_cohorts(df::DataFrame)
-    return df[df.year_deficit.==0, :]
+    #return df[df.year_deficit.==0, :]
+    return df[df.sim_year .== 0, :]
 end
 
 function initialize_sites!(initial_cohorts::DataFrame, sites::Vector{Site})
@@ -392,10 +451,11 @@ function mark_estab_year!(df::DataFrame)
     #show(df[df.age_calc .< 0,:]) #.age_calc .= 1
     year_estab = df.measdate .- (df.age_calc .|> Dates.Year)
     oldest = minimum(year_estab)
-    last = maximum(df.start_measdate)
-    println("Oldest cohort established: $oldest")
-    println("First measurement date: $last")
-    df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- last)) ./ 365.25 .|> round .|> Int
+    #last = maximum(df.start_measdate)
+    #println("Oldest cohort established: $oldest")
+    #println("First measurement date: $last")
+    #df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- last)) ./ 365.25 .|> round .|> Int
+    df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- df.start_measdate)) ./ 365.25 .|> round .|> Int
 end
 
 @generated function _dimslice(A::AbstractArray{T,N}, indices::Vararg{Any,M}) where {T,N,M}
@@ -468,13 +528,21 @@ end
 
 function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, eco_params::Array{BiomassSuccessionEcoParams})
     #show(spinup_cohorts.year_deficit)
-    current_year = minimum(spinup_cohorts.year_deficit)
+    # year deficit is establisment year.
+    # however, I cannot add with age = 0, therefore it'll have to show up the year after with age=1
+    # therefore year_age_one = year_deficit + 1
+    current_year = minimum(spinup_cohorts.year_deficit) + 1
+    # max_current_year = max(year_deficit) + 1 = -2 + 1 = -1
+    # will have to be careful with simulation not to trigger succession year 0 twice
     ## current_year will go down to -1, since the last estab cohort
     ## would be 1 year old, so a year before the last start_measdate
     #pbar = ProgressBar(total = -current_year)
+    #println("current_year, $(current_year), year_deficit+1, $(first(spinup_cohorts).year_deficit + 1)")
     for row in eachrow(spinup_cohorts)
         #println(row)
-        while current_year < row.year_deficit
+        while current_year < row.year_deficit + 1
+            #println("current_year, $(current_year), year_deficit+1, $(row.year_deficit + 1), succession: $(current_year < row.year_deficit+1) ")
+
             #grow all active
             Threads.@threads :static for site in sites #
                 if site.active
@@ -496,25 +564,29 @@ function spinup_cohorts!(spinup_cohorts::DataFrame, sites::Vector{Site}, eco_par
         sp = row.eco_species_id
         if site.old < site.live  # there are young cohorts
             for idx in (site.old+1):site.live
-                if site.c_species[idx] == sp
+                if site.c_species[idx] == sp #found one, no need to add
                     add_new_cohort = false
+                    break
                 end
             end
         end
+        #println("Need to added cohort: $(add_new_cohort), current_year= $(current_year)")
         if add_new_cohort
             params = eco_params[site.eco_id]
-            try
+            #try
                 initial_biomass = calculate_initial_biomass(params.B_MAX_SPP[sp], site.B, params.B_MAX_ECO)
                 add_new_cohort!(site, UIntType(sp), one(FloatType), initial_biomass)
-            catch e
-                println(row)
-                println(site)
-                println(params)
-                rethrow(e)
-            end
+
+            #catch e
+            #    println(row)
+            #    println(site)
+            #    println(params)
+            #    rethrow(e)
+            #end
         end
         #println("Adding cohort $(row.species_symbol_map) to ", row.plot_id)
     end
+    @assert current_year == -1 "$(current_year)"
     #update(pbar)
     # cohorts with year_deficit = 0 will have been added but not succeeded yet
 
@@ -708,7 +780,7 @@ function mutate_biomass_params(p::BiomassSuccessionParams, param_dists::BiomassP
     return np
 end
 
-@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, sp_w_loss, sp_agb_loss, site_agb_loss)
+@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, sp_w_loss, sp_agb_loss, site_agb_loss, debug)
     sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
     log_diff = log10(sim_agb_sum + loss_params.EPS)
     sp_agb_loss[gsp] = sim_agb_sum
@@ -727,6 +799,17 @@ end
         log_diff -= log10(rec.sp_agb_sum + loss_params.EPS)
         sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
         site_agb_loss -= rec.sp_agb_sum
+        if debug
+            smoothed_ages = smooth_ages(;ages=ages, smoothing_window = loss_params.smoothing_weights)
+            binned_ages = bin_ages(smoothed_ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
+                                        println("sim_sp: $(sp)")
+                                        println("sim_agb: $(sim_agb_sum)")
+                                        println("sim_cdf: $(sim_age_cdf)")
+                                        println("sim__ages: $(ages)")
+                                        println("sim_sages: $(smoothed_ages)")
+                                        println("sim_bages: $(binned_ages)")
+
+        end
     end
     sp_w_loss[gsp] = (1.0f0 + sp_w_loss[gsp]) * (abs(log_diff)^2)
     return site_agb_loss
@@ -750,6 +833,7 @@ function calculate_site_loss2(current_year::Int, site::Site, n_species::Int, eco
 
         c_species = @view site.c_species[1:site.live]
         max_age = UIntType(ceil(maximum(@view site.c_age[1:site.live])))
+        max_age += UIntType(length(loss_params.smoothing_weights) >> 1)
         #get indices of species sorted
         # traversing c_species[p[1..end]] is equivalent to traversing sorted_c_species[1..end]
         # but now useful so that I don't need to sort c_age, c_bio
@@ -781,7 +865,7 @@ function calculate_site_loss2(current_year::Int, site::Site, n_species::Int, eco
                 sp_end_idx = i - 1
                 site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
                     site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-                    spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss)
+                    spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, debug = debug)
                 prev_sp = sp
                 sp_start_idx = i
             end
@@ -795,7 +879,7 @@ function calculate_site_loss2(current_year::Int, site::Site, n_species::Int, eco
                 sp_end_idx = i
                 site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
                     site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-                    spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss)
+                    spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss,debug=debug)
             end
         end
     end
@@ -1000,6 +1084,7 @@ function export_sites!(db::SQLite.DB, current_year::Int, sites)
     end
 end
 
+
 function parametrize(; cohorts_db_path::String, tablename::String, output_dir::String, loss_params::LossParams, skip_disturbances=true, filter_ecos::Array{String}=String[], RNG::Union{Nothing,Random.AbstractRNG}, TRIALS::Int=5)::SAState#Tuple{FloatType,SiteLoss,BiomassSuccessionParams}
     if isnothing(RNG)
         RNG = Random.default_rng()
@@ -1041,8 +1126,10 @@ function parametrize(; cohorts_db_path::String, tablename::String, output_dir::S
     max_age = maximum(splots.age_calc)
     #precomupte loss for missing entries
     println("Preprocessing plot results (smoothing and binning)")
-    @time spdf = smoothen_ref_years(splots, loss_params, max_age)
-    #println(spdf)
+    debug = false
+    no_spinup = true
+    @time spdf = smoothen_ref_years(splots, loss_params, max_age; debug = debug)
+    @assert minimum(spdf.sim_year)== 0 "$(spdf.sim_year)"
     #show(spdf)
     println("Creating comparison years")
     @time spdf_plts = make_spdf_dict(spdf, eco_species_ids)
@@ -1086,13 +1173,15 @@ function parametrize(; cohorts_db_path::String, tablename::String, output_dir::S
                 eco_params = generate_eco_params(params)
                 #println(params)
                 #println("###making sites")
-                sites = make_sites(splots, eco_species_ids; rng=RNG)
+                sites = make_sites(splots, eco_species_ids; rng=RNG, spinup=!no_spinup)
                 chosen_sites = 1:length(sites)#StatsBase.sample(RNG, 1:length(sites), SITES_PER_RUN, replace=false, ordered=true)
                 max_sim_year = site_sim_years.sim_years[chosen_sites] .|> maximum |> maximum
                 #println(sites[chosen_sites])
                 #println(max_sim_year)
                 #println("###Sites made, beginning spinup")
-                spinup_cohorts!(spinup_cohorts, sites, eco_params) #[splots.measdate .== splots.start_measdate,:])
+                if !no_spinup
+                    spinup_cohorts!(spinup_cohorts, sites, eco_params) #[splots.measdate .== splots.start_measdate,:])
+                end
                 #println("Sites spun up")
 
                 #
@@ -1125,18 +1214,22 @@ function parametrize(; cohorts_db_path::String, tablename::String, output_dir::S
                             # what years to check for this site
                             if current_sim_year in sim_years
                                 #println(site.mapcode)
-                                debug = false
-                                if false && site.live > 0 #&& (current_sim_year == sim_years[1] || current_sim_year == sim_years[end])
+                                sloss = calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
+                                if debug && site.live > 0 #&& (current_sim_year == sim_years[1] || current_sim_year == sim_years[end])
                                     println("Thread: $(Threads.threadid())")
                                     println("Current_sim_year = $(current_sim_year)")
                                     println("Site: $(site.mapcode)")
                                     println(site)
-                                    debug = true
-                                end
-                                sloss = calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
-                                if false && site.live > 0 #&& (current_sim_year == sim_years[1] || current_sim_year == sim_years[end])
-                                    println(site)
-                                    println(spdf_plt[current_sim_year])
+                                    #println(spdf_plt[current_sim_year])
+                                    ref_data = spdf[(spdf.plot_id .== site.ref_cn) .& (spdf.sim_year .== current_sim_year), : ]
+                                    for row in eachrow(ref_data)
+                                        println("sp: $(row.eco_species_id)")
+                                        println("agb: $(row.data_agb_sum)")
+                                        println("cdf: $(row.data_agbs_cdf)")
+                                        println(" ages: $(row.ages)")
+                                        println("sages: $(row.smoothed_ages)")
+                                        println("bages: $(row.binned_ages)")
+                                    end
                                     println(sloss)
                                     println("----------------------------")
                                 end
@@ -1625,7 +1718,7 @@ function main(args)
     #filter_ecos = ["8.3.5.65o", "8.5.3.75a", "8.5.3.75c", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"] 
     filter_ecos = ["8.5.3.75g"]#, "8.5.3.75a", "8.5.3.75c", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"] 
     println("Filtering ecos: $(filter_ecos)")
-    search_state = parametrize(; cohorts_db_path="../data_eco_l4_cohorts.db", tablename="data_eco_cohorts_g", output_dir="./outputs", loss_params=loss_params, filter_ecos=filter_ecos, skip_disturbances=true, RNG=RNG, TRIALS=20000)
+    search_state = parametrize(; cohorts_db_path="../data_eco_l4_cohorts.db", tablename="data_eco_cohorts_g", output_dir="./outputs", loss_params=loss_params, filter_ecos=filter_ecos, skip_disturbances=true, RNG=RNG, TRIALS=30000)
     println("Best Loss: $(search_state.best.fx)")
 
 end
