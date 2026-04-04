@@ -20,6 +20,15 @@ end
         state.diff_avg = state.running_average_ratio * (state.diff_avg - diff_fit) + diff_fit
         state.prob_avg = state.running_average_ratio * (state.prob_avg - prob) + prob
     end
+    if state.prob_avg < state.reheat_prob_threshold
+	state.reheat_iter_counter += 1
+	if state.reheat_iter_counter >= state.reheat_after_iters
+		state.reheat_iter_counter = 0
+		state.t = state.initial_t
+	end
+    else
+	state.reheat_iter_counter = 0
+    end
     acceptance_rule = state.acceptance_rule == "TA" ? threshold_accepting_acceptance_rule : simulated_annealing_acceptance_rule
 
     if diff_fit < 0 || acceptance_rule(state.rng, diff_fit, state.t)
@@ -55,6 +64,9 @@ Base.@kwdef mutable struct SAState{Tx,Tf}
     running_average_ratio = 0.9
     diff_avg::Float64 = 0.0
     prob_avg::Float64 = 0.0
+    reheat_prob_threshold::Float64 = 0.01
+    reheat_after_iters::Int=100
+    reheat_iter_counter::Int=0
 end
 
 
