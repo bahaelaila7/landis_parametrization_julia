@@ -1894,49 +1894,48 @@ function get_treemap_cohorts(cn_raster, eco_raster, cohorts_db, eco_ecocode_mapp
     #
     sql = "
             With full_table AS (
-        SELECT df.CN,df.ecocode raster_ecocode, e.eco raster_eco,  o.*,
-            (COALESCE(m.species_symbol_map,b.species_symbol_map) IS NULL) borrowed,
-            (CASE WHEN COALESCE(m.species_symbol_map,b.species_symbol_map) IS NULL THEN o.eco ELSE e.eco END) effective_eco,
-            (CASE WHEN COALESCE(m.species_symbol_map,b.species_symbol_map) IS NULL THEN eo.ecocode ELSE e.ecocode END) effective_ecocode,
-            (CASE WHEN COALESCE(m.species_symbol_map,b.species_symbol_map) IS NULL THEN o.species_symbol_map ELSE COALESCE(m.species_symbol_map,b.species_symbol_map) END) effective_species_symbol_map
+                SELECT df.CN,df.ecocode raster_ecocode, e.eco raster_eco,  o.*,
+                    (COALESCE(m.species_symbol_map,b.species_symbol_map) IS NULL) borrowed,
+                    (CASE WHEN COALESCE(m.species_symbol_map,b.species_symbol_map) IS NULL THEN o.eco ELSE e.eco END) effective_eco,
+                    (CASE WHEN COALESCE(m.species_symbol_map,b.species_symbol_map) IS NULL THEN eo.ecocode ELSE e.ecocode END) effective_ecocode,
+                    (CASE WHEN COALESCE(m.species_symbol_map,b.species_symbol_map) IS NULL THEN o.species_symbol_map ELSE COALESCE(m.species_symbol_map,b.species_symbol_map) END) effective_species_symbol_map
 
-            FROM cn_eco df
-            JOIN eco_ecocode_map e ON df.ecocode = e.ecocode
-            JOIN data_eco_cohorts o ON df.CN = o.PLT_CN
-            JOIN eco_ecocode_map eo ON o.eco = eo.eco
-            LEFT OUTER JOIN data_species_eco_map m ON m.eco = e.eco AND m.species_symbol = o.species_symbol
-            LEFT OUTER JOIN data_all_species b ON b.species_symbol_map = concat(e.eco,'_',o.sftwd_hrdwd)
-         ),group_totals AS (
-            SELECT
-                raster_ecocode,
-                effective_eco,
-                effective_ecocode,
-                effective_species_symbol_map,
-                SUM(tree_count) AS group_count
-            FROM full_table
-            GROUP BY raster_ecocode, effective_species_symbol_map, effective_eco, effective_ecocode
+                FROM cn_eco df
+                JOIN eco_ecocode_map e ON df.ecocode = e.ecocode
+                JOIN data_eco_cohorts o ON df.CN = o.PLT_CN
+                JOIN eco_ecocode_map eo ON o.eco = eo.eco
+                LEFT OUTER JOIN data_species_eco_map m ON m.eco = e.eco AND m.species_symbol = o.species_symbol
+                LEFT OUTER JOIN data_all_species b ON b.species_symbol_map = concat(e.eco,'_',o.sftwd_hrdwd)
+            ),group_totals AS (
+                SELECT
+                    raster_ecocode,
+                    effective_eco,
+                    effective_ecocode,
+                    effective_species_symbol_map,
+                    SUM(tree_count) AS group_count
+                FROM full_table
+                GROUP BY raster_ecocode, effective_species_symbol_map, effective_eco, effective_ecocode
             ),
-        dominant AS (
-        SELECT
-                raster_ecocode,
-                effective_eco,
-                effective_ecocode,
-                effective_species_symbol_map
-        FROM (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY raster_ecocode, effective_species_symbol_map ORDER BY group_count DESC) AS rn
-            FROM group_totals
-        ) WHERE rn = 1
-)
-        SELECT
-        d.effective_eco,
-        d.effective_ecocode,
-        d.effective_species_symbol_map,
-        t.*
-FROM full_table t
-JOIN dominant d
-    ON t.raster_ecocode = d.raster_ecocode
-    AND t.effective_species_symbol_map = d.effective_species_symbol_map;
-
+            dominant AS (
+                SELECT
+                    raster_ecocode,
+                    effective_eco,
+                    effective_ecocode,
+                    effective_species_symbol_map
+                FROM (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY raster_ecocode, effective_species_symbol_map ORDER BY group_count DESC) AS rn
+                    FROM group_totals
+                ) WHERE rn = 1
+            )
+            SELECT
+                d.effective_eco,
+                d.effective_ecocode,
+                d.effective_species_symbol_map,
+                t.*
+            FROM full_table t
+            JOIN dominant d
+                ON t.raster_ecocode = d.raster_ecocode
+                AND t.effective_species_symbol_map = d.effective_species_symbol_map;
         "
 
     #println(sql)
