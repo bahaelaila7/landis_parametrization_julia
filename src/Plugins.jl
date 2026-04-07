@@ -1,7 +1,8 @@
 module Plugins
     using ..PanCore
-    include("plugins/BaseSite.jl")
+    include("plugins/BaseSitePlugin.jl")
     include("plugins/BiomassSuccessionPlugin.jl")
-    
+    using .BaseSitePlugin
+    using .BiomassSuccessionPlugin
 end
 

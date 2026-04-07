@@ -16,28 +16,32 @@ csr_arrays(::Type{<:AbstractPlugin}, ::NamedTuple)  = NamedTuple()
         
 
 
-struct SiteSoA{Plugins <: Tuple, Refs <: NamedTuple, Scalars <: NamedTuple, Csr <: NamedTuple}
+mutable struct SiteSoA{Plugins <: Tuple, Refs <: NamedTuple, Scalars <: NamedTuple, Csr <: NamedTuple}
     n ::Int
     refs :: Refs
     scalar :: Scalars
     csr :: Csr
 end
 
+const AnySoA{P} = SiteSoA{P, <: NamedTuple, <: NamedTuple, <: NamedTuple}
+
 struct SiteView{S}
     soa :: S
     i :: Int
 end
 
-function process_plugin!(::SiteView, ::Type{<:AbstractPlugin}, ::Int)  end
+function process_plugin!(::AnySoA{P}, ::Type{<:AbstractPlugin}, ::Int; ctx::C) where {P, C<:NamedTuple}  end
 
-@inline function build_refs(counts::Vector{Int32})::Vector{Int32}
-    n       = length(counts)
-    refs    = Vector{Int32}(undef, n + 1)
+function build_refs!(refs::Vector{Int32}, counts::Vector{Int32})
     refs[1] = Int32(1)
-    for i in 1:n
+    for i in 1:length(counts)
         refs[i+1] = refs[i] + counts[i]
     end
     return refs
+end
+
+@inline function build_refs(counts::Vector{Int32})::Vector{Int32}
+    build_refs!(Vector{Int32}(undef, length(counts) + 1), counts)
 end
 
 function _build_refs_expr(plugin_types)
@@ -141,32 +145,7 @@ end
         $expr
     end
 end
-#function _build_csr_expr(plugin_types)
-#    foldl(
-#        (a,b) -> :(merge($a,$b)),
-#        [:(csr_arrays($P, nnz)) for P in plugin_types];
-#        init = :(NamedTuple())
-#    )
-#end
-#@generated function SiteSoA{Plugins}(count::C) where {Plugins, C<: NamedTuple}
-#    # some meta-programming to reduce runtime pointer jumping and 
-#    # utilize more cache hits
-#    # this function constructs the effective site struct after designating which plugins to use
-#    # basically merging the fields into one struct before compilation
-#    plugin_types = Plugins.parameters #fieldtypes(Plugins)
-#    refs_expr = _build_refs_expr(plugin_types)
-#    scalar_expr = _build_scalar_expr(plugin_types)
-#    csr_expr = _build_csr_expr(plugin_types)
-#    quote
-#        n = length(first(counts))
-#        nnz = map(v -> Int(sum(v)), counts)
-#        refs = $refs_expr
-#        scalar = $scalar_expr
-#        csr = $csr_expr
-#        SiteSoA{Plugins}(n, refs, scalar, csr)
-#
-#    end
-#end
+
 function SiteSoA{Plugins}(counts::C) where {Plugins, C <: NamedTuple}
     plugin_types = Plugins.parameters
     n   = length(first(counts))
@@ -197,59 +176,158 @@ function SiteSoA{Plugins}(counts::C) where {Plugins, C <: NamedTuple}
     SiteSoA{Plugins, typeof(refs), typeof(scalar), typeof(csr)}(n, refs, scalar, csr)
 end
 
-#@generated function SiteSoAA{Plugins}(count::C) where {Plugins, C<: NamedTuple}
-#    # some meta-programming to reduce runtime pointer jumping and 
-#    # utilize more cache hits
-#    # this function constructs the effective site struct after designating which plugins to use
-#    # basically merging the fields into one struct before compilation
-#    plugin_types = Plugins.parameters #fieldtypes(Plugins)
-#
-#    scalar_expr = foldl(
-#        (a,b) -> :(merge($a, $b)),
-#        [:(scalar_arrays($P, n)) for P in plugin_types]
-#    )
-#
-#    # this is for attributes that have different counts per site
-#    # think sp_mature has its counts based on the number of species at the site
-#    # while c_bio is basically by number of cohorts
-#    # so each csr field has a count_key (:species, :cohort,...) with it
-#    ref_pairs = Expr[]
-#    #@show Plugins
-#    #@show typeof(Plugins)
-#    #@show Plugins.parameters[1].parameters
-#    for P in plugin_types
-#        #@show P
-#        #@show typeof(P)
-#        #@show csr_fields(P)
-#        for (field, count_key) in pairs(csr_fields(P))
-#            push!(ref_pairs, :($(QuoteNode(field)) => build_refs(counts[$(QuoteNode(count_key))])))
-#        end
-#    end
-#
-#    # making all into one named tuple
-#    refs_expr = :(NamedTuple{$(Tuple(first.(ref_pairs)))}(tuple(last.(ref_pairs)...)))
-#    
-#    csr_expr = foldl(
-#        (a,b) -> :(merge($a, $b)),
-#        [:(csr_arrays($P, nnz)) for P in plugin_types],
-#    )
-#
-#    # ok now assembling
-#    quote
-#
-#        n = length(first(counts))
-#        nnz = map(v -> Int(sum(v)), counts)
-#        refs = $refs_expr
-#        scalar = $scalar_expr
-#        csr = $csr_expr
-#        SiteSoA{Plugins}(n, refs, scalar, csr)
-#    end
-#
-#end
-
-function _build_process_calls(plugin_types)
-    [:(process_plugin!(sv, $P, t)) for P in plugin_types]
+@generated function _csr_field_to_key(::Val{P}) where {P}
+    plugin_types = P.parameters
+    field_names  = Symbol[]
+    key_values   = Symbol[]
+    for PT in plugin_types
+        for (field, key) in pairs(csr_fields(PT))
+            push!(field_names, field)
+            push!(key_values,  key)
+        end
+    end
+    nt_type = NamedTuple{Tuple(field_names), NTuple{length(field_names), Symbol}}
+    :($nt_type($(Tuple(key_values))))
 end
+
+@kwdef struct RegrowOptions
+    grow_only     :: Bool = false   # default is compacting
+    multiple_of_2 :: Bool = true   # default is exact
+end
+
+function effective_counts(new_counts::Vector{Int32},
+                          old_refs::Vector{Int32},
+                          opts::RegrowOptions)
+    n = length(new_counts)
+    ec = Vector{Int32}(undef, n)
+    for i in 1:n
+        old_count = old_refs[i+1] - old_refs[i]
+        c = opts.grow_only ? max(new_counts[i], old_count) : new_counts[i]
+        c = max(c, 1)
+        if opts.multiple_of_2
+            c = Int32(2^ceil(Int, log2(max(c, 1))))
+        end
+        @assert c > 0
+        ec[i] = c
+    end
+    return ec
+end
+
+function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
+                       new_counts::NamedTuple,
+                       options::NamedTuple = NamedTuple()) where {P,Refs,Scalars,Csr}
+
+    field_to_key = _csr_field_to_key(Val(P)) # compile-time, need to lift types
+    old_refs     = getfield(soa, :refs)
+    old_csr      = getfield(soa, :csr)
+    n            = soa.n
+
+    for key in keys(new_counts)
+        opts     = hasfield(typeof(options), key) ? getfield(options, key) : RegrowOptions()
+        ec       = effective_counts(new_counts[key], getfield(old_refs, key), opts)
+        cur_refs = getfield(old_refs, key)
+        new_refs = build_refs(ec)
+        new_nnz  = Int(new_refs[end]) - 1
+        #println("new counts: $(ec)")
+        #println("cur_refs: $(cur_refs)")
+        #println("new_refs: $(new_refs)")
+
+        all_growing = true
+        all_shrinking = true
+        for i in 1:n
+            all_growing &= ec[i] >= (cur_refs[i+1] - cur_refs[i])
+            all_shrinking &= ec[i] <= (cur_refs[i+1] - cur_refs[i])
+        end
+
+        #check if no mix of growing and shrinking
+        #if mix, we can only allocat and copy, not resize and shift
+        #all_growing = all(new_refs[i] >= cur_refs[i] for i in 1:n+1)
+        #all_shrinking = !all_growing && all(new_refs[i] <= cur_refs[i] for i in 1:n+1)
+
+        updated_csr = old_csr
+
+        for csr_array_name in keys(old_csr)
+            getfield(field_to_key, csr_array_name) === key || continue
+            #println(csr_array_name)
+            arr = getfield(old_csr, csr_array_name)
+
+            if all_growing
+                #println("all_growing")
+                #println(length(arr))
+                resize!(arr, new_nnz)
+                #println(length(arr))
+                for i in n:-1:1
+                    old_lo = Int(cur_refs[i])
+                    old_hi = Int(cur_refs[i+1]) - 1
+                    new_hi = Int(new_refs[i+1]) - 1
+                    new_lo = Int(new_refs[i])
+                    new_hi = Int(new_refs[i+1]) - 1
+                    new_lo == old_lo && continue
+                    n_copy = old_hi - old_lo + 1
+                    #if(new_lo == old_lo) #tinue # no shift in location, no need to copy
+                    #    println("\t Nopying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
+                    #else
+                    #    println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
+                        copyto!(arr, new_lo, arr, old_lo, n_copy)
+                    #end
+                end
+            elseif all_shrinking
+                #println("all_shrinking")
+                #println(length(arr))
+                for i in 1:n
+                    old_lo = Int(cur_refs[i])
+                    new_lo = Int(new_refs[i])
+                    old_hi = Int(cur_refs[i+1]) - 1
+                    new_hi = Int(new_refs[i+1]) - 1
+                    new_lo == old_lo && continue
+                    n_copy = new_hi - new_lo + 1
+                    #if new_lo == old_lo
+                    #    println("\t Nopying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
+                    #else
+                    #    println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
+                        copyto!(arr, new_lo, arr, old_lo, n_copy)
+                    #end
+                end
+                resize!(arr, new_nnz)
+                #println(length(arr))
+
+            else
+                #println("mix")
+                # some grow some shrin
+                tmp = similar(arr, new_nnz)
+                #println(length(arr))
+                #println(length(tmp))
+                for i in 1:n
+                    old_lo = Int(cur_refs[i])
+                    old_hi = Int(cur_refs[i+1]) - 1
+                    new_lo = Int(new_refs[i])
+                    new_hi = Int(new_refs[i+1]) - 1
+                    n_copy = min(old_hi - old_lo + 1, new_hi - new_lo + 1)
+                    #println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to tmp[$(new_lo):$(new_hi)]")
+                    copyto!(tmp, new_lo, arr, old_lo, n_copy)
+                end
+                updated_csr = merge(updated_csr, NamedTuple{(csr_array_name,)}((tmp,)))
+            end
+        end
+
+        soa.refs = merge(old_refs, NamedTuple{(key,)}((new_refs,)))
+        soa.csr  = updated_csr
+    end
+
+    return soa
+end
+
+@generated function csr_count_key(::AnySoA{P}, ::Val{F}) where {P, F}
+    plugin_types = P.parameters
+    for PT in Plugins
+        for (field, key) in pairs(csr_fields(PT))
+            field === F && return QuoteNode(key)
+        end
+    end
+    :(error("field $F not found"))
+end
+
+
 
 function _build_getproperty_expr(scalar_names, csr_names)
     expr = :(error("field ", f, " not found in SiteView"))
@@ -304,20 +382,6 @@ function _build_setproperty_expr(scalar_names, csr_names)
     expr
 end
 
-#@generated function Base.getproperty(sv::SiteView{S}, f::Symbol) where {S}
-#    scalar_types = fieldtype(S, :scalar)
-#    csr_types = fieldtype(S, :csr)
-#    scalar_names = fieldnames(scalar_types)
-#    csr_names   = fieldnames(csr_types)
-#    expr        = _build_getproperty_expr(scalar_names, csr_names)
-#    quote
-#        f === :soa && return getfield(sv, :soa)
-#        f === :i   && return getfield(sv, :i)
-#        soa = getfield(sv, :soa)
-#        i   = getfield(sv, :i)
-#        $expr
-#    end
-#end
 @generated function Base.setproperty!(sv::SiteView{S}, f::Symbol, v) where {S}
     scalar_types = fieldtype(S, :scalar)
     csr_types = fieldtype(S, :csr)
@@ -333,68 +397,25 @@ end
     end
 end
 
-@generated function process_site!(sv::SiteView{S}, t::Int) where {S}
-    plugin_types = S.parameters[1].parameters
-    calls        = _build_process_calls(plugin_types)
-    quote $(calls...) end
-end
 
 @inline getsite(soa::SiteSoA, i::Int) = SiteView(soa, i)
 
-#@generated function Base.getproperty(sv::SiteView{S}, f::Symbol) where {S}
-#        # redefining getproperty based on plugins before compilation
-#        scalar_names = fieldnames(fieldtype(S, :scalar))
-#        csr_names = fieldnames(fieldtype(S, :csr))
-#        
-#        # building a nested if/else chain to find the field within the struct
-#        expr = :(error("field ", f, " not found in SiteView"))
-#        
-#        for fn in reverse(csr_names)
-#            expr = quote
-#                    if f === $(QuoteNode(fn))
-#                        soa = getfield(sv, :soa)
-#                        i = getfield(sv, :i)
-#                        refs = getfield(getfield(soa, :refs), $(QuoteNode(fn)))
-#                        csr = getfield(getfield(soa, :csr), $(QuoteNode(fn)))
-#                        lo = Int(refs[i])
-#                        hi = Int(refs[i+1]) - 1
-#                        return @view csr[lo:hi]
-#                    else
-#                        $expr
-#                    end
-#            end
-#        end
-#
-#        for fn in reverse(scalar_names)
-#            expr = quote
-#                    if f === $(QuoteNode(fn))
-#                        soa = getfield(sv, :soa)
-#                        i = getfield(sv, :i)
-#                        return getfield(getfield(soa, :scalar), $(QuoteNode(fn)))[i]
-#                    else
-#                        $expr
-#                    end
-#            end
-#        end
-#
-#        quote
-#            f === :soa && return getfield(sv, :soa)
-#            f === :i && return getfield(sv, :i)
-#            $expr
-#        end
-#end
-#
-#
-#@generated function process_site!(sv::SiteView{S}, t::Int) where {S}
-#    Plugins = fieldtype(S, :Plugins)
-#    calls   = [:(process_plugin!(sv, $P, t)) for P in fieldtypes(Plugins)]
-#    quote $(calls...) end
-#end
 
-function simulate_timestep!(soa::SiteSoA{P}, t::Int) where {P}
-    Threads.@threads :static for i in 1:soa.n
-        process_site!(getsite(soa, i), t)
-    end
+@generated function get_ctx(ctx::C, ::Type{P}) where {C<:NamedTuple, P}
+    key = nameof(P)   # e.g. :CarbonPlugin
+    hasfield(C, key) ? :(getfield(ctx, $(QuoteNode(key)))) : :(NamedTuple())
 end
+
+@generated function process_soa!(soa::AnySoA{P}, t::Int; ctx::C=NamedTuple()) where {P, C<:NamedTuple}
+    plugin_types = P.parameters
+    calls        = [:(process_plugin!(soa, $PT, t; ctx=get_ctx(ctx, $PT))) for PT in plugin_types]
+    quote $(calls...) end
+end
+function simulate_timestep!(soa::AnySoA{P}, t::Int; ctx::C=NamedTuple()) where {P, C<:NamedTuple}
+    process_soa!(soa, t; ctx = ctx)
+end
+
+
+
 
 end

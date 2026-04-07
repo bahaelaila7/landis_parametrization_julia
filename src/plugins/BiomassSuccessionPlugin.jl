@@ -5,10 +5,11 @@ export generate_biomass_params, generate_eco_params
 
 import Random, Distributions as Dists
 
-struct BiomassSuccessionPlugin <: AbstractPlugin end
+struct BiomassSuccession <: AbstractPlugin end
+const PluginType = BiomassSuccession
 
 
-PanCore.scalar_arrays(::Type{BiomassSuccessionPlugin}, n::Int) =
+PanCore.scalar_arrays(::Type{PluginType}, n::Int) =
     (
         B=Vector{FloatType}(undef, n),
         AGNPP=Vector{FloatType}(undef, n),
@@ -16,20 +17,20 @@ PanCore.scalar_arrays(::Type{BiomassSuccessionPlugin}, n::Int) =
         growthReduction=Vector{FloatType}(undef, n),
         prevYearMortality=Vector{FloatType}(undef, n),
         shade_class=Vector{UIntType}(undef, n),
-        eco_params=Vector{BiomassSuccessionEcoParams}(undef, n)
+        #eco_params=Vector{BiomassSuccessionEcoParams}(undef, n)
     )
 
-PanCore.csr_fields(::Type{BiomassSuccessionPlugin}) =
+PanCore.csr_fields(::Type{PluginType}) =
     (
         c_species=:cohort,
         c_age=:cohort,
         c_bio=:cohort,
-        c_m_tot=:cohort,
-        c_comp=:cohort,
+        c_m_tot=:cohort, #scratch space to avoid adhoc allocations
+        c_comp=:cohort, #scratch space to avoid adhoc allocations
         sp_mature=:species,
         sp_sprout=:species,
     )
-PanCore.csr_arrays(::Type{BiomassSuccessionPlugin}, nnz::NamedTuple) =
+PanCore.csr_arrays(::Type{PluginType}, nnz::NamedTuple) =
     (
         c_species=Vector{UIntType}(undef, nnz.cohort),
         c_age=Vector{FloatType}(undef, nnz.cohort),
@@ -40,13 +41,25 @@ PanCore.csr_arrays(::Type{BiomassSuccessionPlugin}, nnz::NamedTuple) =
         sp_sprout=Vector{Bool}(undef, nnz.species),
     )
 
-function PanCore.process_plugin!(sv::SiteView, ::Type{BiomassSuccessionPlugin}, current_time::Int)
-    succession_step!(current_time, sv)
-    reproduction_step!(current_time, sv)
+function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, current_time::Int; ctx::NamedTuple)
+    eco_params = ctx.eco_params
+    new_cohort_counts = zeros(Int32, soa.n)
+    Threads.@threads :static for i in 1:soa.n
+        @inbounds site = getsite(soa,i)
+        succession_step!(current_time, site, eco_params[site.eco_id])
+        reproduction_step!(current_time, site, eco_params[site.eco_id])
+        @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
+    end
+    PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
+    Threads.@threads :static for i in 1:soa.n
+        @inbounds site = getsite(soa,i)
+        sprouting_step!(current_time, site, eco_params[site.eco_id])
+    end
+
 end
 
 Base.@kwdef struct BiomassSuccessionEcoParams
-    SPINUP_MORTALITY_FRACTION::Vector{FloatType}
+    SPINUP_MORTALITY_FRACTION::FloatType
 
     D::Vector{FloatType}
     S::Vector{FloatType}
@@ -73,7 +86,7 @@ Base.@kwdef struct BiomassSuccessionParams
     ECO_SPECIES_IDS::Vector{Vector{UIntType}}
 
     # Global
-    SPINUP_MORTALITY_FRACTION::Vector{FloatType}
+    SPINUP_MORTALITY_FRACTION::FloatType
     SUFFICIENT_LIGHT::Vector{Vector{FloatType}}
 
     # ecoregion specific
@@ -145,7 +158,7 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
     n_species = length(species_list) |> UIntType
     n_ecoregions = length(eco_list) |> UIntType
     # TODO: species that do not show up for a specific ecoregion, make all their prob_estab = 0
-    SPINUP_MORTALITY_FRACTION = [0.15f0] #rand(Dists.Uniform(0f0,0.20f0))
+    SPINUP_MORTALITY_FRACTION = 0.15f0 #rand(Dists.Uniform(0f0,0.20f0))
     #println(typeof(SPINUP_MORTALITY_FRACTION))
 
     S = rand(rng, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), n_species) .|> FloatType #Random.rand(rng, FloatType, n_species),#
@@ -232,9 +245,40 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
 
 
 end
+@inline function calculate_initial_biomass(sp_max_anpp::FloatType, site_b::FloatType, b_max_eco::FloatType)::FloatType
+    b = exp(-FloatType(1.6f0) * site_b / b_max_eco)
+    if b < one(FloatType)
+        b = one(FloatType)
+    end
+    b *= sp_max_anpp
+    if b < FloatType(2.0f0)
+        b = FloatType(2.0f0)
+    end
+    return b
+end
 
-function reproduction_step!(current_time::Int, site::SiteView)
-    params = site.eco_params
+@inline function add_new_cohort!(site::SiteView, species::UIntType, age::FloatType, biomass::FloatType)
+    #println(site.live)
+    site.live += one(UIntType)
+    #println(site.live)
+    site.c_species[site.live] = species
+    site.c_age[site.live] = one(FloatType)
+    site.c_bio[site.live] = biomass
+end
+
+function sprouting_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
+        for sp in 1:length(site.sp_sprout)
+            if site.sp_sprout[sp]
+                new_biomass = calculate_initial_biomass(params.ANPP_MAX_SPP[sp],
+                site.B, params.B_MAX_ECO)
+                add_new_cohort!(site, UIntType(sp), one(FloatType), new_biomass)
+                site.B += new_biomass
+                site.sp_sprout[sp] = false
+            end
+        end
+end
+
+function reproduction_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
     # reproduction if live cohorts
     if site.live > zero(UIntType)
         #println(shade_class, params.SUFFICIENT_LIGHT)
@@ -262,13 +306,11 @@ function reproduction_step!(current_time::Int, site::SiteView)
     end
 end
 
-function succession_step!(current_time::Int, site::SiteView)
-    params = site.eco_params
+function succession_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
     B = zero(FloatType)
     C = zero(FloatType)
     #RNG = site.rng Random.seed!(site.rng_state)
     site.sp_mature .= false
-    site.sp_sprout .= false
 
     # advancing age, summing site biomass, computing competition, mortality due to age or random act of god
     for i in 1:site.live
@@ -296,7 +338,7 @@ function succession_step!(current_time::Int, site::SiteView)
             if mort_rng > params.PROB_MORT_SPP[sp]
                 m_age_factor = exp(params.D[sp] * (age / max_age - one(FloatType)))
                 if current_time <= 0
-                    m_age_factor += params.SPINUP_MORTALITY_FRACTION[]
+                    m_age_factor += params.SPINUP_MORTALITY_FRACTION
                 end
                 if m_age_factor < one(FloatType)
                     site.c_m_tot[i] *= m_age_factor
