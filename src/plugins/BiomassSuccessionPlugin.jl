@@ -1,7 +1,8 @@
 module BiomassSuccessionPlugin
 using ..PanCore
+using DataFrames
 
-export generate_biomass_params, generate_eco_params
+export generate_biomass_params, generate_eco_params, spinup_cohorts!
 
 import Random, Distributions as Dists
 
@@ -257,13 +258,104 @@ end
     return b
 end
 
-@inline function add_new_cohort!(site::SiteView, species::UIntType, age::FloatType, biomass::FloatType)
+@inline function add_cohort!(site::SiteView, species::UIntType, age::FloatType, biomass::FloatType)
     #println(site.live)
     site.live += one(UIntType)
+    if age > one(FloatType)
+        site.old += 1
+    end
     #println(site.live)
     site.c_species[site.live] = species
-    site.c_age[site.live] = one(FloatType)
+    site.c_age[site.live] = age
     site.c_bio[site.live] = biomass
+end
+function spinup_cohorts!(soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Array{BiomassSuccessionEcoParams})
+    #show(spinup_cohorts.year_deficit)
+    # year deficit is establisment year.
+    # however, I cannot add with age = 0, therefore it'll have to show up the year after with age=1
+    # therefore year_age_one = year_deficit + 1
+    current_year = minimum(spinup_cohorts.year_deficit) + 1
+    # max_current_year = max(year_deficit) + 1 = -2 + 1 = -1
+    # will have to be careful with simulation not to trigger succession year 0 twice
+    ## current_year will go down to -1, since the last estab cohort
+    ## would be 1 year old, so a year before the last start_measdate
+    #pbar = ProgressBar(total = -current_year)
+    #println("current_year, $(current_year), year_deficit+1, $(first(spinup_cohorts).year_deficit + 1)")
+    new_cohort_counts = zeros(Int32, soa.n)
+    for row in eachrow(spinup_cohorts)
+        #println(row)
+        while current_year < row.year_deficit + 1
+            #println("current_year, $(current_year), year_deficit+1, $(row.year_deficit + 1), succession: $(current_year < row.year_deficit+1) ")
+            Threads.@threads :static for i in 1:soa.n
+                @inbounds site = getsite(soa,i)
+                @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
+            end
+            PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
+            Threads.@threads :static for i in 1:soa.n
+                @inbounds site = getsite(soa,i)
+                sprouting_step!(current_year, site, eco_params[site.eco_id])
+                succession_step!(current_year, site, eco_params[site.eco_id])
+                reproduction_step!(current_year, site, eco_params[site.eco_id])
+            end
+            #grow all active
+            #PanCore.process_plugin!(soa, PluginType, t; ctx=(eco_params=eco_params,))
+            #Threads.@threads :static for site in sites #
+            #    if site.active
+            #        #println(site.mapcode)
+            #        succession_step!(current_year, site, eco_params)
+            #        reproduction_step!(current_year, site, eco_params)
+            #    end
+            #end
+            current_year += 1
+        end
+        #check and add cohort
+        site = getsite(soa, row.plot_id)
+        #print(site)
+        # make it active if not already
+        site.active = true
+        # check if site has a young cohort of species
+        # if not, add one with initial biomass calculated
+        add_new_cohort = true
+        sp = row.eco_species_id
+        if site.old < site.live  # there are young cohorts
+            for idx in (site.old+1):site.live
+                if site.c_species[idx] == sp #found one, no need to add
+                    add_new_cohort = false
+                    break
+                end
+            end
+        end
+        #println("Need to added cohort: $(add_new_cohort), current_year= $(current_year)")
+        if add_new_cohort
+            site.sp_sprout = true
+            #params = eco_params[site.eco_id]
+            #try
+                #initial_biomass = calculate_initial_biomass(params.B_MAX_SPP[sp], site.B, params.B_MAX_ECO)
+                #add_new_cohort!(site, UIntType(sp), one(FloatType), initial_biomass)
+
+            #catch e
+            #    println(row)
+            #    println(site)
+            #    println(params)
+            #    rethrow(e)
+            #end
+        end
+        #println("Adding cohort $(row.species_symbol_map) to ", row.plot_id)
+    end
+    Threads.@threads :static for i in 1:soa.n
+        @inbounds site = getsite(soa,i)
+        @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
+    end
+    PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
+    Threads.@threads :static for i in 1:soa.n
+        @inbounds site = getsite(soa,i)
+        sprouting_step!(current_time, site, eco_params[site.eco_id])
+    end
+    @assert current_year == -1 "$(current_year)"
+    #update(pbar)
+    # cohorts with year_deficit = 0 will have been added but not succeeded yet
+
+
 end
 
 function sprouting_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
@@ -271,7 +363,7 @@ function sprouting_step!(current_time::Int, site::SiteView, params::BiomassSucce
             if site.sp_sprout[sp]
                 new_biomass = calculate_initial_biomass(params.ANPP_MAX_SPP[sp],
                 site.B, params.B_MAX_ECO)
-                add_new_cohort!(site, UIntType(sp), one(FloatType), new_biomass)
+                add_cohort!(site, UIntType(sp), one(FloatType), new_biomass)
                 site.B += new_biomass
                 site.sp_sprout[sp] = false
             end

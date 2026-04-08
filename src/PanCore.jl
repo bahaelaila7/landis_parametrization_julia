@@ -1,6 +1,6 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_site!, simulate_timestep!, FloatType, UIntType, Plugins
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins
 abstract type AbstractPlugin end
 
 include("types.jl")

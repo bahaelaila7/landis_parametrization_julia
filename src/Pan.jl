@@ -2,6 +2,8 @@ module Pan
 include("PanCore.jl")
 include("Plugins.jl")
 include("Parametrization.jl")
+include("Search.jl")
+include("Data.jl")
 #for file in filter(f -> endswith(f,"Plugin.jl"), readdir("src/plugins";join=false))
 #    println("including plugin $(file)")
 #    include(joinpath("plugins", file))
@@ -11,26 +13,226 @@ using .PanCore
 using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin
 import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
+using .Search: SA
+import .Data as Data
+import Dates
 
 
 import Random
 import Distributions as Dists
+import Term.Progress as TProgress
+using DataFrames
 
 
 
 const ActivePlugins = (BaseSitePlugin.BaseSite,BiomassSuccessionPlugin.BiomassSuccession)
 const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 
+function make_sites(splots::DataFrame, eco_species_ids::Array{Array{Int}}; rng::Random.AbstractRNG, spinup::Bool = true)
+    #eco_ids = unique(select(splots, [:eco_id]))
+    #n_species = maximum(splots.species_id)
+    #plot_ids = unique(select(splots, [:plot_id]))
+    #plot_eco_ids = unique(select(splots, [:plot_id, :eco_id]))
+    #plot_eco_ids = sort!(plot_eco_ids, [:plot_id])
+    df = unique(select(splots, [:plot_id, :eco_id]))
+    n = nrow(df)
+    #plot_eco_ids = sort!(plot_eco_ids, [:plot_id])
+    #@assert (nrow(plot_ids) == nrow(plot_eco_ids)) "Error: plot_ids and plot_eco_ids are not of equal length!"
 
+    #index = eco_id * plot_id
+
+    #splots_dict::Dict{Int64,DataFrame} = Dict(
+    #    plt_key.plt_cn => DataFrame(plt_df)
+    #    for (plt_key, plt_df) in pairs(groupby(splots, :plt_cn, sort=false))
+    #)
+    species_counts = [Int32(length(eco_species_ids[row.eco_id])) for row in eachrow(df)]
+    if spinup
+        cohort_counts= fill(Int32(2), n)
+        soa = ActiveSoA((cohort=cohort_counts, species = species_counts))
+        Threads.@threads :static for i in 1:nrow(df) 
+            @inbounds begin
+                site = getsite(soa, i)
+                site.active=false
+                site.rng=Random.Xoshiro(rand(rng, UInt64))
+                site.ecocode=UIntType(df.eco_id[i])# no ecocode coming from raster, relying on eco_id
+                site.eco_id=df.eco_id[i]
+                site.mapcode=UIntType(df.plot_id[i]) # for parametrization, plot_id is global index, no raster
+                site.ref_cn=UIntType(df.plot_id[i])
+                site.old=zero(UIntType)
+                site.live=zero(UIntType)
+                site.B=zero(FloatType)
+                site.AGNPP=zero(FloatType)
+                site.capacityReduction=one(FloatType)
+                site.growthReduction=one(FloatType)
+                site.prevYearMortality=zero(FloatType)
+                site.shade_class=one(UIntType)
+                site.c_species.=zero(UIntType)
+                site.c_age.=zero(FloatType)
+                site.c_bio.=zero(FloatType)
+                site.c_m_tot.=zero(FloatType)
+                site.c_comp.=zero(FloatType)
+                site.sp_mature.=false
+                site.sp_sprout.=false
+            end
+        end
+        return soa
+    else
+        splots_dict = Dict(
+            (plt_key.plot_id, plt_key.eco_id) => begin 
+                plt_df = sort!(DataFrame(plt_df), :age_calc, rev=true)
+                plt_df.sim_year .= Dates.value.(Dates.Day.(plt_df.measdate - plt_df.start_measdate)) ./ 365.25 .|> round .|> Int
+                Data.get_initial_cohorts(plt_df)
+    end
+            for (plt_key, plt_df) in pairs(groupby(splots, [:plot_id, :eco_id], sort=false))
+        )
+        df_keys = sort!(collect(keys(splots_dict)))
+
+        cohort_counts = [Int32(nrow(splots_dict[key])) for key in df_keys]
+        soa = ActiveSoA((cohort=cohort_counts, species = species_counts))
+        Threads.@threads :static for i in 1:length(df_keys)
+                    @inbounds begin
+                        key = df_keys[i]
+                        plt_df = splots_dict[key]
+                        (plot_id, eco_id) = key
+                        initial_cohorts=plt_df
+                        #n_cohorts = nrow(initial_cohorts)
+                        #cap = UIntType(2^ceil(log2(n_cohorts)))
+                        site = getsite(soa, i)
+                        site.active=true
+                        site.rng=Random.Xoshiro(rand(rng, UInt64))
+                        site.ecocode=UIntType(eco_id) #UIntType(getproperty(p, ecocode_field)),
+                        site.eco_id=eco_id
+                        site.mapcode=UIntType(plot_id)
+                        site.ref_cn=plot_id
+                        site.old=zero(UIntType)
+                        site.live=zero(UIntType)
+                        site.B=zero(FloatType)
+                        site.AGNPP=zero(FloatType)
+                        site.capacityReduction=one(FloatType)
+                        site.growthReduction=one(FloatType)
+                        site.prevYearMortality=zero(FloatType)
+                        site.shade_class=one(UIntType)
+                        site.c_species.=zero(UIntType)
+                        site.c_age.=zero(FloatType)
+                        site.c_bio.=zero(FloatType)
+                        site.c_m_tot.=zero(FloatType)
+                        site.c_comp.=zero(FloatType)
+                        site.sp_mature.=false
+                        site.sp_sprout.=false
+                        for row in eachrow(initial_cohorts)
+                            BiomassSuccessionPlugin.add_cohort!(site, UIntType(row.eco_species_id), FloatType(row.age_calc), FloatType(row.agb_sum))
+                        end
+                    end
+        end
+        return soa
+    end
+end
 
 function main(ARGS)
+    rng = Random.Xoshiro(2123)
+    loss_params = PU.LossParams(
+        age_bins=PU.AgeBins(
+            bins_idx=[5, 10, 20, 40, 60, 80] .|> Int,
+            last_bin_open=true
+        ),
+        smoothing_weights=PU.get_smoothing_window(; smoothing_window=1, smoothing_variance=FloatType(1.0f0))
+    )
+    filter_ecos = String[]
+    println(Data)
+    splots, eco_list, species_list, eco_species_ids = Data.prepare_parametrization_data(;cohorts_db_path="../data_eco_l4_cohorts.db", 
+                                      tablename="data_eco_cohorts_g",
+                                      output_dir="./outputs",
+                                      skip_disturbances=true,
+                                      filter_ecos=filter_ecos,
+                                      RNG=rng)
+    n_species = length(species_list)
+    n_ecoregions = length(eco_list)
+    n_plots = maximum(splots.plot_id)
+    #println(eco_list)
+    #println(species_list)
+    #println(eco_species_ids)
+    #println(splots)
+    #return
+    println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
+    println("Initiating param distributions")
+    #greet()
+    #println(splots)
+    #println(splots)
+    max_age = maximum(splots.age_calc)
+    #precomupte loss for missing entries
+    println("Preprocessing plot results (smoothing and binning)")
+    debug = false
+    no_spinup = true
+    @time spdf = PU.smoothen_ref_years(splots, loss_params, max_age; debug = debug)
+    @assert minimum(spdf.sim_year)== 0 "$(spdf.sim_year)"
+    #show(spdf)
+    println("Creating comparison years")
+    @time spdf_plts = Data.make_spdf_dict(spdf, eco_species_ids)
+    println("Marking sim years")
+    @time site_sim_years = Data.get_site_sim_years(spdf)
+    #println(site_sim_years)
+    #return
+    #show(site_sim_years)
+
+    println("Marking spinup cohorts")
+    @time spinup_cohorts = Data.get_spinup_cohorts(splots)
+    #initial_cohorts = get_initial_cohorts(splots)
+    println("beginning trials")
+    #SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
+    #Profile.clear()
+    #Profile.init(n=10^7, delay=0.001)
+    ref_soa = make_sites(splots,eco_species_ids; rng = rng, spinup = false)
+    SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
+
+
+    param_dists =  BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
+    bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng = rng)
+
+    max_sim_year = 130
+    TProgress.@track for trial in 1:300
+        soa = deepcopy(ref_soa)
+
+        bio_params = PU.mutate_params(bio_params, param_dists; rng = rng)
+        eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
+        ctx = (BiomassSuccession = (eco_params = eco_params,),)
+        years_results = Vector{Parametrization.SiteLoss}(undef, max_sim_year + 1)
+        for current_sim_year in 0:max_sim_year
+            #println("\ttimestep $(t)")
+            sites_results = Vector{Parametrization.SiteLoss}(undef, soa.n)
+            PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
+            Threads.@threads :static for i in 1:soa.n
+                @inbounds begin
+                    site = getsite(soa, i)
+                    !site.active && continue
+                    spdf_plt = spdf_plts[site.ref_cn]
+                    sim_years = site_sim_years.sim_years[site.mapcode]
+                    if current_sim_year in sim_years
+                        sloss = Parametrization.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year] , loss_params; debug = debug)
+                        sites_results[i] = sloss
+                    end
+                end
+            end
+            year_results_no_missing = collect(Parametrization.skipundef(sites_results))
+            if length(year_results_no_missing) > 0
+                current_year_results = sum(year_results_no_missing)
+                years_results[current_sim_year+1] = current_year_results
+            end
+        end
+        run_result = sum(Parametrization.skipundef(years_results))
+        @assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
+        println(convert(Float64,run_result))
+    end
+
+end
+
+function main2(ARGS)
     #
     println("hello")
     rng = Random.Xoshiro(2123)
     #Random.seed!(42)
     #println(typeof(ActiveSoA))
     #println(
-    n = 1000
+    n = 20
     n_species = 14
     species_list = ["s_$(i)" for i in 1:n_species]
     eco_list = ["e_1"]
@@ -52,9 +254,8 @@ function main(ARGS)
     #z .= 1.0f0
     #@code_llvm z =getproperty(site, :c_bio)
     
-    @time for trial in 1:300
+    TProgress.@track for trial in 1:300
         soa = ActiveSoA(counts_tuple)
-        println(trial)
         for i in 1:n
             site = getsite(soa, i)
             #println(site)
@@ -69,9 +270,11 @@ function main(ARGS)
         end
         bio_params = PU.mutate_params(bio_params, param_dists; rng = rng)
         eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
+        ctx = (BiomassSuccession = (eco_params = eco_params,),)
         for t in 1:130
             #println("\ttimestep $(t)")
-            simulate_timestep!(soa, t; ctx = (BiomassSuccession = (eco_params = eco_params,),))
+            PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, t; ctx=ctx.BiomassSuccession)
+            
         end
         #println(soa.refs.cohort[end]-1)
     end
