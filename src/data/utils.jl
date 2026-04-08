@@ -110,7 +110,8 @@ function make_splots(df::DataFrame)::Tuple{DataFrame,Array{String},Array{String}
 end
 function get_spinup_cohorts(df::DataFrame)
     spinup_cohorts = df[df.year_deficit.<-1, :]
-    spinup_cohorts = sort!(spinup_cohorts, :year_deficit)
+    spinup_cohorts = unique(select(spinup_cohorts, [:year_deficit, :plot_id, :eco_id, :eco_species_id ]))
+    spinup_cohorts = sort!(spinup_cohorts, [:year_deficit, :plot_id, :eco_id, :eco_species_id ])
     return spinup_cohorts
 end
 

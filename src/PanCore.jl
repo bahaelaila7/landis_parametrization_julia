@@ -1,6 +1,6 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync
 abstract type AbstractPlugin end
 
 include("types.jl")
@@ -31,6 +31,14 @@ struct SiteView{S}
 end
 
 function process_plugin!(::AnySoA{P}, ::Type{<:AbstractPlugin}, ::Int; ctx::C) where {P, C<:NamedTuple}  end
+
+function with_thread_sync(f::F) where {F}
+    local result
+    Threads.@threads for _ in 1:1
+        result = f()
+    end
+    return result
+end
 
 function build_refs!(refs::Vector{Int32}, counts::Vector{Int32})
     refs[1] = Int32(1)
@@ -224,6 +232,7 @@ function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
 
     for key in keys(new_counts)
         opts     = hasfield(typeof(options), key) ? getfield(options, key) : RegrowOptions()
+        @assert length(new_counts[key]) == soa.n "key=$key: expected $(soa.n) counts, got $(length(new_counts[key]))"
         ec       = effective_counts(new_counts[key], getfield(old_refs, key), opts)
         cur_refs = getfield(old_refs, key)
         new_refs = build_refs(ec)
@@ -238,6 +247,14 @@ function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
             all_growing &= ec[i] >= (cur_refs[i+1] - cur_refs[i])
             all_shrinking &= ec[i] <= (cur_refs[i+1] - cur_refs[i])
         end
+        if all_growing && all_shrinking
+            @assert all(cur_refs[i] == new_refs[i] for i in 1:n+1)
+            #no change in counts, so no change in refs
+            continue
+        end
+
+
+
 
         #check if no mix of growing and shrinking
         #if mix, we can only allocat and copy, not resize and shift

@@ -48,6 +48,7 @@ function make_sites(splots::DataFrame, eco_species_ids::Array{Array{Int}}; rng::
     species_counts = [Int32(length(eco_species_ids[row.eco_id])) for row in eachrow(df)]
     if spinup
         cohort_counts= fill(Int32(2), n)
+        @debug cohort_counts
         soa = ActiveSoA((cohort=cohort_counts, species = species_counts))
         Threads.@threads :static for i in 1:nrow(df) 
             @inbounds begin
@@ -162,7 +163,7 @@ function main(ARGS)
     #precomupte loss for missing entries
     println("Preprocessing plot results (smoothing and binning)")
     debug = false
-    no_spinup = true
+    spinup = true
     @time spdf = PU.smoothen_ref_years(splots, loss_params, max_age; debug = debug)
     @assert minimum(spdf.sim_year)== 0 "$(spdf.sim_year)"
     #show(spdf)
@@ -181,21 +182,25 @@ function main(ARGS)
     #SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
     #Profile.clear()
     #Profile.init(n=10^7, delay=0.001)
-    ref_soa = make_sites(splots,eco_species_ids; rng = rng, spinup = false)
-    SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
+    ref_soa = make_sites(splots,eco_species_ids; rng = rng, spinup = spinup)
+    #SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
 
 
     param_dists =  BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
     bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng = rng)
 
-    max_sim_year = 130
+    max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
     TProgress.@track for trial in 1:300
-        soa = deepcopy(ref_soa)
+        #soa = deepcopy(ref_soa)
+        soa = make_sites(splots,eco_species_ids; rng = rng, spinup = spinup)
 
         bio_params = PU.mutate_params(bio_params, param_dists; rng = rng)
         eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
         ctx = (BiomassSuccession = (eco_params = eco_params,),)
         years_results = Vector{Parametrization.SiteLoss}(undef, max_sim_year + 1)
+        if spinup
+            soa = BiomassSuccessionPlugin.spinup_cohorts!(soa, spinup_cohorts, eco_params)
+        end
         for current_sim_year in 0:max_sim_year
             #println("\ttimestep $(t)")
             sites_results = Vector{Parametrization.SiteLoss}(undef, soa.n)

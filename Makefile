@@ -1,5 +1,6 @@
 THREADS ?= auto
-JULIA_CMD ?= ./julia_gdal.sh --project=.
+DEBUG ?= Pan
+JULIA_CMD ?= JULIA_DEBUG=$(DEBUG) ./julia_gdal.sh --project=.
 
 all: run
 

@@ -46,14 +46,14 @@ function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, curren
     eco_params = ctx.eco_params
     new_cohort_counts = zeros(Int32, soa.n)
     Threads.@threads :static for i in 1:soa.n
-        @inbounds site = getsite(soa,i)
+        @inbounds site = getsite(soa, i)
         succession_step!(current_time, site, eco_params[site.eco_id])
         reproduction_step!(current_time, site, eco_params[site.eco_id])
         @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
     end
     PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
     Threads.@threads :static for i in 1:soa.n
-        @inbounds site = getsite(soa,i)
+        @inbounds site = getsite(soa, i)
         sprouting_step!(current_time, site, eco_params[site.eco_id])
     end
 
@@ -269,34 +269,62 @@ end
     site.c_age[site.live] = age
     site.c_bio[site.live] = biomass
 end
-function spinup_cohorts!(soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Array{BiomassSuccessionEcoParams})
+function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Array{BiomassSuccessionEcoParams})
     #show(spinup_cohorts.year_deficit)
     # year deficit is establisment year.
     # however, I cannot add with age = 0, therefore it'll have to show up the year after with age=1
     # therefore year_age_one = year_deficit + 1
+    @debug spinup_cohorts
     current_year = minimum(spinup_cohorts.year_deficit) + 1
+    soa = empty_soa
     # max_current_year = max(year_deficit) + 1 = -2 + 1 = -1
     # will have to be careful with simulation not to trigger succession year 0 twice
     ## current_year will go down to -1, since the last estab cohort
     ## would be 1 year old, so a year before the last start_measdate
     #pbar = ProgressBar(total = -current_year)
     #println("current_year, $(current_year), year_deficit+1, $(first(spinup_cohorts).year_deficit + 1)")
-    new_cohort_counts = zeros(Int32, soa.n)
-    for row in eachrow(spinup_cohorts)
+    year_groups = groupby(spinup_cohorts, :year_deficit, sort=true)
+    for (year_deficit_key, rows) in pairs(year_groups)#eachrow(spinup_cohorts)
+        year_deficit = year_deficit_key.year_deficit
         #println(row)
-        while current_year < row.year_deficit + 1
-            #println("current_year, $(current_year), year_deficit+1, $(row.year_deficit + 1), succession: $(current_year < row.year_deficit+1) ")
-            Threads.@threads :static for i in 1:soa.n
-                @inbounds site = getsite(soa,i)
+        while current_year < year_deficit + 1
+            #println("current_year, $(current_year), year_deficit+1, $(year_deficit + 1), succession: $(current_year < year_deficit+1) ")
+            #@debug ("year $(current_year), before recounting $((soa.refs.cohort))")
+            #@debug (new_cohort_counts)
+            #new_cohort_counts .= Int32(0)
+            new_cohort_counts = zeros(Int32, soa.n)
+            Threads.@threads for i in 1:soa.n
+                @inbounds site = getsite(soa, i)
+                @assert Int(site.mapcode) == Int(i)
+                if i == 18
+                    @debug "thread recount after marking s18: live=$(site.live), sp_sprout=$(site.sp_sprout), species_refs=$(pointer(soa.refs.species))[$(soa.refs.species[18]):$(soa.refs.species[19]-1)]"
+                end
                 @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
             end
-            PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
-            Threads.@threads :static for i in 1:soa.n
-                @inbounds site = getsite(soa,i)
+            @debug ("year $(current_year), after recounting $((soa.refs.cohort))")
+            @debug (new_cohort_counts)
+            @debug ("adjusting")
+            soa = PanCore.with_thread_sync() do
+                PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
+            end
+            @debug ("sprouting")
+            Threads.@threads for i in 1:soa.n
+                @inbounds site = getsite(soa, i)
                 sprouting_step!(current_year, site, eco_params[site.eco_id])
+            end
+            @debug ("succession")
+            new_cohort_counts = zeros(Int32, soa.n)
+            Threads.@threads for i in 1:soa.n
+                @inbounds site = getsite(soa, i)
                 succession_step!(current_year, site, eco_params[site.eco_id])
                 reproduction_step!(current_year, site, eco_params[site.eco_id])
+                if i == 18
+                    @debug "thread recount after succession+repro s18: live=$(site.live), sp_sprout=$(site.sp_sprout), species_refs=$(pointer(soa.refs.species))[$(soa.refs.species[18]):$(soa.refs.species[19]-1)]"
+                end
+                @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
             end
+            @debug ("year $(current_year), recounting after repro $((soa.refs.cohort))")
+            @debug (new_cohort_counts)
             #grow all active
             #PanCore.process_plugin!(soa, PluginType, t; ctx=(eco_params=eco_params,))
             #Threads.@threads :static for site in sites #
@@ -308,71 +336,104 @@ function spinup_cohorts!(soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_par
             #end
             current_year += 1
         end
+        @debug ("Done catching up $(current_year)")
         #check and add cohort
-        site = getsite(soa, row.plot_id)
-        #print(site)
-        # make it active if not already
-        site.active = true
-        # check if site has a young cohort of species
-        # if not, add one with initial biomass calculated
-        add_new_cohort = true
-        sp = row.eco_species_id
-        if site.old < site.live  # there are young cohorts
-            for idx in (site.old+1):site.live
-                if site.c_species[idx] == sp #found one, no need to add
-                    add_new_cohort = false
-                    break
+
+        plots = combine(groupby(rows, [:plot_id, :eco_id], sort=false)) do rs
+            (; eco_species_ids=[rs.eco_species_id])
+        end
+        Threads.@threads for row in eachrow(plots)
+            site = PanCore.getsite(soa, Int(row.plot_id))
+            site.active = true
+            for sp in row.eco_species_ids
+                if site.sp_sprout[sp]
+                    continue
+                end
+                site.sp_sprout[sp] = !any(site.c_species[young_idx] == sp for young_idx in (site.old+1):site.live)
+                if site.sp_sprout[sp]
+
+                    @assert objectid(soa) == objectid(site.soa)
+                    #@assert site.soa.csr.sp_sprout === soa.csr.sp_sprout
+                    #println(site.sp_sprout)
+                    soa_sp_sprout = @view soa.csr.sp_sprout[soa.refs.species[Int(row.plot_id)]:soa.refs.species[Int(row.plot_id)+1]-1]
+                    #println(soa_sp_sprout)
+                    @assert pointer(site.sp_sprout) == pointer(soa_sp_sprout)
+                    @assert all(site.sp_sprout .== soa_sp_sprout)
+                    @assert pointer(soa.refs.species) == pointer(site.soa.refs.species)
+                    @assert length(soa.refs.species) == length(site.soa.refs.species)
+                    @assert (soa.refs.species[Int(row.plot_id)]:soa.refs.species[Int(row.plot_id)+1]-1) == (site.soa.refs.species[Int(row.plot_id)]:site.soa.refs.species[Int(row.plot_id)+1]-1)
+                    @debug ("year $(current_year), marking plot_id=$(row.plot_id), mapcode=$(site.mapcode), sp=$(sp), sum(sp_sprout)+live=$(sum(site.sp_sprout)+site.live), sp_sprout=$(site.sp_sprout), soa=$(objectid(soa)), site.soa=$(objectid(site.soa)), soa.sp_sprout[lo:hi]=$(soa.csr.sp_sprout[soa.refs.species[Int(row.plot_id)]:soa.refs.species[Int(row.plot_id)+1]-1]), soa.species_refs=$(pointer(soa.refs.species))[$(soa.refs.species[Int(row.plot_id)]):$(soa.refs.species[Int(row.plot_id)+1]-1)] , site.soa.species_refs=$(pointer(site.soa.refs.species))[$(site.soa.refs.species[Int(row.plot_id)]):$(site.soa.refs.species[Int(row.plot_id)+1]-1)]")
+                    #params = eco_params[site.eco_id]
+                    #try
+                    #initial_biomass = calculate_initial_biomass(params.B_MAX_SPP[sp], site.B, params.B_MAX_ECO)
+                    #add_new_cohort!(site, UIntType(sp), one(FloatType), initial_biomass)
+
+                    #catch e
+                    #    println(row)
+                    #    println(site)
+                    #    println(params)
+                    #    rethrow(e)
+                    #end
                 end
             end
+            @debug "post-mark verify s=$(row.plot_id): live=$(site.live), sp_sprout=$(site.sp_sprout), species_refs=$(pointer(soa.refs.species))[$(soa.refs.species[Int(row.plot_id)]):$(soa.refs.species[Int(row.plot_id)+1]-1)]"
         end
-        #println("Need to added cohort: $(add_new_cohort), current_year= $(current_year)")
-        if add_new_cohort
-            site.sp_sprout = true
-            #params = eco_params[site.eco_id]
-            #try
-                #initial_biomass = calculate_initial_biomass(params.B_MAX_SPP[sp], site.B, params.B_MAX_ECO)
-                #add_new_cohort!(site, UIntType(sp), one(FloatType), initial_biomass)
 
-            #catch e
-            #    println(row)
-            #    println(site)
-            #    println(params)
-            #    rethrow(e)
-            #end
-        end
+
+        #print(site)
+        # make it active if not already
+        # check if site has a young cohort of species
+        # if not, add one with initial biomass calculated
+        #add_new_cohort = true
+        #if site.old < site.live  # there are young cohorts
+        #    for young_idx in (site.old+1):site.live
+        #        if site.c_species[young_idx] == sp #found one, no need to add
+        #            add_new_cohort = false
+        #            break
+        #        end
+        #    end
+        #end
+        #println("Need to added cohort: $(add_new_cohort), current_year= $(current_year)")
         #println("Adding cohort $(row.species_symbol_map) to ", row.plot_id)
     end
-    Threads.@threads :static for i in 1:soa.n
-        @inbounds site = getsite(soa,i)
+    @debug ("year $(current_year), final before recounting $((soa.refs.cohort))")
+    new_cohort_counts = zeros(Int32, soa.n)
+    Threads.@threads for i in 1:soa.n
+        @inbounds site = getsite(soa, i)
         @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
     end
-    PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
-    Threads.@threads :static for i in 1:soa.n
-        @inbounds site = getsite(soa,i)
-        sprouting_step!(current_time, site, eco_params[site.eco_id])
+    @debug ("year $(current_year), final after recounting $((soa.refs.cohort))")
+    @debug (new_cohort_counts)
+    soa = PanCore.with_thread_sync() do
+        PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
+    end
+    Threads.@threads for i in 1:soa.n
+        @inbounds site = getsite(soa, i)
+        sprouting_step!(current_year, site, eco_params[site.eco_id])
     end
     @assert current_year == -1 "$(current_year)"
     #update(pbar)
     # cohorts with year_deficit = 0 will have been added but not succeeded yet
+    return soa
 
 
 end
 
 function sprouting_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
-        for sp in 1:length(site.sp_sprout)
-            if site.sp_sprout[sp]
-                new_biomass = calculate_initial_biomass(params.ANPP_MAX_SPP[sp],
+    for sp in 1:length(site.sp_sprout)
+        if site.sp_sprout[sp]
+            new_biomass = calculate_initial_biomass(params.ANPP_MAX_SPP[sp],
                 site.B, params.B_MAX_ECO)
-                add_cohort!(site, UIntType(sp), one(FloatType), new_biomass)
-                site.B += new_biomass
-                site.sp_sprout[sp] = false
-            end
+            add_cohort!(site, UIntType(sp), one(FloatType), new_biomass)
+            site.B += new_biomass
+            site.sp_sprout[sp] = false
         end
+    end
 end
 
 function reproduction_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
     # reproduction if live cohorts
-    if site.live > zero(UIntType)
+    if site.active && site.live > zero(UIntType)
         #println(shade_class, params.SUFFICIENT_LIGHT)
         #shade_probs = @view params.SUFFICIENT_LIGHT[:, site.shade_class]
         shade_probs = params.SUFFICIENT_LIGHT[site.shade_class+1] #julia is 1-indexed
@@ -399,6 +460,9 @@ function reproduction_step!(current_time::Int, site::SiteView, params::BiomassSu
 end
 
 function succession_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
+    if !site.active
+        return
+    end
     B = zero(FloatType)
     C = zero(FloatType)
     #RNG = site.rng Random.seed!(site.rng_state)
@@ -568,7 +632,7 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
 
 
     #println(current_time, "done")
-        
-        
+
+
 end
 end
