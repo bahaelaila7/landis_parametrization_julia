@@ -148,6 +148,7 @@ function start_writer(::Type{State}, output_dir::AbstractString; buffer_size::In
                 if job.is_new_best
                     try
                         @info "New best: $(convert(Float64,state.best.fx))" iter = state.i
+                        mkpath(output_dir)
                         JLD2.save_object(joinpath(output_dir, "search_state@$(state.i).jld2"), state)
                         PU.save_json(joinpath(output_dir, "best_params@$(state.i).json"), state.best.x)
                         JLD2.save_object(joinpath(output_dir, "best_params@$(state.i).jld2"), state.best.x)
@@ -387,7 +388,14 @@ end
 function main(ARGS; seed=123)
     Random.seed!(seed)
     rng = Random.Xoshiro(rand(UInt64))
-    parametrize(TRIALS=1000000; rng=rng)
+    parametrize(;
+     cohorts_db_path="../data_eco_l4_cohorts.db",
+    tablename="data_eco_cohorts",
+    output_dir="./outputs",
+    filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"],
+    skip_disturbances=true,
+    spinup=false,
+    TRIALS=1000000, rng=rng)
 end
 
 function main2(ARGS)

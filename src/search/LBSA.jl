@@ -78,7 +78,8 @@ end
                     if next_fit > best_fit && state._frozen_no_best_reheats >= state.restart_after_no_best_reheats
                         state._frozen_no_best_reheats = 0
                         state._warming_up = true
-                        state.current = state.best
+                        state.warm_up_record_uphill_only = true
+                        state.current = rand(state.best_iterations)[3] #state.best
                         state._t_list = [] #state._initial_t_list[:]
                         #state._t_max_idx = argmax(state._t_list)
                         accept = false
@@ -111,7 +112,7 @@ end
             best_fit = cur_fit
             state.best = state.current
             state.best_iteration = state.i
-            push!(state.best_iterations, (state.i, best_fit, state.best.fx))
+            push!(state.best_iterations, (state.i, best_fit, state.best))
             return true
         end
     end
@@ -122,16 +123,16 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf}
     best::LBSACandidate{Tx,Tf}
     current::LBSACandidate{Tx,Tf}
     rng::Random.Xoshiro
-    best_iterations::Vector{Tuple{Int,Float64,Tf}}
+    best_iterations::Vector{Tuple{Int,Float64,LBSACandidate{Tx,Tf}}}
     best_iteration::Int = 0
     current_iteration::Int = 0
     i::Int = 0
     max_iter::Int = 1000000
     warm_up_greedy_acceptance::Bool = false
     warm_up_record_uphill_only::Bool = true
-    temp_list_len::Int = 100
+    temp_list_len::Int = 200
     temp_list_oversample::Bool = false
-    stretch_len::Int = 100
+    stretch_len::Int = 200
     initial_acceptance_prob::Float64 = 0.9
     cooling_only_schedule::Bool = false
     up_attempt_stale_ratio::Float64 = 0.9
@@ -160,7 +161,7 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf}
     diff_avg::Float64 = 0.0
     prob_avg::Float64 = 0.0
 end
-function LBSAState(best::LBSACandidate{Tx,Tf}, current::LBSACandidate{Tx,Tf}, rng::Random.Xoshiro; best_iterations=Tuple{Int,Float64,Tf}[], initial_acceptance_prob=0.9, _neg_inv_lnp0=0.0, kwargs...) where {Tx,Tf}
+function LBSAState(best::LBSACandidate{Tx,Tf}, current::LBSACandidate{Tx,Tf}, rng::Random.Xoshiro; best_iterations=Tuple{Int,Float64,LBSACandidate{Tx,Tf}}[], initial_acceptance_prob=0.9, _neg_inv_lnp0=0.0, kwargs...) where {Tx,Tf}
     LBSAState{Tx,Tf}(; best=best, current=current, rng=rng,
         best_iterations=best_iterations,
         initial_acceptance_prob=initial_acceptance_prob,
