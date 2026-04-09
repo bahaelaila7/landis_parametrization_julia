@@ -267,7 +267,6 @@ function parametrize_LBSA(;ref_soa::ActiveSoA,output_dir::AbstractString, spdf_p
     try
 
         TProgress.@track for trial in 1:TRIALS
-            search_state.i = trial
             soa = deepcopy(ref_soa)
 
             bio_params = PU.mutate_params(bio_params, param_dists; rng=rng)
