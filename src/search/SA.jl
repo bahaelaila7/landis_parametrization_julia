@@ -8,11 +8,11 @@ Base.@kwdef struct SACandidate{Tx,Tf}
     fx::Tf
 end
 
-@inline simulated_annealing_acceptance_rule(rng, diff_fit, t) = exp(-diff_fit / t) > rand(rng,Float64)
+@inline simulated_annealing_acceptance_rule(rng, diff_fit, t) = exp(-diff_fit / t) > rand(rng, Float64)
 @inline threshold_accepting_acceptance_rule(rng, diff_fit, t) = diff_fit < t
 @inline function search_cmp!(next, state)
     diff_fit = convert(Float64, next.fx) - convert(Float64, state.current.fx)
-    prob = (diff_fit <= 0 ? 1.0 : exp(-diff_fit/state.t))
+    prob = (diff_fit <= 0 ? 1.0 : exp(-diff_fit / state.t))
     if isinf(state.diff_avg) || state.i == 1
         state.diff_avg = diff_fit
         state.prob_avg = prob
@@ -21,22 +21,26 @@ end
         state.prob_avg = state.running_average_ratio * (state.prob_avg - prob) + prob
     end
     if state.prob_avg < state.reheat_prob_threshold
-	state.reheat_iter_counter += 1
-	if state.reheat_iter_counter >= state.reheat_after_iters
-		state.reheat_iter_counter = 0
-		state.t = state.initial_t
-	end
+        state.reheat_iter_counter += 1
+        if state.reheat_iter_counter >= state.reheat_after_iters
+            state.reheat_iter_counter = 0
+            state.t = state.initial_t
+        end
     else
-	state.reheat_iter_counter = 0
+        state.reheat_iter_counter = 0
     end
     acceptance_rule = state.acceptance_rule == "TA" ? threshold_accepting_acceptance_rule : simulated_annealing_acceptance_rule
 
     if diff_fit < 0 || acceptance_rule(state.rng, diff_fit, state.t)
         state.current = next
         state.current_iteration = state.i
-        if convert(Float64, state.current.fx) < convert(Float64, state.best.fx)
+        best_fit = convert(Float64, state.best.fx)
+        cur_fit = convert(Float64, state.current.fx)
+        if  cur_fit < best_fit
+            best_fit = cur_fit
             state.best = state.current
             state.best_iteration = state.i
+            push!(state.best_iterations, (state.i, best_fit, state.best.fx))
             return true
         end
     end
@@ -51,6 +55,7 @@ Base.@kwdef mutable struct SAState{Tx,Tf}
     best::SACandidate{Tx,Tf}
     current::SACandidate{Tx,Tf}
     rng::Random.Xoshiro
+    best_iterations::Vector{Tuple{Int,Float64,Tf}}
     best_iteration::Int = 0
     current_iteration::Int = 0
     i::Int = 1
@@ -65,8 +70,13 @@ Base.@kwdef mutable struct SAState{Tx,Tf}
     diff_avg::Float64 = 0.0
     prob_avg::Float64 = 0.0
     reheat_prob_threshold::Float64 = 0.01
-    reheat_after_iters::Int=100
-    reheat_iter_counter::Int=0
+    reheat_after_iters::Int = 100
+    reheat_iter_counter::Int = 0
+end
+function SAState(best::SACandidate{Tx,Tf}, current::SACandidate{Tx,Tf}, rng::Random.Xoshiro; best_iterations=Tuple{Int,Float64,Tf}[], kwargs...) where {Tx,Tf}
+    SAState{Tx,Tf}(; best=best, current=current, rng = rng,
+        best_iterations=best_iterations,
+        kwargs...)
 end
 
 

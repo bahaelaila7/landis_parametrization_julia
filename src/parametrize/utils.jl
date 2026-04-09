@@ -5,6 +5,7 @@ import Setfield
 import Random
 import ImageFiltering
 import Dates
+import JSON3
 using DataFrames
 
 struct MutableParam{S}
@@ -241,7 +242,7 @@ end
 
 
 
-@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, sp_w_loss, sp_agb_loss, site_agb_loss, debug)
+@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, sp_w_loss, sp_agb_loss, site_agb_loss, debug::Bool=false)
     sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
     log_diff = log10(sim_agb_sum + loss_params.EPS)
     sp_agb_loss[gsp] = sim_agb_sum
@@ -276,7 +277,7 @@ end
     return site_agb_loss
 end
 
-function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Array{Array{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; debug=false)::SiteLoss
+function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; debug::Bool=false)::SiteLoss
     #Sort by species
     eco_n_species = length(site.sp_mature)
     species_id_map = eco_species_ids[site.eco_id]
@@ -299,10 +300,8 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
         # traversing c_species[p[1..end]] is equivalent to traversing sorted_c_species[1..end]
         # but now useful so that I don't need to sort c_age, c_bio
         p = sortperm(c_species)
-        if debug
-            println(c_species)
-            println(p)
-        end
+        @debug c_species
+        @debug p
 
         ages = Vector{FloatType}(undef, max_age)
         sp_start_idx = 1
@@ -320,9 +319,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
             # then use p[sp_start_index:sp_end_index] to gather from c_bio, c_age
             # conclude sp
             if sp != prev_sp
-                if debug
-                    println("concluding_species: $(sp)")
-                end
+                @debug "concluding_species: $(sp)"
                 sp_end_idx = i - 1
                 site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
                     site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
@@ -330,17 +327,13 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
                 prev_sp = sp
                 sp_start_idx = i
             end
-            if debug
-                println("processing_species: $(sp)")
-            end
+            @debug ("processing_species: $(sp)")
             if i == length(p)
-                if debug
-                    println("concluding_species: $(sp)")
-                end
+                @debug ("concluding_species: $(sp)")
                 sp_end_idx = i
                 site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
                     site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-                    spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss,debug=debug)
+                    spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, debug = debug)
             end
         end
     end

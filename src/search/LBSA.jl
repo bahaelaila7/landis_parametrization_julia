@@ -1,0 +1,175 @@
+module LBSA
+import Random
+import DataStructures
+
+export LBSACandidate, LBSAState, simulated_annealing_acceptance_rule, threshold_accepting_acceptance_rule, search_cmp!, search_update_rule!
+
+Base.@kwdef struct LBSACandidate{Tx,Tf}
+    x::Tx
+    fx::Tf
+end
+
+@inline function is_search_over(state)::Bool
+    state.i >= state.max_iter
+end
+@inline function search_cmp!(next, state)
+    state.i += 1
+    diff_fit = convert(Float64, next.fx) - convert(Float64, state.current.fx)
+    prob = (diff_fit <= 0 ? 1.0 : exp(-diff_fit / state.t))
+    if isinf(state.diff_avg) || state.i == 1
+        state.diff_avg = diff_fit
+        state.prob_avg = prob
+    else
+        state.diff_avg = state.running_average_ratio * (state.diff_avg - diff_fit) + diff_fit
+        state.prob_avg = state.running_average_ratio * (state.prob_avg - prob) + prob
+    end
+
+    accept = false
+    if state._warming_up
+        accept = diff_fit < 0 || !state.warm_up_greedy_acceptance
+        if diff_fit>=0 || !state.warm_up_record_uphill_only
+            push!(state._t_list, diff_fit*state._neg_inv_lnp0)
+        end
+        if state.temp_list_oversample 
+            n = 2*state.temp_list_len
+            if length(state._t_list) == n
+                sort!(state._t_list, rev=true)
+                lo = div(n, 4) + 1
+                hi = 3 * div(n, 4)
+                state._t_list = state._t_list[lo:hi]
+                state._t_max_idx = 1
+                state._warming_up = false
+            end
+        elseif length(state._t_list) == state.temp_list_len
+            state._t_max_idx = argmax(state._t_list)
+            state._warming_up = false
+        end
+    else
+        state._m += 1
+        if diff_fit < 0
+            accept = true
+        else
+            state._c_up_attempted += 1
+            r = rand(state.rng)
+            if exp(-diff_fit/ state._t_list[state._t_max_idx]) >= r
+                state._c += 1
+                accept = true
+                state._t_sum += -diff_fit/log(r)
+            end
+        end
+        #stretch stuff
+        if state._m >= state.stretch_len
+            state._m = 0
+            if state._c > 0
+                tsum = state._t_sum / state._c
+                if tsum < state._t_list[state._t_max_idx] || !state.cooling_only_schedule 
+                    state._t_list[state._t_max_idx] = tsum
+                end
+                state._t_max_idx = argmax(state._t_list)
+                state._frozen_stretches = 0
+            elseif state._c == 0 && state._c_up_attempted / state.stretch_len >= state.up_attempt_stale_ratio
+                state._frozen_stretches += 1
+                if state._frozen_stretches >= state.reheat_after_frozen_stretches
+                    if state.reheat_max_only
+                        state._t_list[state._t_max_idx] *= state.reheat_factor
+                    else
+                        state._t_list .*= state.reheat_factor
+                    end
+                    state._frozen_stretches = 0
+                end
+            end
+            state._t_sum = 0.0
+            state._c = 0
+            state._c_up_attempted = 0
+        end
+                
+        state.t = state._t_list[state._t_max_idx]
+    end
+
+    if accept
+        state.current = next # immutable, aliasing is fine
+        state.current_iteration = state.i
+        best_fit = convert(Float64, state.best.fx)
+        cur_fit = convert(Float64, state.current.fx)
+        if  cur_fit < best_fit
+            best_fit = cur_fit
+            state.best = state.current
+            state.best_iteration = state.i
+            push!(state.best_iterations, (state.i, best_fit, state.best.fx))
+            return true
+        end
+    end
+    return false
+end
+
+Base.@kwdef mutable struct LBSAState{Tx,Tf}
+    best::LBSACandidate{Tx,Tf}
+    current::LBSACandidate{Tx,Tf}
+    rng::Random.Xoshiro
+    best_iterations::Vector{Tuple{Int,Float64,Tf}}
+    best_iteration::Int = 0
+    current_iteration::Int = 0
+    i::Int = 0
+    max_iter::Int = 1000
+    warm_up_greedy_acceptance::Bool = true
+    warm_up_record_uphill_only::Bool = false
+    temp_list_len :: Int = 150
+    temp_list_oversample :: Bool = false
+    stretch_len :: Int = 25
+    initial_acceptance_prob::Float64 = 0.9
+    cooling_only_schedule::Bool = false
+    up_attempt_stale_ratio::Float64 = 0.92
+    reheat_after_frozen_stretches::Int = 4
+    reheat_factor::Float64 = 2.0
+    reheat_max_only::Bool = false
+
+    t::Float64 = 0.0
+
+    _warming_up::Bool = true
+    _neg_inv_lnp0 :: Float64 = 0.0
+    _m :: Int = 0
+    _frozen_stretches  :: Int = 0
+    _c_up_attempted :: Int = 0
+    _c :: Int = 0
+    _t_list::Vector{Float64} = Float64[]
+    _t_sum :: Float64 = 0.0
+    _t_max_idx :: Int = 0
+
+
+
+    running_average_ratio = 0.9
+    diff_avg::Float64 = 0.0
+    prob_avg::Float64 = 0.0
+end
+function LBSAState(best::LBSACandidate{Tx,Tf}, current::LBSACandidate{Tx,Tf}, rng::Random.Xoshiro; best_iterations=Tuple{Int,Float64,Tf}[],initial_acceptance_prob = 0.9, _neg_inv_lnp0=0.0, kwargs...) where {Tx,Tf}
+    LBSAState{Tx,Tf}(; best=best, current=current, rng=rng,
+        best_iterations=best_iterations,
+        initial_acceptance_prob = initial_acceptance_prob,
+        _neg_inv_lnp0 = -1.0/log(initial_acceptance_prob),
+        kwargs...)
+end
+
+
+function search(state::Union{Nothing,Some{LBSAState}}, get_neighbor, get_fitness)::LBSAState
+    if isnothing(state)
+        first = get_neighbor(nothing; rng=state.rng)
+        first_fit = get_fitness(first)
+        cur = LBSACandidate(first, first_fit)
+        state = LBSAState(cur, cur)
+    end
+
+    start_i = state.i
+    for i in start_i:state.max_iter
+        state.i = i
+        next_cand = get_neighbor(cur; rng=state.rng)
+
+        next = LBSACandidate(next_cand, get_fitness(next_cand))
+
+        search_cmp!(next, state)
+        if search_update_rule!(state)
+            break
+        end
+
+    end
+end
+end

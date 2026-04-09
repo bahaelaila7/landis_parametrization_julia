@@ -5,7 +5,7 @@ using ..PanCore
 using ....Plugins.BiomassSuccessionPlugin: BiomassSuccessionParams
 import Random
 using Distributions
-function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species_ids::Array{Array{Int}})
+function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species_ids::Vector{Vector{Int}})
     n_ess = sum(length(s) for s in eco_species_ids)
     params = [
         MutableParam(:SPINUP_MORTALITY_FRACTION, Uniform(0.0f0, 0.2f0), FloatType, GlobalSampler(), ScalarApplier()),

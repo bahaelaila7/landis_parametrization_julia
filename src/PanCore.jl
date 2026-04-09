@@ -224,114 +224,116 @@ end
 function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
                        new_counts::NamedTuple,
                        options::NamedTuple = NamedTuple()) where {P,Refs,Scalars,Csr}
+    with_thread_sync() do
 
-    field_to_key = _csr_field_to_key(Val(P)) # compile-time, need to lift types
-    old_refs     = getfield(soa, :refs)
-    old_csr      = getfield(soa, :csr)
-    n            = soa.n
+        field_to_key = _csr_field_to_key(Val(P)) # compile-time, need to lift types
+        old_refs     = getfield(soa, :refs)
+        old_csr      = getfield(soa, :csr)
+        n            = soa.n
 
-    for key in keys(new_counts)
-        opts     = hasfield(typeof(options), key) ? getfield(options, key) : RegrowOptions()
-        @assert length(new_counts[key]) == soa.n "key=$key: expected $(soa.n) counts, got $(length(new_counts[key]))"
-        ec       = effective_counts(new_counts[key], getfield(old_refs, key), opts)
-        cur_refs = getfield(old_refs, key)
-        new_refs = build_refs(ec)
-        new_nnz  = Int(new_refs[end]) - 1
-        #println("new counts: $(ec)")
-        #println("cur_refs: $(cur_refs)")
-        #println("new_refs: $(new_refs)")
+        for key in keys(new_counts)
+            opts     = hasfield(typeof(options), key) ? getfield(options, key) : RegrowOptions()
+            @assert length(new_counts[key]) == soa.n "key=$key: expected $(soa.n) counts, got $(length(new_counts[key]))"
+            ec       = effective_counts(new_counts[key], getfield(old_refs, key), opts)
+            cur_refs = getfield(old_refs, key)
+            new_refs = build_refs(ec)
+            new_nnz  = Int(new_refs[end]) - 1
+            #println("new counts: $(ec)")
+            #println("cur_refs: $(cur_refs)")
+            #println("new_refs: $(new_refs)")
 
-        all_growing = true
-        all_shrinking = true
-        for i in 1:n
-            all_growing &= ec[i] >= (cur_refs[i+1] - cur_refs[i])
-            all_shrinking &= ec[i] <= (cur_refs[i+1] - cur_refs[i])
-        end
-        if all_growing && all_shrinking
-            @assert all(cur_refs[i] == new_refs[i] for i in 1:n+1)
-            #no change in counts, so no change in refs
-            continue
-        end
-
-
-
-
-        #check if no mix of growing and shrinking
-        #if mix, we can only allocat and copy, not resize and shift
-        #all_growing = all(new_refs[i] >= cur_refs[i] for i in 1:n+1)
-        #all_shrinking = !all_growing && all(new_refs[i] <= cur_refs[i] for i in 1:n+1)
-
-        updated_csr = old_csr
-
-        for csr_array_name in keys(old_csr)
-            getfield(field_to_key, csr_array_name) === key || continue
-            #println(csr_array_name)
-            arr = getfield(old_csr, csr_array_name)
-
-            if all_growing
-                #println("all_growing")
-                #println(length(arr))
-                resize!(arr, new_nnz)
-                #println(length(arr))
-                for i in n:-1:1
-                    old_lo = Int(cur_refs[i])
-                    old_hi = Int(cur_refs[i+1]) - 1
-                    new_hi = Int(new_refs[i+1]) - 1
-                    new_lo = Int(new_refs[i])
-                    new_hi = Int(new_refs[i+1]) - 1
-                    new_lo == old_lo && continue
-                    n_copy = old_hi - old_lo + 1
-                    #if(new_lo == old_lo) #tinue # no shift in location, no need to copy
-                    #    println("\t Nopying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
-                    #else
-                    #    println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
-                        copyto!(arr, new_lo, arr, old_lo, n_copy)
-                    #end
-                end
-            elseif all_shrinking
-                #println("all_shrinking")
-                #println(length(arr))
-                for i in 1:n
-                    old_lo = Int(cur_refs[i])
-                    new_lo = Int(new_refs[i])
-                    old_hi = Int(cur_refs[i+1]) - 1
-                    new_hi = Int(new_refs[i+1]) - 1
-                    new_lo == old_lo && continue
-                    n_copy = new_hi - new_lo + 1
-                    #if new_lo == old_lo
-                    #    println("\t Nopying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
-                    #else
-                    #    println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
-                        copyto!(arr, new_lo, arr, old_lo, n_copy)
-                    #end
-                end
-                resize!(arr, new_nnz)
-                #println(length(arr))
-
-            else
-                #println("mix")
-                # some grow some shrin
-                tmp = similar(arr, new_nnz)
-                #println(length(arr))
-                #println(length(tmp))
-                for i in 1:n
-                    old_lo = Int(cur_refs[i])
-                    old_hi = Int(cur_refs[i+1]) - 1
-                    new_lo = Int(new_refs[i])
-                    new_hi = Int(new_refs[i+1]) - 1
-                    n_copy = min(old_hi - old_lo + 1, new_hi - new_lo + 1)
-                    #println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to tmp[$(new_lo):$(new_hi)]")
-                    copyto!(tmp, new_lo, arr, old_lo, n_copy)
-                end
-                updated_csr = merge(updated_csr, NamedTuple{(csr_array_name,)}((tmp,)))
+            all_growing = true
+            all_shrinking = true
+            for i in 1:n
+                all_growing &= ec[i] >= (cur_refs[i+1] - cur_refs[i])
+                all_shrinking &= ec[i] <= (cur_refs[i+1] - cur_refs[i])
             end
+            if all_growing && all_shrinking
+                @assert all(cur_refs[i] == new_refs[i] for i in 1:n+1)
+                #no change in counts, so no change in refs
+                continue
+            end
+
+
+
+
+            #check if no mix of growing and shrinking
+            #if mix, we can only allocat and copy, not resize and shift
+            #all_growing = all(new_refs[i] >= cur_refs[i] for i in 1:n+1)
+            #all_shrinking = !all_growing && all(new_refs[i] <= cur_refs[i] for i in 1:n+1)
+
+            updated_csr = old_csr
+
+            for csr_array_name in keys(old_csr)
+                getfield(field_to_key, csr_array_name) === key || continue
+                #println(csr_array_name)
+                arr = getfield(old_csr, csr_array_name)
+
+                if all_growing
+                    #println("all_growing")
+                    #println(length(arr))
+                    resize!(arr, new_nnz)
+                    #println(length(arr))
+                    for i in n:-1:1
+                        old_lo = Int(cur_refs[i])
+                        old_hi = Int(cur_refs[i+1]) - 1
+                        new_hi = Int(new_refs[i+1]) - 1
+                        new_lo = Int(new_refs[i])
+                        new_hi = Int(new_refs[i+1]) - 1
+                        new_lo == old_lo && continue
+                        n_copy = old_hi - old_lo + 1
+                        #if(new_lo == old_lo) #tinue # no shift in location, no need to copy
+                        #    println("\t Nopying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
+                        #else
+                        #    println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
+                            copyto!(arr, new_lo, arr, old_lo, n_copy)
+                        #end
+                    end
+                elseif all_shrinking
+                    #println("all_shrinking")
+                    #println(length(arr))
+                    for i in 1:n
+                        old_lo = Int(cur_refs[i])
+                        new_lo = Int(new_refs[i])
+                        old_hi = Int(cur_refs[i+1]) - 1
+                        new_hi = Int(new_refs[i+1]) - 1
+                        new_lo == old_lo && continue
+                        n_copy = new_hi - new_lo + 1
+                        #if new_lo == old_lo
+                        #    println("\t Nopying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
+                        #else
+                        #    println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to arr[$(new_lo):$(new_hi)]")
+                            copyto!(arr, new_lo, arr, old_lo, n_copy)
+                        #end
+                    end
+                    resize!(arr, new_nnz)
+                    #println(length(arr))
+
+                else
+                    #println("mix")
+                    # some grow some shrin
+                    tmp = similar(arr, new_nnz)
+                    #println(length(arr))
+                    #println(length(tmp))
+                    for i in 1:n
+                        old_lo = Int(cur_refs[i])
+                        old_hi = Int(cur_refs[i+1]) - 1
+                        new_lo = Int(new_refs[i])
+                        new_hi = Int(new_refs[i+1]) - 1
+                        n_copy = min(old_hi - old_lo + 1, new_hi - new_lo + 1)
+                        #println("\t copying s$(i) $(n_copy): arr[$(old_lo):$(old_hi)] to tmp[$(new_lo):$(new_hi)]")
+                        copyto!(tmp, new_lo, arr, old_lo, n_copy)
+                    end
+                    updated_csr = merge(updated_csr, NamedTuple{(csr_array_name,)}((tmp,)))
+                end
+            end
+
+            soa.refs = merge(old_refs, NamedTuple{(key,)}((new_refs,)))
+            soa.csr  = updated_csr
         end
 
-        soa.refs = merge(old_refs, NamedTuple{(key,)}((new_refs,)))
-        soa.csr  = updated_csr
+        return soa
     end
-
-    return soa
 end
 
 @generated function csr_count_key(::AnySoA{P}, ::Val{F}) where {P, F}

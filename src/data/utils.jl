@@ -8,7 +8,7 @@ import ....Parametrization.SPDFGroundTruth
 import ....Parametrization.SPDFRecord
 
 
-function make_spdf_dict(spdf::DataFrame, eco_species_ids::Array{Array{Int}})::Dict{UIntType,Dict{Int,SPDFGroundTruth}}
+function make_spdf_dict(spdf::DataFrame, eco_species_ids::Vector{Vector{Int}})::Dict{UIntType,Dict{Int,SPDFGroundTruth}}
     #n_species = length(unique(spdf.species_id))
     return Dict( #{Int, Dict{Int,DataFrame}}()
         plt_key.plot_id => Dict( #( {Int, DataFrame}(
@@ -60,7 +60,7 @@ function mark_estab_year!(df::DataFrame)
     #df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- last)) ./ 365.25 .|> round .|> Int
     df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- df.start_measdate)) ./ 365.25 .|> round .|> Int
 end
-function make_splots(df::DataFrame)::Tuple{DataFrame,Array{String},Array{String},Array{Array{Int}}}
+function make_splots(df::DataFrame)::Tuple{DataFrame,Vector{String},Vector{String},Vector{Vector{Int}}}
 
 
     #df.species_id = groupindices(groupby(df,:species_field))
@@ -115,7 +115,7 @@ function get_spinup_cohorts(df::DataFrame)
     return spinup_cohorts
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, tablename::String, output_dir::String, skip_disturbances=true, filter_ecos::Array{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, tablename::String, output_dir::String, skip_disturbances=true, filter_ecos::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
         #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
     println("Connecting to: $(cohorts_db_path) ")
     db = SQLite.DB(cohorts_db_path)

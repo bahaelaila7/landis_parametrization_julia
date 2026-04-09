@@ -1,6 +1,5 @@
 THREADS ?= auto
-DEBUG ?= Pan
-JULIA_CMD ?= JULIA_DEBUG=$(DEBUG) ./julia_gdal.sh --project=.
+JULIA_CMD ?= ./julia_gdal.sh --project=.
 
 all: run
 
@@ -15,6 +14,12 @@ run1:
 
 run:
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan;Pan.main("")'
+
+debug1:
+	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=1 -e 'using Pan;Pan.main("")'
+
+debug:
+	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan;Pan.main("")'
                                      
 exec:                                
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler;create_app(".", "build";filter_stdlibs=true,precompile_execution_file="src/entry.jl")'

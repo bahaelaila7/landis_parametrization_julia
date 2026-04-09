@@ -131,7 +131,7 @@ macro dimslice(A, indices...)
     end
 end
 
-function generate_eco_params(params::BiomassSuccessionParams)::Array{BiomassSuccessionEcoParams}
+function generate_eco_params(params::BiomassSuccessionParams)::Vector{BiomassSuccessionEcoParams}
 
     return [
         BiomassSuccessionEcoParams(
@@ -155,7 +155,7 @@ function generate_eco_params(params::BiomassSuccessionParams)::Array{BiomassSucc
 
 
 end
-function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Array{Array{Int}}; rng::Random.AbstractRNG)
+function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG)
     n_species = length(species_list) |> UIntType
     n_ecoregions = length(eco_list) |> UIntType
     # TODO: species that do not show up for a specific ecoregion, make all their prob_estab = 0
@@ -269,7 +269,7 @@ end
     site.c_age[site.live] = age
     site.c_bio[site.live] = biomass
 end
-function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Array{BiomassSuccessionEcoParams})
+function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Vector{BiomassSuccessionEcoParams})
     #show(spinup_cohorts.year_deficit)
     # year deficit is establisment year.
     # however, I cannot add with age = 0, therefore it'll have to show up the year after with age=1
@@ -304,9 +304,9 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
             @debug ("year $(current_year), after recounting $((soa.refs.cohort))")
             @debug (new_cohort_counts)
             @debug ("adjusting")
-            soa = PanCore.with_thread_sync() do
+            soa = #PanCore.with_thread_sync() do
                 PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
-            end
+            #end
             @debug ("sprouting")
             Threads.@threads for i in 1:soa.n
                 @inbounds site = getsite(soa, i)
@@ -404,9 +404,9 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
     end
     @debug ("year $(current_year), final after recounting $((soa.refs.cohort))")
     @debug (new_cohort_counts)
-    soa = PanCore.with_thread_sync() do
+    soa = #PanCore.with_thread_sync() do
         PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
-    end
+    #end
     Threads.@threads for i in 1:soa.n
         @inbounds site = getsite(soa, i)
         sprouting_step!(current_year, site, eco_params[site.eco_id])
