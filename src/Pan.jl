@@ -388,71 +388,16 @@ end
 function main(ARGS; seed=123)
     Random.seed!(seed)
     rng = Random.Xoshiro(rand(UInt64))
+    #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
+    filter_ecos=["8.5.3.75g"]
     parametrize(;
      cohorts_db_path="../data_eco_l4_cohorts.db",
     tablename="data_eco_cohorts",
     output_dir="./outputs",
-    filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"],
+    filter_ecos=filter_ecos,
     skip_disturbances=true,
     spinup=false,
     TRIALS=1000000, rng=rng)
-end
-
-function main2(ARGS)
-    #
-    println("hello")
-    rng = Random.Xoshiro(2123)
-    #Random.seed!(42)
-    #println(typeof(ActiveSoA))
-    #println(
-    n = 20
-    n_species = 14
-    species_list = ["s_$(i)" for i in 1:n_species]
-    eco_list = ["e_1"]
-    eco_species_id::Vector{Vector{Int64}} = [vec(1:n_species) .|> Int64]
-    bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_id; rng=rng)
-    param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_id)
-    #println(param_dists)
-    #println(bio_params)
-
-    cohort_counts = rand(rng, Int32(1):Int32(8), n)
-    species_count = fill(Int32(n_species), n)
-
-    #nteractiveUtils.@code_typed ActiveSoA((cohort=cohort_counts,species = species_count))
-    #soa = ActiveSoA((cohort=cohort_counts,species = species_count))
-    counts_tuple = (cohort=cohort_counts, species=species_count)
-    #@code_typed site = getsite(soa,1)
-    #site = getsite(soa,n)
-    #z =getproperty(site, :c_bio)
-    #z .= 1.0f0
-    #@code_llvm z =getproperty(site, :c_bio)
-
-    TProgress.@track for trial in 1:400
-        soa = ActiveSoA(counts_tuple)
-        for i in 1:n
-            site = getsite(soa, i)
-            #println(site)
-            cap = length(site.c_species)
-            site.rng = Random.Xoshiro(rand(rng, Int64))
-            site.eco_id = 1
-            #site.eco_params = eco_params[1]
-            site.live = rand(site.rng, UIntType(1):UIntType(cap))
-            site.c_age .= 1.0f0
-            site.c_species .= rand(site.rng, UIntType(1):UIntType(n_species), cap)
-            site.c_bio .= 2.0f0
-        end
-        bio_params = PU.mutate_params(bio_params, param_dists; rng=rng)
-        eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
-        ctx = (BiomassSuccession=(eco_params=eco_params,),)
-        for t in 1:130
-            #println("\ttimestep $(t)")
-            PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, t; ctx=ctx.BiomassSuccession)
-
-        end
-        #println(soa.refs.cohort[end]-1)
-    end
-    #println(soa)
-
 end
 
 end
