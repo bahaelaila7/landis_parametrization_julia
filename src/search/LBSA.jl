@@ -1,9 +1,11 @@
 module LBSA
 import Random
 import DataStructures
+import Statistics
 
 export LBSACandidate, LBSAState, simulated_annealing_acceptance_rule, threshold_accepting_acceptance_rule, search_cmp!, search_update_rule!
 
+@enum SearchMethod SimulatedAnnealing ThresholdAccepting
 Base.@kwdef struct LBSACandidate{Tx,Tf}
     x::Tx
     fx::Tf
@@ -31,36 +33,62 @@ end
     if state._warming_up
         accept = diff_fit < 0 || !state.warm_up_greedy_acceptance
         if diff_fit >= 0 || !state.warm_up_record_uphill_only
-            push!(state._t_list, diff_fit * state._neg_inv_lnp0)
+		if state.search_method == SimulatedAnnealing
+		    push!(state._t_list, diff_fit * state._neg_inv_lnp0)
+		else
+		    push!(state._t_list, diff_fit)
+		end
         end
         if state.temp_list_oversample
             n = 2 * state.temp_list_len
             if length(state._t_list) == n
-                sort!(state._t_list, rev=true)
+                sorted_idxs = sortperm(state._t_list, rev=true)
                 lo = div(n, 4) + 1
                 hi = 3 * div(n, 4)
-                state._t_list = state._t_list[lo:hi]
-                state._t_max_idx = 1
+		sorted_idxs = filter(x -> x >= lo && x <= hi, sorted_idxs)
+                state._t_list = state._t_list[sorted_idxs]
+		state._t_max_idx = argmax(state._t_list)
                 state._t_oldest_idx = 1
                 state._warming_up = false
             end
         elseif length(state._t_list) == state.temp_list_len
-            state._t_oldest_idx = argmax(state._t_list)
+            state._t_max_idx = argmax(state._t_list)
+            state._t_oldest_idx = 1
             state._warming_up = false
         end
+	if state.search_method == ThresholdAccepting && length(state._t_list) >= 2
+		t_mean = Statistics.mean(state._t_list)
+		t_std = Statistics.std(state._t_list)
+		state._t_list .= t_mean + 2*t_std
+		state._t_oldest_idx = 1
+		state._t_max_idx = 1
+	end
+
         state._initial_t_list = state._t_list[:]
+    elseif state._hill_climbing_best > 0
+	state._hill_climbing_best -= 1
+	accept = next_fit < cur_fit
     else
         state._m += 1
         if diff_fit < 0
             accept = true
         else
             state._c_up_attempted += 1
-            r = rand(state.rng)
-            if exp(-diff_fit / state._t_list[state._t_max_idx]) >= r
-                state._c += 1
-                accept = true
-                state._t_sum += -diff_fit / log(r)
-            end
+	    if state.search_method == SimulatedAnnealing
+		    r = rand(state.rng)
+		    if exp(-diff_fit / state._t_list[state._t_max_idx]) >= r
+			state._c += 1
+			accept = true
+			state._t_sum += -diff_fit / log(r)
+		    end
+	    else
+		if diff_fit < state._t_list[state._t_max_idx]
+			state._c += 1
+			accept = true
+			state._t_sum += diff_fit
+		end
+
+	    end
         end
         #stretch stuff
         if state._m >= state.stretch_len
@@ -119,6 +147,7 @@ end
             state.best = state.current
             state.best_iteration = state.i
             push!(state.best_iterations, (state.i, best_fit, state.best))
+	    state._hill_climbing_best = state.hill_climbing_upon_new_best
             return true
         end
     end
@@ -136,20 +165,23 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf}
     max_iter::Int = 1000000
     warm_up_greedy_acceptance::Bool = false
     warm_up_record_uphill_only::Bool = true
-    temp_list_len::Int = 200
+    temp_list_len::Int = 10
     temp_list_oversample::Bool = false
-    stretch_len::Int = 200
+    stretch_len::Int = 100
     initial_acceptance_prob::Float64 = 0.9
     cooling_only_schedule::Bool = false
     up_attempt_stale_ratio::Float64 = 0.9
     reheat_after_frozen_stretches::Int = 3
     restart_after_no_best_reheats::Int = 5
-    reheat_factor::Float64 = 2.0
+    reheat_factor::Float64 = 1.5
     reheat_max_only::Bool = false
     replace_oldest_instead_of_max::Bool = true
+    search_method::SearchMethod = SimulatedAnnealing
+    hill_climbing_upon_new_best::Int=0
 
     t::Float64 = 0.0
 
+    _hill_climbing_best::Int = 0
     _warming_up::Bool = true
     _neg_inv_lnp0::Float64 = 0.0
     _m::Int = 0
@@ -161,7 +193,7 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf}
     _initial_t_list::Vector{Float64} = Float64[]
     _t_sum::Float64 = 0.0
     _t_max_idx::Int = 1
-    _t_oldest_idx:Int = 1
+    _t_oldest_idx::Int = 1
 
 
 
