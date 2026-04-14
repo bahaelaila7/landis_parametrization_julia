@@ -1,5 +1,6 @@
 THREADS ?= auto
 JULIA_CMD ?= ./julia_gdal.sh --project=.
+JULIA_RUN ?= 'using Pan;Pan.main()'
 
 all: run
 
@@ -10,16 +11,16 @@ update:
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.update()'
 
 run1:
-	$(JULIA_CMD) --threads=1 -e 'using Pan;Pan.main("")'
+	$(JULIA_CMD) --threads=1 -e $(JULIA_RUN)
 
 run:
-	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan;Pan.main("")'
+	$(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN)
 
 debug1:
-	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=1 -e 'using Pan;Pan.main("")'
+	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=1 -e $(JULIA_RUN)
 
 debug:
-	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan;Pan.main("")'
+	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN)
                                      
 exec:                                
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler;create_app(".", "build";filter_stdlibs=true,precompile_execution_file="src/entry.jl")'

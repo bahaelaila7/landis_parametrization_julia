@@ -165,7 +165,7 @@ end
 
 
 @inline function smooth_ages(; ages::Vector{FloatType}, smoothing_window::Vector{FloatType})::Vector{FloatType}
-    smoothed_ages = ImageFiltering.imfilter!(ages, smoothing_window, "symmetric")
+    smoothed_ages = ImageFiltering.imfilter(ages, smoothing_window, "symmetric")
     @assert !any(isnan.(smoothed_ages)) "filter NaN"
     s = sum(smoothed_ages)
     if s > zero(FloatType)
