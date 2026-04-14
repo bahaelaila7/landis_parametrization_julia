@@ -41,10 +41,11 @@ end
                 hi = 3 * div(n, 4)
                 state._t_list = state._t_list[lo:hi]
                 state._t_max_idx = 1
+                state._t_oldest_idx = 1
                 state._warming_up = false
             end
         elseif length(state._t_list) == state.temp_list_len
-            state._t_max_idx = argmax(state._t_list)
+            state._t_oldest_idx = argmax(state._t_list)
             state._warming_up = false
         end
         state._initial_t_list = state._t_list[:]
@@ -67,7 +68,12 @@ end
             if state._c > 0
                 tsum = state._t_sum / state._c
                 if tsum < state._t_list[state._t_max_idx] || !state.cooling_only_schedule
-                    state._t_list[state._t_max_idx] = tsum
+			if state.replace_oldest_instead_of_max
+			    state._t_list[state._t_oldest_idx] = tsum
+			    state._t_oldest_idx = (state._t_oldest_idx  % length(state._t_list)) + 1
+			else
+			    state._t_list[state._t_max_idx] = tsum
+			end
                 end
                 state._t_max_idx = argmax(state._t_list)
                 state._frozen_stretches = 0
@@ -140,6 +146,7 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf}
     restart_after_no_best_reheats::Int = 5
     reheat_factor::Float64 = 2.0
     reheat_max_only::Bool = false
+    replace_oldest_instead_of_max::Bool = true
 
     t::Float64 = 0.0
 
@@ -153,7 +160,8 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf}
     _t_list::Vector{Float64} = Float64[]
     _initial_t_list::Vector{Float64} = Float64[]
     _t_sum::Float64 = 0.0
-    _t_max_idx::Int = 0
+    _t_max_idx::Int = 1
+    _t_oldest_idx:Int = 1
 
 
 

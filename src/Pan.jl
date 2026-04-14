@@ -385,19 +385,26 @@ function parametrize_SA(;ref_soa::ActiveSoA,output_dir::AbstractString, spdf_plt
     end
 
 end
-function main(ARGS; seed=123)
+function main()
+    seed=123
     Random.seed!(seed)
     rng = Random.Xoshiro(rand(UInt64))
+    filter_ecos=String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
     #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-    filter_ecos=["8.5.3.75g"]
+    #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
+    #filter_ecos=["8.5.3.75g"]
     parametrize(;
      cohorts_db_path="../data_eco_l4_cohorts.db",
     tablename="data_eco_cohorts",
     output_dir="./outputs",
     filter_ecos=filter_ecos,
-    skip_disturbances=true,
+    skip_disturbances=false,
     spinup=false,
     TRIALS=1000000, rng=rng)
 end
 
+function julia_main()::Cint
+	main()
+	return 0
+end
 end

@@ -1,2 +1,2 @@
-using BiomassSuccession
-BiomassSuccession.main("")
+using Pan
+Pan.main()
