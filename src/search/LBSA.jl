@@ -165,14 +165,14 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf}
     max_iter::Int = 1000000
     warm_up_greedy_acceptance::Bool = false
     warm_up_record_uphill_only::Bool = true
-    temp_list_len::Int = 10
+    temp_list_len::Int = 50
     temp_list_oversample::Bool = false
     stretch_len::Int = 100
     initial_acceptance_prob::Float64 = 0.9
     cooling_only_schedule::Bool = false
     up_attempt_stale_ratio::Float64 = 0.9
-    reheat_after_frozen_stretches::Int = 3
-    restart_after_no_best_reheats::Int = 5
+    reheat_after_frozen_stretches::Int = 5
+    restart_after_no_best_reheats::Int = 10
     reheat_factor::Float64 = 1.5
     reheat_max_only::Bool = false
     replace_oldest_instead_of_max::Bool = true

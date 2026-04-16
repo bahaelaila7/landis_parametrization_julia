@@ -398,7 +398,7 @@ function main()
     tablename="data_eco_cohorts",
     output_dir="./outputs",
     filter_ecos=filter_ecos,
-    skip_disturbances=false,
+    skip_disturbances=true,
     spinup=false,
     TRIALS=1000000, rng=rng)
 end
