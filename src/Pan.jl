@@ -173,6 +173,66 @@ function stop_writer(ch::Channel, task::Task)
     close(ch)
     wait(task)
 end
+function test_spdf(df, n_species, eco_species_ids, loss_params::PU.LossParams)
+    site_losses = []
+    for (plt_key, plt_dict) in pairs(df)
+        for (sim_key, spdf_plt) in pairs(plt_dict)
+            #plot_id = plt_key.plot_id
+
+            plot_id, eco_id = plt_key
+            eco_n_species = length(eco_species_ids[eco_id])
+            species_id_map = eco_species_ids[eco_id]
+            @assert eco_n_species == length(spdf_plt.keys) "eco species numbers do not match"
+            @assert length(species_id_map) == eco_n_species "eco species numbers do not match"
+
+            insite = falses(eco_n_species)
+
+            sp_w_loss = zeros(FloatType, n_species)
+            sp_agb_loss = zeros(FloatType, n_species)
+            site_agb_loss = zero(FloatType)
+            for sp in 1:eco_n_species
+                if !(sp in keys(spdf_plt.records))
+                    continue
+                end
+                insite[sp] = true
+                sim_agb_sum = 0.0f0 #spdf_plt.records[sp].sp_agb_sum
+                gsp = species_id_map[sp]
+
+                log_diff = log10(sim_agb_sum + loss_params.EPS)
+                sp_agb_loss[gsp] = sim_agb_sum
+                site_agb_loss += sim_agb_sum
+                if spdf_plt.keys[sp]
+                    rec = @inbounds spdf_plt.records[sp]
+                    #ages .= zero(FloatType)
+                    #for a in @view p[sp_start_idx:sp_end_idx]
+                    #    ages[UIntType(site.c_age[a])] = site.c_bio[a]
+                    #end
+                    #sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
+                    #@assert !any(isnan.(sim_age_cdf)) "cdf NaN"
+                    #@assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
+                    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* abs.(rec.sp_age_cdf)[begin:end-1])
+                    @assert !any(isnan.(sp_w_loss[gsp])) "NaN"
+                    log_diff -= log10(rec.sp_agb_sum + loss_params.EPS)
+                    sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
+                    site_agb_loss -= rec.sp_agb_sum
+                end
+                sp_w_loss[gsp] = (1.0f0 + sp_w_loss[gsp]) * (abs(log_diff)^2)
+
+            end
+            for sp in (1:length(spdf_plt.keys))[spdf_plt.keys.&(.!insite)]
+                @inbounds rec = spdf_plt.records[UIntType(sp)]
+                @inbounds gsp = species_id_map[sp]
+                sp_agb_loss[gsp] = rec.sp_agb_sum
+                sp_w_loss[gsp] += loss_params.lambda * abs(log10(rec.sp_agb_sum + loss_params.EPS))
+                site_agb_loss -= rec.sp_agb_sum
+            end
+
+
+            push!(site_losses, PU.SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=abs(site_agb_loss), num_sites=1))
+        end
+    end
+    return sum(site_losses)
+end
 function parametrize(; cohorts_db_path::String="../data_eco_l4_cohorts.db",
     tablename::String="data_eco_cohorts_g",
     output_dir::String="./outputs",
@@ -218,6 +278,10 @@ function parametrize(; cohorts_db_path::String="../data_eco_l4_cohorts.db",
     #show(spdf)
     println("Creating comparison years")
     @time spdf_plts = Data.make_spdf_dict(spdf, eco_species_ids)
+    @time total_err = test_spdf(spdf_plts, n_species, eco_species_ids, loss_params)
+    println(total_err)
+    println(PU.get_total_loss(total_err))
+    println(sum(length(xs) for xs in eco_species_ids))
     println("Marking sim years")
     @time site_sim_years = Data.get_site_sim_years(spdf)
     #println(site_sim_years)
@@ -236,21 +300,21 @@ function parametrize(; cohorts_db_path::String="../data_eco_l4_cohorts.db",
 
 
     ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup)
-    parametrize_LBSA(; ref_soa = ref_soa,
-                   output_dir = output_dir,
-                   spdf_plts = spdf_plts,
-                   spinup_cohorts = spinup_cohorts,
-                   site_sim_years = site_sim_years,
-                   species_list = species_list,
-                   eco_list = eco_list,
-                   eco_species_ids = eco_species_ids,
-                   spinup = spinup,
-                   TRIALS = TRIALS,
-                   loss_params = loss_params,
-                   rng = rng,
-                   debug = debug)
+    parametrize_LBSA(; ref_soa=ref_soa,
+        output_dir=output_dir,
+        spdf_plts=spdf_plts,
+        spinup_cohorts=spinup_cohorts,
+        site_sim_years=site_sim_years,
+        species_list=species_list,
+        eco_list=eco_list,
+        eco_species_ids=eco_species_ids,
+        spinup=spinup,
+        TRIALS=TRIALS,
+        loss_params=loss_params,
+        rng=rng,
+        debug=debug)
 end
-function parametrize_LBSA(;ref_soa::ActiveSoA,output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
     n_species = length(species_list)
     param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
     bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
@@ -285,7 +349,7 @@ function parametrize_LBSA(;ref_soa::ActiveSoA,output_dir::AbstractString, spdf_p
                     @inbounds begin
                         site = getsite(soa, i)
                         !site.active && continue
-                        spdf_plt = spdf_plts[site.ref_cn]
+                        spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
                         sim_years = site_sim_years.sim_years[site.mapcode]
                         if current_sim_year in sim_years
                             sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
@@ -317,7 +381,7 @@ function parametrize_LBSA(;ref_soa::ActiveSoA,output_dir::AbstractString, spdf_p
     end
 
 end
-function parametrize_SA(;ref_soa::ActiveSoA,output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
+function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
     n_species = length(species_list)
     param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
     bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
@@ -353,7 +417,7 @@ function parametrize_SA(;ref_soa::ActiveSoA,output_dir::AbstractString, spdf_plt
                     @inbounds begin
                         site = getsite(soa, i)
                         !site.active && continue
-                        spdf_plt = spdf_plts[site.ref_cn]
+                        spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
                         sim_years = site_sim_years.sim_years[site.mapcode]
                         if current_sim_year in sim_years
                             sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
@@ -386,25 +450,25 @@ function parametrize_SA(;ref_soa::ActiveSoA,output_dir::AbstractString, spdf_plt
 
 end
 function main()
-    seed=123
+    seed = 123
     Random.seed!(seed)
     rng = Random.Xoshiro(rand(UInt64))
-    filter_ecos=String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
+    filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
     #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
     #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
     #filter_ecos=["8.5.3.75g"]
     parametrize(;
-     cohorts_db_path="../data_eco_l4_cohorts.db",
-    tablename="data_eco_cohorts",
-    output_dir="./outputs",
-    filter_ecos=filter_ecos,
-    skip_disturbances=true,
-    spinup=false,
-    TRIALS=1000000, rng=rng)
+        cohorts_db_path="../data_eco_l4_cohorts.db",
+        tablename="data_eco_cohorts",
+        output_dir="./outputs",
+        filter_ecos=filter_ecos,
+        skip_disturbances=true,
+        spinup=false,
+        TRIALS=1000000, rng=rng)
 end
 
 function julia_main()::Cint
-	main()
-	return 0
+    main()
+    return 0
 end
 end

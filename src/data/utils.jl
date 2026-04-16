@@ -8,10 +8,10 @@ import ....Parametrization.SPDFGroundTruth
 import ....Parametrization.SPDFRecord
 
 
-function make_spdf_dict(spdf::DataFrame, eco_species_ids::Vector{Vector{Int}})::Dict{UIntType,Dict{Int,SPDFGroundTruth}}
+function make_spdf_dict(spdf::DataFrame, eco_species_ids::Vector{Vector{Int}})::Dict{Tuple{UIntType,UIntType},Dict{Int,SPDFGroundTruth}}
     #n_species = length(unique(spdf.species_id))
     return Dict( #{Int, Dict{Int,DataFrame}}()
-        plt_key.plot_id => Dict( #( {Int, DataFrame}(
+        (plt_key.plot_id, plt_key.eco_id) => Dict( #( {Int, DataFrame}(
             year_key.sim_year => SPDFGroundTruth(keys=begin
                     n_species = length(eco_species_ids[first(year_df).eco_id])
                     #println("----")
@@ -36,7 +36,7 @@ function make_spdf_dict(spdf::DataFrame, eco_species_ids::Vector{Vector{Int}})::
             )
             for (year_key, year_df) in pairs(groupby(plt_df, [:sim_year], sort=false))
         )
-        for (plt_key, plt_df) in pairs(groupby(spdf, [:plot_id], sort=false))
+        for (plt_key, plt_df) in pairs(groupby(spdf, [:plot_id, :eco_id], sort=false))
     )
 end
 function get_initial_cohorts(df::DataFrame)
