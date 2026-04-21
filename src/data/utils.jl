@@ -60,7 +60,16 @@ function mark_estab_year!(df::DataFrame)
     #df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- last)) ./ 365.25 .|> round .|> Int
     df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- df.start_measdate)) ./ 365.25 .|> round .|> Int
 end
-function make_splots(df::DataFrame)::Tuple{DataFrame,Vector{String},Vector{String},Vector{Vector{Int}}}
+function make_splots(df::DataFrame; eco::String="epa_l4")::Tuple{DataFrame,Vector{String},Vector{String},Vector{Vector{Int}}}
+    eco_field, species_field = begin
+                        if eco == "epa_l4"
+                            (:epa_l4, :species_symbol_map_l4)
+                        elseif eco == "epa_l3"
+                            (:epa_l3, :species_symbol_map_l3)
+                        else
+                            (:ecosubcd, :species_symbol_map_ecosubcd)
+                        end
+    end
 
 
     #df.species_id = groupindices(groupby(df,:species_field))
@@ -68,13 +77,13 @@ function make_splots(df::DataFrame)::Tuple{DataFrame,Vector{String},Vector{Strin
 
     #println(df)
 
-    eco_vals = sort(unique(df.eco))
+    eco_vals = sort(unique(getproperty(df, eco_field)))
     eco_dict = Dict(eco => i for (i, eco) in enumerate(eco_vals))
-    species_symbol_map_vals = sort(unique(df.species_symbol_map))
+    species_symbol_map_vals = sort(unique(getproperty(df,species_field)))
     species_symbol_map_dict = Dict(ssm => i for (i, ssm) in enumerate(species_symbol_map_vals))
 
-    df.species_id = getindex.(Ref(species_symbol_map_dict), df.species_symbol_map)
-    df.eco_id = getindex.(Ref(eco_dict), df.eco)
+    df.species_id = getindex.(Ref(species_symbol_map_dict), getproperty(df,species_field))
+    df.eco_id = getindex.(Ref(eco_dict), getproperty(df,eco_field))
     #println(df)
     #
     #
@@ -115,25 +124,25 @@ function get_spinup_cohorts(df::DataFrame)
     return spinup_cohorts
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, tablename::String, output_dir::String, skip_disturbances=true, filter_ecos::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, filter_ecos::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
         #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
     println("Connecting to: $(cohorts_db_path) ")
     db = SQLite.DB(cohorts_db_path)
     println("Creating index if necessary")
-    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS PLT_ECO_IDX ON data_eco_cohorts(ECO);")
+    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS PLT_ECO_IDX_$(eco_field) ON data_eco_cohorts($(eco_field));")
     sql = "SELECT * FROM $(tablename) WHERE true"
     if length(filter_ecos) > 0
-        sql *= " AND eco in ('$(join(filter_ecos,"','"))')"
+        sql *= " AND $(eco_field) in ('$(join(filter_ecos,"','"))')"
     end
     if skip_disturbances
-        sql *= " AND subp_has_dstrb='f'"
+        sql *= " AND subp_has_dstrb= false"
     end
     println(sql)
     cohorts_df = SQLite.DBInterface.execute(db, sql) |> DataFrame
     SQLite.close(db)
     println("Closing db. $(nrow(cohorts_df)) rows loaded.")
 
-    @time splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df)
+    @time splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df, eco =eco_field)
     mark_estab_year!(splots)
 
 

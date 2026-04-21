@@ -51,10 +51,10 @@ end
     state.t < state.min_t || state.i >= state.max_iter
 end
 
-Base.@kwdef mutable struct SAState{Tx,Tf}
+Base.@kwdef mutable struct SAState{Tx,Tf, TRNG <: Random.AbstractRNG}
     best::SACandidate{Tx,Tf}
     current::SACandidate{Tx,Tf}
-    rng::Random.Xoshiro
+    rng::TRNG
     best_iterations::Vector{Tuple{Int,Float64,Tf}}
     best_iteration::Int = 0
     current_iteration::Int = 0
@@ -73,8 +73,8 @@ Base.@kwdef mutable struct SAState{Tx,Tf}
     reheat_after_iters::Int = 100
     reheat_iter_counter::Int = 0
 end
-function SAState(best::SACandidate{Tx,Tf}, current::SACandidate{Tx,Tf}, rng::Random.Xoshiro; best_iterations=Tuple{Int,Float64,Tf}[], kwargs...) where {Tx,Tf}
-    SAState{Tx,Tf}(; best=best, current=current, rng = rng,
+function SAState(best::SACandidate{Tx,Tf}, current::SACandidate{Tx,Tf}, rng::TRNG; best_iterations=Tuple{Int,Float64,Tf}[], kwargs...) where {Tx,Tf, TRNG <: Random.AbstractRNG}
+    SAState{Tx,Tf, TRNG}(; best=best, current=current, rng = rng,
         best_iterations=best_iterations,
         kwargs...)
 end

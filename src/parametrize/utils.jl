@@ -1,5 +1,5 @@
 using ..PanCore
-export MutableParam, SpeciesSampler, EcoSampler,  GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef
+export MutableParam, SpeciesSampler, EcoSampler,  GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType
 
 import Setfield
 import Random
@@ -7,27 +7,35 @@ import ImageFiltering
 import Dates
 import JSON3
 using DataFrames
+import Distributions as Dists
 
-struct MutableParam{S}
+struct MutableParam{S,T}
     name     :: Symbol
-    dist     :: Any           # Distributions.jl distribution
+    dist     :: Dists.Distribution           
+    bounds :: Tuple{Union{Nothing,T},Union{Nothing,T}}
+    sigma :: T
     type     :: Type
     sampler  :: S             # how to pick the target element
     applier  :: Any           # how to write the sampled value back
 end
-struct ParamDists{T}
+struct ParamDists{T} # subtyping here to make different plugins have different ParamDists
     params          :: Vector{MutableParam}
     weights_cumsum  :: Vector{Float64}
 end
-struct GlobalSampler end       # scalar field, no index needed
-struct SpeciesSampler end      # pick a random species
-struct EcoSampler end          # pick a random ecoregion
-struct EcoSpeciesSampler end   # pick a random (eco, species) pair
 
-struct ScalarApplier end                          # field[] = val
-struct IndexApplier end                           # field[i] = val
-struct NestedIndexApplier end                     # field[i][j] = val
-struct GradientApplier
+@enum MutationType GaussianMutation RandomMutation
+
+abstract type AbstractSampler end
+struct GlobalSampler <: AbstractSampler end       # scalar field, no index needed
+struct SpeciesSampler <: AbstractSampler end      # pick a random species
+struct EcoSampler <: AbstractSampler end          # pick a random ecoregion
+struct EcoSpeciesSampler <: AbstractSampler end   # pick a random (eco, species) pair
+
+abstract type AbstractApplier end
+struct ScalarApplier <: AbstractApplier end                          # field[] = val
+struct IndexApplier <: AbstractApplier end                           # field[i] = val
+struct NestedIndexApplier <: AbstractApplier end                     # field[i][j] = val
+struct GradientApplier <: AbstractApplier
     step::FloatType
 end         # field[i] = [val, val+step, ...]
 
@@ -40,6 +48,14 @@ function sample_target(s::EcoSpeciesSampler, p, rng::Random.AbstractRNG)
     (eco_id, species_id)
 end
 
+get_field_val(::ScalarApplier,       field, idx) = field
+get_field_val(::IndexApplier,       field, idx) = field[idx]
+function get_field_val(::NestedIndexApplier,  field, idx)
+    field[idx[1]][idx[2]]
+end
+function get_field_val(a::GradientApplier, field, idx)
+    field[idx][1]
+end
 apply_mutation(::ScalarApplier,       field, idx, val) = val
 apply_mutation(::IndexApplier,        field, idx, val) = setindex!(copy(field), val, idx)
 function apply_mutation(::NestedIndexApplier,  field, idx, val)
@@ -54,14 +70,48 @@ function apply_mutation(a::GradientApplier, field, idx, val)
 end
 
 
-function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG) where {T}
+function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation) where {T}
     s          = rand(rng, Float64)
     param_idx  = something(findlast(param_dists.weights_cumsum .<= s), 1)
     param      = param_dists.params[param_idx]
 
-    val        = rand(rng, param.dist) |> param.type
     idx        = sample_target(param.sampler, p, rng)
     field      = getproperty(p, param.name)
+    val        = begin 
+                    if mutation_mode == GaussianMutation
+                        sigma = param.sigma 
+                        min_, max_ = param.bounds
+                        cur_val = get_field_val(param.applier, field, idx)
+                        r = cur_val
+                        while r == cur_val
+                            #println(param, r, cur_val)
+                            r = begin
+                                    if param.type == UIntType 
+                                        if !isnothing(min_) && cur_val == min_
+                                            cur_val + param.sigma
+                                        elseif !isnothing(max_) && cur_val == max_
+                                            cur_val - param.sigma
+                                        else
+                                            rand(rng) > 0.5 ? cur_val+param.sigma : cur_val-param.sigma
+                                        end
+                                    else
+                                        rr = rand(rng, Dists.Normal(FloatType(cur_val),sigma))
+                                        if !isnothing(min_) && rr <= FloatType(min_)
+                                            FloatType(min_)
+                                        elseif !isnothing(max_) && rr >= FloatType(max_)
+                                            FloatType(max_)
+                                        else
+                                            rr
+                                        end
+                                    end
+                                end|> param.type
+                        end
+                        r
+                    else
+                        rand(rng, param.dist)|> param.type
+                    end
+                end 
+
     new_field  = apply_mutation(param.applier, field, idx, val)
     #println(field)
     #println(typeof(val))

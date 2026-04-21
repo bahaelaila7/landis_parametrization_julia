@@ -166,7 +166,8 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
     #println(typeof(S))
     D = rand(rng, Dists.truncated(Dists.Normal(15, 10), 5, 25), n_species) .|> FloatType
     #println(typeof(D))
-    LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200, 100), 100, 300), n_species) .|> FloatType
+    #LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200, 100), 100, 300), n_species) .|> FloatType
+    LONGEVITY = fill(FloatType(600), n_species)
     #println(typeof(LONGEVITY))
     SHADE_TOL = rand(rng, Dists.DiscreteUniform(1, 5), n_species) .|> UIntType # ::Vector{FloatType}
     #println(typeof(SHADE_TOL))

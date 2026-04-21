@@ -26,6 +26,7 @@ using DataFrames
 
 
 
+const RNGType = Random.MersenneTwister
 const ActivePlugins = (BaseSitePlugin.BaseSite, BiomassSuccessionPlugin.BiomassSuccession)
 const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 
@@ -51,11 +52,12 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         cohort_counts = fill(Int32(2), n)
         @debug cohort_counts
         soa = ActiveSoA((cohort=cohort_counts, species=species_counts))
+        tRNGs = [RNGType(rand(rng, UInt64)) for _ in 1:Threads.maxthreadid()]
         Threads.@threads :static for i in 1:nrow(df)
             @inbounds begin
                 site = getsite(soa, i)
                 site.active = false
-                site.rng = Random.Xoshiro(rand(rng, UInt64))
+                site.rng = RNGType(rand(tRNGs[Threads.threadid()], UInt64))
                 site.ecocode = UIntType(df.eco_id[i])# no ecocode coming from raster, relying on eco_id
                 site.eco_id = df.eco_id[i]
                 site.mapcode = UIntType(df.plot_id[i]) # for parametrization, plot_id is global index, no raster
@@ -91,6 +93,7 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
 
         cohort_counts = [Int32(nrow(splots_dict[key])) for key in df_keys]
         soa = ActiveSoA((cohort=cohort_counts, species=species_counts))
+        tRNGs = [RNGType(rand(rng, UInt64)) for _ in 1:Threads.maxthreadid()]
         Threads.@threads :static for i in 1:length(df_keys)
             @inbounds begin
                 key = df_keys[i]
@@ -101,7 +104,7 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
                 #cap = UIntType(2^ceil(log2(n_cohorts)))
                 site = getsite(soa, i)
                 site.active = true
-                site.rng = Random.Xoshiro(rand(rng, UInt64))
+                site.rng = RNGType(rand(tRNGs[Threads.threadid()], UInt64))
                 site.ecocode = UIntType(eco_id) #UIntType(getproperty(p, ecocode_field)),
                 site.eco_id = eco_id
                 site.mapcode = UIntType(plot_id)
@@ -234,6 +237,7 @@ function test_spdf(df, n_species, eco_species_ids, loss_params::PU.LossParams)
     return sum(site_losses)
 end
 function parametrize(; cohorts_db_path::String="../data_eco_l4_cohorts.db",
+                eco_field=:epa_l4,
     tablename::String="data_eco_cohorts_g",
     output_dir::String="./outputs",
     filter_ecos::Vector{String}=String[],
@@ -251,6 +255,7 @@ function parametrize(; cohorts_db_path::String="../data_eco_l4_cohorts.db",
     )
     println(Data)
     splots, eco_list, species_list, eco_species_ids = Data.prepare_parametrization_data(; cohorts_db_path=cohorts_db_path,
+                                                                                        eco_field=eco_field,
         tablename=tablename,
         output_dir=tablename,
         skip_disturbances=skip_disturbances,
@@ -334,7 +339,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
         TProgress.@track for trial in 1:TRIALS
             soa = deepcopy(ref_soa)
 
-            bio_params = PU.mutate_params(bio_params, param_dists; rng=rng)
+            bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.GaussianMutation)
             eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
             ctx = (BiomassSuccession=(eco_params=eco_params,),)
             years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
@@ -452,13 +457,15 @@ end
 function main()
     seed = 123
     Random.seed!(seed)
-    rng = Random.Xoshiro(rand(UInt64))
-    filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
+    rng = RNGType(rand(UInt64))
+    #filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
     #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
     #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
     #filter_ecos=["8.5.3.75g"]
+    filter_ecos=["8.5.3"]
     parametrize(;
-        cohorts_db_path="../data_eco_l4_cohorts.db",
+        cohorts_db_path="../data_eco_cohorts.db",
+        eco_field="epa_l3",
         tablename="data_eco_cohorts",
         output_dir="./outputs",
         filter_ecos=filter_ecos,

@@ -154,24 +154,24 @@ end
     return false
 end
 
-Base.@kwdef mutable struct LBSAState{Tx,Tf}
+Base.@kwdef mutable struct LBSAState{Tx,Tf,TRNG<:Random.AbstractRNG}
     best::LBSACandidate{Tx,Tf}
     current::LBSACandidate{Tx,Tf}
-    rng::Random.Xoshiro
+    rng::TRNG
     best_iterations::Vector{Tuple{Int,Float64,LBSACandidate{Tx,Tf}}}
     best_iteration::Int = 0
     current_iteration::Int = 0
     i::Int = 0
     max_iter::Int = 1000000
     warm_up_greedy_acceptance::Bool = false
-    warm_up_record_uphill_only::Bool = true
-    temp_list_len::Int = 50
+    warm_up_record_uphill_only::Bool = false
+    temp_list_len::Int = 150
     temp_list_oversample::Bool = false
-    stretch_len::Int = 100
+    stretch_len::Int = 150
     initial_acceptance_prob::Float64 = 0.9
     cooling_only_schedule::Bool = false
-    up_attempt_stale_ratio::Float64 = 0.9
-    reheat_after_frozen_stretches::Int = 5
+    up_attempt_stale_ratio::Float64 = 0.95
+    reheat_after_frozen_stretches::Int = 10
     restart_after_no_best_reheats::Int = 10
     reheat_factor::Float64 = 1.5
     reheat_max_only::Bool = false
@@ -201,8 +201,8 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf}
     diff_avg::Float64 = 0.0
     prob_avg::Float64 = 0.0
 end
-function LBSAState(best::LBSACandidate{Tx,Tf}, current::LBSACandidate{Tx,Tf}, rng::Random.Xoshiro; best_iterations=Tuple{Int,Float64,LBSACandidate{Tx,Tf}}[], initial_acceptance_prob=0.9, _neg_inv_lnp0=0.0, kwargs...) where {Tx,Tf}
-    LBSAState{Tx,Tf}(; best=best, current=current, rng=rng,
+function LBSAState(best::LBSACandidate{Tx,Tf}, current::LBSACandidate{Tx,Tf}, rng::TRNG; best_iterations=Tuple{Int,Float64,LBSACandidate{Tx,Tf}}[], initial_acceptance_prob=0.9, _neg_inv_lnp0=0.0, kwargs...) where {Tx,Tf, TRNG <: Random.AbstractRNG}
+    LBSAState{Tx,Tf,TRNG}(; best=best, current=current, rng=rng,
         best_iterations=best_iterations,
         initial_acceptance_prob=initial_acceptance_prob,
         _neg_inv_lnp0=-1.0 / log(initial_acceptance_prob),
