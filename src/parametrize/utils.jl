@@ -23,7 +23,7 @@ struct ParamDists{T} # subtyping here to make different plugins have different P
     weights_cumsum  :: Vector{Float64}
 end
 
-@enum MutationType GaussianMutation RandomMutation
+@enum MutationType GaussianMutation RandomMutation BothMutations
 
 abstract type AbstractSampler end
 struct GlobalSampler <: AbstractSampler end       # scalar field, no index needed
@@ -74,42 +74,43 @@ function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG
     s          = rand(rng, Float64)
     param_idx  = something(findlast(param_dists.weights_cumsum .<= s), 1)
     param      = param_dists.params[param_idx]
+    _mutation_mode = mutation_mode != BothMutations ? mutation_mode : (rand(rng) >0.5 ? GaussianMutation : RandomMutation)
 
     idx        = sample_target(param.sampler, p, rng)
     field      = getproperty(p, param.name)
     val        = begin 
-                    if mutation_mode == GaussianMutation
-                        sigma = param.sigma 
-                        min_, max_ = param.bounds
-                        cur_val = get_field_val(param.applier, field, idx)
-                        r = cur_val
-                        while r == cur_val
+                    cur_val = get_field_val(param.applier, field, idx)
+                    r = cur_val
+                    min_, max_ = param.bounds
+                    while r == cur_val
+                        r = if _mutation_mode == GaussianMutation
+                            sigma = param.sigma 
                             #println(param, r, cur_val)
-                            r = begin
-                                    if param.type == UIntType 
-                                        if !isnothing(min_) && cur_val == min_
-                                            cur_val + param.sigma
-                                        elseif !isnothing(max_) && cur_val == max_
-                                            cur_val - param.sigma
-                                        else
-                                            rand(rng) > 0.5 ? cur_val+param.sigma : cur_val-param.sigma
-                                        end
+                            begin
+                                if param.type == UIntType 
+                                    if !isnothing(min_) && cur_val == min_
+                                        cur_val + param.sigma
+                                    elseif !isnothing(max_) && cur_val == max_
+                                        cur_val - param.sigma
                                     else
-                                        rr = rand(rng, Dists.Normal(FloatType(cur_val),sigma))
-                                        if !isnothing(min_) && rr <= FloatType(min_)
-                                            FloatType(min_)
-                                        elseif !isnothing(max_) && rr >= FloatType(max_)
-                                            FloatType(max_)
-                                        else
-                                            rr
-                                        end
+                                        rand(rng) > 0.5 ? cur_val+param.sigma : cur_val-param.sigma
                                     end
-                                end|> param.type
+                                else
+                                    rand(rng, Dists.Normal(FloatType(cur_val),sigma))
+                                end
+                            end |> param.type
+                        else
+                            rand(rng, param.dist)|> param.type
                         end
-                        r
-                    else
-                        rand(rng, param.dist)|> param.type
+                        r=if !isnothing(min_) && FloatType(r) <= FloatType(min_)
+                            FloatType(min_)
+                        elseif !isnothing(max_) && FloatType(r) >= FloatType(max_)
+                            FloatType(max_)
+                        else
+                            r
+                        end |> param.type
                     end
+                    r
                 end 
 
     new_field  = apply_mutation(param.applier, field, idx, val)
@@ -169,12 +170,13 @@ end
         site_agb_loss=loss1.site_agb_loss + loss2.site_agb_loss,
         num_sites=loss1.num_sites + loss2.num_sites)
 end
-@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
+@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(10.0f0))::FloatType
 
-    w = (alpha * sum(loss.sp_w_loss))
-    sp = (beta * sum(loss.sp_agb_loss))
-    site = (loss.site_agb_loss)
-    all = w + sp + site
+    w = (alpha * loss.sp_w_loss)
+    sp = (beta * log.(1 .+ loss.sp_agb_loss))
+    #site = log(1+loss.site_agb_loss)
+    all = sum(w) #sum(w .+ sp .+ (w .* sp))
+    #all = w + sp #+ site
     return all / loss.num_sites
 
 end
@@ -294,7 +296,7 @@ end
 
 @inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, sp_w_loss, sp_agb_loss, site_agb_loss, debug::Bool=false)
     sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
-    log_diff = log10(sim_agb_sum + loss_params.EPS)
+    log_diff = log10(1+ sim_agb_sum) #+ loss_params.EPS)
     sp_agb_loss[gsp] = sim_agb_sum
     site_agb_loss += sim_agb_sum
     if spdf_plt.keys[sp]
@@ -304,11 +306,11 @@ end
             ages[UIntType(site.c_age[a])] = site.c_bio[a]
         end
         sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
-        @assert !any(isnan.(sim_age_cdf)) "cdf NaN"
-        @assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
+        #@assert !any(isnan.(sim_age_cdf)) "cdf NaN"
+        #@assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
         sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* abs.(sim_age_cdf - rec.sp_age_cdf)[begin:end-1])
-        @assert !any(isnan.(sp_w_loss[gsp])) "NaN"
-        log_diff -= log10(rec.sp_agb_sum + loss_params.EPS)
+        #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
+        log_diff -= log10(1+rec.sp_agb_sum) #+ loss_params.EPS)
         sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
         site_agb_loss -= rec.sp_agb_sum
         if debug
@@ -323,7 +325,7 @@ end
 
         end
     end
-    sp_w_loss[gsp] = (1.0f0 + sp_w_loss[gsp]) * (abs(log_diff)^2)
+    #sp_w_loss[gsp] = sp_w_loss[gsp] #(1.0f0 + sp_w_loss[gsp]) * (abs(log_diff)^2)
     return site_agb_loss
 end
 
@@ -331,8 +333,8 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
     #Sort by species
     eco_n_species = length(site.sp_mature)
     species_id_map = eco_species_ids[site.eco_id]
-    @assert eco_n_species == length(spdf_plt.keys) "eco species numbers do not match"
-    @assert length(species_id_map) == eco_n_species "eco species numbers do not match"
+    #@assert eco_n_species == length(spdf_plt.keys) "eco species numbers do not match"
+    #@assert length(species_id_map) == eco_n_species "eco species numbers do not match"
 
     insite = falses(eco_n_species)
 
@@ -392,7 +394,9 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
         @inbounds rec = spdf_plt.records[UIntType(sp)]
         @inbounds gsp = species_id_map[sp]
         sp_agb_loss[gsp] = rec.sp_agb_sum
-        sp_w_loss[gsp] += loss_params.lambda * abs(log10(rec.sp_agb_sum + loss_params.EPS))
+        #@assert sp_w_loss[gsp] == 0
+        sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* rec.sp_age_cdf[begin:end-1])
+        #sp_w_loss[gsp] = loss_params.lambda * abs(log10(1+rec.sp_agb_sum)) # + loss_params.EPS))
         site_agb_loss -= rec.sp_agb_sum
     end
 

@@ -34,7 +34,7 @@ function process_plugin!(::AnySoA{P}, ::Type{<:AbstractPlugin}, ::Int; ctx::C) w
 
 function with_thread_sync(f::F) where {F}
     local result
-    Threads.@threads for _ in 1:1
+    Threads.@threads :static for _ in 1:1
         result = f()
     end
     return result

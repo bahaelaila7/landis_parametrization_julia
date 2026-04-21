@@ -294,7 +294,7 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
             #@debug (new_cohort_counts)
             #new_cohort_counts .= Int32(0)
             new_cohort_counts = zeros(Int32, soa.n)
-            Threads.@threads for i in 1:soa.n
+            Threads.@threads :static for i in 1:soa.n
                 @inbounds site = getsite(soa, i)
                 @assert Int(site.mapcode) == Int(i)
                 if i == 18
@@ -309,13 +309,13 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
                 PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
             #end
             @debug ("sprouting")
-            Threads.@threads for i in 1:soa.n
+            Threads.@threads :static for i in 1:soa.n
                 @inbounds site = getsite(soa, i)
                 sprouting_step!(current_year, site, eco_params[site.eco_id])
             end
             @debug ("succession")
             new_cohort_counts = zeros(Int32, soa.n)
-            Threads.@threads for i in 1:soa.n
+            Threads.@threads :static for i in 1:soa.n
                 @inbounds site = getsite(soa, i)
                 succession_step!(current_year, site, eco_params[site.eco_id])
                 reproduction_step!(current_year, site, eco_params[site.eco_id])
@@ -343,7 +343,7 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
         plots = combine(groupby(rows, [:plot_id, :eco_id], sort=false)) do rs
             (; eco_species_ids=[rs.eco_species_id])
         end
-        Threads.@threads for row in eachrow(plots)
+        Threads.@threads :static for row in eachrow(plots)
             site = PanCore.getsite(soa, Int(row.plot_id))
             site.active = true
             for sp in row.eco_species_ids
@@ -399,7 +399,7 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
     end
     @debug ("year $(current_year), final before recounting $((soa.refs.cohort))")
     new_cohort_counts = zeros(Int32, soa.n)
-    Threads.@threads for i in 1:soa.n
+    Threads.@threads :static for i in 1:soa.n
         @inbounds site = getsite(soa, i)
         @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
     end
@@ -408,7 +408,7 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
     soa = #PanCore.with_thread_sync() do
         PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
     #end
-    Threads.@threads for i in 1:soa.n
+    Threads.@threads :static for i in 1:soa.n
         @inbounds site = getsite(soa, i)
         sprouting_step!(current_year, site, eco_params[site.eco_id])
     end

@@ -14,7 +14,7 @@ function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species
         #MutableParam(:D, truncated(Normal(15, 10), 5, 25), FloatType, SpeciesSampler(), IndexApplier()),
         MutableParam(:D, Uniform(5.0f0, 25.0f0), (5.0f0, 25.0f0), 0.2f0, FloatType, SpeciesSampler(), IndexApplier()),
         #MutableParam(:LONGEVITY, truncated(Normal(200, 100), 100, 300), FloatType, SpeciesSampler(), IndexApplier()),
-        #MutableParam(:LONGEVITY, DiscreteUniform(100, 400), (100, 400),FloatType, SpeciesSampler(), IndexApplier()),
+        MutableParam(:LONGEVITY, DiscreteUniform(100, 1000), (100, 1000),50,FloatType, SpeciesSampler(), IndexApplier()),
         MutableParam(:SHADE_TOL, DiscreteUniform(1, 5), (1, 5),1,UIntType, SpeciesSampler(), IndexApplier()),
         MutableParam(:MATURITY, DiscreteUniform(3, 40), (3, 40), 1,FloatType, SpeciesSampler(), IndexApplier()),
         MutableParam(:PROB_MORT_SPP, Uniform(), (0.0f0, 1.0f0),0.1f0,FloatType, EcoSpeciesSampler(), NestedIndexApplier()),

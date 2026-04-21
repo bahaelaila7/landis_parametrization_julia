@@ -246,14 +246,19 @@ function parametrize(; cohorts_db_path::String="../data_eco_l4_cohorts.db",
     TRIALS::Int=30000,
     rng::Random.AbstractRNG)
 
+    # [5, 10, 20, 40, 60, 80]
+    #bins_idx = vcat(5:5:30, 40:10:80, 100:20:160)
+    bins_idx = vcat(10:10:40, 60:20:120)
+    smoothing_window = PU.get_smoothing_window(; smoothing_window=2, smoothing_variance=FloatType(1.2f0))
+    @info bins_idx
+    @info smoothing_window
     loss_params = PU.LossParams(
         age_bins=PU.AgeBins(
-            bins_idx=[5, 10, 20, 40, 60, 80] .|> Int,
+            bins_idx= bins_idx .|> Int,
             last_bin_open=true
         ),
-        smoothing_weights=PU.get_smoothing_window(; smoothing_window=1, smoothing_variance=FloatType(1.0f0))
+        smoothing_weights=smoothing_window
     )
-    println(Data)
     splots, eco_list, species_list, eco_species_ids = Data.prepare_parametrization_data(; cohorts_db_path=cohorts_db_path,
                                                                                         eco_field=eco_field,
         tablename=tablename,
@@ -319,27 +324,7 @@ function parametrize(; cohorts_db_path::String="../data_eco_l4_cohorts.db",
         rng=rng,
         debug=debug)
 end
-function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
-    n_species = length(species_list)
-    param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
-    bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-    best_result = PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
-    cur = LBSA.LBSACandidate(bio_params, best_result)
-    _best = cur
-    search_state = LBSA.LBSAState(_best, cur, rng; max_iter=TRIALS)
-    if TRIALS < 1
-        return search_state #best_loss, best_result, best_params
-    end
-    max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
-
-    writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
-
-    try
-
-        TProgress.@track for trial in 1:TRIALS
-            soa = deepcopy(ref_soa)
-
-            bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.GaussianMutation)
+function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
             eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
             ctx = (BiomassSuccession=(eco_params=eco_params,),)
             years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
@@ -369,10 +354,44 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
                 end
             end
             run_result = sum(PU.skipundef(years_results))
-            @assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
+            #@assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
+        return run_result
+end
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
+    n_species = length(species_list)
+    max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+    param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
+    bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+    best_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+    #PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
+    cur = LBSA.LBSACandidate(bio_params, best_result)
+    _best = cur
+    search_state = LBSA.LBSAState(_best, cur, rng; max_iter=TRIALS)
+    if TRIALS < 1
+        return search_state #best_loss, best_result, best_params
+    end
+
+    writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
+
+    try
+
+        TProgress.@track for trial in 1:TRIALS
+            soa = deepcopy(ref_soa)
+
+            bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)
+            run_result =  fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
             next = LBSA.LBSACandidate(bio_params, run_result)
 
             is_new_best = LBSA.search_cmp!(next, search_state)
+            if is_new_best 
+                put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state)))
+            end
+            if LBSA.should_restart(search_state)
+                @info "Restarting @ $(search_state.i)"
+                bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+                cur_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+                is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
+            end
             if is_new_best || search_state.i % 50 == 0
                 put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state)))
             end
@@ -390,7 +409,7 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
     n_species = length(species_list)
     param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
     bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-    best_result = PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
+    best_result = nothing # PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
     cur = SA.SACandidate(bio_params, best_result)
     _best = cur
     search_state = SA.SAState(_best, cur, rng; max_iter=TRIALS, initial_t=1e3, t=1e3)
@@ -455,17 +474,17 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
 
 end
 function main()
-    seed = 123
+    seed = 1337
     Random.seed!(seed)
     rng = RNGType(rand(UInt64))
     #filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
     #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
     #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-    #filter_ecos=["8.5.3.75g"]
-    filter_ecos=["8.5.3"]
+    filter_ecos=["8.5.3.75g"]
+    #filter_ecos=["8.5.3"]
     parametrize(;
         cohorts_db_path="../data_eco_cohorts.db",
-        eco_field="epa_l3",
+        eco_field="epa_l4",
         tablename="data_eco_cohorts",
         output_dir="./outputs",
         filter_ecos=filter_ecos,

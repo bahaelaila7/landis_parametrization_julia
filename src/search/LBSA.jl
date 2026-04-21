@@ -3,7 +3,7 @@ import Random
 import DataStructures
 import Statistics
 
-export LBSACandidate, LBSAState, simulated_annealing_acceptance_rule, threshold_accepting_acceptance_rule, search_cmp!, search_update_rule!
+export LBSACandidate, LBSAState, simulated_annealing_acceptance_rule, threshold_accepting_acceptance_rule, search_cmp!, search_update_rule!, should_restart
 
 @enum SearchMethod SimulatedAnnealing ThresholdAccepting
 Base.@kwdef struct LBSACandidate{Tx,Tf}
@@ -11,8 +11,36 @@ Base.@kwdef struct LBSACandidate{Tx,Tf}
     fx::Tf
 end
 
+@inline function should_restart(state)::Bool
+    state._should_restart
+end
 @inline function is_search_over(state)::Bool
     state.i >= state.max_iter
+end
+@inline function _check_best(state, candidate)::Bool
+        cur_fit = convert(Float64, candidate.fx)
+        best_fit = convert(Float64, state.best.fx)
+        if cur_fit < best_fit
+            state._frozen_no_best_reheats = 0
+            best_fit = cur_fit
+            state.best = state.current
+            state.best_iteration = state.i
+            push!(state.best_iterations, (state.i, best_fit, state.best))
+            state._hill_climbing_best = state.hill_climbing_upon_new_best
+            return true
+        end
+    return false
+end
+@inline function restart(state, candidate) :: Bool
+        state.current=candidate
+        state._should_restart = false
+        state._frozen_no_best_reheats = 0
+        state._warming_up = true
+        state.warm_up_record_uphill_only = true
+        #state.current = rand(state.best_iterations)[3] #state.best
+        state._t_list = [] #state._initial_t_list[:]
+        #state._t_max_idx = argmax(state._t_list)
+        return _check_best(state, state.current)
 end
 @inline function search_cmp!(next, state)
     state.i += 1
@@ -110,12 +138,7 @@ end
                 if state._frozen_stretches >= state.reheat_after_frozen_stretches
                     state._frozen_no_best_reheats += 1
                     if next_fit > best_fit && state._frozen_no_best_reheats >= state.restart_after_no_best_reheats
-                        state._frozen_no_best_reheats = 0
-                        state._warming_up = true
-                        state.warm_up_record_uphill_only = true
-                        state.current = rand(state.best_iterations)[3] #state.best
-                        state._t_list = [] #state._initial_t_list[:]
-                        #state._t_max_idx = argmax(state._t_list)
+                        state._should_restart = true
                         accept = false
                     else
                         if state.reheat_max_only
@@ -141,15 +164,7 @@ end
         state.current = next # immutable, aliasing is fine
         state.current_iteration = state.i
         cur_fit = next_fit
-        if cur_fit < best_fit
-            state._frozen_no_best_reheats = 0
-            best_fit = cur_fit
-            state.best = state.current
-            state.best_iteration = state.i
-            push!(state.best_iterations, (state.i, best_fit, state.best))
-	    state._hill_climbing_best = state.hill_climbing_upon_new_best
-            return true
-        end
+        return _check_best(state, state.current)
     end
     return false
 end
@@ -194,6 +209,7 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf,TRNG<:Random.AbstractRNG}
     _t_sum::Float64 = 0.0
     _t_max_idx::Int = 1
     _t_oldest_idx::Int = 1
+    _should_restart=false
 
 
 
