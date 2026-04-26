@@ -1,6 +1,6 @@
 using ..PanCore
 export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts
-import SQLite
+import DuckDB
 import Random
 using DataFrames
 import Dates
@@ -94,8 +94,13 @@ function make_splots(df::DataFrame; eco::String="epa_l4")::Tuple{DataFrame,Vecto
 
     #maps list species text
     #maps list eco_text
+    #println(df.measdate)
+    #println(typeof(df.measdate))
 
-    df.measdate = Dates.DateTime.(df.measdate, Dates.dateformat"yyyy-mm-dd")
+    if !(df.measdate[1] isa Dates.Date)
+      df.measdate = Dates.DateTime.(df.measdate, Dates.dateformat"yyyy-mm-dd")
+    end
+    df.age_calc = df.age_calc .|> UIntType
 
     fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :species_id, :age_calc]
     plots = combine(groupby(df, fields, sort=false), nrow => :count, :agb => sum => :agb_sum)
@@ -127,9 +132,9 @@ end
 function prepare_parametrization_data(; cohorts_db_path::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, filter_ecos::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
         #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
     println("Connecting to: $(cohorts_db_path) ")
-    db = SQLite.DB(cohorts_db_path)
+    con = DuckDB.connect(DuckDB.DB(cohorts_db_path))
     println("Creating index if necessary")
-    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS PLT_ECO_IDX_$(eco_field) ON data_eco_cohorts($(eco_field));")
+    DuckDB.execute(con, "CREATE INDEX IF NOT EXISTS PLT_ECO_IDX_$(eco_field) ON data_eco_cohorts($(eco_field));")
     sql = "SELECT * FROM $(tablename) WHERE true"
     if length(filter_ecos) > 0
         sql *= " AND $(eco_field) in ('$(join(filter_ecos,"','"))')"
@@ -138,8 +143,8 @@ function prepare_parametrization_data(; cohorts_db_path::String, eco_field::Stri
         sql *= " AND subp_has_dstrb= false"
     end
     println(sql)
-    cohorts_df = SQLite.DBInterface.execute(db, sql) |> DataFrame
-    SQLite.close(db)
+    cohorts_df = DuckDB.execute(con, sql) |> DataFrame
+    #DuckDB.close(con)
     println("Closing db. $(nrow(cohorts_df)) rows loaded.")
 
     @time splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df, eco =eco_field)

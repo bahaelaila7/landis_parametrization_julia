@@ -39,6 +39,25 @@ struct GradientApplier <: AbstractApplier
     step::FloatType
 end         # field[i] = [val, val+step, ...]
 
+# Loss-weighted sampling context: sp_w_loss[global_species_id] drives proportional selection.
+struct SamplingContext
+    sp_w_loss::Vector{FloatType}
+end
+
+# Returns a 1-based index sampled proportional to weights; falls back to uniform when all zero.
+function _weighted_sample(weights::AbstractVector{FloatType}, rng::Random.AbstractRNG)::Int
+    n = length(weights)
+    total = sum(weights)
+    total <= zero(FloatType) && return rand(rng, 1:n)
+    r = rand(rng, FloatType) * total
+    cumw = zero(FloatType)
+    for i in 1:n
+        cumw += weights[i]
+        cumw >= r && return i
+    end
+    return n
+end
+
 sample_target(s::GlobalSampler,     p, rng::Random.AbstractRNG) = nothing
 sample_target(s::SpeciesSampler,    p, rng::Random.AbstractRNG) = rand(rng, 1:length(p.SPECIES_LIST))
 sample_target(s::EcoSampler,        p, rng::Random.AbstractRNG) = rand(rng, 1:length(p.ECO_LIST))
@@ -46,6 +65,27 @@ function sample_target(s::EcoSpeciesSampler, p, rng::Random.AbstractRNG)
     eco_id     = rand(rng, 1:length(p.ECO_SPECIES_IDS))
     species_id = rand(rng, 1:length(p.ECO_SPECIES_IDS[eco_id]))
     (eco_id, species_id)
+end
+
+# Context-aware overloads: species/eco-species selection proportional to sp_w_loss.
+sample_target(::GlobalSampler, p, rng::Random.AbstractRNG, ::SamplingContext) = nothing
+sample_target(::EcoSampler,    p, rng::Random.AbstractRNG, ::SamplingContext) = rand(rng, 1:length(p.ECO_LIST))
+
+function sample_target(::SpeciesSampler, p, rng::Random.AbstractRNG, ctx::SamplingContext)
+    _weighted_sample(ctx.sp_w_loss, rng)
+end
+
+function sample_target(::EcoSpeciesSampler, p, rng::Random.AbstractRNG, ctx::SamplingContext)
+    # Stage 1: sample eco proportional to summed loss of its species.
+    eco_weights = FloatType[
+        sum(ctx.sp_w_loss[Int(gsp)] for gsp in p.ECO_SPECIES_IDS[eco_id])
+        for eco_id in 1:length(p.ECO_SPECIES_IDS)
+    ]
+    eco_id = _weighted_sample(eco_weights, rng)
+    # Stage 2: sample local species index proportional to its loss.
+    sp_weights = FloatType[ctx.sp_w_loss[Int(gsp)] for gsp in p.ECO_SPECIES_IDS[eco_id]]
+    sp_id = _weighted_sample(sp_weights, rng)
+    (eco_id, sp_id)
 end
 
 get_field_val(::ScalarApplier,       field, idx) = field
@@ -70,13 +110,14 @@ function apply_mutation(a::GradientApplier, field, idx, val)
 end
 
 
-function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation) where {T}
+function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation, ctx::Union{Nothing,SamplingContext}=nothing) where {T}
     s          = rand(rng, Float64)
     param_idx  = something(findlast(param_dists.weights_cumsum .<= s), 1)
     param      = param_dists.params[param_idx]
     _mutation_mode = mutation_mode != BothMutations ? mutation_mode : (rand(rng) >0.5 ? GaussianMutation : RandomMutation)
 
-    idx        = sample_target(param.sampler, p, rng)
+    idx        = isnothing(ctx) ? sample_target(param.sampler, p, rng) :
+                                  sample_target(param.sampler, p, rng, ctx)
     field      = getproperty(p, param.name)
     val        = begin 
                     cur_val = get_field_val(param.applier, field, idx)
@@ -170,12 +211,12 @@ end
         site_agb_loss=loss1.site_agb_loss + loss2.site_agb_loss,
         num_sites=loss1.num_sites + loss2.num_sites)
 end
-@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(10.0f0))::FloatType
+@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
 
     w = (alpha * loss.sp_w_loss)
     sp = (beta * log.(1 .+ loss.sp_agb_loss))
     #site = log(1+loss.site_agb_loss)
-    all = sum(w) #sum(w .+ sp .+ (w .* sp))
+    all = sum(w .+ sp .+ (w .* sp))
     #all = w + sp #+ site
     return all / loss.num_sites
 
