@@ -25,5 +25,11 @@ debug:
 exec:                                
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler;create_app(".", "build";filter_stdlibs=true,precompile_execution_file="src/entry.jl")'
                                      
-sysimage:                            
+sysimage:
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler; create_sysimage(["Pan"]; sysimage_path="Pan.so",precompile_execution_file="precompile_exec.jl")'
+
+spatial:
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.spatial_main()'
+
+debug-spatial:
+	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.spatial_main()'
