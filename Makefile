@@ -33,3 +33,9 @@ spatial:
 
 debug-spatial:
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.spatial_main()'
+
+landis:
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.landis_main()'
+
+debug-landis:
+	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.landis_main()'

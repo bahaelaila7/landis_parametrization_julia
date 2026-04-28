@@ -506,166 +506,248 @@ end
 # ---------------------------------------------------------------------------
 
 function make_sites_from_communities(
-    splots::DataFrame,
-    eco_species_ids::Vector{Vector{Int}},
-    rng::Random.AbstractRNG,
+  splots::DataFrame,
+  eco_species_ids::Vector{Vector{Int}},
+  rng::Random.AbstractRNG,
 )
-    site_df = unique(select(splots, [:mapcode, :eco_id]))
-    sort!(site_df, :mapcode)
-    n = nrow(site_df)
+  site_df = unique(select(splots, [:mapcode, :eco_id]))
+  sort!(site_df, :mapcode)
+  n = nrow(site_df)
 
-    splots_dict = Dict(
-        key.mapcode => DataFrame(rows)
-        for (key, rows) in pairs(groupby(splots, :mapcode, sort=false))
-    )
+  splots_dict = Dict(
+    key.mapcode => DataFrame(rows)
+    for (key, rows) in pairs(groupby(splots, :mapcode, sort=false))
+  )
 
-    cohort_counts  = Int32[nrow(splots_dict[row.mapcode]) for row in eachrow(site_df)]
-    species_counts = Int32[length(eco_species_ids[row.eco_id]) for row in eachrow(site_df)]
+  cohort_counts = Int32[nrow(splots_dict[row.mapcode]) for row in eachrow(site_df)]
+  species_counts = Int32[length(eco_species_ids[row.eco_id]) for row in eachrow(site_df)]
 
-    soa   = ActiveSoA((cohort=cohort_counts, species=species_counts))
-    tRNGs = [RNGType(rand(rng, UInt64)) for _ in 1:Threads.maxthreadid()]
+  soa = ActiveSoA((cohort=cohort_counts, species=species_counts))
+  tRNGs = [RNGType(rand(rng, UInt64)) for _ in 1:Threads.maxthreadid()]
 
-    Threads.@threads :static for i in 1:n
-        @inbounds begin
-            row     = site_df[i, :]
-            cohorts = splots_dict[row.mapcode]
-            site    = getsite(soa, i)
+  Threads.@threads :static for i in 1:n
+    @inbounds begin
+      row = site_df[i, :]
+      cohorts = splots_dict[row.mapcode]
+      site = getsite(soa, i)
 
-            site.active           = true
-            site.rng              = RNGType(rand(tRNGs[Threads.threadid()], UInt64))
-            site.mapcode          = row.mapcode
-            site.ecocode          = 0
-            site.eco_id           = row.eco_id
-            site.ref_cn           = row.mapcode
-            site.old              = 0
-            site.live             = 0
-            site.B                = zero(FloatType)
-            site.AGNPP            = zero(FloatType)
-            site.capacityReduction = one(FloatType)
-            site.growthReduction  = one(FloatType)
-            site.prevYearMortality = zero(FloatType)
-            site.shade_class      = 1
-            site.c_species       .= zero(UIntType)
-            site.c_age           .= zero(FloatType)
-            site.c_bio           .= zero(FloatType)
-            site.c_m_tot         .= zero(FloatType)
-            site.c_comp          .= zero(FloatType)
-            site.sp_mature       .= false
-            site.sp_sprout       .= false
+      site.active = true
+      site.rng = RNGType(rand(tRNGs[Threads.threadid()], UInt64))
+      site.mapcode = row.mapcode
+      site.ecocode = 0
+      site.eco_id = row.eco_id
+      site.ref_cn = row.mapcode
+      site.old = 0
+      site.live = 0
+      site.B = zero(FloatType)
+      site.AGNPP = zero(FloatType)
+      site.capacityReduction = one(FloatType)
+      site.growthReduction = one(FloatType)
+      site.prevYearMortality = zero(FloatType)
+      site.shade_class = 1
+      site.c_species .= zero(UIntType)
+      site.c_age .= zero(FloatType)
+      site.c_bio .= zero(FloatType)
+      site.c_m_tot .= zero(FloatType)
+      site.c_comp .= zero(FloatType)
+      site.sp_mature .= false
+      site.sp_sprout .= false
 
-            for cohort_row in eachrow(cohorts)
-                BiomassSuccessionPlugin.add_cohort!(
-                    site,
-                    UIntType(cohort_row.eco_species_id),
-                    FloatType(cohort_row.age_calc),
-                    FloatType(cohort_row.agb_sum),
-                )
-            end
-        end
+      for cohort_row in eachrow(cohorts)
+        BiomassSuccessionPlugin.add_cohort!(
+          site,
+          UIntType(cohort_row.eco_species_id),
+          FloatType(cohort_row.age_calc),
+          FloatType(cohort_row.agb_sum),
+        )
+      end
     end
-    return soa
+  end
+  return soa
 end
 
-function simulate_spatial(;
-    data_dir::String,
-    output_dir::String,
-    eco_raster::String,
-    eco_ecocode_mapping::String,
-    biomass_params_path::String,
-    treemap_raster::Union{String,Nothing}    = nothing,
-    communities_csv::Union{String,Nothing}   = nothing,
-    communities_db::Union{String,Nothing}    = nothing,
-    treemap_version::Int                     = 2022,
-    treemap_db_path::String                  = "../data_eco_cohorts.duckdb",
-    rng_seed::Int                            = 1337,
-    timehorizon_years::Int                   = 50,
-    output_every_years::Int                  = 5,
+function simulate_spatial_treemap(;
+  data_dir::String,
+  output_dir::String,
+  eco_raster::String,
+  eco_ecocode_mapping::String,
+  biomass_params_path::String,
+  treemap_raster::Union{String,Nothing}=nothing,
+  communities_csv::Union{String,Nothing}=nothing,
+  communities_db::Union{String,Nothing}=nothing,
+  treemap_version::Int=2022,
+  treemap_db_path::String="../data_eco_cohorts.duckdb",
+  rng_seed::Int=1337,
+  timehorizon_years::Int=50,
+  output_every_years::Int=5,
 )
-    rng = RNGType(UInt64(rng_seed))
+  rng = RNGType(UInt64(rng_seed))
 
-    println("Loading params: $biomass_params_path")
-    params = JLD2.load_object(joinpath(data_dir, biomass_params_path))
+  println("Loading params: $biomass_params_path")
+  params = JLD2.load_object(joinpath(data_dir, biomass_params_path))
 
-    println("Loading eco raster")
-    eco_raster_data = Data.load_eco_raster(joinpath(data_dir, eco_raster))
+  println("Loading eco raster")
+  eco_raster_data = Data.load_eco_raster(joinpath(data_dir, eco_raster))
 
-    eco_mapping_path = joinpath(data_dir, eco_ecocode_mapping)
-    eco_mapping_df   = CSV.read(eco_mapping_path, DataFrame)
+  eco_mapping_path = joinpath(data_dir, eco_ecocode_mapping)
+  eco_mapping_df = CSV.read(eco_mapping_path, DataFrame)
 
-    local splots_pixels, mod_params, eco_species_ids
+  local splots_pixels, mod_params, eco_species_ids
 
-    if !isnothing(treemap_raster)
-        println("Loading treemap raster: $treemap_raster")
-        @time cn_raster, _ = Data.load_treemap_raster(
-            joinpath(data_dir, treemap_raster); treemap_version=treemap_version)
-        @assert size(cn_raster) == size(eco_raster_data) "Raster size mismatch: treemap $(size(cn_raster)) ≠ eco $(size(eco_raster_data))"
+  if !isnothing(treemap_raster)
+    println("Loading treemap raster: $treemap_raster")
+    @time cn_raster, _ = Data.load_treemap_raster(
+      joinpath(data_dir, treemap_raster); treemap_version=treemap_version)
+    @assert size(cn_raster) == size(eco_raster_data) "Raster size mismatch: treemap $(size(cn_raster)) ≠ eco $(size(eco_raster_data))"
 
-        println("Extracting cohorts from DuckDB (treemap path)")
-        @time splots, eco_list, eff_eco_list, species_list = Data.load_treemap_cohorts(
-            cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path)
-        println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
+    println("Extracting cohorts from DuckDB (treemap path)")
+    @time splots, eco_list, eff_eco_list, species_list = Data.load_treemap_cohorts(
+      cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path)
+    println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
 
-        println("Remapping params to data eco/species")
-        @time mod_params, mapped_splots, eco_species_ids = Data.map_params_to_data_treemap(
-            params, eco_list, eff_eco_list, species_list, splots)
+    println("Remapping params to data eco/species")
+    @time mod_params, mapped_splots, eco_species_ids = Data.map_params_to_data_treemap(
+      params, eco_list, eff_eco_list, species_list, splots)
 
-        println("Expanding cohorts to raster pixels")
-        @time splots_pixels = Data.expand_to_pixels(
-            mapped_splots, cn_raster, eco_raster_data)
+    println("Expanding cohorts to raster pixels")
+    @time splots_pixels = Data.expand_to_pixels(
+      mapped_splots, cn_raster, eco_raster_data)
 
-    elseif !isnothing(communities_csv)
-        println("Loading initial communities from CSV: $communities_csv")
-        ic_df = Data.load_csv_communities(joinpath(data_dir, communities_csv))
-        splots_pixels, mod_params, eco_species_ids = Data.prepare_general_splots(
-            ic_df, eco_raster_data, eco_mapping_df, params)
+  elseif !isnothing(communities_csv)
+    println("Loading initial communities from CSV: $communities_csv")
+    ic_df = Data.load_csv_communities(joinpath(data_dir, communities_csv))
+    splots_pixels, mod_params, eco_species_ids = Data.prepare_general_splots(
+      ic_df, eco_raster_data, eco_mapping_df, params)
 
-    elseif !isnothing(communities_db)
-        println("Loading initial communities from DuckDB: $communities_db")
-        ic_df = Data.load_duckdb_communities(communities_db)
-        splots_pixels, mod_params, eco_species_ids = Data.prepare_general_splots(
-            ic_df, eco_raster_data, eco_mapping_df, params)
+  elseif !isnothing(communities_db)
+    println("Loading initial communities from DuckDB: $communities_db")
+    ic_df = Data.load_duckdb_communities(communities_db)
+    splots_pixels, mod_params, eco_species_ids = Data.prepare_general_splots(
+      ic_df, eco_raster_data, eco_mapping_df, params)
 
-    else
-        error("Specify one of: treemap_raster, communities_csv, communities_db")
-    end
+  else
+    error("Specify one of: treemap_raster, communities_csv, communities_db")
+  end
 
-    n_sites = length(unique(splots_pixels.mapcode))
-    println("Initializing SoA: $n_sites sites")
-    @time ref_soa = make_sites_from_communities(splots_pixels, eco_species_ids, rng)
+  n_sites = length(unique(splots_pixels.mapcode))
+  println("Initializing SoA: $n_sites sites")
+  @time ref_soa = make_sites_from_communities(splots_pixels, eco_species_ids, rng)
 
-    eco_params = BiomassSuccessionPlugin.generate_eco_params(mod_params)
+  eco_params = BiomassSuccessionPlugin.generate_eco_params(mod_params)
 
-    mkpath(output_dir)
-    writer_ch, writer_task = Spatial.start_spatial_writer(output_dir)
+  mkpath(output_dir)
+  writer_ch, writer_task = Spatial.start_spatial_writer(output_dir)
 
-    println("Running simulation: $timehorizon_years years, output every $output_every_years")
-    try
-        Spatial.run_spatial!(ref_soa, eco_params, writer_ch;
-            timehorizon=timehorizon_years, output_every=output_every_years)
-    finally
-        Spatial.stop_spatial_writer(writer_ch, writer_task)
-    end
+  println("Running simulation: $timehorizon_years years, output every $output_every_years")
+  try
+    Spatial.run_spatial!(ref_soa, eco_params, writer_ch;
+      timehorizon=timehorizon_years, output_every=output_every_years)
+  finally
+    Spatial.stop_spatial_writer(writer_ch, writer_task)
+  end
 
-    println("Generating output rasters")
-    ref_raster_path = !isnothing(treemap_raster) ?
-        joinpath(data_dir, treemap_raster) :
-        joinpath(data_dir, eco_raster)
-    Spatial.generate_rasters_from_output(output_dir, ref_raster_path)
+  println("Generating output rasters")
+  ref_raster_path = !isnothing(treemap_raster) ?
+                    joinpath(data_dir, treemap_raster) :
+                    joinpath(data_dir, eco_raster)
+  Spatial.generate_rasters_from_output(output_dir, ref_raster_path)
 end
 
 function spatial_main()
-    simulate_spatial(
-        data_dir             = "../",
-        output_dir           = "./outputs/spatial",
-        eco_raster           = "eco_raster.tif",
-        eco_ecocode_mapping  = "eco_ecocode_mapping.csv",
-        biomass_params_path  = "landis_parametrization_julia/outputs/best_params.jld2",
-        treemap_raster       = "treemap.tif",
-        treemap_version      = 2022,
-        treemap_db_path      = "../data_eco_cohorts.duckdb",
-        timehorizon_years    = 50,
-        output_every_years   = 5,
-    )
+  simulate_spatial_treemap(
+    data_dir="../",
+    output_dir="./outputs/spatial",
+    eco_raster="eco_raster.tif",
+    eco_ecocode_mapping="eco_ecocode_mapping.csv",
+    biomass_params_path="landis_parametrization_julia/outputs/best_params.jld2",
+    treemap_raster="treemap.tif",
+    treemap_version=2022,
+    treemap_db_path="../data_eco_cohorts.duckdb",
+    timehorizon_years=50,
+    output_every_years=5,
+  )
+end
+
+function simulate_spatial_landis(;
+  output_dir::String,
+  initial_communities_tif::String,
+  ecoregion_tif::String,
+  initial_communities_csv::String,
+  core_species_data::String,
+  spp_ecoregion_data::String,
+  species_data::String,
+  eco_ecocode_mapping::String,
+  spp_eco_year::Int=0,
+  min_rel_biomass::Vector{Float32}=Float32[0.15, 0.25, 0.50, 0.75, 0.85],
+  rng_seed::Int=1337,
+  timehorizon_years::Int=50,
+  output_every_years::Int=5,
+)
+  rng = RNGType(UInt64(rng_seed))
+
+  println("Loading LANDIS rasters")
+  @time communities_raster = Data.load_landis_mapcode_raster(initial_communities_tif)
+  println(communities_raster)
+  @time eco_raster = Data.load_eco_raster(ecoregion_tif)
+  println(eco_raster)
+  @assert size(communities_raster) == size(eco_raster) "Raster size mismatch"
+
+  println("Loading LANDIS tables")
+  eco_ecocode_df = CSV.read(eco_ecocode_mapping, DataFrame)
+  ic_df = CSV.read(initial_communities_csv, DataFrame)
+  core_sp_df = Data.load_landis_core_species(core_species_data)
+  spp_eco_df = Data.load_landis_spp_ecoregion(spp_ecoregion_data; year=spp_eco_year)
+  species_df = CSV.read(species_data, DataFrame)
+
+  println("Building BiomassSuccessionParams from LANDIS files")
+  @time params = Data.make_landis_params(
+    core_sp_df, species_df, spp_eco_df;
+    min_rel_biomass=min_rel_biomass,
+  )
+  println("Ecos: $(length(params.ECO_LIST)), Species: $(length(params.SPECIES_LIST))")
+
+  println("Expanding IC to pixels")
+  @time splots = Data.expand_landis_pixels(
+    communities_raster, eco_raster, ic_df, eco_ecocode_df, params)
+  println("Sites: $(length(unique(splots.mapcode))), Cohort rows: $(nrow(splots))")
+
+  eco_species_ids = Vector{Vector{Int}}(params.ECO_SPECIES_IDS)
+
+  println("Initializing SoA")
+  @time ref_soa = make_sites_from_communities(splots, eco_species_ids, rng)
+
+  eco_params = BiomassSuccessionPlugin.generate_eco_params(params)
+
+  mkpath(output_dir)
+  writer_ch, writer_task = Spatial.start_spatial_writer(output_dir)
+
+  println("Running simulation: $timehorizon_years years, output every $output_every_years")
+  try
+    Spatial.run_spatial!(ref_soa, eco_params, writer_ch;
+      timehorizon=timehorizon_years, output_every=output_every_years)
+  finally
+    Spatial.stop_spatial_writer(writer_ch, writer_task)
+  end
+
+  println("Generating output rasters")
+  Spatial.generate_rasters_from_output(output_dir, ecoregion_tif)
+end
+
+function landis_main()
+  prefix = joinpath("..", "landis_data")
+  simulate_spatial_landis(
+    output_dir="./outputs/landis",
+    initial_communities_tif=joinpath(prefix, "initial_communities.tif"),
+    ecoregion_tif=joinpath(prefix, "ecoregions.tif"),
+    initial_communities_csv=joinpath(prefix, "initial_communities.csv"),
+    core_species_data=joinpath(prefix, "CoreSpeciesData.txt"),
+    spp_ecoregion_data=joinpath(prefix, "SppEcoregionData.csv"),
+    species_data=joinpath(prefix, "SpeciesData.csv"),
+    eco_ecocode_mapping=joinpath(prefix, "eco_ecocode_mapping.csv"),
+    spp_eco_year=0,
+    timehorizon_years=50,
+    output_every_years=5,
+  )
 end
 
 end
