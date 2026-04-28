@@ -68,8 +68,8 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         site.live = zero(UIntType)
         site.B = zero(FloatType)
         site.AGNPP = zero(FloatType)
-        site.capacityReduction = one(FloatType)
-        site.growthReduction = one(FloatType)
+        site.harvestCapacityReduction = zero(FloatType)
+        site.growthReduction = zero(FloatType)
         site.prevYearMortality = zero(FloatType)
         site.shade_class = one(UIntType)
         site.c_species .= zero(UIntType)
@@ -77,8 +77,12 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         site.c_bio .= zero(FloatType)
         site.c_m_tot .= zero(FloatType)
         site.c_comp .= zero(FloatType)
+        site.no_establish = false
         site.sp_mature .= false
         site.sp_sprout .= false
+        site.sp_seed .= false
+        site.sp_serotiny .= false
+        site.sp_plant .= false
       end
     end
     return soa
@@ -115,8 +119,8 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         site.live = zero(UIntType)
         site.B = zero(FloatType)
         site.AGNPP = zero(FloatType)
-        site.capacityReduction = one(FloatType)
-        site.growthReduction = one(FloatType)
+        site.harvestCapacityReduction = zero(FloatType)
+        site.growthReduction = zero(FloatType)
         site.prevYearMortality = zero(FloatType)
         site.shade_class = one(UIntType)
         site.c_species .= zero(UIntType)
@@ -124,8 +128,12 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         site.c_bio .= zero(FloatType)
         site.c_m_tot .= zero(FloatType)
         site.c_comp .= zero(FloatType)
+        site.no_establish = false
         site.sp_mature .= false
         site.sp_sprout .= false
+        site.sp_seed .= false
+        site.sp_serotiny .= false
+        site.sp_plant .= false
         for row in eachrow(initial_cohorts)
           BiomassSuccessionPlugin.add_cohort!(site, UIntType(row.eco_species_id), FloatType(row.age_calc), FloatType(row.agb_sum))
         end
@@ -477,17 +485,17 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
 
 end
 function main()
-  seed = 20200101#1337
+  seed = 20200102#1337
   Random.seed!(seed)
   rng = RNGType(rand(UInt64))
   #filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
   #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
   #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-  #filter_ecos=["8.5.3.75g"]
-  filter_ecos = ["8.5.3"]
+  filter_ecos = ["8.5.3.75g"]
+  #filter_ecos = ["8.5.3"]
   parametrize(;
     cohorts_db_path="../data_eco_cohorts.duckdb",
-    eco_field="epa_l3",
+    eco_field="epa_l4",
     tablename="data_eco_cohorts",
     output_dir="./outputs",
     filter_ecos=filter_ecos,
@@ -541,8 +549,8 @@ function make_sites_from_communities(
       site.live = 0
       site.B = zero(FloatType)
       site.AGNPP = zero(FloatType)
-      site.capacityReduction = one(FloatType)
-      site.growthReduction = one(FloatType)
+      site.harvestCapacityReduction = zero(FloatType)
+      site.growthReduction = zero(FloatType)
       site.prevYearMortality = zero(FloatType)
       site.shade_class = 1
       site.c_species .= zero(UIntType)
@@ -550,8 +558,12 @@ function make_sites_from_communities(
       site.c_bio .= zero(FloatType)
       site.c_m_tot .= zero(FloatType)
       site.c_comp .= zero(FloatType)
+      site.no_establish = false
       site.sp_mature .= false
       site.sp_sprout .= false
+      site.sp_seed .= false
+      site.sp_serotiny .= false
+      site.sp_plant .= false
 
       for cohort_row in eachrow(cohorts)
         BiomassSuccessionPlugin.add_cohort!(

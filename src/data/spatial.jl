@@ -451,7 +451,7 @@ end
 function load_landis_spp_ecoregion(path::String; year::Int=0)::DataFrame
   df = CSV.read(path, DataFrame)
   df.EcoregionName = string.(df.EcoregionName)
-  df.SpeciesCode   = string.(df.SpeciesCode)
+  df.SpeciesCode = string.(df.SpeciesCode)
   avail = sort(unique(df.Year))
   candidates = filter(y -> y <= year, avail)
   use_year = isempty(candidates) ? first(avail) : last(candidates)
@@ -490,6 +490,7 @@ function make_landis_params(
   S = zeros(FloatType, n_sp)
   LONGEVITY = zeros(FloatType, n_sp)
   SHADE_TOL = ones(UIntType, n_sp)
+  PROB_RESPROUT = ones(UIntType, n_sp)
   MATURITY = zeros(FloatType, n_sp)
   for (i, sp) in enumerate(SPECIES_LIST)
     r = get(sp_row, sp, nothing)
@@ -499,6 +500,7 @@ function make_landis_params(
     LONGEVITY[i] = FloatType(r.longevity)
     SHADE_TOL[i] = UIntType(r.ShadeTolerance)
     MATURITY[i] = FloatType(r.maturity)
+    PROB_RESPROUT[i] = FloatType(r.veg_reprod_prob)
   end
 
   # Per-eco species membership and eco×species params
@@ -536,6 +538,7 @@ function make_landis_params(
     S=S,
     LONGEVITY=LONGEVITY,
     SHADE_TOL=SHADE_TOL,
+    PROB_RESPROUT=PROB_RESPROUT,
     MATURITY=MATURITY,
     B_MAX_SPP=B_MAX_SPP,
     ANPP_MAX_SPP=ANPP_MAX_SPP,
