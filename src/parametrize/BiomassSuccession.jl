@@ -21,9 +21,9 @@ function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species
     MutableParam(:PROB_MORT_SPP, Uniform(), (0.0f0, 1.0f0), 0.1f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier()),
     MutableParam(:PROB_ESTAB_SPP, Uniform(), (0.0f0, 1.0f0), 0.1f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier()),
     #MutableParam(:ANPP_MAX_SPP, truncated(Normal(2500, 100), 2400, 2500), FloatType, EcoSpeciesSampler(), NestedIndexApplier()),
-    MutableParam(:ANPP_MAX_SPP, DiscreteUniform(2400, 2500), (2400, 2500), 1, FloatType, EcoSpeciesSampler(), NestedIndexApplier()),
+    MutableParam(:ANPP_MAX_SPP, DiscreteUniform(100, 1500), (100, 1500), 100, FloatType, EcoSpeciesSampler(), NestedIndexApplier()),
     #MutableParam(:B_MAX_SPP, truncated(Normal(2500, 100), 2400, 2500), FloatType, EcoSpeciesSampler(), NestedIndexApplier()),
-    MutableParam(:B_MAX_SPP, DiscreteUniform(2400, 35000), (2400, 35000), 1, FloatType, EcoSpeciesSampler(), NestedIndexApplier()),
+    MutableParam(:B_MAX_SPP, DiscreteUniform(20000, 35000), (20000, 35000), 1000, FloatType, EcoSpeciesSampler(), NestedIndexApplier()),
     MutableParam(:MIN_REL_BIOMASS, Uniform(0.0f0, 0.5f0), (0.0f0, 0.5f0), 1f0, FloatType, EcoSampler(), GradientApplier(0.10f0)),
   ]
   weights = Float64[15 + (p.sampler isa EcoSpeciesSampler ? n_ess :

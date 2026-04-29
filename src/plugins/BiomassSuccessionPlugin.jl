@@ -199,10 +199,10 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   PROB_ESTAB_SPP = [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
                     for eco_species in eco_species_ids]
   #println(typeof(PROB_ESTAB_SPP))
-  ANPP_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), length(eco_species)) .|> FloatType
+  ANPP_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(700, 100), 100, 1500), length(eco_species)) .|> FloatType
                   for eco_species in eco_species_ids]
   #println(typeof(ANPP_MAX_SPP))
-  B_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(2500, 100), 2400, 2500), length(eco_species)) .|> FloatType
+  B_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(25000, 1000), 20000, 35000), length(eco_species)) .|> FloatType
                for eco_species in eco_species_ids]
 
 

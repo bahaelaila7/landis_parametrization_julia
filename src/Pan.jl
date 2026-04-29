@@ -28,7 +28,7 @@ using DataFrames
 
 
 
-const RNGType = Random.MersenneTwister
+const RNGType = Random.Xoshiro #Random.MersenneTwister
 const ActivePlugins = (BaseSitePlugin.BaseSite, BiomassSuccessionPlugin.BiomassSuccession)
 const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 
@@ -250,6 +250,7 @@ function parametrize(; cohorts_db_path::String,
   eco_field=:epa_l4,
   tablename::String="data_eco_cohorts_g",
   output_dir::String="./outputs",
+  filter_eco_field::String,
   filter_ecos::Vector{String}=String[],
   skip_disturbances::Bool=true,
   spinup::Bool=true,
@@ -274,6 +275,7 @@ function parametrize(; cohorts_db_path::String,
     tablename=tablename,
     output_dir=tablename,
     skip_disturbances=skip_disturbances,
+    filter_eco_field=filter_eco_field,
     filter_ecos=filter_ecos,
     RNG=rng)
   n_species = length(species_list)
@@ -388,7 +390,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
     TProgress.@track for trial in 1:TRIALS
       soa = deepcopy(ref_soa)
 
-      bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations,
+      bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations, #BothMutations,
         ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)))
       run_result = fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
       next = LBSA.LBSACandidate(bio_params, run_result)
@@ -485,17 +487,19 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
 
 end
 function main()
-  seed = 20200102#1337
+  seed = 22200104#1337
   Random.seed!(seed)
   rng = RNGType(rand(UInt64))
   #filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
+  #filter_ecos = String["8.5.3", "8.3.5", "15.4.1", "9.4.7", "8.3.7", "8.5.1", "9.5.1"]
   #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-  #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-  filter_ecos = ["8.5.3.75g"]
+  filter_ecos = String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
+  #filter_ecos = ["8.5.3.75g"]
   #filter_ecos = ["8.5.3"]
   parametrize(;
     cohorts_db_path="../data_eco_cohorts.duckdb",
-    eco_field="epa_l4",
+    filter_eco_field="epa_l4",
+    eco_field="epa_l3",
     tablename="data_eco_cohorts",
     output_dir="./outputs",
     filter_ecos=filter_ecos,
