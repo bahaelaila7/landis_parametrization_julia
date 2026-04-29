@@ -1,6 +1,6 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes
 abstract type AbstractPlugin end
 
 include("types.jl")
@@ -200,25 +200,27 @@ end
 
 @kwdef struct RegrowOptions
   grow_only::Bool = false   # default is compacting
-  multiple_of_2::Bool = true   # default is exact
+  multiple_of_2::Bool = false   # default is exact
 end
 
-function effective_counts(new_counts::Vector{Int32},
+function effective_counts!(new_counts::Vector{Int32},
+  # this applies the regrow options to either keep the count, 
+  # or adjust it
   old_refs::Vector{Int32},
-  opts::RegrowOptions)
+  opts::RegrowOptions)::Vector{Int32}
   n = length(new_counts)
-  ec = Vector{Int32}(undef, n)
+  #ec = Vector{UIntType}(undef, n)
   for i in 1:n
     old_count = old_refs[i+1] - old_refs[i]
     c = opts.grow_only ? max(new_counts[i], old_count) : new_counts[i]
     c = max(c, 1)
     if opts.multiple_of_2
-      c = Int32(2^ceil(Int, log2(max(c, 1))))
+      c = UIntType(2^ceil(Int, log2(max(c, 1))))
     end
     @assert c > 0
-    ec[i] = c
+    new_counts[i] = c
   end
-  return ec
+  return new_counts
 end
 
 function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
@@ -234,7 +236,7 @@ function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
     for key in keys(new_counts)
       opts = hasfield(typeof(options), key) ? getfield(options, key) : RegrowOptions()
       @assert length(new_counts[key]) == soa.n "key=$key: expected $(soa.n) counts, got $(length(new_counts[key]))"
-      ec = effective_counts(new_counts[key], getfield(old_refs, key), opts)
+      ec = effective_counts!(new_counts[key], getfield(old_refs, key), opts)
       cur_refs = getfield(old_refs, key)
       new_refs = build_refs(ec)
       new_nnz = Int(new_refs[end]) - 1

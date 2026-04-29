@@ -3,6 +3,7 @@ module Spatial
 using ..PanCore
 using ..Plugins: BiomassSuccessionPlugin
 import Term.Progress as TProgress
+import Format
 import ArchGDAL
 import Parquet2
 import DataFrames: DataFrame
@@ -49,7 +50,8 @@ function start_spatial_writer(output_dir::String; buffer_size::Int=16)
                     Parquet2.writefile(path, _records_to_df(buf))
                     @info "Spatial writer: flushed chunk $(chunk) ($(length(buf)) records)"
                     chunk += 1
-                    empty!(buf)
+                    buf = SiteRecord[]
+                    sizehint!(buf, FLUSH_THRESHOLD)
                 end
             end
         catch e
@@ -72,36 +74,44 @@ function stop_spatial_writer(ch::Channel, task::Task)
     wait(task)
 end
 
+function _emit_year!(thread_buffers, soa, year, writer_ch)
+    Threads.@threads :static for i in 1:soa.n
+        @inbounds begin
+            site = getsite(soa, i)
+            !site.active && continue
+            buf = thread_buffers[Threads.threadid()]
+            for k in 1:site.live
+                push!(buf, SiteRecord(
+                    UInt32(year),
+                    UInt32(site.mapcode),
+                    UInt32(site.eco_id),
+                    UInt32(site.c_species[k]),
+                    Float32(site.c_age[k]),
+                    Float32(site.c_bio[k]),
+                ))
+            end
+        end
+    end
+    for buf in thread_buffers
+        isempty(buf) || put!(writer_ch, buf)
+    end
+    return [SiteRecord[] for _ in 1:Threads.maxthreadid()]
+end
+
 function run_spatial!(soa, eco_params, writer_ch::Channel;
                       timehorizon::Int, output_every::Int)
     ctx = (BiomassSuccession=(eco_params=eco_params,),)
     thread_buffers = [SiteRecord[] for _ in 1:Threads.maxthreadid()]
 
+    thread_buffers = _emit_year!(thread_buffers, soa, 0, writer_ch)
+
     TProgress.@track for year in 1:timehorizon
         PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession,
                                 year; ctx=ctx.BiomassSuccession)
+        @info "Year $year: SoA $(round(Base.summarysize(soa)/1e9, digits=2)) GB, $(Format.format(sum(soa.scalar._new_cohort_counts), commas=true)) cohorts"
 
         if year % output_every == 0
-            Threads.@threads :static for i in 1:soa.n
-                @inbounds begin
-                    site = getsite(soa, i)
-                    !site.active && continue
-                    buf  = thread_buffers[Threads.threadid()]
-                    for k in 1:site.live
-                        push!(buf, SiteRecord(
-                            UInt32(year),
-                            UInt32(site.mapcode),
-                            UInt32(site.eco_id),
-                            UInt32(site.c_species[k]),
-                            Float32(site.c_age[k]),
-                            Float32(site.c_bio[k]),
-                        ))
-                    end
-                end
-            end
-            all_records = reduce(vcat, thread_buffers)
-            foreach(empty!, thread_buffers)
-            isempty(all_records) || put!(writer_ch, all_records)
+            thread_buffers = _emit_year!(thread_buffers, soa, year, writer_ch)
         end
     end
 end

@@ -82,7 +82,17 @@ function load_treemap_cohorts(
   eco_raster::Matrix{Int16},
   db_path::String,
   eco_ecocode_mapping_csv::String,
+  params;
+  eco_field::String="epa_l4",
 )
+  species_field = if eco_field == "epa_l4"
+    "species_symbol_map_l4"
+  elseif eco_field == "epa_l3"
+    "species_symbol_map_l3"
+  else
+    "species_symbol_map_ecosubcd"
+  end
+
   eco_ecocode_df = CSV.read(eco_ecocode_mapping_csv, DataFrame)
 
   cn_eco_counts = StatsBase.countmap(
@@ -96,68 +106,165 @@ function load_treemap_cohorts(
     count=collect(values(cn_eco_counts)),
   )
 
+  # Flatten params into a (eco, species) table registered in DuckDB so the
+  # 4-case matching can be expressed as declarative SQL joins.
+  params_eco_sp_df = DataFrame(
+    eco=[params.ECO_LIST[eid]
+         for eid in eachindex(params.ECO_LIST)
+         for _ in params.ECO_SPECIES_IDS[eid]],
+    species=[params.SPECIES_LIST[Int(sid)]
+             for eid in eachindex(params.ECO_LIST)
+             for sid in params.ECO_SPECIES_IDS[eid]],
+  )
+
   db = DuckDB.DB(db_path)
   con = DuckDB.connect(db)
   DuckDB.register_data_frame(con, cn_eco_df, "cn_eco")
   DuckDB.register_data_frame(con, eco_ecocode_df, "eco_ecocode_map")
+  DuckDB.register_data_frame(con, params_eco_sp_df, "params_eco_species")
 
-  sql = """
-      WITH all_species AS (
-          SELECT DISTINCT species_symbol_map FROM data_eco_cohorts
-      ),
-      full_table AS (
-          SELECT
-              df.CN,
-              df.ecocode                                          AS raster_ecocode,
-              e.eco                                               AS raster_eco,
-              o.*,
-              (COALESCE(m.species_symbol_map, b.species_symbol_map) IS NULL) AS borrowed,
-              CASE WHEN COALESCE(m.species_symbol_map, b.species_symbol_map) IS NULL
-                   THEN o.eco   ELSE e.eco   END                 AS effective_eco,
-              CASE WHEN COALESCE(m.species_symbol_map, b.species_symbol_map) IS NULL
-                   THEN eo.ecocode ELSE e.ecocode END            AS effective_ecocode,
-              CASE WHEN COALESCE(m.species_symbol_map, b.species_symbol_map) IS NULL
-                   THEN o.species_symbol_map
-                   ELSE COALESCE(m.species_symbol_map, b.species_symbol_map) END
-                                                                  AS effective_species_symbol_map
-          FROM cn_eco df
-          JOIN eco_ecocode_map  e  ON df.ecocode = e.ecocode
-          JOIN data_eco_cohorts o  ON df.CN = o.PLT_CN
-          JOIN eco_ecocode_map  eo ON o.eco = eo.eco
-          LEFT OUTER JOIN data_species_eco_map m
-              ON m.eco = e.eco AND m.species_symbol = o.species_symbol
-          LEFT OUTER JOIN all_species b
-              ON b.species_symbol_map = e.eco || '_' || o.sftwd_hrdwd
-      ),
-      group_totals AS (
-          SELECT raster_ecocode, effective_eco, effective_ecocode,
-                 effective_species_symbol_map,
-                 SUM(tree_count) AS group_count
-          FROM full_table
-          GROUP BY raster_ecocode, effective_species_symbol_map,
-                   effective_eco, effective_ecocode
-      ),
-      dominant AS (
-          SELECT raster_ecocode, effective_eco, effective_ecocode,
-                 effective_species_symbol_map
-          FROM (
-              SELECT *, ROW_NUMBER() OVER (
-                  PARTITION BY raster_ecocode, effective_species_symbol_map
-                  ORDER BY group_count DESC
-              ) AS rn
-              FROM group_totals
-          ) WHERE rn = 1
-      )
-      SELECT d.effective_eco, d.effective_ecocode,
-             d.effective_species_symbol_map, t.*
-      FROM full_table t
-      JOIN dominant d
-          ON  t.raster_ecocode            = d.raster_ecocode
-          AND t.effective_species_symbol_map = d.effective_species_symbol_map
-  """
+  # Create a reusable view that resolves each cohort row to its effective
+  # species/eco using the 4-case priority:
+  #   1. species exists in target eco params           → (species,     target_eco, borrowed=false)
+  #   2. softwood/hardwood catchall in target eco      → (eco_S/H,    target_eco, borrowed=false)
+  #   3a. species exists in original eco params        → (species,    orig_eco,   borrowed=true)
+  #   3b. catchall in original eco params              → (orig_eco_SH, orig_eco,  borrowed=true)
+  #   4. none of the above                             → NULL (dropped)
+  DuckDB.execute(
+    con,
+    """
+    CREATE OR REPLACE TEMP VIEW all_cohorts_matched AS
+    SELECT
+        df.CN,
+        df.ecocode                          AS raster_ecocode,
+        e.eco                               AS raster_eco,
+        o.plt_cn, o.statecd, o.unitcd, o.countycd, o.plot, o.subp,
+        o.$(eco_field)                      AS original_eco,
+        o.$(species_field)                  AS species_symbol_map,
+        o.sftwd_hrdwd,
+        o.agb, o.tree_count, o.measdate, o.age_calc,
+        -- case 1: exact species in target eco
+        COALESCE(p1.species, p2.species, p3a.species, p3b.species)
+                                            AS effective_species_symbol_map,
+        CASE
+            WHEN p1.species IS NOT NULL OR p2.species IS NOT NULL THEN e.eco
+            WHEN p3a.species IS NOT NULL OR p3b.species IS NOT NULL THEN o.$(eco_field)
+        END                                 AS effective_eco,
+        CASE
+            WHEN p1.species IS NOT NULL OR p2.species IS NOT NULL THEN FALSE
+            WHEN p3a.species IS NOT NULL OR p3b.species IS NOT NULL THEN TRUE
+        END                                 AS borrowed
+    FROM cn_eco df
+    JOIN eco_ecocode_map  e  ON df.ecocode = e.ecocode
+    JOIN data_eco_cohorts o  ON df.CN      = o.PLT_CN
+    -- case 1
+    LEFT JOIN params_eco_species p1
+        ON p1.eco = e.eco AND p1.species = o.$(species_field)
+    -- case 2: softwood/hardwood catchall in target eco
+    LEFT JOIN params_eco_species p2
+        ON p2.eco = e.eco AND p2.species = e.eco || '_' || o.sftwd_hrdwd
+    -- case 3a: exact species in original eco
+    LEFT JOIN params_eco_species p3a
+        ON p3a.eco = o.$(eco_field) AND p3a.species = o.$(species_field)
+    -- case 3b: catchall in original eco
+    LEFT JOIN params_eco_species p3b
+        ON p3b.eco = o.$(eco_field)
+       AND p3b.species = o.$(eco_field) || '_' || o.sftwd_hrdwd
+"""
+  )
 
-  df = DuckDB.execute(con, sql) |> DataFrame
-  DuckDB.close(con)
+  # Print a concise summary of matching outcomes.
+  stats = DuckDB.execute(
+    con,
+    """
+    SELECT
+        SUM(tree_count)                                                         AS total_trees,
+        SUM(agb)                                                                AS total_agb,
+        SUM(CASE WHEN effective_species_symbol_map IS NULL THEN tree_count ELSE 0 END)
+                                                                                AS dropped_trees,
+        SUM(CASE WHEN effective_species_symbol_map IS NULL THEN agb     ELSE 0 END)
+                                                                                AS dropped_agb,
+        SUM(CASE WHEN borrowed = TRUE THEN tree_count ELSE 0 END)               AS borrowed_trees,
+        SUM(CASE WHEN borrowed = TRUE THEN agb        ELSE 0 END)               AS borrowed_agb
+    FROM all_cohorts_matched
+"""
+  ) |> DataFrame
+  s = first(stats)
+  tot_t, tot_a = s.total_trees, s.total_agb
+  if s.dropped_trees > 0
+    pt = round(100 * s.dropped_trees / tot_t, digits=1)
+    pa = round(100 * s.dropped_agb / tot_a, digits=1)
+    println("  Dropped (case 4): $(s.dropped_trees) trees ($pt%), $pa% AGB")
+    top_drop = DuckDB.execute(
+      con,
+      """
+    SELECT original_eco, species_symbol_map,
+           SUM(tree_count) AS trees, SUM(agb) AS agb_sum
+    FROM all_cohorts_matched
+    WHERE effective_species_symbol_map IS NULL
+    GROUP BY original_eco, species_symbol_map
+    ORDER BY trees DESC LIMIT 5
+"""
+    ) |> DataFrame
+    for r in eachrow(top_drop)
+      println("    $(r.original_eco)/$(r.species_symbol_map): $(r.trees) trees")
+    end
+  end
+  if s.borrowed_trees > 0
+    pt = round(100 * s.borrowed_trees / tot_t, digits=1)
+    pa = round(100 * s.borrowed_agb / tot_a, digits=1)
+    println("  Borrowed (case 3): $(s.borrowed_trees) trees ($pt%), $pa% AGB")
+    top_borr = DuckDB.execute(
+      con,
+      """
+    SELECT original_eco, species_symbol_map,
+           effective_eco, effective_species_symbol_map,
+           SUM(tree_count) AS trees
+    FROM all_cohorts_matched
+    WHERE borrowed = TRUE
+    GROUP BY original_eco, species_symbol_map,
+             effective_eco, effective_species_symbol_map
+    ORDER BY trees DESC LIMIT 5
+"""
+    ) |> DataFrame
+    for r in eachrow(top_borr)
+      println("    $(r.original_eco)/$(r.species_symbol_map) → $(r.effective_eco)/$(r.effective_species_symbol_map): $(r.trees) trees")
+    end
+  end
+
+  # Select only matched rows, resolving ties in effective_eco by picking the
+  # one with the highest total tree_count per (raster_ecocode, effective_species).
+  df = DuckDB.execute(
+    con,
+    """
+    WITH group_totals AS (
+        SELECT raster_ecocode, effective_eco, effective_species_symbol_map,
+               SUM(tree_count) AS group_count
+        FROM all_cohorts_matched
+        WHERE effective_species_symbol_map IS NOT NULL
+        GROUP BY raster_ecocode, effective_species_symbol_map, effective_eco
+    ),
+    dominant AS (
+        SELECT raster_ecocode, effective_eco, effective_species_symbol_map
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY raster_ecocode, effective_species_symbol_map
+                ORDER BY group_count DESC
+            ) AS rn
+            FROM group_totals
+        ) WHERE rn = 1
+    )
+    SELECT m.*
+    FROM all_cohorts_matched m
+    JOIN dominant d
+        ON  m.raster_ecocode               = d.raster_ecocode
+        AND m.effective_species_symbol_map  = d.effective_species_symbol_map
+        AND m.effective_eco                 = d.effective_eco
+    WHERE m.effective_species_symbol_map IS NOT NULL
+"""
+  ) |> DataFrame
+
+  #DuckDB.close(con)
   return _make_effective_splots(df)
 end
 
@@ -179,11 +286,14 @@ function _make_effective_splots(df::DataFrame)
     df.measdate = Dates.DateTime.(df.measdate, Dates.dateformat"yyyy-mm-dd")
   end
 
+  subp_counts = combine(groupby(df, :plt_cn), :subp => (x -> length(unique(x))) => :subp_count)
   fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot,
     :raster_ecocode, :eco_id, :effective_eco_id, :measdate,
     :species_id, :age_calc]
-  plots = combine(groupby(df, fields, sort=false),
+  raw_plots = combine(groupby(df, fields, sort=false),
     nrow => :count, :agb => sum => :agb_sum)
+  plots = leftjoin(raw_plots, subp_counts, on=:plt_cn)
+  plots.agb_sum ./= plots.subp_count
   start_measdates = combine(
     groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)
   ) do rows
@@ -288,6 +398,7 @@ function map_params_to_data_treemap(params, eco_list, effective_eco_list, specie
     LONGEVITY=params.LONGEVITY[joint_species_df.param_species_id],
     SHADE_TOL=params.SHADE_TOL[joint_species_df.param_species_id],
     MATURITY=params.MATURITY[joint_species_df.param_species_id],
+    PROB_RESPROUT=params.PROB_RESPROUT[joint_species_df.param_species_id],
     B_MAX_SPP=slice_eco_sp(:B_MAX_SPP),
     ANPP_MAX_SPP=slice_eco_sp(:ANPP_MAX_SPP),
     PROB_MORT_SPP=slice_eco_sp(:PROB_MORT_SPP),
@@ -303,7 +414,7 @@ function expand_to_pixels(
   eco_raster::Matrix{Int16},
 )
   cohorts_dict = Dict(
-    (Int64(key.plt_cn), Int64(key.raster_ecocode)) => (
+    (key.plt_cn, Int64(key.raster_ecocode)) => (
       n=nrow(rows),
       eco_id=rows.eco_id,
       eco_species_id=rows.eco_species_id,
@@ -324,7 +435,7 @@ function expand_to_pixels(
     plt_cn = cn_raster[i]
     ismissing(plt_cn) && continue
     eco = Int64(eco_raster[i])
-    c = get(cohorts_dict, (plt_cn, eco), nothing)
+    c = get(cohorts_dict, ("$(plt_cn)", eco), nothing)
     isnothing(c) && continue
     append!(mapcodes, fill(i, c.n))
     append!(eco_ids, c.eco_id)

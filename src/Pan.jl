@@ -618,7 +618,7 @@ function simulate_spatial_treemap(;
 
     println("Extracting cohorts from DuckDB (treemap path)")
     @time splots, eco_list, eff_eco_list, species_list = Data.load_treemap_cohorts(
-      cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path)
+      cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
 
     println("Remapping params to data eco/species")
