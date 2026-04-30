@@ -334,8 +334,9 @@ function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
       soa.csr = updated_csr
     end
 
-    return soa
   end
+  GC.gc()
+  return soa
 end
 
 @generated function csr_count_key(::AnySoA{P}, ::Val{F}) where {P,F}
