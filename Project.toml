@@ -6,6 +6,7 @@ authors = ["BahaaEddin AlAila <bahaelaila7@gmail.com>"]
 [deps]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 ArchGDAL = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
+Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
@@ -28,6 +29,7 @@ Term = "22787eb5-b846-44ae-b979-8e399b8463ab"
 [compat]
 Aqua = "0.8.14"
 ArchGDAL = "0.10"
+Arrow = "2.8.1"
 CSV = "0.10"
 DataFrames = "1.8.1"
 DataStructures = "0.19.4"

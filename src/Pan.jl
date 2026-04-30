@@ -651,22 +651,18 @@ function simulate_spatial_treemap(;
 
   eco_params = BiomassSuccessionPlugin.generate_eco_params(mod_params)
 
-  mkpath(output_dir)
-  writer_ch, writer_task = Spatial.start_spatial_writer(output_dir)
-
   println("Running simulation: $timehorizon_years years, output every $output_every_years")
-  try
-    Spatial.run_spatial!(ref_soa, eco_params, writer_ch;
-      timehorizon=timehorizon_years, output_every=output_every_years)
-  finally
-    Spatial.stop_spatial_writer(writer_ch, writer_task)
-  end
+  Spatial.run_spatial!(ref_soa, eco_params, output_dir;
+    timehorizon=timehorizon_years, output_every=output_every_years)
 
   println("Generating output rasters")
   ref_raster_path = !isnothing(treemap_raster) ?
                     joinpath(data_dir, treemap_raster) :
                     joinpath(data_dir, eco_raster)
-  Spatial.generate_rasters_from_output(output_dir, ref_raster_path)
+  Spatial.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ref_raster_path)
+
+  println("Coalescing Arrow files to DuckDB")
+  Spatial.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
 end
 
 function spatial_main()
@@ -734,19 +730,15 @@ function simulate_spatial_landis(;
 
   eco_params = BiomassSuccessionPlugin.generate_eco_params(params)
 
-  mkpath(output_dir)
-  writer_ch, writer_task = Spatial.start_spatial_writer(output_dir)
-
   println("Running simulation: $timehorizon_years years, output every $output_every_years")
-  try
-    Spatial.run_spatial!(ref_soa, eco_params, writer_ch;
-      timehorizon=timehorizon_years, output_every=output_every_years)
-  finally
-    Spatial.stop_spatial_writer(writer_ch, writer_task)
-  end
+  Spatial.run_spatial!(ref_soa, eco_params, output_dir;
+    timehorizon=timehorizon_years, output_every=output_every_years)
 
   println("Generating output rasters")
-  Spatial.generate_rasters_from_output(output_dir, ecoregion_tif)
+  Spatial.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ecoregion_tif)
+
+  println("Coalescing Arrow files to DuckDB")
+  Spatial.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
 end
 
 function landis_main()
