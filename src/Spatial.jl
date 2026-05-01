@@ -11,26 +11,42 @@ import DuckDB
 export run_spatial!, write_raster, generate_rasters_from_output,
   coalesce_to_duckdb
 
-const FLUSH_THRESHOLD = 100_000_000
+const FLUSH_THRESHOLD = 5_000_000  # records; 120 MB per thread at 24 B/record
 
-# Column-oriented buffer. A NamedTuple of same-length vectors is a valid
-# Tables.jl column table, so Arrow.write consumes it directly — no struct
-# packing, no DataFrame conversion.
-function _new_buf()
-  (
-    year=UInt32[],
-    mapcode=UInt32[],
-    eco_id=UInt32[],
-    species_id=UInt32[],
-    age=Float32[],
-    biomass=Float32[],
+mutable struct ThreadBuf
+  year::Vector{UInt32}
+  mapcode::Vector{UInt32}
+  eco_id::Vector{UInt32}
+  species_id::Vector{UInt32}
+  age::Vector{Float32}
+  biomass::Vector{Float32}
+  n::Int
+end
+
+function _new_buf(cap::Int=FLUSH_THRESHOLD)
+  ThreadBuf(
+    Vector{UInt32}(undef, cap),
+    Vector{UInt32}(undef, cap),
+    Vector{UInt32}(undef, cap),
+    Vector{UInt32}(undef, cap),
+    Vector{Float32}(undef, cap),
+    Vector{Float32}(undef, cap),
+    0,
   )
 end
 
-function _write_chunk(output_dir, year, tid, chunk, buf)
+function _flush_buf!(buf::ThreadBuf, output_dir, year, tid, chunk)
   path = joinpath(output_dir, "cohorts_year$(year)_t$(tid)_c$(chunk).arrow")
-  Arrow.write(path, buf; compress=:lz4)
-  @info "Wrote year=$(year) thread=$(tid) chunk=$(chunk) ($(length(buf.year)) records)"
+  Arrow.write(path, (
+      year=(@view buf.year[1:buf.n]),
+      mapcode=(@view buf.mapcode[1:buf.n]),
+      eco_id=(@view buf.eco_id[1:buf.n]),
+      species_id=(@view buf.species_id[1:buf.n]),
+      age=(@view buf.age[1:buf.n]),
+      biomass=(@view buf.biomass[1:buf.n]),
+    ); compress=:lz4)
+  @info "Wrote year=$(year) thread=$(tid) chunk=$(chunk) ($(buf.n) records)"
+  buf.n = 0
 end
 
 function _emit_year!(thread_buffers, thread_chunks, soa, year, output_dir)
@@ -45,27 +61,26 @@ function _emit_year!(thread_buffers, thread_chunks, soa, year, output_dir)
       eid = UInt32(site.eco_id)
       yr = UInt32(year)
       for k in 1:site.live
-        push!(buf.year, yr)
-        push!(buf.mapcode, mc)
-        push!(buf.eco_id, eid)
-        push!(buf.species_id, UInt32(site.c_species[k]))
-        push!(buf.age, Float32(site.c_age[k]))
-        push!(buf.biomass, Float32(site.c_bio[k]))
-      end
-      if length(buf.year) >= FLUSH_THRESHOLD
-        thread_chunks[tid] += 1
-        _write_chunk(output_dir, year, tid, thread_chunks[tid], buf)
-        thread_buffers[tid] = _new_buf()
-        buf = thread_buffers[tid]
+        n = buf.n + 1
+        buf.year[n] = yr
+        buf.mapcode[n] = mc
+        buf.eco_id[n] = eid
+        buf.species_id[n] = UInt32(site.c_species[k])
+        buf.age[n] = Float32(site.c_age[k])
+        buf.biomass[n] = Float32(site.c_bio[k])
+        buf.n = n
+        if n == FLUSH_THRESHOLD
+          thread_chunks[tid] += 1
+          _flush_buf!(buf, output_dir, year, tid, thread_chunks[tid])
+        end
       end
     end
   end
   Threads.@threads :static for tid in eachindex(thread_buffers)
     buf = thread_buffers[tid]
-    if !isempty(buf.year)
+    if buf.n > 0
       thread_chunks[tid] += 1
-      _write_chunk(output_dir, year, tid, thread_chunks[tid], buf)
-      thread_buffers[tid] = _new_buf()
+      _flush_buf!(buf, output_dir, year, tid, thread_chunks[tid])
     end
   end
 end
@@ -78,11 +93,12 @@ function run_spatial!(soa, eco_params, output_dir::String;
 
   mkpath(output_dir)
   _emit_year!(thread_buffers, thread_chunks, soa, 0, output_dir)
+  PanCore.gc_and_trim!()
 
   TProgress.@track for year in 1:timehorizon
     PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession,
       year; ctx=ctx.BiomassSuccession)
-    @info "Year $year: SoA $(round(Base.summarysize(soa)/1e9, digits=2)) GB, $(Format.format(sum(soa.scalar._new_cohort_counts), commas=true)) cohorts, peak RSS: $(round(Sys.maxrss() / 1e9, digits=2)) GB"
+    @info "Year $year: SoA $(round(Base.summarysize(soa)/1e9, digits=2)) GB, $(Format.format(sum(soa.scalar._new_cohort_counts), commas=true)) cohorts, RSS: $(round(PanCore.current_rss_gb(), digits=2)) GB, peak RSS: $(round(Sys.maxrss() / 1e9, digits=2)) GB"
 
     if year % output_every == 0
       _emit_year!(thread_buffers, thread_chunks, soa, year, output_dir)

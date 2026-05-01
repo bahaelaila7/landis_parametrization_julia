@@ -534,6 +534,7 @@ function make_sites_from_communities(
   cohort_counts = Int32[nrow(splots_dict[row.mapcode]) for row in eachrow(site_df)]
   species_counts = Int32[length(eco_species_ids[row.eco_id]) for row in eachrow(site_df)]
 
+  @info "Pre-SoA RSS: $(round(Sys.maxrss()/1e9, digits=2)) GB"
   soa = ActiveSoA((cohort=cohort_counts, species=species_counts))
   tRNGs = [RNGType(rand(rng, UInt64)) for _ in 1:Threads.maxthreadid()]
 
