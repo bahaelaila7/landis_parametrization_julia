@@ -336,15 +336,15 @@ function parametrize(; cohorts_db_path::String,
     rng=rng,
     debug=debug)
 end
-function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, thread_accumulators=nothing, total_accumulator=nothing)
+function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, loss_buffers=nothing, thread_accumulators=nothing, total_accumulator=nothing)
   eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
   ctx = (BiomassSuccession=(eco_params=eco_params,),)
 
   # Use provided accumulators or create new ones
   _thread_accumulators = isnothing(thread_accumulators) ?
-    [PU.SiteLossAccumulator(n_species) for _ in 1:Threads.maxthreadid()] : thread_accumulators
+                         [PU.SiteLossAccumulator(n_species) for _ in 1:Threads.maxthreadid()] : thread_accumulators
   _total_accumulator = isnothing(total_accumulator) ?
-    PU.SiteLossAccumulator(n_species) : total_accumulator
+                       PU.SiteLossAccumulator(n_species) : total_accumulator
 
   # Reset total accumulator
   PU.reset!(_total_accumulator)
@@ -366,8 +366,11 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
         spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
         sim_years = site_sim_years.sim_years[site.mapcode]
         if current_sim_year in sim_years
-          # TODO: buffer-based calculate_site_loss2! was slower - using original for now
-          sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
+          sloss = if debug || isnothing(loss_buffers)
+            PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
+          else
+            PU.calculate_site_loss2!(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params, loss_buffers[Threads.threadid()])
+          end
           PU.accumulate!(_thread_accumulators[Threads.threadid()], sloss)
         end
       end
@@ -386,13 +389,25 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
   bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+  # Compute buffer dimensions from data
+  max_eco_species = maximum(length.(eco_species_ids))
+  # Cohorts can grow significantly during simulation - use conservative estimate
+  initial_max_cohorts = Int(maximum(ref_soa.refs.cohort[2:end] .- ref_soa.refs.cohort[1:end-1]))
+  max_cohorts = max(initial_max_cohorts * 2, initial_max_cohorts + max_eco_species * max_sim_year)
+  max_age = 300  # Conservative upper bound for tree age + smoothing window
+  n_bins = length(loss_params.age_bins.bins_idx) + (loss_params.age_bins.last_bin_open ? 1 : 0)
+
+  # Preallocate thread-local loss buffers (only if not in debug mode)
+  loss_buffers = debug ? nothing : PU.create_loss_buffer_pool(;
+    max_eco_species=max_eco_species, n_species=n_species,
+    max_cohorts=max_cohorts, max_age=max_age, n_bins=n_bins)
 
   # Preallocate thread-local accumulators
   thread_accumulators = [PU.SiteLossAccumulator(n_species) for _ in 1:Threads.maxthreadid()]
   total_accumulator = PU.SiteLossAccumulator(n_species)
 
   best_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug,
-    thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
+    loss_buffers=loss_buffers, thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
   cur = LBSA.LBSACandidate(bio_params, best_result)
   _best = cur
   search_state = LBSA.LBSAState(_best, cur, rng; max_iter=TRIALS)
@@ -414,7 +429,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
       bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations,
         ctx=sampling_ctx)
       run_result = fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug,
-        thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
+        loss_buffers=loss_buffers, thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
       next = LBSA.LBSACandidate(bio_params, run_result)
 
       is_new_best = LBSA.search_cmp!(next, search_state)
@@ -425,7 +440,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
         @info "Restarting @ $(search_state.i)"
         bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
         cur_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug,
-          thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
+          loss_buffers=loss_buffers, thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       if is_new_best || search_state.i % 50 == 0
@@ -644,8 +659,9 @@ function simulate_spatial_treemap(;
 
   println("Running simulation: $timehorizon_years years, output every $output_every_years")
   let ctx = (eco_params=eco_params,),
-      bufs = [BiomassSuccessionPlugin._new_buf() for _ in 1:Threads.maxthreadid()],
-      chunks = zeros(Int, Threads.maxthreadid())
+    bufs = [BiomassSuccessionPlugin._new_buf() for _ in 1:Threads.maxthreadid()],
+    chunks = zeros(Int, Threads.maxthreadid())
+
     Spatial.run_spatial!(ref_soa, BiomassSuccessionPlugin.BiomassSuccession, ctx, output_dir,
       (soa, year) -> BiomassSuccessionPlugin.emit_year!(bufs, chunks, soa, year, output_dir);
       timehorizon=timehorizon_years, output_every=output_every_years)
@@ -728,8 +744,9 @@ function simulate_spatial_landis(;
 
   println("Running simulation: $timehorizon_years years, output every $output_every_years")
   let ctx = (eco_params=eco_params,),
-      bufs = [BiomassSuccessionPlugin._new_buf() for _ in 1:Threads.maxthreadid()],
-      chunks = zeros(Int, Threads.maxthreadid())
+    bufs = [BiomassSuccessionPlugin._new_buf() for _ in 1:Threads.maxthreadid()],
+    chunks = zeros(Int, Threads.maxthreadid())
+
     Spatial.run_spatial!(ref_soa, BiomassSuccessionPlugin.BiomassSuccession, ctx, output_dir,
       (soa, year) -> BiomassSuccessionPlugin.emit_year!(bufs, chunks, soa, year, output_dir);
       timehorizon=timehorizon_years, output_every=output_every_years)
@@ -742,9 +759,9 @@ function simulate_spatial_landis(;
   BiomassSuccessionPlugin.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
 end
 
-function export_landis_main(; output_dir::String="/workspace/best_params_landis")
+function export_landis_main(; output_dir::String="../best_params_landis")
   jld2_files = filter(f -> startswith(f, "best_params@") && endswith(f, ".jld2"),
-                      readdir("./outputs"))
+    readdir("./outputs"))
   isempty(jld2_files) && error("No best_params JLD2 files found in ./outputs/")
   latest = last(sort(jld2_files))
   jld2_path = joinpath("./outputs", latest)

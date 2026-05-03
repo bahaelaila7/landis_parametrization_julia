@@ -135,16 +135,19 @@ function coalesce_to_duckdb(; output_dir::String, db_path::String)
   isempty(chunk_files) && (@warn "No arrow files in $output_dir"; return)
 
   con = DuckDB.connect(DuckDB.DB(db_path))
-  DuckDB.execute(con, """
-    CREATE TABLE IF NOT EXISTS cohorts (
-      year       UINTEGER,
-      mapcode    UINTEGER,
-      eco_id     UINTEGER,
-      species_id UINTEGER,
-      age        FLOAT,
-      biomass    FLOAT
-    )
-  """)
+  DuckDB.execute(
+    con,
+    """
+  CREATE TABLE IF NOT EXISTS cohorts (
+    year       UINTEGER,
+    mapcode    UINTEGER,
+    eco_id     UINTEGER,
+    species_id UINTEGER,
+    age        FLOAT,
+    biomass    FLOAT
+  )
+"""
+  )
   app = DuckDB.Appender(con, "cohorts")
   for fname in chunk_files
     tbl = Arrow.Table(joinpath(output_dir, fname))
@@ -168,10 +171,10 @@ end
 function export_landis_params(params::BiomassSuccessionParams; output_dir::String)
   mkpath(output_dir)
 
-  eco_list   = params.ECO_LIST
-  sp_list    = params.SPECIES_LIST
+  eco_list = params.ECO_LIST
+  sp_list = params.SPECIES_LIST
   eco_sp_ids = params.ECO_SPECIES_IDS
-  n_sp  = length(sp_list)
+  n_sp = length(sp_list)
   n_eco = length(eco_list)
 
   # ---- CoreSpeciesData.txt ------------------------------------------------
@@ -231,7 +234,9 @@ function export_landis_params(params::BiomassSuccessionParams; output_dir::Strin
     # MinRelativeBiomass: rows = shade class (1-5), cols = ecoregion
     println(io, "MinRelativeBiomass")
     print(io, ">> ShadeClass")
-    for eco in eco_list; print(io, "\t$eco"); end
+    for eco in eco_list
+      print(io, "\t$eco")
+    end
     println(io)
     for sc in 1:5
       print(io, "   $sc")
@@ -245,7 +250,9 @@ function export_landis_params(params::BiomassSuccessionParams; output_dir::Strin
     # SufficientLight: rows = shade class (1-6), cols = shade tolerance (1-5)
     println(io, "SufficientLight")
     print(io, ">> ShadeClass")
-    for st in 1:5; print(io, "\tShadeTol$st"); end
+    for st in 1:5
+      print(io, "\tShadeTol$st")
+    end
     println(io)
     for sc in 1:length(params.SUFFICIENT_LIGHT)
       print(io, "   $sc")
