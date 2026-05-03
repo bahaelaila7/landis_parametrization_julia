@@ -1,5 +1,5 @@
 using ..PanCore
-export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType
+export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, update_sampling_context!, LossParams, SiteLoss, SiteLossAccumulator, reset!, accumulate!, to_site_loss, AgeBins, get_smoothing_window, calculate_site_loss2, calculate_site_loss2!, SiteLossBuffers, create_loss_buffer_pool, reset_loss_buffers!, skipundef, MutationType
 
 import Setfield
 import Random
@@ -42,6 +42,11 @@ end         # field[i] = [val, val+step, ...]
 # Loss-weighted sampling context: sp_w_loss[global_species_id] drives proportional selection.
 struct SamplingContext
   sp_w_loss::Vector{FloatType}
+end
+
+# Preallocate a SamplingContext for reuse
+function SamplingContext(n_species::Int)
+  SamplingContext(Vector{FloatType}(undef, n_species))
 end
 
 # Returns a 1-based index sampled proportional to weights; falls back to uniform when all zero.
@@ -99,8 +104,11 @@ end
 apply_mutation(::ScalarApplier, field, idx, val) = val
 apply_mutation(::IndexApplier, field, idx, val) = setindex!(copy(field), val, idx)
 function apply_mutation(::NestedIndexApplier, field, idx, val)
-  nv = deepcopy(field)
-  nv[idx[1]][idx[2]] = val
+  # Only copy the outer vector (shallow) and the modified inner vector
+  eco_id, sp_id = idx
+  nv = copy(field)  # Shallow copy of outer Vector
+  nv[eco_id] = copy(field[eco_id])  # Copy only the modified inner vector
+  nv[eco_id][sp_id] = val
   nv
 end
 function apply_mutation(a::GradientApplier, field, idx, val)
@@ -212,17 +220,90 @@ end
     num_sites=loss1.num_sites + loss2.num_sites)
 end
 @inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
-
-  w = (alpha * loss.sp_w_loss)
-  sp = (beta * log.(1 .+ loss.sp_agb_loss))
-  #site = log(1+loss.site_agb_loss)
-  all = sum(w .+ sp .+ (w .* sp))
-  #all = w + sp #+ site
-  return all / loss.num_sites
-
+  total = zero(FloatType)
+  @inbounds @simd for i in eachindex(loss.sp_w_loss)
+    w = alpha * loss.sp_w_loss[i]
+    sp = beta * log(one(FloatType) + loss.sp_agb_loss[i])
+    total += w + sp + (w * sp)
+  end
+  return total / loss.num_sites
 end
 @inline Base.convert(::Type{Float64}, a::SiteLoss) = Float64(get_total_loss(a))
 #@inline Base.promote_rule(::Type{SiteLoss}, ::Type{Float64}) = Float64
+
+# Update sampling context weights in-place from a SiteLoss (avoids 3 intermediate allocations)
+@inline function update_sampling_context!(ctx::SamplingContext, loss::SiteLoss)
+  @inbounds @simd for i in eachindex(ctx.sp_w_loss)
+    w = loss.sp_w_loss[i]
+    agb = loss.sp_agb_loss[i]
+    ctx.sp_w_loss[i] = w + agb + (w * agb)
+  end
+  return ctx
+end
+
+# Mutable accumulator for allocation-free loss aggregation
+mutable struct SiteLossAccumulator
+  sp_w_loss::Vector{FloatType}
+  sp_agb_loss::Vector{FloatType}
+  site_agb_loss::FloatType
+  num_sites::Int
+end
+
+function SiteLossAccumulator(n_species::Int)
+  SiteLossAccumulator(
+    zeros(FloatType, n_species),
+    zeros(FloatType, n_species),
+    zero(FloatType),
+    0
+  )
+end
+
+@inline function reset!(acc::SiteLossAccumulator)
+  acc.sp_w_loss .= zero(FloatType)
+  acc.sp_agb_loss .= zero(FloatType)
+  acc.site_agb_loss = zero(FloatType)
+  acc.num_sites = 0
+  return acc
+end
+
+@inline function accumulate!(acc::SiteLossAccumulator, loss::SiteLoss)
+  @inbounds @simd for i in eachindex(acc.sp_w_loss)
+    acc.sp_w_loss[i] += loss.sp_w_loss[i]
+    acc.sp_agb_loss[i] += loss.sp_agb_loss[i]
+  end
+  acc.site_agb_loss += loss.site_agb_loss
+  acc.num_sites += loss.num_sites
+  return acc
+end
+
+@inline function accumulate!(acc1::SiteLossAccumulator, acc2::SiteLossAccumulator)
+  @inbounds @simd for i in eachindex(acc1.sp_w_loss)
+    acc1.sp_w_loss[i] += acc2.sp_w_loss[i]
+    acc1.sp_agb_loss[i] += acc2.sp_agb_loss[i]
+  end
+  acc1.site_agb_loss += acc2.site_agb_loss
+  acc1.num_sites += acc2.num_sites
+  return acc1
+end
+
+function to_site_loss(acc::SiteLossAccumulator)
+  SiteLoss(
+    sp_w_loss=copy(acc.sp_w_loss),
+    sp_agb_loss=copy(acc.sp_agb_loss),
+    site_agb_loss=acc.site_agb_loss,
+    num_sites=acc.num_sites
+  )
+end
+
+@inline function get_total_loss(acc::SiteLossAccumulator, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
+  total = zero(FloatType)
+  @inbounds @simd for i in eachindex(acc.sp_w_loss)
+    w = alpha * acc.sp_w_loss[i]
+    sp = beta * log(one(FloatType) + acc.sp_agb_loss[i])
+    total += w + sp + (w * sp)
+  end
+  return total / acc.num_sites
+end
 
 #StructTypes.StructType(::Type{SAState}) = StructTypes.Struct()
 #StructTypes.StructType(::Type{SACandidate}) = StructTypes.Struct()
@@ -444,4 +525,258 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
 
   return SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=abs(site_agb_loss), num_sites=1)
 
+end
+
+# ============================================================================
+# Allocation-free loss calculation using preallocated buffers
+# ============================================================================
+
+# Thread-local scratch buffers for loss calculation
+struct SiteLossBuffers
+  insite::BitVector
+  sp_w_loss::Vector{FloatType}
+  sp_agb_loss::Vector{FloatType}
+  perm::Vector{Int}
+  ages::Vector{FloatType}
+  smoothed_ages::Vector{FloatType}
+  binned_ages::Vector{FloatType}
+  sim_age_cdf::Vector{FloatType}
+end
+
+function SiteLossBuffers(; max_eco_species::Int, n_species::Int, max_cohorts::Int, max_age::Int, n_bins::Int)
+  SiteLossBuffers(
+    falses(max_eco_species),
+    zeros(FloatType, n_species),
+    zeros(FloatType, n_species),
+    Vector{Int}(undef, max_cohorts),
+    Vector{FloatType}(undef, max_age),
+    Vector{FloatType}(undef, max_age),
+    Vector{FloatType}(undef, n_bins),
+    Vector{FloatType}(undef, n_bins),
+  )
+end
+
+function create_loss_buffer_pool(; max_eco_species::Int, n_species::Int, max_cohorts::Int, max_age::Int, n_bins::Int)
+  [SiteLossBuffers(; max_eco_species, n_species, max_cohorts, max_age, n_bins)
+   for _ in 1:Threads.maxthreadid()]
+end
+
+@inline function reset_loss_buffers!(buf::SiteLossBuffers, eco_n_species::Int, n_species::Int)
+  @inbounds for i in 1:eco_n_species
+    buf.insite[i] = false
+  end
+  @inbounds @simd for i in 1:n_species
+    buf.sp_w_loss[i] = zero(FloatType)
+    buf.sp_agb_loss[i] = zero(FloatType)
+  end
+  return buf
+end
+
+# In-place smoothing using manual convolution (avoids ImageFiltering allocation)
+@inline function smooth_ages!(out::AbstractVector{FloatType}, ages::AbstractVector{FloatType},
+                              smoothing_window::Vector{FloatType}, n::Int)
+  hw = length(smoothing_window) >> 1
+  @inbounds for i in 1:n
+    acc = zero(FloatType)
+    for (j, w) in enumerate(smoothing_window)
+      src_idx = i + j - hw - 1
+      if src_idx < 1
+        src_idx = 2 - src_idx
+      elseif src_idx > n
+        src_idx = 2 * n - src_idx
+      end
+      src_idx = clamp(src_idx, 1, n)
+      acc += ages[src_idx] * w
+    end
+    out[i] = acc
+  end
+  s = zero(FloatType)
+  @inbounds @simd for i in 1:n
+    s += out[i]
+  end
+  if s > zero(FloatType)
+    inv_s = one(FloatType) / s
+    @inbounds @simd for i in 1:n
+      out[i] *= inv_s
+    end
+  end
+  return @view out[1:n]
+end
+
+# In-place binning
+@inline function bin_ages!(out::AbstractVector{FloatType}, ages::AbstractVector{FloatType},
+                           age_bins::Vector{Int}, last_bin_open::Bool, n_ages::Int)
+  n_bins_total = length(age_bins) + (last_bin_open ? 1 : 0)
+  @inbounds @simd for i in 1:n_bins_total
+    out[i] = zero(FloatType)
+  end
+  current_bin = 1
+  current_age = @inbounds age_bins[current_bin]
+  @inbounds for i in 1:n_ages
+    if i >= current_age
+      current_bin += 1
+      if current_bin > length(age_bins)
+        current_age = last_bin_open ? typemax(Int) : break
+      else
+        current_age = age_bins[current_bin]
+      end
+    end
+    out[current_bin] += ages[i]
+  end
+  return @view out[1:n_bins_total]
+end
+
+# In-place cumsum
+@inline function cumsum!(out::AbstractVector{FloatType}, src::AbstractVector{FloatType}, n::Int)
+  acc = zero(FloatType)
+  @inbounds for i in 1:n
+    acc += src[i]
+    out[i] = acc
+  end
+  return @view out[1:n]
+end
+
+# In-place smoothen_bin_cdf using preallocated buffers
+@inline function smoothen_bin_cdf!(buf::SiteLossBuffers, ages::AbstractVector{FloatType},
+                                   loss_params::LossParams, n_ages::Int)
+  smooth_ages!(buf.smoothed_ages, ages, loss_params.smoothing_weights, n_ages)
+  n_bins = length(loss_params.age_bins.bins_idx) + (loss_params.age_bins.last_bin_open ? 1 : 0)
+  bin_ages!(buf.binned_ages, @view(buf.smoothed_ages[1:n_ages]),
+            loss_params.age_bins.bins_idx, loss_params.age_bins.last_bin_open, n_ages)
+  cdf_view = cumsum!(buf.sim_age_cdf, buf.binned_ages, n_bins)
+  if cdf_view[end] > zero(FloatType)
+    inv_total = one(FloatType) / cdf_view[end]
+    @inbounds @simd for i in 1:n_bins
+      buf.sim_age_cdf[i] *= inv_total
+    end
+  end
+  return @view buf.sim_age_cdf[1:n_bins]
+end
+
+# Allocation-free Wasserstein distance calculation
+@inline function wasserstein_distance(bin_widths::Vector{FloatType},
+                                      sim_cdf::AbstractVector{FloatType},
+                                      ref_cdf::AbstractVector{FloatType})::FloatType
+  total = zero(FloatType)
+  n = length(bin_widths)
+  @inbounds @simd for i in 1:n
+    total += bin_widths[i] * abs(sim_cdf[i] - ref_cdf[i])
+  end
+  return total
+end
+
+# Allocation-free Wasserstein for missing species (sim_cdf is zero)
+@inline function wasserstein_distance_missing(bin_widths::Vector{FloatType},
+                                              ref_cdf::AbstractVector{FloatType})::FloatType
+  total = zero(FloatType)
+  n = length(bin_widths)
+  @inbounds @simd for i in 1:n
+    total += bin_widths[i] * ref_cdf[i]
+  end
+  return total
+end
+
+# Buffered version of calculate_species_loss!
+@inline function calculate_species_loss_buffered!(; sp, gsp, site, buf::SiteLossBuffers, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, site_agb_loss, n_ages::Int)
+  sim_agb_sum = zero(FloatType)
+  @inbounds for j in sp_start_idx:sp_end_idx
+    sim_agb_sum += site.c_bio[p[j]]
+  end
+  buf.sp_agb_loss[gsp] = sim_agb_sum
+  site_agb_loss += sim_agb_sum
+
+  if spdf_plt.keys[sp]
+    rec = @inbounds spdf_plt.records[sp]
+    # Reset ages buffer
+    @inbounds @simd for i in 1:n_ages
+      buf.ages[i] = zero(FloatType)
+    end
+    # Fill ages from cohorts
+    @inbounds for j in sp_start_idx:sp_end_idx
+      idx = p[j]
+      age_idx = UIntType(site.c_age[idx])
+      buf.ages[age_idx] = site.c_bio[idx]
+    end
+    # Compute CDF in-place
+    sim_cdf = smoothen_bin_cdf!(buf, @view(buf.ages[1:n_ages]), loss_params, n_ages)
+    # Compute Wasserstein distance without intermediate arrays
+    buf.sp_w_loss[gsp] = wasserstein_distance(loss_params.age_bins.bin_widths, sim_cdf, rec.sp_age_cdf)
+    buf.sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
+    site_agb_loss -= rec.sp_agb_sum
+  end
+  return site_agb_loss
+end
+
+# Allocation-free version of calculate_site_loss2 using preallocated buffers
+function calculate_site_loss2!(current_year::Int, site::SiteView, n_species::Int,
+                               eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth,
+                               loss_params::LossParams, buf::SiteLossBuffers)::SiteLoss
+  eco_n_species = length(site.sp_mature)
+
+  # Fall back to allocating version if buffers are too small
+  if site.live > length(buf.perm) || eco_n_species > length(buf.insite)
+    return calculate_site_loss2(current_year, site, n_species, eco_species_ids, spdf_plt, loss_params; debug=false)
+  end
+
+  species_id_map = eco_species_ids[site.eco_id]
+
+  # Reset buffers
+  reset_loss_buffers!(buf, eco_n_species, n_species)
+  site_agb_loss = zero(FloatType)
+
+  if site.live > 0
+    c_species = @view site.c_species[1:site.live]
+    max_age = UIntType(ceil(maximum(@view site.c_age[1:site.live])))
+    max_age += UIntType(length(loss_params.smoothing_weights) >> 1)
+    n_ages = Int(max_age)
+
+    # Check if ages buffer is large enough
+    if n_ages > length(buf.ages)
+      return calculate_site_loss2(current_year, site, n_species, eco_species_ids, spdf_plt, loss_params; debug=false)
+    end
+
+    # Use sortperm! with preallocated buffer
+    perm_view = @view buf.perm[1:site.live]
+    sortperm!(perm_view, c_species)
+
+    sp_start_idx = 1
+    prev_sp = @inbounds site.c_species[perm_view[sp_start_idx]]
+
+    for i in 1:site.live
+      sp = @inbounds c_species[perm_view[i]]
+      buf.insite[sp] = true
+
+      if sp != prev_sp
+        sp_end_idx = i - 1
+        site_agb_loss = calculate_species_loss_buffered!(;
+          sp=prev_sp, gsp=species_id_map[prev_sp], site=site, buf=buf, p=perm_view,
+          sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx, spdf_plt=spdf_plt,
+          loss_params=loss_params, site_agb_loss=site_agb_loss, n_ages=n_ages)
+        prev_sp = sp
+        sp_start_idx = i
+      end
+
+      if i == site.live
+        sp_end_idx = i
+        site_agb_loss = calculate_species_loss_buffered!(;
+          sp=sp, gsp=species_id_map[sp], site=site, buf=buf, p=perm_view,
+          sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx, spdf_plt=spdf_plt,
+          loss_params=loss_params, site_agb_loss=site_agb_loss, n_ages=n_ages)
+      end
+    end
+  end
+
+  # Handle missing species without allocating index array
+  @inbounds for sp in 1:length(spdf_plt.keys)
+    if spdf_plt.keys[sp] && !buf.insite[sp]
+      rec = spdf_plt.records[UIntType(sp)]
+      gsp = species_id_map[sp]
+      buf.sp_agb_loss[gsp] = rec.sp_agb_sum
+      buf.sp_w_loss[gsp] = wasserstein_distance_missing(loss_params.age_bins.bin_widths, rec.sp_age_cdf)
+      site_agb_loss -= rec.sp_agb_sum
+    end
+  end
+
+  return SiteLoss(sp_w_loss=copy(buf.sp_w_loss), sp_agb_loss=copy(buf.sp_agb_loss),
+                  site_agb_loss=abs(site_agb_loss), num_sites=1)
 end

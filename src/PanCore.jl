@@ -50,7 +50,7 @@ end
 function gc_and_trim!()
   GC.gc()
   ccall(:malloc_trim, Cint, (Csize_t,), 0)
-  println(read("/proc/self/smaps_rollup", String))
+  #println(read("/proc/self/smaps_rollup", String))
   nothing
 end
 

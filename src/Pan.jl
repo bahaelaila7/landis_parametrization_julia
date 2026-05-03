@@ -336,16 +336,28 @@ function parametrize(; cohorts_db_path::String,
     rng=rng,
     debug=debug)
 end
-function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, thread_accumulators=nothing, total_accumulator=nothing)
   eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
   ctx = (BiomassSuccession=(eco_params=eco_params,),)
-  years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
+
+  # Use provided accumulators or create new ones
+  _thread_accumulators = isnothing(thread_accumulators) ?
+    [PU.SiteLossAccumulator(n_species) for _ in 1:Threads.maxthreadid()] : thread_accumulators
+  _total_accumulator = isnothing(total_accumulator) ?
+    PU.SiteLossAccumulator(n_species) : total_accumulator
+
+  # Reset total accumulator
+  PU.reset!(_total_accumulator)
+
   if spinup
     soa = BiomassSuccessionPlugin.spinup_cohorts!(soa, spinup_cohorts, eco_params)
   end
   for current_sim_year in 0:max_sim_year
-    #println("\ttimestep $(t)")
-    sites_results = Vector{PU.SiteLoss}(undef, soa.n)
+    # Reset thread-local accumulators for this year
+    for acc in _thread_accumulators
+      PU.reset!(acc)
+    end
+
     PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
     Threads.@threads :static for i in 1:soa.n
       @inbounds begin
@@ -354,19 +366,19 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
         spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
         sim_years = site_sim_years.sim_years[site.mapcode]
         if current_sim_year in sim_years
+          # TODO: buffer-based calculate_site_loss2! was slower - using original for now
           sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
-          sites_results[i] = sloss
+          PU.accumulate!(_thread_accumulators[Threads.threadid()], sloss)
         end
       end
     end
-    year_results_no_missing = collect(PU.skipundef(sites_results))
-    if length(year_results_no_missing) > 0
-      current_year_results = sum(year_results_no_missing)
-      years_results[current_sim_year+1] = current_year_results
+    # Reduce thread accumulators into total
+    for acc in _thread_accumulators
+      PU.accumulate!(_total_accumulator, acc)
     end
   end
-  run_result = sum(PU.skipundef(years_results))
-  #@assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
+  # Convert to SiteLoss for compatibility with existing code
+  run_result = PU.to_site_loss(_total_accumulator)
   return run_result
 end
 function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
@@ -374,25 +386,35 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
   bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-  best_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
-  #PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
+
+  # Preallocate thread-local accumulators
+  thread_accumulators = [PU.SiteLossAccumulator(n_species) for _ in 1:Threads.maxthreadid()]
+  total_accumulator = PU.SiteLossAccumulator(n_species)
+
+  best_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug,
+    thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
   cur = LBSA.LBSACandidate(bio_params, best_result)
   _best = cur
   search_state = LBSA.LBSAState(_best, cur, rng; max_iter=TRIALS)
   if TRIALS < 1
-    return search_state #best_loss, best_result, best_params
+    return search_state
   end
 
   writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
 
-  try
+  # Preallocate sampling context to avoid 3 intermediate allocations per trial
+  sampling_ctx = PU.SamplingContext(n_species)
 
+  try
     TProgress.@track for trial in 1:TRIALS
       soa = deepcopy(ref_soa)
 
-      bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations, #BothMutations,
-        ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)))
-      run_result = fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+      # Update sampling context in-place from current loss
+      PU.update_sampling_context!(sampling_ctx, search_state.current.fx)
+      bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations,
+        ctx=sampling_ctx)
+      run_result = fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug,
+        thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
       next = LBSA.LBSACandidate(bio_params, run_result)
 
       is_new_best = LBSA.search_cmp!(next, search_state)
@@ -402,7 +424,8 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-        cur_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+        cur_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug,
+          thread_accumulators=thread_accumulators, total_accumulator=total_accumulator)
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       if is_new_best || search_state.i % 50 == 0
@@ -411,7 +434,6 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
       if LBSA.is_search_over(search_state)
         break
       end
-      #println(convert(Float64,run_result))
     end
   finally
     stop_writer(writer_ch, writer_task)
@@ -420,56 +442,26 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
 end
 function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
   n_species = length(species_list)
+  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
   bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-  best_result = nothing # PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
+  best_result = nothing
   cur = SA.SACandidate(bio_params, best_result)
   _best = cur
   search_state = SA.SAState(_best, cur, rng; max_iter=TRIALS, initial_t=1e3, t=1e3)
   if TRIALS < 1
-    return search_state #best_loss, best_result, best_params
+    return search_state
   end
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
 
   writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
 
   try
-
     TProgress.@track for trial in 1:TRIALS
       search_state.i = trial
       soa = deepcopy(ref_soa)
 
       bio_params = PU.mutate_params(bio_params, param_dists; rng=rng)
-      eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
-      ctx = (BiomassSuccession=(eco_params=eco_params,),)
-      years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
-      if spinup
-        soa = BiomassSuccessionPlugin.spinup_cohorts!(soa, spinup_cohorts, eco_params)
-      end
-      for current_sim_year in 0:max_sim_year
-        #println("\ttimestep $(t)")
-        sites_results = Vector{PU.SiteLoss}(undef, soa.n)
-        PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
-        Threads.@threads :static for i in 1:soa.n
-          @inbounds begin
-            site = getsite(soa, i)
-            !site.active && continue
-            spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
-            sim_years = site_sim_years.sim_years[site.mapcode]
-            if current_sim_year in sim_years
-              sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
-              sites_results[i] = sloss
-            end
-          end
-        end
-        year_results_no_missing = collect(PU.skipundef(sites_results))
-        if length(year_results_no_missing) > 0
-          current_year_results = sum(year_results_no_missing)
-          years_results[current_sim_year+1] = current_year_results
-        end
-      end
-      run_result = sum(PU.skipundef(years_results))
-      @assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
+      run_result = fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
       next = SA.SACandidate(bio_params, run_result)
 
       is_new_best = SA.search_cmp!(next, search_state)
@@ -479,12 +471,10 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
       if SA.search_update_rule!(search_state)
         break
       end
-      #println(convert(Float64,run_result))
     end
   finally
     stop_writer(writer_ch, writer_task)
   end
-
 end
 function main()
   seed = 22200104#1337
