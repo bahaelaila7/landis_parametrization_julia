@@ -653,17 +653,22 @@ function simulate_spatial_treemap(;
   eco_params = BiomassSuccessionPlugin.generate_eco_params(mod_params)
 
   println("Running simulation: $timehorizon_years years, output every $output_every_years")
-  Spatial.run_spatial!(ref_soa, eco_params, output_dir;
-    timehorizon=timehorizon_years, output_every=output_every_years)
+  let ctx = (eco_params=eco_params,),
+      bufs = [BiomassSuccessionPlugin._new_buf() for _ in 1:Threads.maxthreadid()],
+      chunks = zeros(Int, Threads.maxthreadid())
+    Spatial.run_spatial!(ref_soa, BiomassSuccessionPlugin.BiomassSuccession, ctx, output_dir,
+      (soa, year) -> BiomassSuccessionPlugin.emit_year!(bufs, chunks, soa, year, output_dir);
+      timehorizon=timehorizon_years, output_every=output_every_years)
+  end
 
   println("Generating output rasters")
   ref_raster_path = !isnothing(treemap_raster) ?
                     joinpath(data_dir, treemap_raster) :
                     joinpath(data_dir, eco_raster)
-  Spatial.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ref_raster_path)
+  BiomassSuccessionPlugin.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ref_raster_path)
 
   println("Coalescing Arrow files to DuckDB")
-  Spatial.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
+  BiomassSuccessionPlugin.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
 end
 
 function spatial_main()
@@ -732,14 +737,30 @@ function simulate_spatial_landis(;
   eco_params = BiomassSuccessionPlugin.generate_eco_params(params)
 
   println("Running simulation: $timehorizon_years years, output every $output_every_years")
-  Spatial.run_spatial!(ref_soa, eco_params, output_dir;
-    timehorizon=timehorizon_years, output_every=output_every_years)
+  let ctx = (eco_params=eco_params,),
+      bufs = [BiomassSuccessionPlugin._new_buf() for _ in 1:Threads.maxthreadid()],
+      chunks = zeros(Int, Threads.maxthreadid())
+    Spatial.run_spatial!(ref_soa, BiomassSuccessionPlugin.BiomassSuccession, ctx, output_dir,
+      (soa, year) -> BiomassSuccessionPlugin.emit_year!(bufs, chunks, soa, year, output_dir);
+      timehorizon=timehorizon_years, output_every=output_every_years)
+  end
 
   println("Generating output rasters")
-  Spatial.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ecoregion_tif)
+  BiomassSuccessionPlugin.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ecoregion_tif)
 
   println("Coalescing Arrow files to DuckDB")
-  Spatial.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
+  BiomassSuccessionPlugin.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
+end
+
+function export_landis_main(; output_dir::String="/workspace/best_params_landis")
+  jld2_files = filter(f -> startswith(f, "best_params@") && endswith(f, ".jld2"),
+                      readdir("./outputs"))
+  isempty(jld2_files) && error("No best_params JLD2 files found in ./outputs/")
+  latest = last(sort(jld2_files))
+  jld2_path = joinpath("./outputs", latest)
+  println("Exporting from $jld2_path")
+  params = JLD2.load_object(jld2_path)
+  BiomassSuccessionPlugin.export_landis_params(params; output_dir=output_dir)
 end
 
 function landis_main()
