@@ -53,14 +53,13 @@ PanCore.csr_arrays(::Type{PluginType}, nnz::NamedTuple) =
 
 function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, current_time::Int; ctx::NamedTuple)
   eco_params = ctx.eco_params
-  new_cohort_counts = zeros(Int32, soa.n)
   Threads.@threads :static for i in 1:soa.n
     @inbounds site = getsite(soa, i)
     succession_step!(current_time, site, eco_params[site.eco_id])
     reproduction_check_step!(current_time, site, eco_params[site.eco_id])
-    @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
+    @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
   end
-  PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
+  PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
   Threads.@threads :static for i in 1:soa.n
     @inbounds site = getsite(soa, i)
     #sprouting_step!(current_time, site, eco_params[site.eco_id])
@@ -311,22 +310,19 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
     while current_year < year_deficit + 1
       #println("current_year, $(current_year), year_deficit+1, $(year_deficit + 1), succession: $(current_year < year_deficit+1) ")
       #@debug ("year $(current_year), before recounting $((soa.refs.cohort))")
-      #@debug (new_cohort_counts)
-      #new_cohort_counts .= Int32(0)
-      new_cohort_counts = zeros(Int32, soa.n)
       Threads.@threads :static for i in 1:soa.n
         @inbounds site = getsite(soa, i)
         @assert Int(site.mapcode) == Int(i)
         if i == 18
           @debug "thread recount after marking s18: live=$(site.live), sp_sprout=$(site.sp_sprout), species_refs=$(pointer(soa.refs.species))[$(soa.refs.species[18]):$(soa.refs.species[19]-1)]"
         end
-        @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
+        @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
       end
       @debug ("year $(current_year), after recounting $((soa.refs.cohort))")
-      @debug (new_cohort_counts)
+      @debug (soa.scalar._new_cohort_counts)
       @debug ("adjusting")
       soa = #PanCore.with_thread_sync() do
-        PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
+        PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
       #end
       @debug ("sprouting")
       Threads.@threads :static for i in 1:soa.n
@@ -335,7 +331,6 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
         reproduction_commit_step!(current_year, site, eco_params[site.eco_id])
       end
       @debug ("succession")
-      new_cohort_counts = zeros(Int32, soa.n)
       Threads.@threads :static for i in 1:soa.n
         @inbounds site = getsite(soa, i)
         succession_step!(current_year, site, eco_params[site.eco_id])
@@ -343,10 +338,10 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
         if i == 18
           @debug "thread recount after succession+repro s18: live=$(site.live), sp_sprout=$(site.sp_sprout), species_refs=$(pointer(soa.refs.species))[$(soa.refs.species[18]):$(soa.refs.species[19]-1)]"
         end
-        @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
+        @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
       end
       @debug ("year $(current_year), recounting after repro $((soa.refs.cohort))")
-      @debug (new_cohort_counts)
+      @debug (soa.scalar._new_cohort_counts)
       #grow all active
       #PanCore.process_plugin!(soa, PluginType, t; ctx=(eco_params=eco_params,))
       #Threads.@threads :static for site in sites #
@@ -419,15 +414,14 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
     #println("Adding cohort $(row.species_symbol_map) to ", row.plot_id)
   end
   @debug ("year $(current_year), final before recounting $((soa.refs.cohort))")
-  new_cohort_counts = zeros(Int32, soa.n)
   Threads.@threads :static for i in 1:soa.n
     @inbounds site = getsite(soa, i)
-    @inbounds new_cohort_counts[i] = sum(site.sp_sprout) + site.live
+    @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
   end
   @debug ("year $(current_year), final after recounting $((soa.refs.cohort))")
-  @debug (new_cohort_counts)
+  @debug (soa.scalar._new_cohort_counts)
   soa = #PanCore.with_thread_sync() do
-    PanCore.readjust_soa!(soa, (cohort=new_cohort_counts,))
+    PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
   #end
   Threads.@threads :static for i in 1:soa.n
     @inbounds site = getsite(soa, i)
