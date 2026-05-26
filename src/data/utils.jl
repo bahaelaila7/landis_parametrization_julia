@@ -135,7 +135,7 @@ function get_spinup_cohorts(df::DataFrame)
   return spinup_cohorts
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, filter_ecos::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, filter_ecos::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
   #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
   println("Connecting to: $(cohorts_db_path) ")
   con = DuckDB.connect(DuckDB.DB(cohorts_db_path))
@@ -147,6 +147,9 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   end
   if skip_disturbances
     sql *= " AND subp_has_dstrb= false"
+  end
+  if !spinup
+	sql *= " AND plot_meas_num > 1 "
   end
   println(sql)
   cohorts_df = DuckDB.execute(con, sql) |> DataFrame
