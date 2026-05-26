@@ -1,4 +1,5 @@
 module Pan
+ENV["GKSwstype"] = "nul" # this is to suppress window opening upon plotting
 include("PanCore.jl")
 include("Plugins.jl")
 include("Parametrization.jl")
@@ -25,6 +26,8 @@ import Distributions as Dists
 import Term.Progress as TProgress
 import JLD2
 using DataFrames
+import CairoMakie
+
 
 
 
@@ -143,9 +146,138 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
   end
 end
 
+
+function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iteration, loss, outdir="./outputs/")
+  outdir = joinpath(outdir, "plots")
+
+  mkpath(outdir)
+
+  DictData = Dict{Tuple{UIntType,UIntType,UIntType},Tuple{Vector{UIntType},Vector{FloatType}}}
+  empirical_dict::DictData = Dict()
+  simulated_dict::DictData = Dict()
+  for (key, group_df) in pairs(groupby(empirical_df, [:plot_id, :sim_year, :species_id]))
+    empirical_dict[(UIntType(key.plot_id), UIntType(key.sim_year), UIntType(key.species_id))] = ([UIntType(row.age_calc) for row in eachrow(group_df)], [FloatType(row.agb_sum) for row in eachrow(group_df)])
+  end
+  for (key, group_df) in pairs(groupby(simulated_df, [:plot_id, :sim_year, :species_id]))
+    simulated_dict[(UIntType(key.plot_id), UIntType(key.sim_year), UIntType(key.species_id))] = ([UIntType(row.age) for row in eachrow(group_df)], [FloatType(row.agb) for row in eachrow(group_df)])
+  end
+
+  #joint_df = DataFrame.join(empirical_df,simulated_df, on=[:plot_id, :sim_year, :species_id, :age_calc], kind = :outer)
+  all_keys = union(keys(empirical_dict), keys(simulated_dict))
+  all_keys_df = DataFrame(all_keys, [:plot_id, :sim_year, :species_id])
+
+  markersize_fun(x) = 3 .+ 4 .* log10.(x .+ 1)
+
+  for (key,sim_year_df) in pairs(groupby(all_keys_df, [:plot_id,:species_id]))
+    (plot_id, species_id) = key
+
+    file_name = "p$(Int(plot_id))_s$(Int(species_id))_simyears$(nrow(sim_year_df))@$(iteration)_$(loss).png"
+    f = CairoMakie.Figure(size = (800, 400*nrow(sim_year_df)))
+    axes = []
+    axi=0
+    for sim_year in sort(sim_year_df.sim_year)
+      axi+=1
+      dict_key = (plot_id, sim_year, species_id)
+      em_points = get(empirical_dict, dict_key, nothing)
+      sim_points = get(simulated_dict, dict_key, nothing)
+      @assert !isnothing(em_points) || !isnothing(sim_points) "dict_key = $(dict_key) not in $(all_keys_df)"
+
+
+
+      ax = CairoMakie.Axis(f[axi, 1],
+            xlabel = "Age",
+            ylabel = "Biomass",
+            title = "Species $(species_id), simyear: $(sim_year)"
+      )
+
+
+
+      #p = Plots.scatter(
+      #  xlabel="Age",
+      #  ylabel="Biomass",
+      #  title="Species: $(species_id)",
+      #  legend=:bottomright,
+      #  size=(800, 600)
+      #)
+
+      if !isnothing(em_points)
+        #Plots.scatter!(
+        #  p,
+        #  em_points[1],
+        #  em_points[2];
+        #  markersize=markersize_fun(em_points[2]),
+        #  markercolor=:blue,
+        #  markeralpha=0.4,
+        #  markerstrokewidth=0,
+        #  label="Empirical"
+        #)
+        CairoMakie.scatter!(
+          ax,
+          em_points[1],
+          em_points[2];
+          color=(:blue, 0.4),
+          markersize=markersize_fun(em_points[2]),
+          strokewidth=0,
+          label="Empirical"
+        )
+
+      end
+
+      if !isnothing(sim_points)
+        #Plots.scatter!(
+        #  p,
+        #  sim_points[1],
+        #  sim_points[2];
+        #  markersize=markersize_fun(sim_points[2]),
+        #  markercolor=:red,
+        #  markeralpha=0.4,
+        #  markerstrokewidth=0,
+        #  label="Simulated"
+        #)
+        CairoMakie.scatter!(
+          ax,
+          sim_points[1],
+          sim_points[2];
+          markersize=markersize_fun(sim_points[2]),
+          color=(:red, 0.4),
+          strokewidth=0,
+          label="Simulated"
+        )
+      end
+      push!(axes, ax)
+    end
+    # Tight vertical spacing
+    CairoMakie.rowgap!(f.layout, 5)
+
+    # Share x-axis
+    CairoMakie.linkxaxes!(axes...)
+
+    # Optional: hide repeated x decorations
+    for ax in axes[1:end-1]
+        CairoMakie.hidexdecorations!(ax, grid=false)
+    end
+    for ax in axes
+      CairoMakie.axislegend(ax, position = :rb)
+    end
+
+    filename = joinpath(
+      outdir,
+      file_name
+    )
+
+    CairoMakie.save(filename, f)
+
+    println("Saved: $filename")
+
+  end
+
+end
+
 struct WriterJob{State}
   is_new_best::Bool
   state::State
+  splots::DataFrame
+  merged_sites_state::DataFrame
 end
 
 const STOP = :stop
@@ -154,6 +286,12 @@ function start_writer(::Type{State}, output_dir::AbstractString; buffer_size::In
   ch = Channel{Union{WriterJob{State},Symbol}}(buffer_size)
 
   task = Threads.@spawn begin
+      #ENV["MPLBACKEND"] = "Agg"
+      #Plots.gr(show = false)
+      #function __init__()
+      #  Plots.pythonplot()
+      #end
+      #Plots.default(show = false)
     try
       for job in ch
         job === STOP && break
@@ -168,6 +306,7 @@ function start_writer(::Type{State}, output_dir::AbstractString; buffer_size::In
           catch e
             @error "writer: save failed" iter = state.i exception = (e, catch_backtrace())
           end
+          generate_plots(job.splots, job.merged_sites_state, state.i, convert(Float64, state.best.fx), output_dir)
         else
           @info ("Best@$(state.best_iteration): $(convert(Float64, state.best.fx)), Avg diff: $(state.diff_avg), Temp: $(state.t), ratio $(state.diff_avg/state.t), Prob: $(state.prob_avg)")
         end
@@ -275,7 +414,7 @@ function parametrize(; cohorts_db_path::String,
     tablename=tablename,
     output_dir=tablename,
     skip_disturbances=skip_disturbances,
-    spinup = spinup,
+    spinup=spinup,
     filter_eco_field=filter_eco_field,
     filter_ecos=filter_ecos,
     RNG=rng)
@@ -325,6 +464,7 @@ function parametrize(; cohorts_db_path::String,
   ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup)
   parametrize_LBSA(; ref_soa=ref_soa,
     output_dir=output_dir,
+    splots=splots,
     spdf_plts=spdf_plts,
     spinup_cohorts=spinup_cohorts,
     site_sim_years=site_sim_years,
@@ -341,10 +481,13 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
   eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
   ctx = (BiomassSuccession=(eco_params=eco_params,),)
   years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
+  starting_sim_year = 1
   if spinup
     soa = BiomassSuccessionPlugin.spinup_cohorts!(soa, spinup_cohorts, eco_params)
+    starting_sim_year = 0 # with spinup, even the first year of vegetation data is to be matched and compared
   end
-  for current_sim_year in 0:max_sim_year
+  sites_data = [Tuple{UIntType,Int,UIntType,UIntType,FloatType}[] for _ in 1:soa.n]
+  for current_sim_year in starting_sim_year:max_sim_year
     #println("\ttimestep $(t)")
     sites_results = Vector{PU.SiteLoss}(undef, soa.n)
     PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
@@ -357,6 +500,9 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
         if current_sim_year in sim_years
           sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
           sites_results[i] = sloss
+          for j in 1:site.live
+            push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+          end
         end
       end
     end
@@ -368,14 +514,18 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
   end
   run_result = sum(PU.skipundef(years_results))
   #@assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
-  return run_result
+  cached_sites_state = [cohort for cohorts in sites_data for cohort in cohorts]
+  return run_result, cached_sites_state
 end
-function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
+  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
+
+
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
   bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-  best_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+  best_result, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
   #PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
   cur = LBSA.LBSACandidate(bio_params, best_result)
   _best = cur
@@ -391,19 +541,20 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
     TProgress.@track for trial in 1:TRIALS
       soa = deepcopy(ref_soa)
 
-	bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations,
+      bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations,
         ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)))
-	for _ in 0:rand(rng, 0:3)
-		bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
-	end
+      for _ in 0:rand(rng, 0:3)
+        bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
+      end
 
-      run_result = fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+      run_result, cached_sites_state = fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
       next = LBSA.LBSACandidate(bio_params, run_result)
 
       is_new_best = LBSA.search_cmp!(next, search_state)
-      if is_new_best
-        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state)))
-      end
+      #if is_new_best
+      #  put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), merged_sites_state))
+      #  plot(cached_sites_state)
+      #end
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
@@ -411,7 +562,8 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       if is_new_best || search_state.i % 50 == 0
-        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state)))
+        cached_sites_state_df = DataFrame(cached_sites_state, [:plot_id, :sim_year, :species_id, :age, :agb])
+        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df))
       end
       if LBSA.is_search_over(search_state)
         break
@@ -462,6 +614,7 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
             spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
             sim_years = site_sim_years.sim_years[site.mapcode]
             if current_sim_year in sim_years
+              #cache_site_data()
               sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
               sites_results[i] = sloss
             end
