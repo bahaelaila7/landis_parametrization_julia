@@ -168,15 +168,17 @@ function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iterat
 
   markersize_fun(x) = 3 .+ 4 .* log10.(x .+ 1)
 
-  for (key,sim_year_df) in pairs(groupby(all_keys_df, [:plot_id,:species_id]))
+  for (key, sim_year_df) in pairs(groupby(all_keys_df, [:plot_id, :species_id]))
     (plot_id, species_id) = key
 
     file_name = "p$(Int(plot_id))_s$(Int(species_id))_simyears$(nrow(sim_year_df))@$(iteration)_$(loss).png"
-    f = CairoMakie.Figure(size = (800, 400*nrow(sim_year_df)))
+    f = CairoMakie.Figure(size=(800, 400 * nrow(sim_year_df)))
     axes = []
-    axi=0
+    axi = 0
+    xmin = 1000000.0
+    xmax = -1.0
     for sim_year in sort(sim_year_df.sim_year)
-      axi+=1
+      axi += 1
       dict_key = (plot_id, sim_year, species_id)
       em_points = get(empirical_dict, dict_key, nothing)
       sim_points = get(simulated_dict, dict_key, nothing)
@@ -185,9 +187,9 @@ function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iterat
 
 
       ax = CairoMakie.Axis(f[axi, 1],
-            xlabel = "Age",
-            ylabel = "Biomass",
-            title = "Species $(species_id), simyear: $(sim_year)"
+        xlabel="Age",
+        ylabel="Biomass",
+        title="Species $(species_id), simyear: $(sim_year)"
       )
 
 
@@ -201,6 +203,8 @@ function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iterat
       #)
 
       if !isnothing(em_points)
+        xmax = max(xmax, maximum(em_points[1]))
+        xmin = min(xmin, minimum(em_points[1]))
         #Plots.scatter!(
         #  p,
         #  em_points[1],
@@ -211,6 +215,7 @@ function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iterat
         #  markerstrokewidth=0,
         #  label="Empirical"
         #)
+
         CairoMakie.scatter!(
           ax,
           em_points[1],
@@ -224,6 +229,8 @@ function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iterat
       end
 
       if !isnothing(sim_points)
+        xmax = max(xmax, maximum(sim_points[1]))
+        xmin = min(xmin, minimum(sim_points[1]))
         #Plots.scatter!(
         #  p,
         #  sim_points[1],
@@ -244,6 +251,7 @@ function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iterat
           label="Simulated"
         )
       end
+
       push!(axes, ax)
     end
     # Tight vertical spacing
@@ -254,10 +262,12 @@ function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iterat
 
     # Optional: hide repeated x decorations
     for ax in axes[1:end-1]
-        CairoMakie.hidexdecorations!(ax, grid=false)
+      CairoMakie.hidexdecorations!(ax, grid=true)
     end
     for ax in axes
-      CairoMakie.axislegend(ax, position = :rb)
+      CairoMakie.axislegend(ax, position=:rb)
+      ax.xminorticks = xmin:xmax
+      ax.xminorgridvisible = true
     end
 
     filename = joinpath(
@@ -286,12 +296,12 @@ function start_writer(::Type{State}, output_dir::AbstractString; buffer_size::In
   ch = Channel{Union{WriterJob{State},Symbol}}(buffer_size)
 
   task = Threads.@spawn begin
-      #ENV["MPLBACKEND"] = "Agg"
-      #Plots.gr(show = false)
-      #function __init__()
-      #  Plots.pythonplot()
-      #end
-      #Plots.default(show = false)
+    #ENV["MPLBACKEND"] = "Agg"
+    #Plots.gr(show = false)
+    #function __init__()
+    #  Plots.pythonplot()
+    #end
+    #Plots.default(show = false)
     try
       for job in ch
         job === STOP && break
@@ -558,7 +568,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-        cur_result = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+        cur_result, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       if is_new_best || search_state.i % 50 == 0
