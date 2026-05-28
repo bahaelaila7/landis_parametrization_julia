@@ -1,7 +1,8 @@
 using ..PanCore
-export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType
+export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples
 
 import Setfield
+import Sobol
 import Random
 import ImageFiltering
 import Dates
@@ -438,7 +439,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
     @inbounds gsp = species_id_map[sp]
     sp_agb_loss[gsp] = rec.sp_agb_sum
     #@assert sp_w_loss[gsp] == 0
-    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* rec.sp_agb_sum * rec.sp_agb_sum * rec.sp_age_cdf[begin:end-1])
+    sp_w_loss[gsp] = rec.sp_agb_sum^2 * sum(loss_params.age_bins.bin_widths .* rec.sp_age_cdf[begin:end-1])
     #sp_w_loss[gsp] = loss_params.lambda * abs(log10(1+rec.sp_agb_sum)) # + loss_params.EPS))
     site_agb_loss -= rec.sp_agb_sum
   end
@@ -446,4 +447,55 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
 
   return SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=abs(site_agb_loss), num_sites=1)
 
+end
+
+# Generate N quasi-random Sobol samples covering the full parameter space.
+# `param_dists` comes from e.g. BSP.make_biomass_param_dists(...).
+# `initial_params` is the template struct (provides ECO_SPECIES_IDS, SPECIES_LIST, ECO_LIST).
+function sobol_samples(param_dists::ParamDists{T}, initial_params::T, N::Int)::Vector{T} where T
+  slots = Tuple{Int,Any}[]
+  for (pi, param) in enumerate(param_dists.params)
+    if param.sampler isa GlobalSampler
+      push!(slots, (pi, nothing))
+    elseif param.sampler isa SpeciesSampler
+      for i in 1:length(initial_params.SPECIES_LIST)
+        push!(slots, (pi, i))
+      end
+    elseif param.sampler isa EcoSampler
+      for i in 1:length(initial_params.ECO_LIST)
+        push!(slots, (pi, i))
+      end
+    elseif param.sampler isa EcoSpeciesSampler
+      for (eco_id, sp_ids) in enumerate(initial_params.ECO_SPECIES_IDS)
+        for sp_id in eachindex(sp_ids)
+          push!(slots, (pi, (eco_id, sp_id)))
+        end
+      end
+    end
+  end
+
+  d = length(slots)
+  seq = Sobol.SobolSeq(d)
+  u = zeros(Float64, d)
+  results = Vector{T}(undef, N)
+  for n in 1:N
+    Sobol.next!(seq, u)
+    p = initial_params
+    for (dim, (pi, idx)) in enumerate(slots)
+      param = param_dists.params[pi]
+      raw = Dists.quantile(param.dist, clamp(u[dim], 1e-10, 1 - 1e-10))
+      min_, max_ = param.bounds
+      val = if !isnothing(min_) && raw < min_
+        param.type(min_)
+      elseif !isnothing(max_) && raw > max_
+        param.type(max_)
+      else
+        param.type(raw)
+      end
+      new_field = apply_mutation(param.applier, getproperty(p, param.name), idx, val)
+      p = Setfield.@set p.$(param.name) = new_field
+    end
+    results[n] = p
+  end
+  return results
 end

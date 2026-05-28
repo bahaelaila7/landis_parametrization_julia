@@ -415,6 +415,9 @@ function parametrize(; cohorts_db_path::String,
   TRIALS::Int=30000,
   resume_from::Union{Nothing,String}=nothing,
   force_restart_from_random::Bool=false,
+  sobol_n::Int=100,
+  sobol_m::Int=5,
+  eval_tier::Int=3,
   rng::Random.AbstractRNG)
 
   # [5, 10, 20, 40, 60, 80]
@@ -483,6 +486,23 @@ function parametrize(; cohorts_db_path::String,
 
 
   ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup)
+  if search_tier == 0
+    return parametrize_sobol(; ref_soa=ref_soa,
+      output_dir=output_dir,
+      spdf_plts=spdf_plts,
+      spinup_cohorts=spinup_cohorts,
+      site_sim_years=site_sim_years,
+      species_list=species_list,
+      eco_list=eco_list,
+      eco_species_ids=eco_species_ids,
+      loss_params=loss_params,
+      spinup=spinup,
+      rng=rng,
+      debug=debug,
+      N=sobol_n,
+      M=sobol_m,
+      eval_tier=eval_tier)
+  end
   parametrize_LBSA(; ref_soa=ref_soa,
     output_dir=output_dir,
     splots=splots,
@@ -560,6 +580,14 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
   end
   sites_data = [Tuple{UIntType,Int,UIntType,UIntType,FloatType}[] for _ in 1:soa.n]
   if search_tier == 1
+    eco_site_counts = zeros(Int, length(eco_species_ids))
+    eco_obs_counts = zeros(Int, length(eco_species_ids))
+    for i in 1:soa.n
+      site = getsite(soa, i)
+      !site.active && continue
+      eco_site_counts[site.eco_id] += 1
+      eco_obs_counts[site.eco_id] += count(>=(starting_sim_year), site_sim_years.sim_years[site.mapcode])
+    end
     n_bins = size(t1_ref[1], 2)
     t1_sim_t = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
   end
@@ -578,6 +606,9 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
               push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
             end
           end
+          if current_sim_year == last(sim_years)
+            site.active = false
+          end
         end
       end
     else
@@ -595,6 +626,9 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
               push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
             end
           end
+          if current_sim_year == last(sim_years)
+            site.active = false
+          end
         end
       end
       year_results_no_missing = collect(PU.skipundef(sites_results))
@@ -604,14 +638,6 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
     end
   end
   if search_tier == 1
-    eco_site_counts = zeros(Int, length(eco_species_ids))
-    eco_obs_counts = zeros(Int, length(eco_species_ids))
-    for i in 1:soa.n
-      site = getsite(soa, i)
-      !site.active && continue
-      eco_site_counts[site.eco_id] += 1
-      eco_obs_counts[site.eco_id] += count(>=(starting_sim_year), site_sim_years.sim_years[site.mapcode])
-    end
     eco_losses = calculate_aggregate_loss([sum(t[eco_id] for t in t1_sim_t) for eco_id in eachindex(eco_species_ids)], t1_ref, loss_params, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
     run_result = sum(eco_losses)
   else
@@ -622,6 +648,75 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
   cached_sites_state = [cohort for cohorts in sites_data for cohort in cohorts]
   return run_result, cached_sites_state, eco_losses
 end
+function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, rng::Random.AbstractRNG, debug::Bool, N::Int=100, M::Int=5, eval_tier::Int=3)
+  n_species = length(species_list)
+  n_ecoregions = length(eco_list)
+  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+
+  if eval_tier == 1
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
+    for ((_, eco_id), year_dict) in spdf_plts
+      for (_, spdf_gt) in year_dict
+        for (sp_eco, rec) in spdf_gt.records
+          t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
+        end
+      end
+    end
+  else
+    t1_ref = nothing
+  end
+
+  param_dists = BSP.make_biomass_param_dists(n_species, n_ecoregions, eco_species_ids)
+  initial_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+  samples = PU.sobol_samples(param_dists, initial_params, N)
+  #println(samples)
+
+  ResultT = @NamedTuple{params::typeof(initial_params), mean_loss::FloatType, std_loss::FloatType, median_loss::FloatType, losses::Vector{FloatType}}
+  results = ResultT[]
+
+  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
+  losses_db = DuckDB.connect(losses_db_file)
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS sobol_results (run_id VARCHAR, sobol_idx INTEGER, mean_loss DOUBLE, std_loss DOUBLE, median_loss DOUBLE, params_blob BLOB)")
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS sobol_eval_losses (run_id VARCHAR, sobol_idx INTEGER, eval_idx INTEGER, loss DOUBLE)")
+  run_id = string(Dates.now())
+
+  try
+    TProgress.@track for i in 1:N
+      bio_params = samples[i]
+      losses = FloatType[]
+      for _ in 1:M
+        run_result, _, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species,
+          eco_species_ids, spdf_plts, site_sim_years,
+          spinup, spinup_cohorts, loss_params;
+          debug=debug, search_tier=eval_tier, t1_ref=t1_ref)
+        push!(losses, PU.get_total_loss(run_result))
+      end
+      μ = FloatType(sum(losses) / M)
+      σ = FloatType(sqrt(sum((l - μ)^2 for l in losses) / max(M - 1, 1)))
+      sorted = sort(losses)
+      med = FloatType(M % 2 == 1 ? sorted[M÷2+1] : (sorted[M÷2] + sorted[M÷2+1]) / 2)
+      push!(results, (; params=bio_params, mean_loss=μ, std_loss=σ, median_loss=med, losses=losses))
+      buf = IOBuffer()
+      Serialization.serialize(buf, bio_params)
+      DuckDB.execute(losses_db, "INSERT INTO sobol_results VALUES (?, ?, ?, ?, ?, ?)",
+        [run_id, i, Float64(μ), Float64(σ), Float64(med), take!(buf)])
+      for (ei, loss) in enumerate(losses)
+        DuckDB.execute(losses_db, "INSERT INTO sobol_eval_losses VALUES (?, ?, ?, ?)",
+          [run_id, i, ei, Float64(loss)])
+      end
+    end
+  finally
+    close(losses_db_file)
+    isempty(results) && return results
+    sort!(results, by=x -> x.mean_loss)
+    out_path = joinpath(output_dir, "sobol_results@$(length(results))of$(N)x$(M).jld2")
+    JLD2.save_object(out_path, results)
+    @info "Saved sobol results → $out_path (best mean_loss = $(results[1].mean_loss) ± $(results[1].std_loss), median = $(results[1].median_loss))"
+  end
+  return results
+end
+
 function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
@@ -871,11 +966,14 @@ function run_from_yaml(yaml_path::String)
     skip_disturbances=get_cfg("skip_disturbances", true),
     spinup=get_cfg("spinup", false),
     search_tier=get_cfg("search_tier", 1),
-    bins_idx=Int.(get_cfg("bins_idx", [20, 60, 120])),
+    bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
     smoothing_window=smoothing_window,
     TRIALS=get_cfg("trials", 1000000),
     resume_from=resume_from,
     force_restart_from_random=get_cfg("force_restart_from_random", false),
+    sobol_n=get_cfg("sobol_n", 100),
+    sobol_m=get_cfg("sobol_m", 5),
+    eval_tier=get_cfg("eval_tier", 3),
     rng=rng)
 end
 
@@ -883,7 +981,7 @@ function main()
   if length(ARGS) >= 1 && (endswith(ARGS[1], ".yaml") || endswith(ARGS[1], ".yml"))
     return run_from_yaml(ARGS[1])
   end
-  seed = 404 #1337
+  seed = 12312315 #404 #1337
   Random.seed!(seed)
   rng = RNGType(rand(UInt64))
   #filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
