@@ -25,8 +25,10 @@ import Random
 import Distributions as Dists
 import Term.Progress as TProgress
 import JLD2
+import Serialization
 using DataFrames
 import CairoMakie
+import DuckDB
 
 
 
@@ -316,7 +318,8 @@ function start_writer(::Type{State}, output_dir::AbstractString; buffer_size::In
           catch e
             @error "writer: save failed" iter = state.i exception = (e, catch_backtrace())
           end
-          generate_plots(job.splots, job.merged_sites_state, state.i, convert(Float64, state.best.fx), output_dir)
+
+          #generate_plots(job.splots, job.merged_sites_state, state.i, convert(Float64, state.best.fx), output_dir)
         else
           @info ("Best@$(state.best_iteration): $(convert(Float64, state.best.fx)), Avg diff: $(state.diff_avg), Temp: $(state.t), ratio $(state.diff_avg/state.t), Prob: $(state.prob_avg)")
         end
@@ -401,15 +404,20 @@ function parametrize(; cohorts_db_path::String,
   output_dir::String="./outputs",
   filter_eco_field::String,
   filter_ecos::Vector{String}=String[],
+  filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[],
+  filter_species::Vector{String}=String[],
   skip_disturbances::Bool=true,
+  bins_idx::Vector{Int64}=1:180 .|> Int64,
+  smoothing_window::Vector{FloatType}=FloatType[one(FloatType)],
   spinup::Bool=true,
+  search_tier::Int=3,
   TRIALS::Int=30000,
+  resume_from::Union{Nothing,String}=nothing,
+  force_restart_from_random::Bool=false,
   rng::Random.AbstractRNG)
 
   # [5, 10, 20, 40, 60, 80]
   #bins_idx = vcat(5:5:30, 40:10:80, 100:20:160)
-  bins_idx = vcat(10:10:40, 60:20:120)
-  smoothing_window = PU.get_smoothing_window(; smoothing_window=2, smoothing_variance=FloatType(1.2f0))
   @info bins_idx
   @info smoothing_window
   loss_params = PU.LossParams(
@@ -427,6 +435,8 @@ function parametrize(; cohorts_db_path::String,
     spinup=spinup,
     filter_eco_field=filter_eco_field,
     filter_ecos=filter_ecos,
+    filter_plots=filter_plots,
+    filter_species=filter_species,
     RNG=rng)
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
@@ -482,12 +492,63 @@ function parametrize(; cohorts_db_path::String,
     eco_list=eco_list,
     eco_species_ids=eco_species_ids,
     spinup=spinup,
+    search_tier=search_tier,
     TRIALS=TRIALS,
+    resume_from=resume_from,
+    force_restart_from_random=force_restart_from_random,
     loss_params=loss_params,
     rng=rng,
     debug=debug)
 end
-function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params::PU.LossParams)
+  site.live == 0 && return
+  c_species = @view site.c_species[1:site.live]
+  max_age = Int(ceil(maximum(@view site.c_age[1:site.live]))) + length(loss_params.smoothing_weights) >> 1
+  p = sortperm(c_species)
+  ages = zeros(FloatType, max_age)
+  sp_start = 1
+  prev_sp = c_species[p[1]]
+  function conclude!(sp, s, e)
+    fill!(ages, 0f0)
+    for a in @view p[s:e]
+      ages[clamp(Int(ceil(site.c_age[a])), 1, max_age)] += site.c_bio[a]
+    end
+    agb = sum(ages)
+    cdf = PU.smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
+    t1_sim_eco[sp, :] .+= diff([0f0; cdf]) .* agb
+  end
+  for i in eachindex(p)
+    sp = c_species[p[i]]
+    if sp != prev_sp
+      conclude!(prev_sp, sp_start, i - 1)
+      prev_sp = sp
+      sp_start = i
+    end
+    if i == length(p)
+      conclude!(sp, sp_start, i)
+    end
+  end
+end
+
+function calculate_aggregate_loss(t1_sim::Vector{Matrix{FloatType}}, t1_ref::Vector{Matrix{FloatType}}, loss_params::PU.LossParams, n_species::Int, eco_species_ids::Vector{Vector{Int}}, eco_site_counts::Vector{Int}, eco_obs_counts::Vector{Int})::Vector{PU.SiteLoss}
+  eco_losses = Vector{PU.SiteLoss}(undef, length(t1_sim))
+  for eco_id in eachindex(t1_sim)
+    sp_w_loss = zeros(FloatType, n_species)
+    sp_agb_loss = zeros(FloatType, n_species)
+    sp_map = eco_species_ids[eco_id]
+    for sp_eco in eachindex(sp_map)
+      gsp = sp_map[sp_eco]
+      sim_row = @view t1_sim[eco_id][sp_eco, :]
+      ref_row = @view t1_ref[eco_id][sp_eco, :]
+      sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* abs.(cumsum(sim_row) .- cumsum(ref_row))[begin:end-1])
+      sp_agb_loss[gsp] = abs(sum(sim_row) - sum(ref_row))
+    end
+    eco_losses[eco_id] = PU.SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=zero(FloatType), num_sites=eco_site_counts[eco_id], num_obs=eco_obs_counts[eco_id])
+  end
+  return eco_losses
+end
+
+function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing)
   eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
   ctx = (BiomassSuccession=(eco_params=eco_params,),)
   years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
@@ -497,37 +558,70 @@ function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, s
     starting_sim_year = 0 # with spinup, even the first year of vegetation data is to be matched and compared
   end
   sites_data = [Tuple{UIntType,Int,UIntType,UIntType,FloatType}[] for _ in 1:soa.n]
+  if search_tier == 1
+    n_bins = size(t1_ref[1], 2)
+    t1_sim_t = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
+  end
   for current_sim_year in starting_sim_year:max_sim_year
     #println("\ttimestep $(t)")
-    sites_results = Vector{PU.SiteLoss}(undef, soa.n)
     PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
-    Threads.@threads :static for i in 1:soa.n
-      @inbounds begin
-        site = getsite(soa, i)
-        !site.active && continue
-        spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
-        sim_years = site_sim_years.sim_years[site.mapcode]
-        if current_sim_year in sim_years
-          sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
-          sites_results[i] = sloss
-          for j in 1:site.live
-            push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+    if search_tier == 1
+      Threads.@threads :static for i in 1:soa.n
+        @inbounds begin
+          site = getsite(soa, i)
+          !site.active && continue
+          sim_years = site_sim_years.sim_years[site.mapcode]
+          if current_sim_year in sim_years
+            accumulate_site_bins!(t1_sim_t[Threads.threadid()][site.eco_id], site, loss_params)
+            for j in 1:site.live
+              push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+            end
           end
         end
       end
-    end
-    year_results_no_missing = collect(PU.skipundef(sites_results))
-    if length(year_results_no_missing) > 0
-      current_year_results = sum(year_results_no_missing)
-      years_results[current_sim_year+1] = current_year_results
+    else
+      sites_results = Vector{PU.SiteLoss}(undef, soa.n)
+      Threads.@threads :static for i in 1:soa.n
+        @inbounds begin
+          site = getsite(soa, i)
+          !site.active && continue
+          spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
+          sim_years = site_sim_years.sim_years[site.mapcode]
+          if current_sim_year in sim_years
+            sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
+            sites_results[i] = sloss
+            for j in 1:site.live
+              push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+            end
+          end
+        end
+      end
+      year_results_no_missing = collect(PU.skipundef(sites_results))
+      if length(year_results_no_missing) > 0
+        years_results[current_sim_year+1] = sum(year_results_no_missing)
+      end
     end
   end
-  run_result = sum(PU.skipundef(years_results))
+  if search_tier == 1
+    eco_site_counts = zeros(Int, length(eco_species_ids))
+    eco_obs_counts = zeros(Int, length(eco_species_ids))
+    for i in 1:soa.n
+      site = getsite(soa, i)
+      !site.active && continue
+      eco_site_counts[site.eco_id] += 1
+      eco_obs_counts[site.eco_id] += count(>=(starting_sim_year), site_sim_years.sim_years[site.mapcode])
+    end
+    eco_losses = calculate_aggregate_loss([sum(t[eco_id] for t in t1_sim_t) for eco_id in eachindex(eco_species_ids)], t1_ref, loss_params, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
+    run_result = sum(eco_losses)
+  else
+    eco_losses = nothing
+    run_result = sum(PU.skipundef(years_results))
+  end
   #@assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
   cached_sites_state = [cohort for cohorts in sites_data for cohort in cohorts]
-  return run_result, cached_sites_state
+  return run_result, cached_sites_state, eco_losses
 end
-function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
 
@@ -535,29 +629,72 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
   bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-  best_result, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
-  #PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
-  cur = LBSA.LBSACandidate(bio_params, best_result)
-  _best = cur
-  search_state = LBSA.LBSAState(_best, cur, rng; max_iter=TRIALS)
-  if TRIALS < 1
-    return search_state #best_loss, best_result, best_params
+  if search_tier == 1
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
+    for ((_, eco_id), year_dict) in spdf_plts
+      for (_, spdf_gt) in year_dict
+        for (sp_eco, rec) in spdf_gt.records
+          t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
+        end
+      end
+    end
+  else
+    t1_ref = nothing
+  end
+  if isnothing(resume_from)
+    best_result, _, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref)
+    cur = LBSA.LBSACandidate(bio_params, best_result)
+    search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS)
+  else
+    @info "Resuming from $resume_from"
+    search_state = JLD2.load_object(resume_from)
+    search_state.max_iter = TRIALS
+    bio_params = search_state.current.x
+    if force_restart_from_random
+      search_state._should_restart = true
+    end
+  end
+  if TRIALS < 1 || LBSA.is_search_over(search_state)
+    return search_state
   end
 
   writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
 
+  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
+  losses_db = DuckDB.connect(losses_db_file)
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, params_blob BLOB)")
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
+
+  baseline_weights = diff([0.0; param_dists.weights_cumsum])
+  param_sensitivities = zeros(length(baseline_weights))
+  sensitivity_decay = 0.999      # per-trial decay toward 0 for all params
+  sensitivity_ema_alpha = 0.1    # EMA weight for chosen param's sensitivity update
+  sensitivity_lambda = 3.0       # max weight boost at full sensitivity (baseline × (1 + λ))
+
   try
 
-    TProgress.@track for trial in 1:TRIALS
-      soa = deepcopy(ref_soa)
-
-      bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations,
-        ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)))
-      for _ in 0:rand(rng, 0:3)
-        bio_params = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
+    TProgress.@track for trial in (search_state.i+1):TRIALS
+      #dynamic_weights = baseline_weights .* (1.0 .+ sensitivity_lambda .* param_sensitivities)
+      #dynamic_weights ./= sum(dynamic_weights)
+      #dynamic_cumsum = cumsum(dynamic_weights)
+      bio_params, chosen_param_idx = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)
+      #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)),
+      #dynamic_cumsum=dynamic_cumsum)
+      for _ in 0:rand(rng, 0:2)
+        bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
       end
 
-      run_result, cached_sites_state = fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+      rep_results = [fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref) for _ in 1:1]
+      run_result, cached_sites_state, eco_losses = rep_results[sortperm([convert(Float64, r[1]) for r in rep_results])[1]]
+
+      current_loss = convert(Float64, search_state.current.fx)
+      delta_loss = abs(convert(Float64, run_result) - current_loss)
+      norm_delta = delta_loss / (current_loss + 1e-10)
+      param_sensitivities .*= sensitivity_decay
+      param_sensitivities[chosen_param_idx] = (1.0 - sensitivity_ema_alpha) * param_sensitivities[chosen_param_idx] + sensitivity_ema_alpha * min(norm_delta, 1.0)
+
       next = LBSA.LBSACandidate(bio_params, run_result)
 
       is_new_best = LBSA.search_cmp!(next, search_state)
@@ -568,8 +705,29 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-        cur_result, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug)
+        cur_result, _, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref)
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
+      end
+      if is_new_best
+        iter = search_state.best_iteration
+        total = convert(Float64, search_state.best.fx)
+        @info "New best @ $iter | loss=$total"
+        let buf = IOBuffer()
+          Serialization.serialize(buf, search_state.best.x)
+          DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, run_result.num_sites, run_result.num_obs, total, take!(buf)])
+        end
+        if !isnothing(eco_losses)
+          for (eco_id, eco_loss) in enumerate(eco_losses)
+            eco_name = eco_list[eco_id]
+            eco_total = convert(Float64, PU.get_total_loss(eco_loss))
+            DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
+            n = max(1, eco_loss.num_sites)
+            for gsp in 1:n_species
+              eco_loss.sp_w_loss[gsp] == 0f0 && continue
+              DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+            end
+          end
+        end
       end
       if is_new_best || search_state.i % 50 == 0
         cached_sites_state_df = DataFrame(cached_sites_state, [:plot_id, :sim_year, :species_id, :age, :agb])
@@ -582,9 +740,34 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
     end
   finally
     stop_writer(writer_ch, writer_task)
+    close(losses_db_file)
+    try
+      mkpath(output_dir)
+      fname = "search_state@$(search_state.i).jld2"
+      JLD2.save_object(joinpath(output_dir, fname), search_state)
+      link_path = joinpath(output_dir, "search_state_latest.jld2")
+      islink(link_path) && rm(link_path)
+      symlink(fname, link_path)
+      @info "Search state saved @ $(search_state.i)"
+    catch e
+      @error "Failed to save search state on exit" exception = (e, catch_backtrace())
+    end
   end
 
 end
+
+function load_best_params(db_path::String; iteration::Union{Nothing,Int}=nothing)
+  db = DuckDB.DB(db_path)
+  con = DuckDB.connect(db)
+  sql = isnothing(iteration) ?
+        "SELECT params_blob FROM total_loss ORDER BY total_loss ASC LIMIT 1" :
+        "SELECT params_blob FROM total_loss WHERE iteration = $iteration LIMIT 1"
+  result = DuckDB.execute(con, sql) |> DataFrame
+  close(db)
+  isempty(result) && return nothing
+  return Serialization.deserialize(IOBuffer(result.params_blob[1]))
+end
+
 function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
   n_species = length(species_list)
   param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
@@ -606,7 +789,7 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
       search_state.i = trial
       soa = deepcopy(ref_soa)
 
-      bio_params = PU.mutate_params(bio_params, param_dists; rng=rng)
+      bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng)
       eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
       ctx = (BiomassSuccession=(eco_params=eco_params,),)
       years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
@@ -664,19 +847,36 @@ function main()
   #filter_ecos = String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
   #filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
   #filter_ecos = String["8.5.3.75f"]
-  filter_ecos = String["8.5.3.75g"]
+  #filter_ecos = String["8.5.3.75g"]
   #filter_ecos = ["8.5.3.75g"]
-  #filter_ecos = ["8.5.3"]
+  filter_ecos = ["8.5.3"]
+  filter_plots = NTuple{4,Int}[]#(13, 1, 49, 26)]  # e.g. [(statecd,unitcd,countycd,plot), ...]
+  filter_species = String[] #String["PIEL"]        # e.g. ["ACRU", "QURU"]
+  # bins_idx = vcat(10:10:40, 60:20:120)
+  t1_bins_idx = [20, 60, 120]
+  # smoothing_window = PU.get_smoothing_window(; smoothing_window=2, smoothing_variance=FloatType(1.2f0))
+  t1_smoothing_window = PU.get_smoothing_window(; smoothing_window=2, smoothing_variance=FloatType(1.2f0))
+
+  resume_from = "./outputs/search_state_latest.jld2" #nothing             # set to e.g. "./outputs/search_state_latest.jld2" to resume
+  force_restart_from_random = false # set to true to restart from random params when resuming
   parametrize(;
     cohorts_db_path="../data_eco_cohorts.duckdb",
-    filter_eco_field="epa_l4",
-    eco_field="epa_l4",
+    filter_eco_field="epa_l3",
+    eco_field="epa_l3",
     tablename="data_eco_cohorts",
     output_dir="./outputs",
     filter_ecos=filter_ecos,
+    filter_plots=filter_plots,
+    filter_species=filter_species,
     skip_disturbances=true,
     spinup=false,
-    TRIALS=1000000, rng=rng)
+    search_tier=1,
+    bins_idx=t1_bins_idx,
+    smoothing_window=t1_smoothing_window,
+    TRIALS=1000000,
+    resume_from=resume_from,
+    force_restart_from_random=force_restart_from_random,
+    rng=rng)
 end
 
 function julia_main()::Cint

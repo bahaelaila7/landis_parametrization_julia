@@ -61,8 +61,8 @@ function mark_estab_year!(df::DataFrame)
   #df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- last)) ./ 365.25 .|> round .|> Int
   df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- df.start_measdate)) ./ 365.25 .|> round .|> Int
 end
-function make_splots(df::DataFrame; eco::String="epa_l4")::Tuple{DataFrame,Vector{String},Vector{String},Vector{Vector{Int}}}
-  eco_field, species_field = begin
+function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[])::Tuple{DataFrame,Vector{String},Vector{String},Vector{Vector{Int}}}
+  eco_field, species_map_field = begin
     if eco == "epa_l4"
       (:epa_l4, :species_symbol_map_l4)
     elseif eco == "epa_l3"
@@ -72,11 +72,14 @@ function make_splots(df::DataFrame; eco::String="epa_l4")::Tuple{DataFrame,Vecto
     end
   end
 
-
-  #df.species_id = groupindices(groupby(df,:species_field))
-  #df.eco_id = groupindices(groupby(df,:eco))
-
-  #println(df)
+  df.effective_species = ifelse.(getproperty(df, species_map_field) .== df.species_symbol,
+                                 getproperty(df, species_map_field),
+                                 "GRP_" .* string.(df.spgrpcd))
+  if !isempty(filter_species)
+    fs = Set(filter_species)
+    filter!(row -> row.effective_species in fs, df)
+  end
+  species_field = :effective_species
 
   eco_vals = sort(unique(getproperty(df, eco_field)))
   eco_dict = Dict(eco => i for (i, eco) in enumerate(eco_vals))
@@ -135,7 +138,7 @@ function get_spinup_cohorts(df::DataFrame)
   return spinup_cohorts
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, filter_ecos::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
   #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
   println("Connecting to: $(cohorts_db_path) ")
   con = DuckDB.connect(DuckDB.DB(cohorts_db_path))
@@ -151,12 +154,16 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   if !spinup
 	sql *= " AND plot_meas_num > 1 "
   end
+  if length(filter_plots) > 0
+    tuples_str = join(["($(s),$(u),$(c),$(p))" for (s,u,c,p) in filter_plots], ",")
+    sql *= " AND (statecd, unitcd, countycd, plot) IN ($(tuples_str))"
+  end
   println(sql)
   cohorts_df = DuckDB.execute(con, sql) |> DataFrame
   #DuckDB.close(con)
   println("Closing db. $(nrow(cohorts_df)) rows loaded.")
 
-  @time splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df, eco=eco_field)
+  @time splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df, eco=eco_field, filter_species=filter_species)
   mark_estab_year!(splots)
 
 

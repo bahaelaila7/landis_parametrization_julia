@@ -110,9 +110,10 @@ function apply_mutation(a::GradientApplier, field, idx, val)
 end
 
 
-function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation, ctx::Union{Nothing,SamplingContext}=nothing) where {T}
+function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation, ctx::Union{Nothing,SamplingContext}=nothing, dynamic_cumsum::Union{Nothing,Vector{Float64}}=nothing) where {T}
   s = rand(rng, Float64)
-  param_idx = something(findlast(param_dists.weights_cumsum .<= s), 1)
+  wcumsum = isnothing(dynamic_cumsum) ? param_dists.weights_cumsum : dynamic_cumsum
+  param_idx = something(findlast(wcumsum .<= s), 1)
   param = param_dists.params[param_idx]
   _mutation_mode = mutation_mode != BothMutations ? mutation_mode : (rand(rng) > 0.5 ? GaussianMutation : RandomMutation)
 
@@ -159,7 +160,7 @@ function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG
   #println(typeof(val))
   #println(new_field)
 
-  Setfield.@set p.$(param.name) = new_field
+  Setfield.@set(p.$(param.name) = new_field), param_idx
 end
 
 
@@ -204,22 +205,17 @@ Base.@kwdef struct SiteLoss
   sp_agb_loss::Vector{FloatType}
   site_agb_loss::FloatType
   num_sites::Int = 1
+  num_obs::Int = 1  # (site, measurement_year) pairs regressed against
 end
 @inline function Base.:+(loss1::SiteLoss, loss2::SiteLoss)
   SiteLoss(sp_w_loss=loss1.sp_w_loss .+ loss2.sp_w_loss,
     sp_agb_loss=loss1.sp_agb_loss .+ loss2.sp_agb_loss,
     site_agb_loss=loss1.site_agb_loss + loss2.site_agb_loss,
-    num_sites=loss1.num_sites + loss2.num_sites)
+    num_sites=loss1.num_sites + loss2.num_sites,
+    num_obs=loss1.num_obs + loss2.num_obs)
 end
 @inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
-
-  w = (alpha * loss.sp_w_loss)
-  sp = (beta * log.(1 .+ loss.sp_agb_loss))
-  #site = log(1+loss.site_agb_loss)
-  all = sum(w .+ sp .+ (w .* sp))
-  #all = w + sp #+ site
-  return all / loss.num_sites
-
+  return sum((alpha .* loss.sp_w_loss)) / loss.num_obs
 end
 @inline Base.convert(::Type{Float64}, a::SiteLoss) = Float64(get_total_loss(a))
 #@inline Base.promote_rule(::Type{SiteLoss}, ::Type{Float64}) = Float64
@@ -258,6 +254,9 @@ end
 
 
 @inline function smooth_ages(; ages::Vector{FloatType}, smoothing_window::Vector{FloatType})::Vector{FloatType}
+  if length(smoothing_window) == 1
+    return ages[:]
+  end
   smoothed_ages = ImageFiltering.imfilter(ages, smoothing_window, "symmetric")
   @assert !any(isnan.(smoothed_ages)) "filter NaN"
   s = sum(smoothed_ages)
@@ -297,13 +296,16 @@ end
 
 function get_bin_widths(; age_bins::Vector{Int}, last_bin_open::Bool)
   # returns the bin widths for wasser1 (ie K-1 widths)
+  local bin_widths
   if last_bin_open
     @assert length(age_bins) > 0 "insufficint bins, must be at least 1"
-    return age_bins .- [0; age_bins[begin:end-1]]
+    bin_widths = age_bins .- [0; age_bins[begin:end-1]]
   else
     @assert length(age_bins) > 1 "insufficint bins, must be at least 2"
-    return age_bins[begin:end-1] .- [0; age_bins[begin:end-2]]
+    bin_widths = age_bins[begin:end-1] .- [0; age_bins[begin:end-2]]
   end
+  #return ones(FloatType, length(bin_widths))
+  return bin_widths
 
 end
 
@@ -349,7 +351,7 @@ end
     sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
     #@assert !any(isnan.(sim_age_cdf)) "cdf NaN"
     #@assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
-    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* abs.(sim_age_cdf - rec.sp_age_cdf)[begin:end-1])
+    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* (abs.(sim_agb_sum * sim_age_cdf - rec.sp_agb_sum * rec.sp_age_cdf) .^ 2.0)[begin:end-1])
     #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
     log_diff -= log10(1 + rec.sp_agb_sum) #+ loss_params.EPS)
     sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
@@ -436,7 +438,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
     @inbounds gsp = species_id_map[sp]
     sp_agb_loss[gsp] = rec.sp_agb_sum
     #@assert sp_w_loss[gsp] == 0
-    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* rec.sp_age_cdf[begin:end-1])
+    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* rec.sp_agb_sum * rec.sp_agb_sum * rec.sp_age_cdf[begin:end-1])
     #sp_w_loss[gsp] = loss_params.lambda * abs(log10(1+rec.sp_agb_sum)) # + loss_params.EPS))
     site_agb_loss -= rec.sp_agb_sum
   end
