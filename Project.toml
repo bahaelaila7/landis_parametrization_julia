@@ -29,6 +29,7 @@ Setfield = "efcf1570-3423-57d1-acb7-fd33fddbac46"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 Term = "22787eb5-b846-44ae-b979-8e399b8463ab"
+YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
 
 [compat]
 Aqua = "0.8.14"
@@ -56,3 +57,4 @@ Setfield = "1.1.2"
 Statistics = "1.11.1"
 StatsBase = "0.34"
 Term = "2.0.8"
+YAML = "0.4.16"

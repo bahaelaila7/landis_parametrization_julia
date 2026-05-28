@@ -26,6 +26,7 @@ import Distributions as Dists
 import Term.Progress as TProgress
 import JLD2
 import Serialization
+import YAML
 using DataFrames
 import CairoMakie
 import DuckDB
@@ -837,7 +838,51 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
   end
 
 end
+
+function run_from_yaml(yaml_path::String)
+  cfg = YAML.load_file(yaml_path)
+  get_cfg(key, default) = get(cfg, key, default)
+
+  seed = get_cfg("seed", 404)
+  Random.seed!(seed)
+  rng = RNGType(rand(UInt64))
+
+  filter_plots = NTuple{4,Int}[
+    NTuple{4,Int}(Int.(p)) for p in get_cfg("filter_plots", [])
+  ]
+
+  sw_size = get_cfg("smoothing_window_size", 0)
+  smoothing_window = sw_size > 0 ?
+                     PU.get_smoothing_window(; smoothing_window=sw_size, smoothing_variance=FloatType(get_cfg("smoothing_variance", 1.0))) :
+                     FloatType[one(FloatType)]
+
+  resume_from = get_cfg("resume_from", nothing)
+  resume_from = (resume_from === nothing || resume_from == "null") ? nothing : String(resume_from)
+
+  parametrize(;
+    cohorts_db_path=get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"),
+    filter_eco_field=get_cfg("filter_eco_field", "epa_l3"),
+    eco_field=get_cfg("eco_field", "epa_l3"),
+    tablename=get_cfg("tablename", "data_eco_cohorts"),
+    output_dir=get_cfg("output_dir", "./outputs"),
+    filter_ecos=String.(get_cfg("filter_ecos", String[])),
+    filter_plots=filter_plots,
+    filter_species=String.(get_cfg("filter_species", String[])),
+    skip_disturbances=get_cfg("skip_disturbances", true),
+    spinup=get_cfg("spinup", false),
+    search_tier=get_cfg("search_tier", 1),
+    bins_idx=Int.(get_cfg("bins_idx", [20, 60, 120])),
+    smoothing_window=smoothing_window,
+    TRIALS=get_cfg("trials", 1000000),
+    resume_from=resume_from,
+    force_restart_from_random=get_cfg("force_restart_from_random", false),
+    rng=rng)
+end
+
 function main()
+  if length(ARGS) >= 1 && (endswith(ARGS[1], ".yaml") || endswith(ARGS[1], ".yml"))
+    return run_from_yaml(ARGS[1])
+  end
   seed = 404 #1337
   Random.seed!(seed)
   rng = RNGType(rand(UInt64))
