@@ -338,7 +338,7 @@ end
 
 
 
-@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, sp_w_loss, sp_agb_loss, site_agb_loss, debug::Bool=false)
+@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, sp_w_loss, sp_agb_loss, site_agb_loss, lp::FloatType=one(FloatType), debug::Bool=false)
   sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
   log_diff = log10(1 + sim_agb_sum) #+ loss_params.EPS)
   sp_agb_loss[gsp] = sim_agb_sum
@@ -352,7 +352,7 @@ end
     sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
     #@assert !any(isnan.(sim_age_cdf)) "cdf NaN"
     #@assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
-    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* (abs.(sim_agb_sum * sim_age_cdf - rec.sp_agb_sum * rec.sp_age_cdf) .^ 2.0)[begin:end-1])
+    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* (abs.(sim_agb_sum * sim_age_cdf - rec.sp_agb_sum * rec.sp_age_cdf) .^ lp)[begin:end-1])
     #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
     log_diff -= log10(1 + rec.sp_agb_sum) #+ loss_params.EPS)
     sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
@@ -373,7 +373,7 @@ end
   return site_agb_loss
 end
 
-function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; debug::Bool=false)::SiteLoss
+function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; lp::FloatType=one(FloatType), debug::Bool=false)::SiteLoss
   #Sort by species
   eco_n_species = length(site.sp_mature)
   species_id_map = eco_species_ids[site.eco_id]
@@ -419,7 +419,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
         sp_end_idx = i - 1
         site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
           site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-          spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, debug=debug)
+          spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
         prev_sp = sp
         sp_start_idx = i
       end
@@ -429,7 +429,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
         sp_end_idx = i
         site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
           site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-          spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, debug=debug)
+          spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
       end
     end
   end
@@ -439,7 +439,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
     @inbounds gsp = species_id_map[sp]
     sp_agb_loss[gsp] = rec.sp_agb_sum
     #@assert sp_w_loss[gsp] == 0
-    sp_w_loss[gsp] = rec.sp_agb_sum^2 * sum(loss_params.age_bins.bin_widths .* rec.sp_age_cdf[begin:end-1])
+    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* (rec.sp_agb_sum .* rec.sp_age_cdf[begin:end-1]) .^ lp)
     #sp_w_loss[gsp] = loss_params.lambda * abs(log10(1+rec.sp_agb_sum)) # + loss_params.EPS))
     site_agb_loss -= rec.sp_agb_sum
   end

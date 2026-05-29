@@ -411,13 +411,15 @@ function parametrize(; cohorts_db_path::String,
   bins_idx::Vector{Int64}=1:180 .|> Int64,
   smoothing_window::Vector{FloatType}=FloatType[one(FloatType)],
   spinup::Bool=true,
-  search_tier::Int=3,
+  search_mode::String="lbsa",
+  tier::Int=3,
   TRIALS::Int=30000,
   resume_from::Union{Nothing,String}=nothing,
   force_restart_from_random::Bool=false,
   sobol_n::Int=100,
   sobol_m::Int=5,
-  eval_tier::Int=3,
+  sobol_candidates_db::Union{Nothing,String}=nothing,
+  sobol_top_frac::Float64=0.5,
   rng::Random.AbstractRNG)
 
   # [5, 10, 20, 40, 60, 80]
@@ -486,7 +488,7 @@ function parametrize(; cohorts_db_path::String,
 
 
   ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup)
-  if search_tier == 0
+  if search_mode == "sobol"
     return parametrize_sobol(; ref_soa=ref_soa,
       output_dir=output_dir,
       spdf_plts=spdf_plts,
@@ -501,7 +503,7 @@ function parametrize(; cohorts_db_path::String,
       debug=debug,
       N=sobol_n,
       M=sobol_m,
-      eval_tier=eval_tier)
+      eval_tier=tier)
   end
   parametrize_LBSA(; ref_soa=ref_soa,
     output_dir=output_dir,
@@ -513,10 +515,12 @@ function parametrize(; cohorts_db_path::String,
     eco_list=eco_list,
     eco_species_ids=eco_species_ids,
     spinup=spinup,
-    search_tier=search_tier,
+    search_tier=tier,
     TRIALS=TRIALS,
     resume_from=resume_from,
     force_restart_from_random=force_restart_from_random,
+    sobol_candidates_db=sobol_candidates_db,
+    sobol_top_frac=sobol_top_frac,
     loss_params=loss_params,
     rng=rng,
     debug=debug)
@@ -808,14 +812,14 @@ function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spd
   return results
 end
 
-function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false)
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
 
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
-  bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+  _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   if search_tier == 1
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
@@ -849,9 +853,16 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
     t2_ref = nothing
   end
   if isnothing(resume_from)
+    bio_params = if !isempty(_sobol_cands)
+      @info "Using Sobol candidate 1/$(length(_sobol_cands)) as initial point"
+      _sobol_cands[1]
+    else
+      BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+    end
     best_result, _, _ = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref)[1]
     cur = LBSA.LBSACandidate(bio_params, best_result)
     search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS)
+    search_state.sobol_cand_idx = 2
   else
     @info "Resuming from $resume_from"
     search_state = JLD2.load_object(resume_from)
@@ -863,6 +874,14 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
   end
   if TRIALS < 1 || LBSA.is_search_over(search_state)
     return search_state
+  end
+  next_candidate() = if search_state.sobol_cand_idx <= length(_sobol_cands)
+    p = _sobol_cands[search_state.sobol_cand_idx]
+    @info "Using Sobol candidate $(search_state.sobol_cand_idx)/$(length(_sobol_cands))"
+    search_state.sobol_cand_idx += 1
+    p
+  else
+    BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
   end
 
   writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
@@ -910,7 +929,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       #end
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
-        bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+        bio_params = next_candidate()
         cur_result, _, _ = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref)[1]
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
@@ -972,6 +991,26 @@ function load_best_params(db_path::String; iteration::Union{Nothing,Int}=nothing
   close(db)
   isempty(result) && return nothing
   return Serialization.deserialize(IOBuffer(result.params_blob[1]))
+end
+
+function load_sobol_candidates(db_path::String; top_frac::Float64=0.5, run_id::Union{Nothing,String}=nothing)
+  isfile(db_path) || return []
+  db = DuckDB.DB(db_path)
+  con = DuckDB.connect(db)
+  try
+    sql = isnothing(run_id) ?
+          "SELECT params_blob FROM sobol_results ORDER BY mean_loss ASC" :
+          "SELECT params_blob FROM sobol_results WHERE run_id = '$(run_id)' ORDER BY mean_loss ASC"
+    result = DuckDB.execute(con, sql) |> DataFrame
+    isempty(result) && return []
+    n_keep = max(1, round(Int, nrow(result) * top_frac))
+    @info "Loaded $(n_keep) Sobol candidates (top $(round(Int, top_frac*100))% of $(nrow(result)))"
+    return [Serialization.deserialize(IOBuffer(row.params_blob)) for row in eachrow(result[1:n_keep, :])]
+  catch
+    return []
+  finally
+    close(db)
+  end
 end
 
 function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool)
@@ -1063,6 +1102,8 @@ function run_from_yaml(yaml_path::String)
 
   resume_from = get_cfg("resume_from", nothing)
   resume_from = (resume_from === nothing || resume_from == "null") ? nothing : String(resume_from)
+  sobol_candidates_db = get_cfg("sobol_candidates_db", nothing)
+  sobol_candidates_db = (sobol_candidates_db === nothing || sobol_candidates_db == "null") ? nothing : String(sobol_candidates_db)
 
   parametrize(;
     cohorts_db_path=get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"),
@@ -1075,7 +1116,8 @@ function run_from_yaml(yaml_path::String)
     filter_species=String.(get_cfg("filter_species", String[])),
     skip_disturbances=get_cfg("skip_disturbances", true),
     spinup=get_cfg("spinup", false),
-    search_tier=get_cfg("search_tier", 1),
+    search_mode=get_cfg("search_mode", "lbsa"),
+    tier=get_cfg("tier", 1),
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
     smoothing_window=smoothing_window,
     TRIALS=get_cfg("trials", 1000000),
@@ -1083,7 +1125,8 @@ function run_from_yaml(yaml_path::String)
     force_restart_from_random=get_cfg("force_restart_from_random", false),
     sobol_n=get_cfg("sobol_n", 100),
     sobol_m=get_cfg("sobol_m", 5),
-    eval_tier=get_cfg("eval_tier", 3),
+    sobol_candidates_db=sobol_candidates_db,
+    sobol_top_frac=Float64(get_cfg("sobol_top_frac", 0.5)),
     rng=rng)
 end
 
@@ -1123,7 +1166,8 @@ function main()
     filter_species=filter_species,
     skip_disturbances=true,
     spinup=false,
-    search_tier=1,
+    search_mode="lbsa",
+    tier=1,
     bins_idx=t1_bins_idx,
     smoothing_window=t1_smoothing_window,
     TRIALS=1000000,

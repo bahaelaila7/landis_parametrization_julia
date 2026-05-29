@@ -211,7 +211,7 @@ Base.@kwdef mutable struct LBSAState{Tx,Tf,TRNG<:Random.AbstractRNG}
   _t_oldest_idx::Int = 1
   _should_restart = false
 
-
+  sobol_cand_idx::Int = 1
 
   running_average_ratio = 0.9
   diff_avg::Float64 = 0.0
