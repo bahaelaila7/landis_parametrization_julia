@@ -1,6 +1,6 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes, copy_and_reseed_soa
 abstract type AbstractPlugin end
 
 include("types.jl")
@@ -436,6 +436,19 @@ end
 end
 function simulate_timestep!(soa::AnySoA{P}, t::Int; ctx::C=NamedTuple()) where {P,C<:NamedTuple}
   process_soa!(soa, t; ctx=ctx)
+end
+
+function copy_and_reseed_soa(soa, seed)
+  new_soa = deepcopy(soa)
+  if !isnothing(seed)
+    rng_type = typeof(getsite(soa, 1).rng)
+    local_rng = rng_type(UInt64(seed))
+    for i in 1:new_soa.n
+      site = getsite(new_soa, i)
+      site.rng = rng_type(rand(local_rng, UInt64))
+    end
+  end
+  return new_soa
 end
 
 

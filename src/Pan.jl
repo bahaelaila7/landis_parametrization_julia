@@ -569,84 +569,158 @@ function calculate_aggregate_loss(t1_sim::Vector{Matrix{FloatType}}, t1_ref::Vec
   return eco_losses
 end
 
-function fit_params(soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing)
-  eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
-  ctx = (BiomassSuccession=(eco_params=eco_params,),)
-  years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
-  starting_sim_year = 1
-  if spinup
-    soa = BiomassSuccessionPlugin.spinup_cohorts!(soa, spinup_cohorts, eco_params)
-    starting_sim_year = 0 # with spinup, even the first year of vegetation data is to be matched and compared
-  end
-  sites_data = [Tuple{UIntType,Int,UIntType,UIntType,FloatType}[] for _ in 1:soa.n]
-  if search_tier == 1
-    eco_site_counts = zeros(Int, length(eco_species_ids))
-    eco_obs_counts = zeros(Int, length(eco_species_ids))
-    for i in 1:soa.n
-      site = getsite(soa, i)
-      !site.active && continue
-      eco_site_counts[site.eco_id] += 1
-      eco_obs_counts[site.eco_id] += count(>=(starting_sim_year), site_sim_years.sim_years[site.mapcode])
+
+function calculate_t2_loss(t2_sim_bins, t2_sim_total, t2_ref, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
+  eco_losses = Vector{PU.SiteLoss}(undef, length(eco_species_ids))
+  n_bins = size(t2_ref.bins[1], 2)
+  for eco_id in eachindex(eco_species_ids)
+    sp_w_loss = zeros(FloatType, n_species)
+    sp_agb_loss = zeros(FloatType, n_species)
+    sp_map = eco_species_ids[eco_id]
+    for sp_eco in eachindex(sp_map)
+      gsp = sp_map[sp_eco]
+      for b in 1:n_bins
+        sp_w_loss[gsp] += PU.wasserstein1d(t2_sim_bins[eco_id][sp_eco, b], t2_ref.bins[eco_id][sp_eco, b])
+      end
+      sp_agb_loss[gsp] = PU.wasserstein1d(t2_sim_total[eco_id][sp_eco], t2_ref.total[eco_id][sp_eco])
     end
-    n_bins = size(t1_ref[1], 2)
-    t1_sim_t = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
+    eco_losses[eco_id] = PU.SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=zero(FloatType), num_sites=eco_site_counts[eco_id], num_obs=eco_obs_counts[eco_id])
   end
-  for current_sim_year in starting_sim_year:max_sim_year
-    #println("\ttimestep $(t)")
-    PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
+  return eco_losses
+end
+
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing])
+  return map(seeds) do seed
+    soa = copy_and_reseed_soa(ref_soa, seed)
+    eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
+    ctx = (BiomassSuccession=(eco_params=eco_params,),)
+    years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
+    starting_sim_year = 1
+    if spinup
+      soa = BiomassSuccessionPlugin.spinup_cohorts!(soa, spinup_cohorts, eco_params)
+      starting_sim_year = 0 # with spinup, even the first year of vegetation data is to be matched and compared
+    end
+    sites_data = [Tuple{UIntType,Int,UIntType,UIntType,FloatType}[] for _ in 1:soa.n]
     if search_tier == 1
-      Threads.@threads :static for i in 1:soa.n
-        @inbounds begin
-          site = getsite(soa, i)
-          !site.active && continue
-          sim_years = site_sim_years.sim_years[site.mapcode]
-          if current_sim_year in sim_years
-            accumulate_site_bins!(t1_sim_t[Threads.threadid()][site.eco_id], site, loss_params)
-            for j in 1:site.live
-              push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+      eco_site_counts = zeros(Int, length(eco_species_ids))
+      eco_obs_counts = zeros(Int, length(eco_species_ids))
+      for i in 1:soa.n
+        site = getsite(soa, i)
+        !site.active && continue
+        eco_site_counts[site.eco_id] += 1
+        eco_obs_counts[site.eco_id] += count(>=(starting_sim_year), site_sim_years.sim_years[site.mapcode])
+      end
+      n_bins = size(t1_ref[1], 2)
+      t1_sim_t = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
+    elseif search_tier == 2
+      n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+      eco_site_counts = zeros(Int, length(eco_species_ids))
+      eco_obs_counts = zeros(Int, length(eco_species_ids))
+      for i in 1:soa.n
+        site = getsite(soa, i)
+        !site.active && continue
+        eco_site_counts[site.eco_id] += 1
+        eco_obs_counts[site.eco_id] += count(>=(starting_sim_year), site_sim_years.sim_years[site.mapcode])
+      end
+      t2_sim_bins_t = [[[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
+      t2_sim_total_t = [[[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
+    end
+    for current_sim_year in starting_sim_year:max_sim_year
+      #println("\ttimestep $(t)")
+      PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
+      if search_tier == 1
+        Threads.@threads :static for i in 1:soa.n
+          @inbounds begin
+            site = getsite(soa, i)
+            !site.active && continue
+            sim_years = site_sim_years.sim_years[site.mapcode]
+            if current_sim_year in sim_years
+              accumulate_site_bins!(t1_sim_t[Threads.threadid()][site.eco_id], site, loss_params)
+              for j in 1:site.live
+                push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+              end
+            end
+            if current_sim_year == last(sim_years)
+              site.active = false
             end
           end
-          if current_sim_year == last(sim_years)
-            site.active = false
-          end
         end
-      end
-    else
-      sites_results = Vector{PU.SiteLoss}(undef, soa.n)
-      Threads.@threads :static for i in 1:soa.n
-        @inbounds begin
-          site = getsite(soa, i)
-          !site.active && continue
-          spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
-          sim_years = site_sim_years.sim_years[site.mapcode]
-          if current_sim_year in sim_years
-            sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
-            sites_results[i] = sloss
-            for j in 1:site.live
-              push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+      elseif search_tier == 2
+        Threads.@threads :static for i in 1:soa.n
+          @inbounds begin
+            site = getsite(soa, i)
+            !site.active && continue
+            sim_years = site_sim_years.sim_years[site.mapcode]
+            if current_sim_year in sim_years
+              eco_id = Int(site.eco_id)
+              tid = Threads.threadid()
+              for sp_eco in 1:length(eco_species_ids[eco_id])
+                sp_total = zero(FloatType)
+                sp_bin_agbs = zeros(FloatType, n_bins)
+                for j in 1:site.live
+                  site.c_species[j] == UIntType(sp_eco) || continue
+                  age = Int(ceil(Float64(site.c_age[j])))
+                  b = PU.find_age_bin(age, loss_params.age_bins)
+                  b == 0 && continue
+                  sp_bin_agbs[b] += site.c_bio[j]
+                  sp_total += site.c_bio[j]
+                end
+                for b in 1:n_bins
+                  push!(t2_sim_bins_t[tid][eco_id][sp_eco, b], sp_bin_agbs[b])
+                end
+                push!(t2_sim_total_t[tid][eco_id][sp_eco], sp_total)
+              end
+              for j in 1:site.live
+                push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+              end
+            end
+            if current_sim_year == last(sim_years)
+              site.active = false
             end
           end
-          if current_sim_year == last(sim_years)
-            site.active = false
+        end
+      else
+        sites_results = Vector{PU.SiteLoss}(undef, soa.n)
+        Threads.@threads :static for i in 1:soa.n
+          @inbounds begin
+            site = getsite(soa, i)
+            !site.active && continue
+            spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
+            sim_years = site_sim_years.sim_years[site.mapcode]
+            if current_sim_year in sim_years
+              sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
+              sites_results[i] = sloss
+              for j in 1:site.live
+                push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+              end
+            end
+            if current_sim_year == last(sim_years)
+              site.active = false
+            end
           end
         end
-      end
-      year_results_no_missing = collect(PU.skipundef(sites_results))
-      if length(year_results_no_missing) > 0
-        years_results[current_sim_year+1] = sum(year_results_no_missing)
+        year_results_no_missing = collect(PU.skipundef(sites_results))
+        if length(year_results_no_missing) > 0
+          years_results[current_sim_year+1] = sum(year_results_no_missing)
+        end
       end
     end
+    if search_tier == 1
+      eco_losses = calculate_aggregate_loss([sum(t[eco_id] for t in t1_sim_t) for eco_id in eachindex(eco_species_ids)], t1_ref, loss_params, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
+      run_result = sum(eco_losses)
+    elseif search_tier == 2
+      t2_sim_bins = [[vcat((t2_sim_bins_t[tid][eco_id][sp, b] for tid in 1:Threads.maxthreadid())...) for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_species_ids)]
+      t2_sim_total = [[vcat((t2_sim_total_t[tid][eco_id][sp] for tid in 1:Threads.maxthreadid())...) for sp in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_species_ids)]
+      eco_losses = calculate_t2_loss(t2_sim_bins, t2_sim_total, t2_ref, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
+      run_result = sum(eco_losses)
+    else
+      eco_losses = nothing
+      run_result = sum(PU.skipundef(years_results))
+    end
+    #@assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
+    cached_sites_state = [cohort for cohorts in sites_data for cohort in cohorts]
+    (run_result, cached_sites_state, eco_losses)
   end
-  if search_tier == 1
-    eco_losses = calculate_aggregate_loss([sum(t[eco_id] for t in t1_sim_t) for eco_id in eachindex(eco_species_ids)], t1_ref, loss_params, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
-    run_result = sum(eco_losses)
-  else
-    eco_losses = nothing
-    run_result = sum(PU.skipundef(years_results))
-  end
-  #@assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
-  cached_sites_state = [cohort for cohorts in sites_data for cohort in cohorts]
-  return run_result, cached_sites_state, eco_losses
 end
 function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, rng::Random.AbstractRNG, debug::Bool, N::Int=100, M::Int=5, eval_tier::Int=3)
   n_species = length(species_list)
@@ -663,8 +737,27 @@ function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spd
         end
       end
     end
+    t2_ref = nothing
+  elseif eval_tier == 2
+    t1_ref = nothing
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
+    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
+    for ((_, eco_id), year_dict) in spdf_plts
+      for (_, spdf_gt) in year_dict
+        for (sp_eco, rec) in spdf_gt.records
+          bin_probs = diff([0f0; rec.sp_age_cdf])
+          for b in 1:n_bins
+            push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum)
+          end
+          push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
+        end
+      end
+    end
+    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   else
     t1_ref = nothing
+    t2_ref = nothing
   end
 
   param_dists = BSP.make_biomass_param_dists(n_species, n_ecoregions, eco_species_ids)
@@ -680,18 +773,16 @@ function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spd
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS sobol_results (run_id VARCHAR, sobol_idx INTEGER, mean_loss DOUBLE, std_loss DOUBLE, median_loss DOUBLE, params_blob BLOB)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS sobol_eval_losses (run_id VARCHAR, sobol_idx INTEGER, eval_idx INTEGER, loss DOUBLE)")
   run_id = string(Dates.now())
+  eval_seeds = [rand(rng, UInt64) for _ in 1:M]
 
   try
     TProgress.@track for i in 1:N
       bio_params = samples[i]
-      losses = FloatType[]
-      for _ in 1:M
-        run_result, _, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species,
-          eco_species_ids, spdf_plts, site_sim_years,
-          spinup, spinup_cohorts, loss_params;
-          debug=debug, search_tier=eval_tier, t1_ref=t1_ref)
-        push!(losses, PU.get_total_loss(run_result))
-      end
+      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species,
+        eco_species_ids, spdf_plts, site_sim_years,
+        spinup, spinup_cohorts, loss_params;
+        debug=debug, search_tier=eval_tier, t1_ref=t1_ref, t2_ref=t2_ref, seeds=eval_seeds)
+      losses = FloatType[PU.get_total_loss(r[1]) for r in rep_results]
       μ = FloatType(sum(losses) / M)
       σ = FloatType(sqrt(sum((l - μ)^2 for l in losses) / max(M - 1, 1)))
       sorted = sort(losses)
@@ -735,11 +826,30 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
         end
       end
     end
+    t2_ref = nothing
+  elseif search_tier == 2
+    t1_ref = nothing
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
+    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
+    for ((_, eco_id), year_dict) in spdf_plts
+      for (_, spdf_gt) in year_dict
+        for (sp_eco, rec) in spdf_gt.records
+          bin_probs = diff([0f0; rec.sp_age_cdf])
+          for b in 1:n_bins
+            push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum)
+          end
+          push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
+        end
+      end
+    end
+    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   else
     t1_ref = nothing
+    t2_ref = nothing
   end
   if isnothing(resume_from)
-    best_result, _, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref)
+    best_result, _, _ = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref)[1]
     cur = LBSA.LBSACandidate(bio_params, best_result)
     search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS)
   else
@@ -782,7 +892,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
         bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
       end
 
-      rep_results = [fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref) for _ in 1:1]
+      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref)
       run_result, cached_sites_state, eco_losses = rep_results[sortperm([convert(Float64, r[1]) for r in rep_results])[1]]
 
       current_loss = convert(Float64, search_state.current.fx)
@@ -801,7 +911,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
-        cur_result, _, _ = fit_params(deepcopy(ref_soa), bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref)
+        cur_result, _, _ = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref)[1]
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       if is_new_best

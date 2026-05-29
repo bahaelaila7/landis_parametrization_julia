@@ -1,5 +1,5 @@
 using ..PanCore
-export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples
+export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples, wasserstein1d, find_age_bin
 
 import Setfield
 import Sobol
@@ -447,6 +447,34 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
 
   return SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=abs(site_agb_loss), num_sites=1)
 
+end
+
+@inline function find_age_bin(age::Int, age_bins::AgeBins)::Int
+  for k in eachindex(age_bins.bins_idx)
+    age < age_bins.bins_idx[k] && return k
+  end
+  age_bins.last_bin_open ? length(age_bins.bins_idx) + 1 : 0
+end
+
+function wasserstein1d(a::AbstractVector, b::AbstractVector)::FloatType
+  (isempty(a) || isempty(b)) && return zero(FloatType)
+  sa = sort(Float64.(a))
+  sb = sort(Float64.(b))
+  na, nb = length(sa), length(sb)
+  ia, ib = 1, 1
+  ca, cb = 0, 0
+  prev_x = min(sa[1], sb[1])
+  w1 = 0.0
+  while ia <= na || ib <= nb
+    va = ia <= na ? sa[ia] : Inf
+    vb = ib <= nb ? sb[ib] : Inf
+    x = min(va, vb)
+    w1 += abs(ca / na - cb / nb) * (x - prev_x)
+    while ia <= na && sa[ia] == x; ca += 1; ia += 1; end
+    while ib <= nb && sb[ib] == x; cb += 1; ib += 1; end
+    prev_x = x
+  end
+  return FloatType(w1)
 end
 
 # Generate N quasi-random Sobol samples covering the full parameter space.
