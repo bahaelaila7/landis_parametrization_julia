@@ -30,6 +30,7 @@ import YAML
 using DataFrames
 import CairoMakie
 import DuckDB
+import HypothesisTests
 
 
 
@@ -417,7 +418,7 @@ function parametrize(; cohorts_db_path::String,
   resume_from::Union{Nothing,String}=nothing,
   force_restart_from_random::Bool=false,
   sobol_n::Int=100,
-  sobol_m::Int=5,
+  n_reps::Int=5,
   sobol_candidates_db::Union{Nothing,String}=nothing,
   sobol_top_frac::Float64=0.5,
   rng::Random.AbstractRNG)
@@ -502,7 +503,7 @@ function parametrize(; cohorts_db_path::String,
       rng=rng,
       debug=debug,
       N=sobol_n,
-      M=sobol_m,
+      M=n_reps,
       eval_tier=tier)
   end
   parametrize_LBSA(; ref_soa=ref_soa,
@@ -519,6 +520,7 @@ function parametrize(; cohorts_db_path::String,
     TRIALS=TRIALS,
     resume_from=resume_from,
     force_restart_from_random=force_restart_from_random,
+    n_reps=n_reps,
     sobol_candidates_db=sobol_candidates_db,
     sobol_top_frac=sobol_top_frac,
     loss_params=loss_params,
@@ -812,7 +814,7 @@ function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spd
   return results
 end
 
-function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5)
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
 
@@ -859,7 +861,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
     else
       BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
     end
-    best_result, _, _ = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref)[1]
+    best_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps]))
     cur = LBSA.LBSACandidate(bio_params, best_result)
     search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS)
     search_state.sobol_cand_idx = 2
@@ -911,8 +913,10 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
         bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
       end
 
-      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref)
-      run_result, cached_sites_state, eco_losses = rep_results[sortperm([convert(Float64, r[1]) for r in rep_results])[1]]
+      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps])
+      run_result = sum(r[1] for r in rep_results)
+      cached_sites_state = rep_results[1][2]
+      eco_losses = isnothing(rep_results[1][3]) ? nothing : [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
 
       current_loss = convert(Float64, search_state.current.fx)
       delta_loss = abs(convert(Float64, run_result) - current_loss)
@@ -930,13 +934,20 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = next_candidate()
-        cur_result, _, _ = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref)[1]
+        cur_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps]))
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       if is_new_best
         iter = search_state.best_iteration
         total = convert(Float64, search_state.best.fx)
         @info "New best @ $iter | loss=$total"
+        try
+          test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, rng=rng)
+          show(test_df; allrows=true, allcols=true)
+          println()
+        catch e
+          @warn "simulate_and_test failed" exception=(e, catch_backtrace())
+        end
         let buf = IOBuffer()
           Serialization.serialize(buf, search_state.best.x)
           DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, run_result.num_sites, run_result.num_obs, total, take!(buf)])
@@ -1124,7 +1135,7 @@ function run_from_yaml(yaml_path::String)
     resume_from=resume_from,
     force_restart_from_random=get_cfg("force_restart_from_random", false),
     sobol_n=get_cfg("sobol_n", 100),
-    sobol_m=get_cfg("sobol_m", 5),
+    n_reps=get_cfg("n_reps", 5),
     sobol_candidates_db=sobol_candidates_db,
     sobol_top_frac=Float64(get_cfg("sobol_top_frac", 0.5)),
     rng=rng)
@@ -1179,6 +1190,124 @@ end
 function julia_main()::Cint
   main()
   return 0
+end
+
+# ---------------------------------------------------------------------------
+# Statistical testing: simulated vs reference plot distributions
+# ---------------------------------------------------------------------------
+
+
+function simulate_and_test(;
+  splots::DataFrame,
+  bio_params,
+  eco_list::Vector{String},
+  species_list::Vector{String},
+  eco_species_ids::Vector{Vector{Int}},
+  loss_params::PU.LossParams,
+  site_sim_years,
+  M::Int=10,
+  rng::Random.AbstractRNG,
+)::DataFrame
+  n_ecos = length(eco_list)
+  n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
+  ctx = (BiomassSuccession=(eco_params=eco_params,),)
+
+  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=false)
+
+  # Reference: per (eco_id, sp_eco, bin) → [AGB per (plot, measurement_year)], excluding the
+  # initial year (sim_year=0) since that's the state we initialize from.
+  ref_vals = [[[FloatType[] for _ in 1:n_bins] for _ in 1:length(eco_species_ids[e])] for e in 1:n_ecos]
+  for gdf in groupby(splots, [:plot_id, :eco_id, :eco_species_id, :measdate])
+    r = gdf[1, :]
+    sim_year = Int(round(Dates.value(Dates.Day(r.measdate - r.start_measdate)) / 365.25))
+    sim_year > 0 || continue
+    eco_id = Int(r.eco_id)
+    sp_eco = Int(r.eco_species_id)
+    (1 <= eco_id <= n_ecos && 1 <= sp_eco <= length(eco_species_ids[eco_id])) || continue
+    bin_agbs = zeros(FloatType, n_bins)
+    for row in eachrow(gdf)
+      b = PU.find_age_bin(max(1, Int(round(Float64(row.age_calc)))), loss_params.age_bins)
+      b == 0 && continue
+      bin_agbs[b] += FloatType(row.agb_sum)
+    end
+    for b in 1:n_bins
+      push!(ref_vals[eco_id][sp_eco][b], bin_agbs[b])
+    end
+  end
+
+  # Simulate M times; accumulate per (site_idx, eco_id, sp_eco, bin) to average across reps.
+  sim_sum = Dict{NTuple{4,Int}, Float64}()
+  sim_cnt = Dict{NTuple{4,Int}, Int}()
+
+  for seed in (rand(rng, UInt64) for _ in 1:M)
+    soa = copy_and_reseed_soa(ref_soa, seed)
+    for current_sim_year in 1:max_sim_year
+      PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
+      for i in 1:soa.n
+        site = getsite(soa, i)
+        !site.active && continue
+        sim_years = site_sim_years.sim_years[site.mapcode]
+        if current_sim_year in sim_years
+          eco_id = Int(site.eco_id)
+          for sp_eco in 1:length(eco_species_ids[eco_id])
+            bin_agbs = zeros(FloatType, n_bins)
+            for j in 1:site.live
+              site.c_species[j] == UIntType(sp_eco) || continue
+              b = PU.find_age_bin(max(1, Int(ceil(Float64(site.c_age[j])))), loss_params.age_bins)
+              b == 0 && continue
+              bin_agbs[b] += site.c_bio[j]
+            end
+            for b in 1:n_bins
+              key = (i, eco_id, sp_eco, b)
+              sim_sum[key] = get(sim_sum, key, 0.0) + Float64(bin_agbs[b])
+              sim_cnt[key] = get(sim_cnt, key, 0) + 1
+            end
+          end
+        end
+        if current_sim_year == last(sim_years)
+          site.active = false
+        end
+      end
+    end
+  end
+
+  # Per (eco_id, sp_eco, bin): one mean-across-M value per (site, measurement-year) pair.
+  sim_vals = [[[FloatType[] for _ in 1:n_bins] for _ in 1:length(eco_species_ids[e])] for e in 1:n_ecos]
+  for (key, total) in sim_sum
+    (_, eco_id, sp_eco, b) = key
+    push!(sim_vals[eco_id][sp_eco][b], FloatType(total / sim_cnt[key]))
+  end
+
+  # Mann-Whitney U per (eco, species, bin).
+  bin_label(b) = b <= length(loss_params.age_bins.bins_idx) ?
+    "<$(loss_params.age_bins.bins_idx[b])" : ">=$(loss_params.age_bins.bins_idx[end])"
+
+  rows = NamedTuple[]
+  for eco_id in 1:n_ecos
+    for sp_eco in eachindex(eco_species_ids[eco_id])
+      gsp = eco_species_ids[eco_id][sp_eco]
+      for b in 1:n_bins
+        ref = ref_vals[eco_id][sp_eco][b]
+        sim = sim_vals[eco_id][sp_eco][b]
+        (isempty(ref) || isempty(sim)) && continue
+        test = HypothesisTests.MannWhitneyUTest(Float64.(ref), Float64.(sim))
+        push!(rows, (
+          eco=eco_list[eco_id],
+          species=species_list[gsp],
+          bin=b,
+          age_class=bin_label(b),
+          n_ref=length(ref),
+          n_sim=length(sim),
+          U_statistic=test.U,
+          p_value=HypothesisTests.pvalue(test),
+        ))
+      end
+    end
+  end
+
+  return isempty(rows) ? DataFrame() : DataFrame(rows)
 end
 
 # ---------------------------------------------------------------------------

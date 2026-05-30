@@ -189,7 +189,7 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   SHADE_TOL = rand(rng, Dists.DiscreteUniform(1, 5), n_species) .|> UIntType # ::Vector{FloatType}
   #println(typeof(SHADE_TOL))
   MATURITY = rand(rng, Dists.DiscreteUniform(3, 40), n_species) .|> FloatType #::Vector{FloatType}
-  PROB_RESPROUT = ones(FloatType, n_species)
+  PROB_RESPROUT = zeros(FloatType, n_species)
   #println(typeof(MATURITY))
 
   PROB_MORT_SPP = [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
@@ -494,27 +494,30 @@ end
 
 function reproduction_check_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams; seeding::SeedDispersal=NoDispersal())
   # reproduction if live cohorts
+  # the purpose of this function is to turn "shoudl try" flags of sp_plant, sp_serotiny, and sp_resprout into "succeeded" or not
+  # after all trials are done, site.sp_sprout represents which species will have a new cohort added
+  # adding the actual cohort based on success is in reproduction_commit_step!
   if !site.active || site.no_establish
     return
   end
   rng = site.rng
   n_species = length(site.sp_mature)
+
+  # check "try planting flags"
   planting = false
-  if any(planting)
-    for sp in 1:n_species
-      if !site.sp_plant[sp]
-        continue
-      end
-      site.sp_plant[s] = plant_establish(sp, site, params; rng=rng)
-      planting |= site.sp_plant[sp]
+  for sp in 1:n_species
+    if !site.sp_plant[sp]
+      continue
     end
+    site.sp_plant[s] = plant_establish(sp, site, params; rng=rng)
+    planting |= site.sp_plant[sp]
   end
 
   shade_probs = params.SUFFICIENT_LIGHT[site.shade_class+1] #julia is 1-indexed
 
   serotiny = false
   #try serotiny if no planting
-  if !planting && any(site.sp_serotiny)
+  if !planting
     for sp in 1:n_species
       if !site.sp_serotiny[sp]
         continue
@@ -526,7 +529,7 @@ function reproduction_check_step!(current_time::Int, site::SiteView, params::Bio
 
   resprout = false
   #resprout only if no serotiny
-  if !serotiny && any(site.sp_sprout)
+  if !serotiny
     for sp in 1:n_species
       if !site.sp_sprout[sp]
         continue
@@ -534,12 +537,19 @@ function reproduction_check_step!(current_time::Int, site::SiteView, params::Bio
       site.sp_sprout[s] = sufficient_light(sp, shade_probs, params; rng=rng) && resprout_establish(sp, site, params; rng=rng)
       resprout |= site.sp_sprout[sp]
     end
+    # can sprout even when plant
+  else
+    site.sp_sprout .= site.sp_serotiny
+  end
+
+  if resprout
+    site.sp_sprout .|= site.sp_plant
   end
 
   if !(planting || serotiny || resprout)
     do_seeding!(seeding, site, params; rng=rng)
+    site.sp_sprout .= site.sp_seed
   end
-  site.sp_sprout .= site.sp_plant .| site.sp_sprout .| site.sp_seed .| site.sp_serotiny
 end
 
 function succession_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
