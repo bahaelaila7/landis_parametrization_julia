@@ -22,4 +22,10 @@ if [[ ! -f "$CACHE_FILE" ]] || \
 fi
 
 export GDAL_DRIVER_PATH=$(cat "$CACHE_FILE")
-exec julia "$@"
+
+SYSIMAGE_ARG=""
+if [[ -f "${PROJECT_PATH}/Pan.so" ]]; then
+    SYSIMAGE_ARG="--sysimage=${PROJECT_PATH}/Pan.so"
+fi
+
+exec julia $SYSIMAGE_ARG "$@"

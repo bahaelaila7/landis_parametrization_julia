@@ -1,6 +1,6 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes, copy_and_reseed_soa
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes, copy_and_reseed_soa, current_rss_gb, gc_and_trim!
 abstract type AbstractPlugin end
 
 include("types.jl")
@@ -38,6 +38,20 @@ function with_thread_sync(f::F) where {F}
     result = f()
   end
   return result
+end
+
+function current_rss_gb()
+  for line in eachline("/proc/self/status")
+    startswith(line, "VmRSS:") && return parse(Int, split(line)[2]) / 1e6
+  end
+  return NaN
+end
+
+function gc_and_trim!()
+  GC.gc()
+  ccall(:malloc_trim, Cint, (Csize_t,), 0)
+  println(read("/proc/self/smaps_rollup", String))
+  nothing
 end
 
 function build_refs!(refs::Vector{Int32}, counts::Vector{Int32})
@@ -342,8 +356,9 @@ function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
       soa.csr = updated_csr
     end
 
-    return soa
   end
+  #gc_and_trim!()
+  return soa
 end
 
 @generated function csr_count_key(::AnySoA{P}, ::Val{F}) where {P,F}

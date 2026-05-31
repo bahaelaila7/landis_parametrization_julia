@@ -7,39 +7,36 @@ JULIA_RUN_YAML ?= 'using Pan;Pan.run_from_yaml("$(RUN)")'
 all: run
 
 prepare:
-	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate()'
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.resolve(); Pkg.update(); Pkg.instantiate()'
 
-update:
-	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.update()'
-
-run1:
+run1: prepare
 	$(JULIA_CMD) --threads=1 -e $(JULIA_RUN)
 
-run:
+run: prepare
 	$(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN)
 
-debug1:
+debug1: prepare
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=1 -e $(JULIA_RUN)
 
-debug:
+debug: prepare
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN)
                                      
-exec:                                
-	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler;create_app(".", "build";filter_stdlibs=true,precompile_execution_file="src/entry.jl")'
+exec: prepare
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using PackageCompiler;create_app(".", "build";filter_stdlibs=true,precompile_execution_file="src/entry.jl")'
                                      
-sysimage:
-	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg; Pkg.instantiate();using PackageCompiler; create_sysimage(["Pan"]; sysimage_path="Pan.so",precompile_execution_file="precompile_exec.jl")'
+sysimage: prepare
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using PackageCompiler; create_sysimage(["Pan"]; sysimage_path="Pan.so",precompile_execution_file="precompile_exec.jl")'
 
-spatial:
+spatial: prepare
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.spatial_main()'
 
-debug-spatial:
+debug-spatial: prepare
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.spatial_main()'
 
-landis:
+landis: prepare
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.landis_main()'
 
-debug-landis:
+debug-landis: prepare
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.landis_main()'
 
 yaml:
@@ -47,3 +44,6 @@ yaml:
 
 debug-yaml:
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN_YAML)
+
+export-landis: prepare
+	$(JULIA_CMD) --threads=1 -e 'using Pan; Pan.export_landis_main()'

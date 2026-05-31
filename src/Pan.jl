@@ -1888,6 +1888,7 @@ function make_sites_from_communities(
   cohort_counts = Int32[nrow(splots_dict[row.mapcode]) for row in eachrow(site_df)]
   species_counts = Int32[length(eco_species_ids[row.eco_id]) for row in eachrow(site_df)]
 
+  @info "Pre-SoA RSS: $(round(Sys.maxrss()/1e9, digits=2)) GB"
   soa = ActiveSoA((cohort=cohort_counts, species=species_counts))
   tRNGs = [RNGType(rand(rng, UInt64)) for _ in 1:Threads.maxthreadid()]
 
@@ -2006,17 +2007,23 @@ function simulate_spatial_treemap(;
   eco_params = BiomassSuccessionPlugin.generate_eco_params(mod_params)
 
   println("Running simulation: $timehorizon_years years, output every $output_every_years")
-  Spatial.run_spatial!(ref_soa, eco_params, output_dir;
-    timehorizon=timehorizon_years, output_every=output_every_years)
+  let ctx = (eco_params=eco_params,),
+    bufs = [BiomassSuccessionPlugin._new_buf() for _ in 1:Threads.maxthreadid()],
+    chunks = zeros(Int, Threads.maxthreadid())
+
+    Spatial.run_spatial!(ref_soa, BiomassSuccessionPlugin.BiomassSuccession, ctx, output_dir,
+      (soa, year) -> BiomassSuccessionPlugin.emit_year!(bufs, chunks, soa, year, output_dir);
+      timehorizon=timehorizon_years, output_every=output_every_years)
+  end
 
   println("Generating output rasters")
   ref_raster_path = !isnothing(treemap_raster) ?
                     joinpath(data_dir, treemap_raster) :
                     joinpath(data_dir, eco_raster)
-  Spatial.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ref_raster_path)
+  BiomassSuccessionPlugin.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ref_raster_path)
 
   println("Coalescing Arrow files to DuckDB")
-  Spatial.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
+  BiomassSuccessionPlugin.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
 end
 
 function spatial_main()
@@ -2085,14 +2092,223 @@ function simulate_spatial_landis(;
   eco_params = BiomassSuccessionPlugin.generate_eco_params(params)
 
   println("Running simulation: $timehorizon_years years, output every $output_every_years")
-  Spatial.run_spatial!(ref_soa, eco_params, output_dir;
-    timehorizon=timehorizon_years, output_every=output_every_years)
+  let ctx = (eco_params=eco_params,),
+    bufs = [BiomassSuccessionPlugin._new_buf() for _ in 1:Threads.maxthreadid()],
+    chunks = zeros(Int, Threads.maxthreadid())
+
+    Spatial.run_spatial!(ref_soa, BiomassSuccessionPlugin.BiomassSuccession, ctx, output_dir,
+      (soa, year) -> BiomassSuccessionPlugin.emit_year!(bufs, chunks, soa, year, output_dir);
+      timehorizon=timehorizon_years, output_every=output_every_years)
+  end
 
   println("Generating output rasters")
-  Spatial.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ecoregion_tif)
+  BiomassSuccessionPlugin.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ecoregion_tif)
 
   println("Coalescing Arrow files to DuckDB")
-  Spatial.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
+  BiomassSuccessionPlugin.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
+end
+
+function export_landis_main(; output_dir::String="/workspace/best_params_landis")
+  jld2_files = filter(f -> startswith(f, "best_params@") && endswith(f, ".jld2"),
+    readdir("./outputs"))
+  isempty(jld2_files) && error("No best_params JLD2 files found in ./outputs/")
+  latest = last(sort(jld2_files))
+  jld2_path = joinpath("./outputs", latest)
+  println("Exporting from $jld2_path")
+  params = JLD2.load_object(jld2_path)
+  BiomassSuccessionPlugin.export_landis_params(params; output_dir=output_dir)
+end
+
+# ---------------------------------------------------------------------------
+# Export LANDIS-II scenario files (same loading path as spatial simulation)
+# ---------------------------------------------------------------------------
+
+# Copy a biomass-climate config file and any data files it references (ClimateFile /
+# SpinUpClimateFile lines) into output_dir. Returns the basename for use in
+# biomass_succession.txt. Does not read CSV content — just copies bytes.
+function _copy_climate_files(src_path::String, output_dir::String)::String
+  src_abs = abspath(src_path)
+  src_dir = dirname(src_abs)
+  dst_name = basename(src_abs)
+  cp(src_abs, joinpath(output_dir, dst_name); force=true)
+  for line in eachline(src_abs)
+    m = match(r"^\s*(?:ClimateFile|SpinUpClimateFile)\s+(\S+)", line)
+    isnothing(m) && continue
+    ref = m.captures[1]
+    ref_src = isabspath(ref) ? ref : joinpath(src_dir, ref)
+    isfile(ref_src) || continue
+    ref_dst = joinpath(output_dir, basename(ref))
+    isfile(ref_dst) || cp(ref_src, ref_dst)
+    println("  $(basename(ref))")
+  end
+  return dst_name
+end
+
+function export_landis_scenario(;
+  data_dir::String,
+  output_dir::String,
+  eco_raster::String,
+  eco_ecocode_mapping::String,
+  biomass_params_path::String,
+  climate_config_file::String,
+  treemap_raster::Union{String,Nothing}=nothing,
+  communities_csv::Union{String,Nothing}=nothing,
+  communities_db::Union{String,Nothing}=nothing,
+  treemap_version::Int=2022,
+  treemap_db_path::String="../data_eco_cohorts.duckdb",
+  duration_years::Int=40,
+  cell_length_m::Int=30,
+  timestep::Int=5,
+  # Ignored parameters (for signature compatibility with simulate_spatial_treemap)
+  rng_seed::Int=1337,
+  timehorizon_years::Int=50,
+  output_every_years::Int=5,
+)
+  mkpath(output_dir)
+
+  println("Loading params: $biomass_params_path")
+  params = JLD2.load_object(joinpath(data_dir, biomass_params_path))
+
+  println("Loading eco raster")
+  eco_raster_path = joinpath(data_dir, eco_raster)
+  eco_raster_data = Data.load_eco_raster(eco_raster_path)
+
+  eco_mapping_path = joinpath(data_dir, eco_ecocode_mapping)
+  eco_mapping_df = CSV.read(eco_mapping_path, DataFrame)
+
+  local communities_df, combo_to_mapcode, mod_params, eco_species_ids, cn_raster
+
+  if !isnothing(treemap_raster)
+    println("Loading treemap raster: $treemap_raster")
+    @time cn_raster, _ = Data.load_treemap_raster(
+      joinpath(data_dir, treemap_raster); treemap_version=treemap_version)
+    @assert size(cn_raster) == size(eco_raster_data) "Raster size mismatch: treemap $(size(cn_raster)) ≠ eco $(size(eco_raster_data))"
+
+    println("Extracting cohorts from DuckDB (treemap path)")
+    @time splots, eco_list, eff_eco_list, species_list = Data.load_treemap_cohorts(
+      cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params)
+    println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
+
+    println("Remapping params to data eco/species")
+    @time mod_params, mapped_splots, eco_species_ids = Data.map_params_to_data_treemap(
+      params, eco_list, eff_eco_list, species_list, splots)
+
+    println("Deduplicating cohorts by (plt_cn, ecocode)")
+    @time communities_df, combo_to_mapcode = Data.deduplicate_for_export(
+      mapped_splots, cn_raster, eco_raster_data)
+
+  elseif !isnothing(communities_csv) || !isnothing(communities_db)
+    if !isnothing(communities_csv)
+      println("Loading initial communities from CSV: $communities_csv")
+      ic_df = Data.load_csv_communities(joinpath(data_dir, communities_csv))
+    else
+      println("Loading initial communities from DuckDB: $communities_db")
+      ic_df = Data.load_duckdb_communities(communities_db)
+    end
+    # prepare_general_splots maps to internal IDs; for export we use ic_df directly.
+    # We still call it to get mod_params and eco_species_ids.
+    _, mod_params, eco_species_ids = Data.prepare_general_splots(
+      ic_df, eco_raster_data, eco_mapping_df, params)
+    cn_raster = nothing
+    combo_to_mapcode = nothing
+
+    # ic_df already has semantic columns (mapcode, species, age/CohortAge, biomass/CohortBiomass).
+    # Normalize column names and filter to species present in mod_params.
+    sp_set = Set(string.(mod_params.SPECIES_LIST))
+    sp_col = hasproperty(ic_df, :SpeciesName) ? ic_df.SpeciesName : ic_df.species
+    age_col = hasproperty(ic_df, :CohortAge) ? ic_df.CohortAge : ic_df.age
+    bio_col = hasproperty(ic_df, :CohortBiomass) ? ic_df.CohortBiomass : ic_df.biomass
+    mc_col = hasproperty(ic_df, :MapCode) ? ic_df.MapCode : ic_df.mapcode
+    valid = [s in sp_set for s in sp_col]
+    communities_df = DataFrame(
+      mapcode=Int.(mc_col[valid]),
+      species=String.(sp_col[valid]),
+      age_calc=FloatType.(age_col[valid]),
+      agb_sum=FloatType.(bio_col[valid]),
+    )
+
+  else
+    error("Specify one of: treemap_raster, communities_csv, communities_db")
+  end
+
+  n_sites = length(unique(communities_df.mapcode))
+  println("Prepared $n_sites unique mapcodes for export")
+
+  # ---------------------------------------------------------------------------
+  println("\nExporting LANDIS-II scenario files to $output_dir ...")
+
+  # 1. scenario.txt
+  println("Exporting scenario.txt")
+  BiomassSuccessionPlugin.export_scenario_file(;
+    output_path=joinpath(output_dir, "scenario.txt"),
+    duration_years=duration_years,
+    cell_length_m=cell_length_m,
+    rng_seed=rng_seed,
+  )
+
+  # 2. ecoregion.txt + copy ecoregion.tif (resolve symlinks for a real file copy)
+  println("Exporting ecoregion.txt")
+  BiomassSuccessionPlugin.export_ecoregions_txt(
+    mod_params, eco_mapping_df;
+    output_path=joinpath(output_dir, "ecoregion.txt"))
+  println("Copying ecoregion.tif")
+  cp(realpath(eco_raster_path), joinpath(output_dir, "ecoregion.tif"); force=true)
+  println("  ecoregion.tif")
+
+  # 3. Climate config file + any data files it references
+  climate_ref = nothing  # filename to embed in biomass_succession.txt
+  if !isnothing(climate_config_file)
+    println("Copying climate files")
+    climate_ref = _copy_climate_files(climate_config_file, output_dir)
+    println("  $climate_ref")
+  end
+
+  # 4. CoreSpeciesData.txt, SpeciesData.csv, SppEcoregionData.csv, biomass_succession.txt
+  BiomassSuccessionPlugin.export_landis_params(mod_params;
+    output_dir=output_dir,
+    climate_config_file=climate_ref
+  )
+
+  # 4. initial_communities.csv
+  println("Exporting initial_communities.csv")
+  BiomassSuccessionPlugin.export_initial_communities_csv(
+    communities_df;
+    output_path=joinpath(output_dir, "initial_communities.csv"))
+
+  # 5. initial_communities.tif (treemap path only; mapcode raster)
+  if !isnothing(combo_to_mapcode)
+    println("Exporting initial_communities.tif")
+    ref_raster = joinpath(data_dir, treemap_raster)
+    BiomassSuccessionPlugin.export_initial_communities_tif(
+      combo_to_mapcode, cn_raster, eco_raster_data, ref_raster;
+      output_path=joinpath(output_dir, "initial_communities.tif"))
+  end
+
+  # 6. eco_ecocode_mapping.csv (lookup table, not read by LANDIS directly)
+  BiomassSuccessionPlugin.export_eco_ecocode_mapping(
+    mod_params, eco_mapping_df;
+    output_path=joinpath(output_dir, "eco_ecocode_mapping.csv"))
+  println("  eco_ecocode_mapping.csv")
+
+  println("\nLANDIS-II scenario exported to: $output_dir")
+  println("Files:")
+  for f in sort(readdir(output_dir))
+    println("  $f")
+  end
+end
+
+function export_landis_scenario_main()
+  export_landis_scenario(
+    data_dir="../",
+    output_dir="./outputs/landis_scenario",
+    eco_raster="eco_raster.tif",
+    eco_ecocode_mapping="eco_ecocode_mapping.csv",
+    biomass_params_path="landis_parametrization_julia/outputs/best_params.jld2",
+    treemap_raster="treemap.tif",
+    treemap_version=2022,
+    treemap_db_path="../data_eco_cohorts.duckdb",
+    climate_config_file="biomass-climate.txt",
+  )
 end
 
 function landis_main()

@@ -12,7 +12,7 @@ const AttrDict = Dict{String,Any}
 const AttrTable = Dict{Int64,AttrDict}
 
 export load_eco_raster, load_treemap_raster, load_treemap_cohorts,
-  map_params_to_data_treemap, expand_to_pixels,
+  map_params_to_data_treemap, expand_to_pixels, deduplicate_for_export,
   load_csv_communities, load_duckdb_communities, prepare_general_splots,
   load_landis_mapcode_raster, load_landis_core_species,
   load_landis_spp_ecoregion, make_landis_params, expand_landis_pixels
@@ -451,6 +451,34 @@ function expand_to_pixels(
     age_calc=ages,
     agb_sum=agbs,
   )
+end
+
+function deduplicate_for_export(
+  mapped_splots::DataFrame,
+  cn_raster::Array{Union{Missing,Int64}},
+  eco_raster::Matrix{Int16},
+)
+  # Assign a sequential mapcode to each unique (plt_cn, raster_ecocode) combination.
+  # All raster pixels sharing the same plot/eco get the same mapcode, so cohort rows
+  # are written once per combo (no duplication).
+  combo_to_mapcode = Dict{Tuple{String,Int64},Int}()
+  mc = 0
+  for row in eachrow(mapped_splots)
+    key = (row.plt_cn, Int64(row.raster_ecocode))
+    if !haskey(combo_to_mapcode, key)
+      mc += 1
+      combo_to_mapcode[key] = mc
+    end
+  end
+
+  communities_df = DataFrame(
+    mapcode=Int[combo_to_mapcode[(row.plt_cn, Int64(row.raster_ecocode))] for row in eachrow(mapped_splots)],
+    species=mapped_splots.species,    # semantic string — not an internal _id
+    age_calc=FloatType.(mapped_splots.age_calc),
+    agb_sum=FloatType.(mapped_splots.agb_sum),
+  )
+
+  return communities_df, combo_to_mapcode
 end
 
 function load_csv_communities(path::String)::DataFrame
