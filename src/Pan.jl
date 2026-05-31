@@ -357,6 +357,8 @@ struct WriterJob{State}
   merged_sites_state::DataFrame
   emp_sample::Union{Nothing,DataFrame}
   sim_sample::Union{Nothing,DataFrame}
+  emp_sample_val::Union{Nothing,DataFrame}
+  sim_sample_val::Union{Nothing,DataFrame}
 end
 
 const STOP = :stop
@@ -388,9 +390,16 @@ function start_writer(::Type{State}, output_dir::AbstractString; buffer_size::In
 
           if !isnothing(job.emp_sample) && !isnothing(job.sim_sample)
             try
-              generate_plots(job.emp_sample, job.sim_sample, state.i, convert(Float64, state.best.fx), output_dir)
+              generate_plots(job.emp_sample, job.sim_sample, "training_$(state.i)", convert(Float64, state.best.fx), output_dir)
             catch e
-              @error "writer: generate_plots failed" iter=state.i exception=(e, catch_backtrace())
+              @error "writer: generate_plots (train) failed" iter=state.i exception=(e, catch_backtrace())
+            end
+          end
+          if !isnothing(job.emp_sample_val) && !isnothing(job.sim_sample_val)
+            try
+              generate_plots(job.emp_sample_val, job.sim_sample_val, "validation_$(state.i)", convert(Float64, state.best.fx), output_dir)
+            catch e
+              @error "writer: generate_plots (val) failed" iter=state.i exception=(e, catch_backtrace())
             end
           end
         else
@@ -495,6 +504,10 @@ function parametrize(; cohorts_db_path::String,
   n_output_plots::Int=0,
   by_subplot::Bool=false,
   no_establishment::Bool=false,
+  val_frac::Float64=0.0,
+  split_seed::Int=42,
+  min_trees::Int=100,
+  min_agb_frac::Float64=0.05,
   rng::Random.AbstractRNG)
 
   mkpath(output_dir)
@@ -509,27 +522,44 @@ function parametrize(; cohorts_db_path::String,
     ),
     smoothing_weights=smoothing_window
   )
-  splots, eco_list, species_list, eco_species_ids = Data.prepare_parametrization_data(; cohorts_db_path=cohorts_db_path,
-    eco_field=eco_field,
-    tablename=tablename,
-    output_dir=tablename,
-    skip_disturbances=skip_disturbances,
-    spinup=spinup,
-    by_subplot=by_subplot,
-    filter_eco_field=filter_eco_field,
-    filter_ecos=filter_ecos,
-    filter_plots=filter_plots,
-    filter_species=filter_species,
-    RNG=rng)
+  split_rng = val_frac > 0.0 ? RNGType(UInt64(split_seed)) : nothing
+  splots, eco_list, species_list, eco_species_ids, splots_val_raw =
+    Data.prepare_parametrization_data(; cohorts_db_path=cohorts_db_path,
+      eco_field=eco_field,
+      tablename=tablename,
+      output_dir=tablename,
+      skip_disturbances=skip_disturbances,
+      spinup=spinup,
+      by_subplot=by_subplot,
+      val_frac=val_frac,
+      split_rng=split_rng,
+      min_trees=min_trees,
+      min_agb_frac=min_agb_frac,
+      filter_eco_field=filter_eco_field,
+      filter_ecos=filter_ecos,
+      filter_plots=filter_plots,
+      filter_species=filter_species,
+      RNG=rng)
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
   n_plots = maximum(splots.plot_id)
-  #println(eco_list)
-  #println(species_list)
-  #println(eco_species_ids)
-  #println(splots)
-  #return
   println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
+
+  # Val preprocessing — each half is self-contained with its own contiguous plot_ids
+  val_splots = nothing; val_ref_soa = nothing; val_spdf_plts = nothing
+  val_site_sim_years = nothing; val_spinup_cohorts = nothing; val_injection_cohorts = nothing
+  if !isnothing(splots_val_raw)
+    val_max_age = Int(maximum(splots_val_raw.age_calc))
+    val_spdf = PU.smoothen_ref_years(splots_val_raw, loss_params, val_max_age; debug=false)
+    val_spdf_plts = Data.make_spdf_dict(val_spdf, eco_species_ids)
+    val_site_sim_years = Data.get_site_sim_years(val_spdf)
+    val_spinup_cohorts = DataFrame()
+    val_injection_cohorts = no_establishment ? Data.get_injection_cohorts(splots_val_raw) : nothing
+    val_ref_soa = make_sites(splots_val_raw, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment)
+    val_splots = splots_val_raw
+    println("Val: $(length(unique(splots_val_raw.plot_id))) plots, $(nrow(splots_val_raw)) rows")
+  end
+
   println("Initiating param distributions")
   #greet()
   #println(splots)
@@ -608,6 +638,12 @@ function parametrize(; cohorts_db_path::String,
     no_establishment=no_establishment,
     injection_cohorts=injection_cohorts,
     n_output_plots=n_output_plots,
+    val_splots=val_splots,
+    val_ref_soa=val_ref_soa,
+    val_spdf_plts=val_spdf_plts,
+    val_site_sim_years=val_site_sim_years,
+    val_spinup_cohorts=val_spinup_cohorts,
+    val_injection_cohorts=val_injection_cohorts,
     rng=rng,
     debug=debug)
 end
@@ -957,7 +993,7 @@ function _filter_cached_to_df(cached, sampled_ids::Set)
   DataFrame(filtered, [:plot_id, :sim_year, :species_id, :age, :agb])
 end
 
-function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing)
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   # Fixed plot sample chosen once at startup so progress is comparable across iterations
@@ -971,6 +1007,16 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict  = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
+
+  # Validation setup
+  have_val       = !isnothing(val_ref_soa)
+  inj_dict_val   = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts) : nothing
+  inj_years_val  = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
+  sampled_ids_val = (have_val && n_output_plots > 0) ?
+    _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) :
+    Set{UIntType}()
+  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
+
   if search_tier == 1
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
@@ -1086,16 +1132,37 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
         cur_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps], injection_dict=injection_dict, injection_years=injection_years))
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
+      val_sim_sample = nothing
       if is_new_best
         iter = search_state.best_iteration
         total = convert(Float64, search_state.best.fx)
         @info "New best @ $iter | loss=$total"
         try
           test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng)
-          show(test_df; allrows=true, allcols=true)
-          println()
+          println("Train stats:"); show(test_df; allrows=true, allcols=true); println()
         catch e
-          @warn "simulate_and_test failed" exception=(e, catch_backtrace())
+          @warn "simulate_and_test (train) failed" exception=(e, catch_backtrace())
+        end
+        if have_val
+          try
+            val_result = only(fit_params(val_ref_soa, search_state.best.x, max_sim_year, n_species,
+              eco_species_ids, val_spdf_plts, val_site_sim_years,
+              spinup, val_spinup_cohorts, loss_params;
+              debug=false, search_tier=3,
+              injection_dict=inj_dict_val, injection_years=inj_years_val,
+              seeds=[rand(rng, UInt64)]))
+            val_total = convert(Float64, PU.get_total_loss(val_result[1]))
+            @info "Val loss @ $iter | loss=$val_total"
+            try
+              val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng)
+              println("Val stats:"); show(val_test_df; allrows=true, allcols=true); println()
+            catch e
+              @warn "simulate_and_test (val) failed" exception=(e, catch_backtrace())
+            end
+            val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
+          catch e
+            @warn "val fit_params failed" exception=(e, catch_backtrace())
+          end
         end
         let buf = IOBuffer()
           Serialization.serialize(buf, search_state.best.x)
@@ -1117,7 +1184,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       if is_new_best || search_state.i % 50 == 0
         cached_sites_state_df = DataFrame(cached_sites_state, [:plot_id, :sim_year, :species_id, :age, :agb])
         sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(cached_sites_state, sampled_ids) : nothing
-        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample))
+        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample, is_new_best ? emp_sample_val : nothing, val_sim_sample))
       end
       if LBSA.is_search_over(search_state)
         break
@@ -1253,7 +1320,8 @@ function run_from_yaml(yaml_path::String)
   rng = RNGType(rand(UInt64))
 
   filter_plots = NTuple{4,Int}[
-    NTuple{4,Int}(Int.(p)) for p in get_cfg("filter_plots", [])
+    NTuple{4,Int}([x isa AbstractString ? parse(Int, x) : Int(x) for x in p])
+    for p in get_cfg("filter_plots", [])
   ]
 
   sw_size = get_cfg("smoothing_window_size", 0)
@@ -1280,6 +1348,8 @@ function run_from_yaml(yaml_path::String)
     spinup            = get_cfg("spinup", false),
     by_subplot        = get_cfg("by_subplot", false),
     no_establishment  = get_cfg("no_establishment", false),
+    min_trees         = Int(get_cfg("min_trees", 100)),
+    min_agb_frac      = Float64(get_cfg("min_agb_frac", 0.05)),
     bins_idx          = Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
   n_output_plots = get_cfg("n_output_plots", 0)
@@ -1320,6 +1390,8 @@ function run_from_yaml(yaml_path::String)
     sobol_candidates_db = sobol_candidates_db,
     sobol_top_frac      = Float64(get_cfg("sobol_top_frac", 0.5)),
     n_output_plots      = n_output_plots,
+    val_frac            = Float64(get_cfg("val_frac", 0.0)),
+    split_seed          = Int(get_cfg("split_seed", 42)),
     rng                 = rng)
 end
 
@@ -1418,7 +1490,7 @@ function _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
     age_bins          = PU.AgeBins(bins_idx=bins_idx .|> Int, last_bin_open=true),
     smoothing_weights = smoothing_window,
   )
-  splots, _, species_list, eco_species_ids =
+  splots, _, species_list, eco_species_ids, _ =
     Data.prepare_parametrization_data(;
       cohorts_db_path, eco_field, tablename, output_dir,
       skip_disturbances, spinup, by_subplot, filter_eco_field,
@@ -1576,7 +1648,7 @@ function simulate_and_test(;
 )::DataFrame
   n_ecos = length(eco_list)
   n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  max_sim_year = maximum(maximum.(filter(!isempty, site_sim_years.sim_years)))
   eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
   ctx = (BiomassSuccession=(eco_params=eco_params,),)
 

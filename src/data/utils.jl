@@ -1,5 +1,5 @@
 using ..PanCore
-export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity, get_injection_cohorts
+export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity, get_injection_cohorts, build_padded_sim_years
 import DuckDB
 import Random
 import StatsBase
@@ -112,81 +112,120 @@ function assign_tiered_species!(df::DataFrame;
   group_list = sort(unique([v for (_,v) in sp_map if startswith(v,"GRP_")]))
   n_H = count(v == "H" for v in values(sp_map))
   n_S = count(v == "S" for v in values(sp_map))
-  @info "Species tiers  ($(length(sp_map)) total → $(length(exact_list)) exact / $(length(group_list)) groups / H=$n_H S=$n_S)" exact=join(exact_list,", ") groups=join(group_list,", ")
+  @info "Species tiers  ($(length(sp_map)) total → $(length(exact_list)) exact / $(length(group_list)) groups / H=$n_H S=$n_S)  [min_trees=$min_trees, min_agb_frac=$min_agb_frac]" exact=join(exact_list,", ") groups=join(group_list,", ")
 end
 
-function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[], by_subplot::Bool=false)::Tuple{DataFrame,Vector{String},Vector{String},Vector{Vector{Int}}}
-  eco_field = begin
-    if eco == "epa_l4"
-      :epa_l4
-    elseif eco == "epa_l3"
-      :epa_l3
-    else
-      :ecosubcd
-    end
+# Split raw cohort-level df by site (plot or subplot), stratified by species.
+# Each site goes to exactly one stratum (its rarest species) so the total val
+# fraction stays close to val_frac. Returns (df_train, df_val).
+function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
+                               val_frac::Float64, rng::Random.AbstractRNG)
+  site_sp = unique(select(df, vcat(id_cols, [:effective_species])))
+  sp_count = Dict(r.effective_species => r.n_sites
+                  for r in eachrow(combine(groupby(site_sp, :effective_species), nrow => :n_sites)))
+  site_strata = combine(groupby(site_sp, id_cols)) do rows
+    idx = argmin(i -> get(sp_count, rows.effective_species[i], typemax(Int)), 1:nrow(rows))
+    (; stratum = rows.effective_species[idx])
   end
+  val_sites = vcat([begin
+    shuffled = gdf[Random.shuffle(rng, 1:nrow(gdf)), id_cols]
+    n_val = max(1, round(Int, nrow(gdf) * val_frac))
+    shuffled[1:n_val, :]
+  end for gdf in groupby(site_strata, :stratum)]...)
+  n_total   = nrow(site_strata)
+  n_val_out = nrow(val_sites)
+  @info "Train/val split" n_train=n_total-n_val_out n_val=n_val_out val_pct=round(100*n_val_out/n_total, digits=1)
+  df_train = antijoin(df, val_sites, on=id_cols)
+  df_val   = semijoin(df,  val_sites, on=id_cols)
+  return df_train, df_val
+end
 
-  assign_tiered_species!(df)
+function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[],
+                     by_subplot::Bool=false,
+                     val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing,
+                     min_trees::Int=100, min_agb_frac::Float64=0.05)
+  eco_field = if eco == "epa_l4"; :epa_l4
+              elseif eco == "epa_l3"; :epa_l3
+              else; :ecosubcd end
+
+  assign_tiered_species!(df; min_trees=min_trees, min_agb_frac=min_agb_frac)
   if !isempty(filter_species)
     fs = Set(filter_species)
     filter!(row -> row.effective_species in fs, df)
   end
-  species_field = :effective_species
 
   eco_vals = sort(unique(getproperty(df, eco_field)))
   eco_dict = Dict(eco => i for (i, eco) in enumerate(eco_vals))
-  species_symbol_map_vals = sort(unique(getproperty(df, species_field)))
+  species_symbol_map_vals = sort(unique(df.effective_species))
   species_symbol_map_dict = Dict(ssm => i for (i, ssm) in enumerate(species_symbol_map_vals))
 
-  df.species_id = getindex.(Ref(species_symbol_map_dict), getproperty(df, species_field))
+  df.species_id = getindex.(Ref(species_symbol_map_dict), df.effective_species)
   df.eco_id = getindex.(Ref(eco_dict), getproperty(df, eco_field))
-  #println(df)
-  #
-  #
 
+  # eco→species_ids built from full df so train and val share the same vocabulary
   ddf = combine(groupby(df, :eco_id, sort=true)) do rows
     (; species_ids=[sort(unique(rows.species_id))])
   end
-
-  #maps list species text
-  #maps list eco_text
-  #println(df.measdate)
-  #println(typeof(df.measdate))
+  eco_species_id_map = Dict((eco_id, species_id) => eco_species_id
+                            for (eco_id, species_ids) in enumerate(ddf.species_ids)
+                            for (eco_species_id, species_id) in enumerate(species_ids))
 
   if !(df.measdate[1] isa Dates.Date)
     df.measdate = Dates.DateTime.(df.measdate, Dates.dateformat"yyyy-mm-dd")
   end
   df.age_calc = df.age_calc .|> UIntType
 
-  id_cols = by_subplot ? [:statecd, :unitcd, :countycd, :plot, :subp] : [:statecd, :unitcd, :countycd, :plot]
-  base_fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :sim_year, :species_id, :effective_species, :age_calc]
+  id_cols = by_subplot ? [:statecd, :unitcd, :countycd, :plot, :subp] :
+                         [:statecd, :unitcd, :countycd, :plot]
+  base_fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :sim_year,
+                 :species_id, :effective_species, :age_calc]
   fields = by_subplot ? vcat(base_fields, [:subp]) : base_fields
-  raw_plots = combine(groupby(df, fields, sort=false), nrow => :count, :agb => sum => :agb_sum)
-  if by_subplot
-    plots = raw_plots
-  else
-    subp_counts = combine(groupby(df, :plt_cn), :subp => (x -> length(unique(x))) => :subp_count)
-    plots = leftjoin(raw_plots, subp_counts, on=:plt_cn)
-    plots.agb_sum ./= plots.subp_count
+
+  # Split right here — after mapping, before aggregation — so each half gets its
+  # own contiguous plot_ids and is fully self-contained.
+  do_split = val_frac > 0.0 && !isnothing(split_rng)
+  df_train, df_val_raw = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng) :
+                                    (df, nothing)
+
+  # Aggregate a raw cohort df into a splots DataFrame with contiguous plot_ids.
+  function _agg(df_sub::DataFrame)
+    raw = combine(groupby(df_sub, fields, sort=false), nrow => :count, :agb => sum => :agb_sum)
+    plots = if by_subplot
+      raw
+    else
+      sc = combine(groupby(df_sub, :plt_cn), :subp => (x -> length(unique(x))) => :subp_count)
+      p  = leftjoin(raw, sc, on=:plt_cn)
+      p.agb_sum ./= p.subp_count
+      p
+    end
+    sm = combine(groupby(plots, id_cols, sort=false)) do rows
+      (; start_measdate=[minimum(rows.measdate)])
+    end
+    sp = sort!(innerjoin(plots, sm, on=id_cols),
+               [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc, :species_id])
+    sp.plot_id .= groupindices(groupby(sp, id_cols)) .|> UIntType
+    sp.eco_species_id .= getindex.(Ref(eco_species_id_map), zip(sp.eco_id, sp.species_id))
+    sp
   end
 
-  start_measdates = combine(groupby(plots, id_cols, sort=false)) do rows
-    (; start_measdate=[minimum(rows.measdate)])
-  end
-  plots_measdate = innerjoin(plots, start_measdates, on=id_cols)
-  splots = sort!(plots_measdate, [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc, :species_id])
-
-  splots.plot_id .= groupindices(groupby(splots, id_cols)) .|> UIntType
-
-  eco_species_id_map = Dict((eco_id, species_id) => eco_species_id
-                            for (eco_id, species_ids) in enumerate(ddf.species_ids)
-                            for (eco_species_id, species_id) in enumerate(species_ids))
-  splots.eco_species_id .= getindex.(Ref(eco_species_id_map), zip(splots.eco_id, splots.species_id))
-  #println(effective_species_symbol_map_vals)
-  #println(eco_vals)
-  return splots, eco_vals, species_symbol_map_vals, ddf.species_ids
-
+  splots_train = _agg(df_train)
+  splots_val   = isnothing(df_val_raw) ? nothing : _agg(df_val_raw)
+  return splots_train, eco_vals, species_symbol_map_vals, ddf.species_ids, splots_val
 end
+
+function build_padded_sim_years(splots_subset::DataFrame, n_plots_total::Int)
+  # Returns a NamedTuple (sim_years = padded_vector) where padded_vector[plot_id]
+  # gives the correct sim_years for that plot. Plots not in the subset get Int[].
+  # This preserves the site_sim_years.sim_years[mapcode] indexing convention used
+  # in fit_params, which relies on plot_id being a 1-based index into the vector.
+  ssy    = get_site_sim_years(splots_subset)
+  padded = Vector{Vector{Int}}([Int[] for _ in 1:n_plots_total])
+  for row in eachrow(ssy)
+    padded[Int(row.plot_id)] = row.sim_years
+  end
+  (sim_years = padded,)
+end
+
 function get_injection_cohorts(splots::DataFrame)::DataFrame
   # Cohorts with birth_sim_year = sim_year - age_calc > 0 were born after
   # simulation start and are not in the initial conditions. Return one row per
@@ -284,8 +323,7 @@ function check_cohort_continuity(splots::DataFrame; age_tol::Int=0)
   n_viol
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
-  #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, min_trees::Int=100, min_agb_frac::Float64=0.05, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
   con = DuckDB.connect(DuckDB.DB(cohorts_db_path))
   println("Creating index if necessary")
@@ -306,15 +344,17 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   end
   println(sql)
   cohorts_df = DuckDB.execute(con, sql) |> DataFrame
-  #DuckDB.close(con)
   println("Closing db. $(nrow(cohorts_df)) rows loaded.")
 
-  @time splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df, eco=eco_field, filter_species=filter_species, by_subplot=by_subplot)
+  @time splots, eco_list, species_list, eco_species_ids, splots_val =
+    make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
+                by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng,
+                min_trees=min_trees, min_agb_frac=min_agb_frac)
   mark_estab_year!(splots)
+  isnothing(splots_val) || mark_estab_year!(splots_val)
 
   n_viol = check_cohort_continuity(splots)
   println("Cohort continuity violations: $n_viol")
 
-  return splots, eco_list, species_list, eco_species_ids
-
+  return splots, eco_list, species_list, eco_species_ids, splots_val
 end
