@@ -100,12 +100,13 @@ end
 apply_mutation(::ScalarApplier, field, idx, val) = val
 apply_mutation(::IndexApplier, field, idx, val) = setindex!(copy(field), val, idx)
 function apply_mutation(::NestedIndexApplier, field, idx, val)
-  nv = deepcopy(field)
+  nv = copy(field)
+  nv[idx[1]] = copy(nv[idx[1]])
   nv[idx[1]][idx[2]] = val
   nv
 end
 function apply_mutation(a::GradientApplier, field, idx, val)
-  nv = deepcopy(field)
+  nv = copy(field)
   nv[idx] = [val + k * a.step for k in 0:length(nv[idx])-1]
   nv
 end
@@ -166,7 +167,7 @@ end
 
 
 
-@inline skipundef(xs::AbstractArray) = (xs[i] for i in eachindex(xs) if isassigned(xs, i))
+@inline skipundef(xs::AbstractArray) = xs[filter(i -> isassigned(xs, i), eachindex(xs))]
 
 BandType = Union{String,Real}
 ValType = Union{String,Real}
@@ -214,6 +215,23 @@ end
     site_agb_loss=loss1.site_agb_loss + loss2.site_agb_loss,
     num_sites=loss1.num_sites + loss2.num_sites,
     num_obs=loss1.num_obs + loss2.num_obs)
+end
+
+function Base.sum(losses::AbstractVector{SiteLoss})
+  isempty(losses) && error("sum of empty SiteLoss vector")
+  sp_w = copy(losses[1].sp_w_loss)
+  sp_agb = copy(losses[1].sp_agb_loss)
+  site_agb = losses[1].site_agb_loss
+  n_sites = losses[1].num_sites
+  n_obs = losses[1].num_obs
+  @inbounds for k in 2:length(losses)
+    sp_w .+= losses[k].sp_w_loss
+    sp_agb .+= losses[k].sp_agb_loss
+    site_agb += losses[k].site_agb_loss
+    n_sites += losses[k].num_sites
+    n_obs += losses[k].num_obs
+  end
+  SiteLoss(sp_w_loss=sp_w, sp_agb_loss=sp_agb, site_agb_loss=site_agb, num_sites=n_sites, num_obs=n_obs)
 end
 @inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
   return sum((alpha .* loss.sp_w_loss)) / loss.num_obs
@@ -352,7 +370,13 @@ end
     sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
     #@assert !any(isnan.(sim_age_cdf)) "cdf NaN"
     #@assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
-    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* (abs.(sim_agb_sum * sim_age_cdf - rec.sp_agb_sum * rec.sp_age_cdf) .^ lp)[begin:end-1])
+    let bw = loss_params.age_bins.bin_widths
+      s = zero(FloatType)
+      @inbounds for k in eachindex(bw)
+        s += bw[k] * abs(sim_agb_sum * sim_age_cdf[k] - rec.sp_agb_sum * rec.sp_age_cdf[k])^lp
+      end
+      sp_w_loss[gsp] = s
+    end
     #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
     log_diff -= log10(1 + rec.sp_agb_sum) #+ loss_params.EPS)
     sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
@@ -439,7 +463,13 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
     @inbounds gsp = species_id_map[sp]
     sp_agb_loss[gsp] = rec.sp_agb_sum
     #@assert sp_w_loss[gsp] == 0
-    sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* (rec.sp_agb_sum .* rec.sp_age_cdf[begin:end-1]) .^ lp)
+    let bw = loss_params.age_bins.bin_widths
+      s = zero(FloatType)
+      @inbounds for k in eachindex(bw)
+        s += bw[k] * (rec.sp_agb_sum * rec.sp_age_cdf[k])^lp
+      end
+      sp_w_loss[gsp] = s
+    end
     #sp_w_loss[gsp] = loss_params.lambda * abs(log10(1+rec.sp_agb_sum)) # + loss_params.EPS))
     site_agb_loss -= rec.sp_agb_sum
   end

@@ -238,6 +238,14 @@ function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
       @assert length(new_counts[key]) == soa.n "key=$key: expected $(soa.n) counts, got $(length(new_counts[key]))"
       ec = effective_counts!(new_counts[key], getfield(old_refs, key), opts)
       cur_refs = getfield(old_refs, key)
+
+      # Fast path: skip build_refs + all CSR work when no counts changed
+      all_same = true
+      @inbounds for i in 1:n
+        ec[i] == cur_refs[i+1] - cur_refs[i] || (all_same = false; break)
+      end
+      all_same && continue
+
       new_refs = build_refs(ec)
       new_nnz = Int(new_refs[end]) - 1
       #println("new counts: $(ec)")

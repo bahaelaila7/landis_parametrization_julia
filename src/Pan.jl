@@ -647,12 +647,20 @@ function parametrize(; cohorts_db_path::String,
     rng=rng,
     debug=debug)
 end
-function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params::PU.LossParams)
+function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params::PU.LossParams, scratch_perm::Vector{Int}, scratch_ages::Vector{FloatType})
   site.live == 0 && return
-  c_species = @view site.c_species[1:site.live]
-  max_age = Int(ceil(maximum(@view site.c_age[1:site.live]))) + length(loss_params.smoothing_weights) >> 1
-  p = sortperm(c_species)
-  ages = zeros(FloatType, max_age)
+  nlive = site.live
+  c_species = @view site.c_species[1:nlive]
+  max_age = Int(ceil(maximum(@view site.c_age[1:nlive]))) + length(loss_params.smoothing_weights) >> 1
+  if length(scratch_perm) < nlive
+    resize!(scratch_perm, nlive)
+  end
+  if length(scratch_ages) < max_age
+    resize!(scratch_ages, max_age)
+  end
+  p = @view scratch_perm[1:nlive]
+  sortperm!(p, c_species)
+  ages = @view scratch_ages[1:max_age]
   sp_start = 1
   prev_sp = c_species[p[1]]
   function conclude!(sp, s, e)
@@ -662,7 +670,10 @@ function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params:
     end
     agb = sum(ages)
     cdf = PU.smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
-    t1_sim_eco[sp, :] .+= diff([0f0; cdf]) .* agb
+    t1_sim_eco[sp, 1] += cdf[1] * agb
+    for k in 2:length(cdf)
+      t1_sim_eco[sp, k] += (cdf[k] - cdf[k-1]) * agb
+    end
   end
   for i in eachindex(p)
     sp = c_species[p[i]]
@@ -687,7 +698,17 @@ function calculate_aggregate_loss(t1_sim::Vector{Matrix{FloatType}}, t1_ref::Vec
       gsp = sp_map[sp_eco]
       sim_row = @view t1_sim[eco_id][sp_eco, :]
       ref_row = @view t1_ref[eco_id][sp_eco, :]
-      sp_w_loss[gsp] = sum(loss_params.age_bins.bin_widths .* abs.(cumsum(sim_row) .- cumsum(ref_row))[begin:end-1])
+      let bw = loss_params.age_bins.bin_widths
+        s = zero(FloatType)
+        acc_sim = zero(FloatType)
+        acc_ref = zero(FloatType)
+        @inbounds for k in eachindex(bw)
+          acc_sim += sim_row[k]
+          acc_ref += ref_row[k]
+          s += bw[k] * abs(acc_sim - acc_ref)
+        end
+        sp_w_loss[gsp] = s
+      end
       sp_agb_loss[gsp] = abs(sum(sim_row) - sum(ref_row))
     end
     eco_losses[eco_id] = PU.SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=zero(FloatType), num_sites=eco_site_counts[eco_id], num_obs=eco_obs_counts[eco_id])
@@ -738,6 +759,10 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       end
       n_bins = size(t1_ref[1], 2)
       t1_sim_t = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
+      max_cohorts_scratch = Int(maximum(soa.refs.cohort[i+1] - soa.refs.cohort[i] for i in 1:soa.n))
+      max_age_scratch = max_sim_year + max(1, length(loss_params.smoothing_weights) >> 1) + 5
+      scratch_perm_t = [Vector{Int}(undef, max_cohorts_scratch) for _ in 1:Threads.maxthreadid()]
+      scratch_ages_t = [Vector{FloatType}(undef, max_age_scratch) for _ in 1:Threads.maxthreadid()]
     elseif search_tier == 2
       n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
       eco_site_counts = zeros(Int, length(eco_species_ids))
@@ -764,7 +789,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
             !site.active && continue
             sim_years = site_sim_years.sim_years[site.mapcode]
             if current_sim_year in sim_years
-              accumulate_site_bins!(t1_sim_t[Threads.threadid()][site.eco_id], site, loss_params)
+              accumulate_site_bins!(t1_sim_t[Threads.threadid()][site.eco_id], site, loss_params, scratch_perm_t[Threads.threadid()], scratch_ages_t[Threads.threadid()])
               for j in 1:site.live
                 push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
               end
@@ -783,19 +808,20 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
             if current_sim_year in sim_years
               eco_id = Int(site.eco_id)
               tid = Threads.threadid()
-              for sp_eco in 1:length(eco_species_ids[eco_id])
+              n_sp_eco = length(eco_species_ids[eco_id])
+              sp_bin_agbs = zeros(FloatType, n_sp_eco, n_bins)
+              for j in 1:site.live
+                sp_eco = Int(site.c_species[j])
+                age = Int(ceil(Float64(site.c_age[j])))
+                b = PU.find_age_bin(age, loss_params.age_bins)
+                b == 0 && continue
+                sp_bin_agbs[sp_eco, b] += site.c_bio[j]
+              end
+              for sp_eco in 1:n_sp_eco
                 sp_total = zero(FloatType)
-                sp_bin_agbs = zeros(FloatType, n_bins)
-                for j in 1:site.live
-                  site.c_species[j] == UIntType(sp_eco) || continue
-                  age = Int(ceil(Float64(site.c_age[j])))
-                  b = PU.find_age_bin(age, loss_params.age_bins)
-                  b == 0 && continue
-                  sp_bin_agbs[b] += site.c_bio[j]
-                  sp_total += site.c_bio[j]
-                end
                 for b in 1:n_bins
-                  push!(t2_sim_bins_t[tid][eco_id][sp_eco, b], sp_bin_agbs[b])
+                  sp_total += sp_bin_agbs[sp_eco, b]
+                  push!(t2_sim_bins_t[tid][eco_id][sp_eco, b], sp_bin_agbs[sp_eco, b])
                 end
                 push!(t2_sim_total_t[tid][eco_id][sp_eco], sp_total)
               end
@@ -828,14 +854,19 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
             end
           end
         end
-        year_results_no_missing = collect(PU.skipundef(sites_results))
+        year_results_no_missing = PU.skipundef(sites_results)
         if length(year_results_no_missing) > 0
           years_results[current_sim_year+1] = sum(year_results_no_missing)
         end
       end
     end
     if search_tier == 1
-      eco_losses = calculate_aggregate_loss([sum(t[eco_id] for t in t1_sim_t) for eco_id in eachindex(eco_species_ids)], t1_ref, loss_params, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
+      for tid in 2:Threads.maxthreadid()
+        for eco_id in eachindex(eco_species_ids)
+          t1_sim_t[1][eco_id] .+= t1_sim_t[tid][eco_id]
+        end
+      end
+      eco_losses = calculate_aggregate_loss(t1_sim_t[1], t1_ref, loss_params, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
       run_result = sum(eco_losses)
     elseif search_tier == 2
       t2_sim_bins = [[vcat((t2_sim_bins_t[tid][eco_id][sp, b] for tid in 1:Threads.maxthreadid())...) for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_species_ids)]
@@ -1689,17 +1720,18 @@ function simulate_and_test(;
         sim_years = site_sim_years.sim_years[site.mapcode]
         if current_sim_year in sim_years
           eco_id = Int(site.eco_id)
-          for sp_eco in 1:length(eco_species_ids[eco_id])
-            bin_agbs = zeros(FloatType, n_bins)
-            for j in 1:site.live
-              site.c_species[j] == UIntType(sp_eco) || continue
-              b = PU.find_age_bin(max(1, Int(ceil(Float64(site.c_age[j])))), loss_params.age_bins)
-              b == 0 && continue
-              bin_agbs[b] += site.c_bio[j]
-            end
+          n_sp_eco = length(eco_species_ids[eco_id])
+          bin_agbs = zeros(FloatType, n_sp_eco, n_bins)
+          for j in 1:site.live
+            sp_eco = Int(site.c_species[j])
+            b = PU.find_age_bin(max(1, Int(ceil(Float64(site.c_age[j])))), loss_params.age_bins)
+            b == 0 && continue
+            bin_agbs[sp_eco, b] += site.c_bio[j]
+          end
+          for sp_eco in 1:n_sp_eco
             for b in 1:n_bins
               key = (i, eco_id, sp_eco, b)
-              sim_sum[key] = get(sim_sum, key, 0.0) + Float64(bin_agbs[b])
+              sim_sum[key] = get(sim_sum, key, 0.0) + Float64(bin_agbs[sp_eco, b])
               sim_cnt[key] = get(sim_cnt, key, 0) + 1
             end
           end

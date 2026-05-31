@@ -713,9 +713,9 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
       end
       last -= 1
     end
-    site.live = last
     #TODO slot in the right place
   end
+  site.live = last
 
 
 
