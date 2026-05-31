@@ -40,7 +40,7 @@ const RNGType = Random.Xoshiro #Random.MersenneTwister
 const ActivePlugins = (BaseSitePlugin.BaseSite, BiomassSuccessionPlugin.BiomassSuccession)
 const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 
-function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, spinup::Bool=true)
+function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, spinup::Bool=true, no_establishment::Bool=false)
   #eco_ids = unique(select(splots, [:eco_id]))
   #n_species = maximum(splots.species_id)
   #plot_ids = unique(select(splots, [:plot_id]))
@@ -85,7 +85,7 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         site.c_bio .= zero(FloatType)
         site.c_m_tot .= zero(FloatType)
         site.c_comp .= zero(FloatType)
-        site.no_establish = false
+        site.no_establish = no_establishment
         site.sp_mature .= false
         site.sp_sprout .= false
         site.sp_seed .= false
@@ -136,7 +136,7 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         site.c_bio .= zero(FloatType)
         site.c_m_tot .= zero(FloatType)
         site.c_comp .= zero(FloatType)
-        site.no_establish = false
+        site.no_establish = no_establishment
         site.sp_mature .= false
         site.sp_sprout .= false
         site.sp_seed .= false
@@ -151,6 +151,40 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
   end
 end
 
+
+function _inject_observed_cohorts!(soa, injection_dict::Dict, current_sim_year::Int)
+  Threads.@threads :static for i in 1:soa.n
+    @inbounds begin
+      site = getsite(soa, i)
+      !site.active && continue
+      cohorts = get(injection_dict, (UIntType(site.ref_cn), current_sim_year), nothing)
+      site._new_cohort_counts = isnothing(cohorts) ? site.live : site.live + length(cohorts)
+    end
+  end
+  PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+  Threads.@threads :static for i in 1:soa.n
+    @inbounds begin
+      site = getsite(soa, i)
+      !site.active && continue
+      cohorts = get(injection_dict, (UIntType(site.ref_cn), current_sim_year), nothing)
+      isnothing(cohorts) && continue
+      for (sp, age, bio) in cohorts
+        BiomassSuccessionPlugin.add_cohort!(site, sp, age, bio)
+        site.B += bio
+      end
+    end
+  end
+end
+
+function _build_injection_dict(injection_cohorts::DataFrame)
+  d = Dict{Tuple{UIntType,Int}, Vector{Tuple{UIntType,FloatType,FloatType}}}()
+  for row in eachrow(injection_cohorts)
+    key = (UIntType(row.plot_id), Int(row.sim_year))
+    push!(get!(d, key, Tuple{UIntType,FloatType,FloatType}[]),
+          (UIntType(row.eco_species_id), FloatType(row.age_calc), FloatType(row.agb_sum)))
+  end
+  d
+end
 
 function generate_plots(empirical_df::DataFrame, simulated_df::DataFrame, iteration, loss, outdir="./outputs/")
   outdir = joinpath(outdir, "plots")
@@ -460,6 +494,7 @@ function parametrize(; cohorts_db_path::String,
   sobol_top_frac::Float64=0.5,
   n_output_plots::Int=0,
   by_subplot::Bool=false,
+  no_establishment::Bool=false,
   rng::Random.AbstractRNG)
 
   mkpath(output_dir)
@@ -529,7 +564,8 @@ function parametrize(; cohorts_db_path::String,
 
 
 
-  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup)
+  injection_cohorts = no_establishment ? Data.get_injection_cohorts(splots) : nothing
+  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment)
   if search_mode == "sobol"
     return parametrize_sobol(; ref_soa=ref_soa,
       output_dir=output_dir,
@@ -542,6 +578,8 @@ function parametrize(; cohorts_db_path::String,
       eco_species_ids=eco_species_ids,
       loss_params=loss_params,
       spinup=spinup,
+      no_establishment=no_establishment,
+      injection_cohorts=injection_cohorts,
       rng=rng,
       debug=debug,
       N=sobol_n,
@@ -567,6 +605,8 @@ function parametrize(; cohorts_db_path::String,
     sobol_candidates_db=sobol_candidates_db,
     sobol_top_frac=sobol_top_frac,
     loss_params=loss_params,
+    no_establishment=no_establishment,
+    injection_cohorts=injection_cohorts,
     n_output_plots=n_output_plots,
     rng=rng,
     debug=debug)
@@ -639,7 +679,7 @@ function calculate_t2_loss(t2_sim_bins, t2_sim_total, t2_ref, n_species, eco_spe
   return eco_losses
 end
 
-function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing])
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}())
   return map(seeds) do seed
     soa = copy_and_reseed_soa(ref_soa, seed)
     eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
@@ -678,6 +718,9 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     for current_sim_year in starting_sim_year:max_sim_year
       #println("\ttimestep $(t)")
       PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
+      if !isnothing(injection_dict) && current_sim_year in injection_years
+        _inject_observed_cohorts!(soa, injection_dict, current_sim_year)
+      end
       if search_tier == 1
         Threads.@threads :static for i in 1:soa.n
           @inbounds begin
@@ -772,7 +815,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     (run_result, cached_sites_state, eco_losses)
   end
 end
-function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, rng::Random.AbstractRNG, debug::Bool, N::Int=100, M::Int=5, eval_tier::Int=3, n_output_plots::Int=0)
+function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, rng::Random.AbstractRNG, debug::Bool, N::Int=100, M::Int=5, eval_tier::Int=3, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing)
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
@@ -810,8 +853,10 @@ function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
     t2_ref = nothing
   end
 
-  param_dists = BSP.make_biomass_param_dists(n_species, n_ecoregions, eco_species_ids)
-  initial_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+  param_dists = BSP.make_biomass_param_dists(n_species, n_ecoregions, eco_species_ids; no_establishment=no_establishment)
+  initial_params = BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
+  injection_dict  = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts)
+  injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
   samples = PU.sobol_samples(param_dists, initial_params, N)
   #println(samples)
 
@@ -831,7 +876,8 @@ function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
       rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species,
         eco_species_ids, spdf_plts, site_sim_years,
         spinup, spinup_cohorts, loss_params;
-        debug=debug, search_tier=eval_tier, t1_ref=t1_ref, t2_ref=t2_ref, seeds=eval_seeds)
+        debug=debug, search_tier=eval_tier, t1_ref=t1_ref, t2_ref=t2_ref, seeds=eval_seeds,
+        injection_dict=injection_dict, injection_years=injection_years)
       losses = FloatType[PU.get_total_loss(r[1]) for r in rep_results]
       μ = FloatType(sum(losses) / M)
       σ = FloatType(sqrt(sum((l - μ)^2 for l in losses) / max(M - 1, 1)))
@@ -857,19 +903,38 @@ function parametrize_sobol(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
 
     if n_output_plots > 0 && !isempty(results)
       splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate .- splots.start_measdate)) ./ 365.25 .|> round .|> Int
-      sampled_ids = Set(Random.shuffle(rng, UIntType.(unique(splots.plot_id)))[1:min(n_output_plots, length(unique(splots.plot_id)))])
+      sampled_ids = _sample_plot_ids(UIntType.(unique(splots.plot_id)), n_output_plots, rng; injection_cohorts=injection_cohorts)
       emp_sample  = _make_emp_df(splots, sampled_ids)
       best_params = results[1].params
-      best_soa    = make_sites(splots, eco_species_ids; rng, spinup)
+      best_soa    = make_sites(splots, eco_species_ids; rng, spinup, no_establishment=no_establishment)
       best_result = only(fit_params(best_soa, best_params, site_sim_years.sim_years .|> maximum |> maximum,
                                     length(species_list), eco_species_ids, spdf_plts,
                                     site_sim_years, spinup, spinup_cohorts, loss_params;
-                                    debug, search_tier=eval_tier, seeds=[rand(rng, UInt64)]))
+                                    debug, search_tier=eval_tier, seeds=[rand(rng, UInt64)],
+                                    injection_dict=injection_dict, injection_years=injection_years))
       sim_sample  = _filter_cached_to_df(best_result[2], sampled_ids)
       generate_plots(emp_sample, sim_sample, "sobol_best", convert(Float64, PU.get_total_loss(best_result[1])), output_dir)
     end
   end
   return results
+end
+
+function _sample_plot_ids(all_ids::Vector{UIntType}, n::Int, rng;
+                          injection_cohorts::Union{Nothing,DataFrame}=nothing)
+  n == 0 && return Set{UIntType}()
+  if isnothing(injection_cohorts) || isempty(injection_cohorts)
+    return Set(Random.shuffle(rng, all_ids)[1:min(n, length(all_ids))])
+  end
+  inj_set    = Set(UIntType.(injection_cohorts.plot_id))
+  with_inj   = filter(id ->  id in inj_set, all_ids)
+  without_inj = filter(id -> !(id in inj_set), all_ids)
+  n_inj   = min(n ÷ 2, length(with_inj))
+  n_clean = min(n - n_inj, length(without_inj))
+  n_inj   = min(n - n_clean, length(with_inj))   # backfill if clean side was small
+  Set(vcat(
+    Random.shuffle(rng, with_inj)[1:n_inj],
+    Random.shuffle(rng, without_inj)[1:n_clean],
+  ))
 end
 
 function _make_emp_df(splots::DataFrame, sampled_ids::Set)
@@ -892,20 +957,20 @@ function _filter_cached_to_df(cached, sampled_ids::Set)
   DataFrame(filtered, [:plot_id, :sim_year, :species_id, :age, :agb])
 end
 
-function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0)
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   # Fixed plot sample chosen once at startup so progress is comparable across iterations
-  all_plot_ids   = Set(UIntType.(unique(splots.plot_id)))
-  sampled_ids    = n_output_plots > 0 ?
-    Set(Random.shuffle(rng, collect(all_plot_ids))[1:min(n_output_plots, length(all_plot_ids))]) :
-    Set{UIntType}()
-  emp_sample     = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
+  all_plot_ids = UIntType.(unique(splots.plot_id))
+  sampled_ids  = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
+  emp_sample   = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
 
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
-  param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids)
+  param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment)
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
+  injection_dict  = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts)
+  injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
   if search_tier == 1
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
@@ -943,9 +1008,9 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       @info "Using Sobol candidate 1/$(length(_sobol_cands)) as initial point"
       _sobol_cands[1]
     else
-      BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+      BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     end
-    best_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps]))
+    best_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps], injection_dict=injection_dict, injection_years=injection_years))
     cur = LBSA.LBSACandidate(bio_params, best_result)
     search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS)
     search_state.sobol_cand_idx = 2
@@ -967,7 +1032,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
     search_state.sobol_cand_idx += 1
     p
   else
-    BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng)
+    BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
   end
 
   writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
@@ -997,7 +1062,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
         bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
       end
 
-      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps])
+      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps], injection_dict=injection_dict, injection_years=injection_years)
       run_result = sum(r[1] for r in rep_results)
       cached_sites_state = _median_rep_cached(rep_results)
       eco_losses = isnothing(rep_results[1][3]) ? nothing : [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
@@ -1018,7 +1083,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = next_candidate()
-        cur_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps]))
+        cur_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps], injection_dict=injection_dict, injection_years=injection_years))
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       if is_new_best
@@ -1026,7 +1091,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
         total = convert(Float64, search_state.best.fx)
         @info "New best @ $iter | loss=$total"
         try
-          test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, rng=rng)
+          test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng)
           show(test_df; allrows=true, allcols=true)
           println()
         catch e
@@ -1214,6 +1279,7 @@ function run_from_yaml(yaml_path::String)
     skip_disturbances = get_cfg("skip_disturbances", true),
     spinup            = get_cfg("spinup", false),
     by_subplot        = get_cfg("by_subplot", false),
+    no_establishment  = get_cfg("no_establishment", false),
     bins_idx          = Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
   n_output_plots = get_cfg("n_output_plots", 0)
@@ -1335,11 +1401,13 @@ struct PlotContext
   spdf_plts
   loss_params::PU.LossParams
   max_sim_year::Int
+  no_establishment::Bool
+  injection_cohorts::Union{Nothing,DataFrame}
 end
 
 # Shared data-loading boilerplate used by both plot functions.
 function _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
-                               skip_disturbances, spinup, by_subplot=false, filter_eco_field,
+                               skip_disturbances, spinup, by_subplot=false, no_establishment=false, filter_eco_field,
                                filter_ecos, filter_plots, filter_species,
                                bins_idx, smoothing_window_size, smoothing_variance, rng)
   smoothing_window = smoothing_window_size > 0 ?
@@ -1363,17 +1431,22 @@ function _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
   spdf           = PU.smoothen_ref_years(splots, loss_params, max_age; debug=false)
   spdf_plts      = Data.make_spdf_dict(spdf, eco_species_ids)
   PlotContext(splots, species_list, eco_species_ids, site_sim_years,
-              spinup_cohorts, spdf_plts, loss_params, max_sim_year)
+              spinup_cohorts, spdf_plts, loss_params, max_sim_year,
+              no_establishment,
+              no_establishment ? Data.get_injection_cohorts(splots) : nothing)
 end
 
 function _run_and_plot(bio_params, label, ctx::PlotContext;
                        sampled_ids, emp_sample, output_dir, spinup, rng)
-  ref_soa = make_sites(ctx.splots, ctx.eco_species_ids; rng, spinup)
+  inj_dict  = isnothing(ctx.injection_cohorts) ? nothing : _build_injection_dict(ctx.injection_cohorts)
+  inj_years = isnothing(ctx.injection_cohorts) ? Set{Int}() : Set(Int.(ctx.injection_cohorts.sim_year))
+  ref_soa = make_sites(ctx.splots, ctx.eco_species_ids; rng, spinup, no_establishment=ctx.no_establishment)
   result  = only(fit_params(ref_soa, bio_params, ctx.max_sim_year,
                             length(ctx.species_list), ctx.eco_species_ids,
                             ctx.spdf_plts, ctx.site_sim_years, spinup,
                             ctx.spinup_cohorts, ctx.loss_params;
-                            debug=false, search_tier=3, seeds=[rand(rng, UInt64)]))
+                            debug=false, search_tier=3, seeds=[rand(rng, UInt64)],
+                            injection_dict=inj_dict, injection_years=inj_years))
   loss       = convert(Float64, PU.get_total_loss(result[1]))
   sim_sample = _filter_cached_to_df(result[2], sampled_ids)
   generate_plots(emp_sample, sim_sample, label, loss, output_dir)
@@ -1397,6 +1470,7 @@ function plot_sample(;
   skip_disturbances::Bool              = true,
   spinup::Bool                         = false,
   by_subplot::Bool                     = false,
+  no_establishment::Bool               = false,
   bins_idx::Vector{Int64}              = vcat(10:10:40, 60:20:120) .|> Int64,
   smoothing_window_size::Int           = 0,
   smoothing_variance::Float64          = 1.2,
@@ -1407,11 +1481,11 @@ function plot_sample(;
   rng        = RNGType(UInt64(rng_seed))
   bio_params = _load_params_from_path(params_path)
   ctx = _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
-                              skip_disturbances, spinup, by_subplot, filter_eco_field,
+                              skip_disturbances, spinup, by_subplot, no_establishment, filter_eco_field,
                               filter_ecos, filter_plots, filter_species,
                               bins_idx, smoothing_window_size, smoothing_variance, rng)
   all_ids     = UIntType.(unique(ctx.splots.plot_id))
-  sampled_ids = Set(Random.shuffle(rng, all_ids)[1:min(n_output_plots, length(all_ids))])
+  sampled_ids = _sample_plot_ids(all_ids, n_output_plots, rng; injection_cohorts=ctx.injection_cohorts)
   emp_sample  = _make_emp_df(ctx.splots, sampled_ids)
   _run_and_plot(bio_params, "plot_only", ctx; sampled_ids, emp_sample, output_dir, spinup, rng)
 end
@@ -1434,6 +1508,7 @@ function plot_sample_sobol(;
   skip_disturbances::Bool              = true,
   spinup::Bool                         = false,
   by_subplot::Bool                     = false,
+  no_establishment::Bool               = false,
   bins_idx::Vector{Int64}              = vcat(10:10:40, 60:20:120) .|> Int64,
   smoothing_window_size::Int           = 0,
   smoothing_variance::Float64          = 1.2,
@@ -1468,11 +1543,11 @@ function plot_sample_sobol(;
   @info "plot_sample_sobol: plotting $(length(selected)) param sets from $N sobol results"
 
   ctx = _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
-                              skip_disturbances, spinup, by_subplot, filter_eco_field,
+                              skip_disturbances, spinup, by_subplot, no_establishment, filter_eco_field,
                               filter_ecos, filter_plots, filter_species,
                               bins_idx, smoothing_window_size, smoothing_variance, rng)
   all_ids     = UIntType.(unique(ctx.splots.plot_id))
-  sampled_ids = Set(Random.shuffle(rng, all_ids)[1:min(n_output_plots, length(all_ids))])
+  sampled_ids = _sample_plot_ids(all_ids, n_output_plots, rng; injection_cohorts=ctx.injection_cohorts)
   emp_sample  = _make_emp_df(ctx.splots, sampled_ids)
 
   for (rank, res) in enumerate(selected)
@@ -1496,6 +1571,7 @@ function simulate_and_test(;
   loss_params::PU.LossParams,
   site_sim_years,
   M::Int=10,
+  no_establishment::Bool=false,
   rng::Random.AbstractRNG,
 )::DataFrame
   n_ecos = length(eco_list)
@@ -1504,7 +1580,7 @@ function simulate_and_test(;
   eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
   ctx = (BiomassSuccession=(eco_params=eco_params,),)
 
-  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=false)
+  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=false, no_establishment=no_establishment)
 
   # Reference: per (eco_id, sp_eco, bin) → [AGB per (plot, measurement_year)], excluding the
   # initial year (sim_year=0) since that's the state we initialize from.

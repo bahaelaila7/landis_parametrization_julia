@@ -173,7 +173,7 @@ function generate_eco_params(params::BiomassSuccessionParams)::Vector{BiomassSuc
 
 
 end
-function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG)
+function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, no_establishment::Bool=false)
   n_species = length(species_list) |> UIntType
   n_ecoregions = length(eco_list) |> UIntType
   SPINUP_MORTALITY_FRACTION = 0.15f0 #rand(Dists.Uniform(0f0,0.20f0))
@@ -195,8 +195,11 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   PROB_MORT_SPP = [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
                    for eco_species in eco_species_ids]
   #println(typeof(PROB_MORT_SPP))
-  PROB_ESTAB_SPP = [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
-                    for eco_species in eco_species_ids]
+  PROB_ESTAB_SPP = if no_establishment
+    [zeros(FloatType, length(eco_species)) for eco_species in eco_species_ids]
+  else
+    [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType for eco_species in eco_species_ids]
+  end
   #println(typeof(PROB_ESTAB_SPP))
   ANPP_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(700, 100), 100, 1500), length(eco_species)) .|> FloatType
                   for eco_species in eco_species_ids]

@@ -1,5 +1,5 @@
 using ..PanCore
-export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity
+export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity, get_injection_cohorts
 import DuckDB
 import Random
 import StatsBase
@@ -187,6 +187,24 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   return splots, eco_vals, species_symbol_map_vals, ddf.species_ids
 
 end
+function get_injection_cohorts(splots::DataFrame)::DataFrame
+  # Cohorts with birth_sim_year = sim_year - age_calc > 0 were born after
+  # simulation start and are not in the initial conditions. Return one row per
+  # cohort at its first FIA measurement year so the caller can inject it into
+  # the simulation at the right time with the observed age and biomass.
+  birth_sym = Int.(splots.sim_year) .- Int.(splots.age_calc)
+  inject = splots[birth_sym .> 0, :]
+  isempty(inject) && return select(inject, [:plot_id, :sim_year, :eco_species_id, :age_calc, :agb_sum])
+  inject = transform(inject,
+    [:sim_year, :age_calc] => ByRow((s, a) -> Int(s) - Int(a)) => :_birth_sym)
+  first_app = combine(groupby(inject, [:plot_id, :eco_species_id, :_birth_sym]),
+    :sim_year => minimum => :_inject_year)
+  result = innerjoin(inject,
+    rename(first_app, :_inject_year => :sim_year),
+    on=[:plot_id, :eco_species_id, :_birth_sym, :sim_year])
+  return select(result, [:plot_id, :sim_year, :eco_species_id, :age_calc, :agb_sum])
+end
+
 function get_spinup_cohorts(df::DataFrame)
   spinup_cohorts = df[df.year_deficit.<-1, :]
   spinup_cohorts = unique(select(spinup_cohorts, [:year_deficit, :plot_id, :eco_id, :eco_species_id]))
