@@ -255,7 +255,7 @@ end
 
 
 @inline function smooth_ages(; ages::Vector{FloatType}, smoothing_window::Vector{FloatType})::Vector{FloatType}
-  if length(smoothing_window) == 1
+  if length(smoothing_window) < 2
     return ages[:]
   end
   smoothed_ages = ImageFiltering.imfilter(ages, smoothing_window, "symmetric")
@@ -470,8 +470,14 @@ function wasserstein1d(a::AbstractVector, b::AbstractVector)::FloatType
     vb = ib <= nb ? sb[ib] : Inf
     x = min(va, vb)
     w1 += abs(ca / na - cb / nb) * (x - prev_x)
-    while ia <= na && sa[ia] == x; ca += 1; ia += 1; end
-    while ib <= nb && sb[ib] == x; cb += 1; ib += 1; end
+    while ia <= na && sa[ia] == x
+      ca += 1
+      ia += 1
+    end
+    while ib <= nb && sb[ib] == x
+      cb += 1
+      ib += 1
+    end
     prev_x = x
   end
   return FloatType(w1)

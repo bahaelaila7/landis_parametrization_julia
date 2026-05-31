@@ -1,5 +1,5 @@
 using ..PanCore
-export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts
+export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity
 import DuckDB
 import Random
 import StatsBase
@@ -61,20 +61,72 @@ function mark_estab_year!(df::DataFrame)
   #df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- last)) ./ 365.25 .|> round .|> Int
   df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- df.start_measdate)) ./ 365.25 .|> round .|> Int
 end
-function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[])::Tuple{DataFrame,Vector{String},Vector{String},Vector{Vector{Int}}}
-  eco_field, species_map_field = begin
-    if eco == "epa_l4"
-      (:epa_l4, :species_symbol_map_l4)
-    elseif eco == "epa_l3"
-      (:epa_l3, :species_symbol_map_l3)
-    else
-      (:ecosubcd, :species_symbol_map_ecosubcd)
+function assign_tiered_species!(df::DataFrame;
+                                max_exact::Int=12, max_group::Int=4,
+                                min_trees::Int=100, min_agb_frac::Float64=0.05)
+  sp_stats = combine(groupby(df, [:species_symbol, :spgrpcd, :sftwd_hrdwd]),
+                     nrow        => :n_rows,
+                     :agb        => sum => :sp_agb)
+  total_agb = sum(sp_stats.sp_agb)
+  sp_stats.agb_frac = sp_stats.sp_agb ./ max(total_agb, 1e-9)
+  sort!(sp_stats, :n_rows, rev=true)
+
+  exact_set = Set{String}()
+  for row in eachrow(sp_stats)
+    length(exact_set) >= max_exact && break
+    row.n_rows >= min_trees && row.agb_frac >= min_agb_frac || continue
+    push!(exact_set, row.species_symbol)
+  end
+
+  grp_set = Set{Int}()
+  remaining = filter(row -> row.species_symbol ∉ exact_set, sp_stats)
+  if nrow(remaining) > 0
+    grp_stats = combine(groupby(remaining, :spgrpcd),
+                        :n_rows => sum => :grp_n,
+                        :sp_agb => sum => :grp_agb)
+    grp_stats.grp_agb_frac = grp_stats.grp_agb ./ max(total_agb, 1e-9)
+    sort!(grp_stats, :grp_n, rev=true)
+    for row in eachrow(grp_stats)
+      length(grp_set) >= max_group && break
+      row.grp_n >= min_trees && row.grp_agb_frac >= min_agb_frac || continue
+      push!(grp_set, row.spgrpcd)
     end
   end
 
-  df.effective_species = ifelse.(getproperty(df, species_map_field) .== df.species_symbol,
-                                 getproperty(df, species_map_field),
-                                 "GRP_" .* string.(df.spgrpcd))
+  sp_map = Dict{String,String}()
+  for row in eachrow(sp_stats)
+    sp = row.species_symbol
+    sp_map[sp] = if sp in exact_set
+      sp
+    elseif row.spgrpcd in grp_set
+      "GRP_$(row.spgrpcd)"
+    else
+      coalesce(row.sftwd_hrdwd, "H")
+    end
+  end
+
+  df.effective_species = [get(sp_map, s, "H") for s in df.species_symbol]
+
+  # Summary
+  exact_list = sort([k for (k,v) in sp_map if v == k])
+  group_list = sort(unique([v for (_,v) in sp_map if startswith(v,"GRP_")]))
+  n_H = count(v == "H" for v in values(sp_map))
+  n_S = count(v == "S" for v in values(sp_map))
+  @info "Species tiers  ($(length(sp_map)) total → $(length(exact_list)) exact / $(length(group_list)) groups / H=$n_H S=$n_S)" exact=join(exact_list,", ") groups=join(group_list,", ")
+end
+
+function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[], by_subplot::Bool=false)::Tuple{DataFrame,Vector{String},Vector{String},Vector{Vector{Int}}}
+  eco_field = begin
+    if eco == "epa_l4"
+      :epa_l4
+    elseif eco == "epa_l3"
+      :epa_l3
+    else
+      :ecosubcd
+    end
+  end
+
+  assign_tiered_species!(df)
   if !isempty(filter_species)
     fs = Set(filter_species)
     filter!(row -> row.effective_species in fs, df)
@@ -106,21 +158,25 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   end
   df.age_calc = df.age_calc .|> UIntType
 
-  subp_counts = combine(groupby(df, :plt_cn), :subp => (x -> length(unique(x))) => :subp_count)
-  fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :species_id, :age_calc]
+  id_cols = by_subplot ? [:statecd, :unitcd, :countycd, :plot, :subp] : [:statecd, :unitcd, :countycd, :plot]
+  base_fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :sim_year, :species_id, :effective_species, :age_calc]
+  fields = by_subplot ? vcat(base_fields, [:subp]) : base_fields
   raw_plots = combine(groupby(df, fields, sort=false), nrow => :count, :agb => sum => :agb_sum)
-  plots = leftjoin(raw_plots, subp_counts, on=:plt_cn)
-  plots.agb_sum ./= plots.subp_count
+  if by_subplot
+    plots = raw_plots
+  else
+    subp_counts = combine(groupby(df, :plt_cn), :subp => (x -> length(unique(x))) => :subp_count)
+    plots = leftjoin(raw_plots, subp_counts, on=:plt_cn)
+    plots.agb_sum ./= plots.subp_count
+  end
 
-
-  # start_measdate =
-  start_measdates = combine(groupby(plots, [:statecd, :unitcd, :countycd, :plot], sort=false)) do rows
+  start_measdates = combine(groupby(plots, id_cols, sort=false)) do rows
     (; start_measdate=[minimum(rows.measdate)])
   end
-  plots_measdate = innerjoin(plots, start_measdates, on=[:statecd, :unitcd, :countycd, :plot])
+  plots_measdate = innerjoin(plots, start_measdates, on=id_cols)
   splots = sort!(plots_measdate, [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc, :species_id])
 
-  splots.plot_id .= groupindices(groupby(splots, [:statecd, :unitcd, :countycd, :plot])) .|> UIntType
+  splots.plot_id .= groupindices(groupby(splots, id_cols)) .|> UIntType
 
   eco_species_id_map = Dict((eco_id, species_id) => eco_species_id
                             for (eco_id, species_ids) in enumerate(ddf.species_ids)
@@ -138,12 +194,84 @@ function get_spinup_cohorts(df::DataFrame)
   return spinup_cohorts
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
+function check_cohort_continuity(splots::DataFrame; age_tol::Int=0)
+  T_md = eltype(splots.measdate)
+
+  # Previous measdate per (plot_id, measdate) — visits identified by measdate, not sim_year.
+  plot_prev_md = Dict{Tuple{UIntType, T_md}, T_md}()
+  for gdf in groupby(sort(unique(select(splots, [:plot_id, :measdate])), [:plot_id, :measdate]), :plot_id)
+    for i in 2:nrow(gdf)
+      plot_prev_md[(gdf.plot_id[i], gdf.measdate[i])] = gdf.measdate[i-1]
+    end
+  end
+
+  # sim_year per (plot_id, measdate) — used only for integer gap arithmetic.
+  sy_map = Dict{Tuple{UIntType, T_md}, Int}()
+  for r in eachrow(unique(select(splots, [:plot_id, :measdate, :sim_year])))
+    sy_map[(r.plot_id, r.measdate)] = Int(r.sim_year)
+  end
+
+  # Age set per (plot_id, effective_species, measdate) — join by measdate, not sim_year.
+  age_sets = Dict{Tuple{UIntType, String, T_md}, Set{Int}}()
+  for r in eachrow(splots)
+    key = (r.plot_id, r.effective_species, r.measdate)
+    push!(get!(age_sets, key, Set{Int}()), Int(r.age_calc))
+  end
+
+  n_viol = 0
+  for r in eachrow(splots)
+    md  = r.measdate
+    age = Int(r.age_calc)
+    # Condition 1: no prior plot visit → always OK
+    haskey(plot_prev_md, (r.plot_id, md)) || continue
+    prev_md = plot_prev_md[(r.plot_id, md)]
+    sy      = get(sy_map, (r.plot_id, md),      0)
+    prev_sy = get(sy_map, (r.plot_id, prev_md), 0)
+    gap     = sy - prev_sy        # integer sim_year gap, exact
+    # Condition 1b: gap=0 (two visits in same sim_year step) → OK
+    gap == 0 && continue
+    # Condition 2: cohort born within the interval → OK
+    age <= gap && continue
+    # Condition 3: matching cohort at previous measdate → OK
+    expected  = age - gap
+    prev_ages = get(age_sets, (r.plot_id, r.effective_species, prev_md), Set{Int}())
+    any(abs(a - expected) <= age_tol for a in prev_ages) && continue
+    n_viol += 1
+  end
+
+  @info "check_cohort_continuity: $n_viol violations / $(nrow(splots)) rows  (age_tol=$(age_tol))"
+
+  if n_viol > 0
+    println("  sample violations (first 10):")
+    shown = 0
+    for r in eachrow(splots)
+      shown >= 10 && break
+      md  = r.measdate
+      age = Int(r.age_calc)
+      haskey(plot_prev_md, (r.plot_id, md)) || continue
+      prev_md = plot_prev_md[(r.plot_id, md)]
+      sy      = get(sy_map, (r.plot_id, md),      0)
+      prev_sy = get(sy_map, (r.plot_id, prev_md), 0)
+      gap     = sy - prev_sy
+      gap == 0 && continue
+      age <= gap && continue
+      expected  = age - gap
+      prev_ages = get(age_sets, (r.plot_id, r.effective_species, prev_md), Set{Int}())
+      any(abs(a - expected) <= age_tol for a in prev_ages) && continue
+      println("    plot_id=$(r.plot_id) sp=$(r.effective_species) md=$md sy=$sy age=$age gap=$gap expected=$expected prev_ages=$(sort(collect(prev_ages)))")
+      shown += 1
+    end
+  end
+
+  n_viol
+end
+
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], RNG::Union{Nothing,Random.AbstractRNG})
   #cohorts_df = load_cohorts_sqlite(db_path, tablename; filter_ecos=filter_ecos)
   println("Connecting to: $(cohorts_db_path) ")
   con = DuckDB.connect(DuckDB.DB(cohorts_db_path))
   println("Creating index if necessary")
-  DuckDB.execute(con, "CREATE INDEX IF NOT EXISTS PLT_ECO_IDX_$(eco_field) ON data_eco_cohorts($(eco_field));")
+  DuckDB.execute(con, "CREATE INDEX IF NOT EXISTS PLT_ECO_IDX_$(eco_field) ON $(tablename)($(eco_field));")
   sql = "SELECT * FROM $(tablename) WHERE true"
   if length(filter_ecos) > 0
     sql *= " AND $(filter_eco_field) in ('$(join(filter_ecos,"','"))')"
@@ -163,9 +291,11 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   #DuckDB.close(con)
   println("Closing db. $(nrow(cohorts_df)) rows loaded.")
 
-  @time splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df, eco=eco_field, filter_species=filter_species)
+  @time splots, eco_list, species_list, eco_species_ids = make_splots(cohorts_df, eco=eco_field, filter_species=filter_species, by_subplot=by_subplot)
   mark_estab_year!(splots)
 
+  n_viol = check_cohort_continuity(splots)
+  println("Cohort continuity violations: $n_viol")
 
   return splots, eco_list, species_list, eco_species_ids
 

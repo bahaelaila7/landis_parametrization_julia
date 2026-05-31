@@ -1,6 +1,8 @@
 THREADS ?= auto
+RUN ?= run.yml
 JULIA_CMD ?= ./julia_gdal.sh --project=.
 JULIA_RUN ?= 'using Pan;Pan.main()'
+JULIA_RUN_YAML ?= 'using Pan;Pan.run_from_yaml("$(RUN)")'
 
 all: run
 
@@ -39,3 +41,9 @@ landis:
 
 debug-landis:
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.landis_main()'
+
+yaml:
+	$(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN_YAML)
+
+debug-yaml:
+	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN_YAML)
