@@ -141,7 +141,7 @@ end
 
 @inline function calculate_initial_biomass(sp_max_anpp::FloatType, site_b::FloatType, b_max_eco::FloatType)::FloatType
   b = exp(-FloatType(1.6f0) * site_b / b_max_eco)
-  if b < one(FloatType)
+  if b > one(FloatType)
     b = one(FloatType)
   end
   b *= sp_max_anpp
@@ -382,7 +382,7 @@ function reproduction_check_step!(current_time::Int, site::SiteView, params::Bio
     if !site.sp_plant[sp]
       continue
     end
-    site.sp_plant[s] = plant_establish(sp, site, params; rng=rng)
+    site.sp_plant[sp] = plant_establish(sp, site, params; rng=rng)
     planting |= site.sp_plant[sp]
   end
 
@@ -395,29 +395,29 @@ function reproduction_check_step!(current_time::Int, site::SiteView, params::Bio
       if !site.sp_serotiny[sp]
         continue
       end
-      site.sp_serotiny[s] = sufficient_light(sp, shade_probs, params; rng=rng) && serotiny_establish(sp, site, params; rng=rng)
+      site.sp_serotiny[sp] = sufficient_light(sp, shade_probs, params; rng=rng) && serotiny_establish(sp, site, params; rng=rng)
       serotiny |= site.sp_serotiny[sp]
     end
   end
 
   resprout = false
   #resprout only if no serotiny
-  if !serotiny
+  if serotiny
+    site.sp_sprout .= site.sp_serotiny
+  else
+    # can sprout even when plant
     for sp in 1:n_species
       if !site.sp_sprout[sp]
         continue
       end
-      site.sp_sprout[s] = sufficient_light(sp, shade_probs, params; rng=rng) && resprout_establish(sp, site, params; rng=rng)
+      site.sp_sprout[sp] = sufficient_light(sp, shade_probs, params; rng=rng) && resprout_establish(sp, site, params; rng=rng)
       resprout |= site.sp_sprout[sp]
     end
-    # can sprout even when plant
-  else
-    site.sp_sprout .= site.sp_serotiny
+    if planting
+      site.sp_sprout .|= site.sp_plant
+    end
   end
 
-  if resprout
-    site.sp_sprout .|= site.sp_plant
-  end
 
   if !(planting || serotiny || resprout)
     do_seeding!(seeding, site, params; rng=rng)
@@ -549,7 +549,7 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
     end
     #@assert bio - m_tot >= -FloatType(1.0f-8)
     # keep all bio dead if random mortality (not allowed during spinup)
-    if current_time > 0 && rand(site.rng, FloatType) > params.PROB_MORT_SPP[sp]
+    if current_time > 0 && rand(site.rng, FloatType) < params.PROB_MORT_SPP[sp]
       m_tot = bio
     end
 
@@ -578,8 +578,8 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
         site.c_age[i] = site.c_age[last]
         site.c_bio[i] = site.c_bio[last]
         site.c_species[i] = site.c_species[last]
-        #site.c_comp[i] = site.c_comp[last]
-        #site.c_m_tot[i] = site.c_m_tot[last]
+        site.c_comp[i] = site.c_comp[last]
+        site.c_m_tot[i] = site.c_m_tot[last]
       end
       last -= 1
     end

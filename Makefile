@@ -33,8 +33,8 @@ spatial: prepare
 debug-spatial: prepare
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.spatial_main()'
 
-landis: prepare
-	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.landis_main()'
+landis:
+	$(JULIA_CMD) --threads=1 -e 'using Pan; Pan.landis_main()'
 
 debug-landis: prepare
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.landis_main()'

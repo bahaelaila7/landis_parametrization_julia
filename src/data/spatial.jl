@@ -264,7 +264,7 @@ function load_treemap_cohorts(
 """
   ) |> DataFrame
 
-  #DuckDB.close(con)
+  DuckDB.close(db)
   return _make_effective_splots(df)
 end
 
@@ -486,9 +486,10 @@ function load_csv_communities(path::String)::DataFrame
 end
 
 function load_duckdb_communities(db_path::String; tablename::String="communities")::DataFrame
-  con = DuckDB.connect(DuckDB.DB(db_path))
+  db = DuckDB.DB(db_path)
+  con = DuckDB.connect(db)
   df = DuckDB.execute(con, "SELECT * FROM $(tablename)") |> DataFrame
-  DuckDB.close(con)
+  DuckDB.close(db)
   return df
 end
 
@@ -610,14 +611,19 @@ function make_landis_params(
   spp_eco_df::DataFrame;
   min_rel_biomass::Vector{Float32}=Float32[0.15, 0.25, 0.50, 0.75, 0.85],
 )
+  @show core_sp_df
+  @show species_df
+  @show spp_eco_df
   ECO_LIST = sort(unique(spp_eco_df.EcoregionName))
   SPECIES_LIST = sort(unique(spp_eco_df.SpeciesCode))
   eco_to_id = Dict(eco => i for (i, eco) in enumerate(ECO_LIST))
   sp_to_id = Dict(sp => i for (i, sp) in enumerate(SPECIES_LIST))
 
   # Join core species + species data on species name
+  core_sp_df_ren = rename(core_sp_df, :species_name => :SpeciesCode)
+  @show core_sp_df_ren
   sp_joined = innerjoin(
-    rename(core_sp_df, :species_name => :SpeciesCode),
+    core_sp_df_ren,
     species_df,
     on=:SpeciesCode,
   )
@@ -629,7 +635,7 @@ function make_landis_params(
   S = zeros(FloatType, n_sp)
   LONGEVITY = zeros(FloatType, n_sp)
   SHADE_TOL = ones(UIntType, n_sp)
-  PROB_RESPROUT = ones(UIntType, n_sp)
+  PROB_RESPROUT = ones(FloatType, n_sp)
   MATURITY = zeros(FloatType, n_sp)
   for (i, sp) in enumerate(SPECIES_LIST)
     r = get(sp_row, sp, nothing)
