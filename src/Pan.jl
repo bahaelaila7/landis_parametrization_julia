@@ -166,7 +166,7 @@ const _SiteInjectionDict = Dict{Int,_SiteInjectionYear}
 # site is wiped (live/old/B reset) and rebuilt from exactly the observed cohorts, dropping
 # sim-only cohorts (ones that should have died but didn't). Gives an exact multi-cohort
 # state for stress-testing the CSR indexing. Requires OVERRIDE_INJECTION[] (for the data).
-const OVERRIDE_INJECTION = Ref(false)
+const OVERRIDE_INJECTION = Ref(true)
 const OVERRIDE_INJECTION_NOISE = Ref(0.0)
 const OVERRIDE_INJECTION_REPLACE = Ref(false)
 
@@ -1274,6 +1274,12 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
     t1_ref = nothing
     t2_ref = nothing
   end
+  # Common random numbers: fix the per-rep seed set once so every candidate is scored on
+  # the *same* stochastic realization. The RNG term then cancels in LBSA's accept/reject
+  # comparison, smoothing the surface — vs drawing fresh seeds per trial (high variance).
+  # (On resume this is a new realization; the incumbent self-heals after the first accepted
+  # move. Refreshing periodically to avoid overfitting one realization is a later knob.)
+  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
   if isnothing(resume_from)
     bio_params = if !isempty(_sobol_cands)
       @info "Using Sobol candidate 1/$(length(_sobol_cands)) as initial point"
@@ -1281,7 +1287,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
     else
       BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     end
-    best_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps], injection_dict=injection_dict, injection_years=injection_years))
+    best_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))
     cur = LBSA.LBSACandidate(bio_params, best_result)
     search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS)
     search_state.sobol_cand_idx = 2
@@ -1321,20 +1327,30 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
   sensitivity_ema_alpha = 0.1    # EMA weight for chosen param's sensitivity update
   sensitivity_lambda = 3.0       # max weight boost at full sensitivity (baseline × (1 + λ))
 
+  # A Ctrl-C inside a @threads region (e.g. mid-resize in readjust_soa!) surfaces as a
+  # TaskFailedException wrapping an InterruptException, not a bare InterruptException.
+  # Recurse through the task/composite wrappers to recognize it.
+  caused_by_interrupt(e) =
+    e isa InterruptException ? true :
+    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
+    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) :
+    false
+
   try
 
     TProgress.@track for trial in (search_state.i+1):TRIALS
-      #dynamic_weights = baseline_weights .* (1.0 .+ sensitivity_lambda .* param_sensitivities)
-      #dynamic_weights ./= sum(dynamic_weights)
-      #dynamic_cumsum = cumsum(dynamic_weights)
-      bio_params, chosen_param_idx = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)
-      #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)),
-      #dynamic_cumsum=dynamic_cumsum)
+      dynamic_weights = baseline_weights .* (1.0 .+ sensitivity_lambda .* param_sensitivities)
+      dynamic_weights ./= sum(dynamic_weights)
+      dynamic_cumsum = cumsum(dynamic_weights)
+      bio_params, chosen_param_idx = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations,
+        #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)),
+        #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss),
+        dynamic_cumsum=dynamic_cumsum)
       for _ in 0:rand(rng, 0:2)
         bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
       end
 
-      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps], injection_dict=injection_dict, injection_years=injection_years)
+      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
       run_result = sum(r[1] for r in rep_results)
       cached_sites_state = _median_rep_cached(rep_results)
       eco_losses = isnothing(rep_results[1][3]) ? nothing : [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
@@ -1355,7 +1371,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = next_candidate()
-        cur_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=[rand(rng, UInt64) for _ in 1:n_reps], injection_dict=injection_dict, injection_years=injection_years))
+        cur_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       val_sim_sample = nothing
@@ -1421,6 +1437,14 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       end
       #println(convert(Float64,run_result))
     end
+  catch e
+    # Swallow a user interrupt (possibly wrapped by a @threads region) and let `finally`
+    # save the checkpoint; rethrow anything that isn't an interrupt.
+    if caused_by_interrupt(e)
+      @info "Search interrupted by user @ trial $(search_state.i); finalizing checkpoint…"
+    else
+      rethrow()
+    end
   finally
     stop_writer(writer_ch, writer_task)
     close(losses_db_file)
@@ -1437,6 +1461,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
     end
   end
 
+  return search_state
 end
 
 function load_best_params(db_path::String; iteration::Union{Nothing,Int}=nothing)

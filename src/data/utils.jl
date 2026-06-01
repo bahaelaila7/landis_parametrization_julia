@@ -99,19 +99,19 @@ function assign_tiered_species!(df::DataFrame;
     sp_map[sp] = if sp in exact_set
       sp
     elseif row.spgrpcd in grp_set
-      "GRP_$(row.spgrpcd)"
+      "_GRP_$(row.spgrpcd)"
     else
-      coalesce(row.sftwd_hrdwd, "H")
+      "_" * coalesce(row.sftwd_hrdwd, "H")
     end
   end
 
-  df.effective_species = [get(sp_map, s, "H") for s in df.species_symbol]
+  df.effective_species = [get(sp_map, s, "_H") for s in df.species_symbol]
 
   # Summary
   exact_list = sort([k for (k, v) in sp_map if v == k])
-  group_list = sort(unique([v for (_, v) in sp_map if startswith(v, "GRP_")]))
-  n_H = count(v == "H" for v in values(sp_map))
-  n_S = count(v == "S" for v in values(sp_map))
+  group_list = sort(unique([v for (_, v) in sp_map if startswith(v, "_GRP_")]))
+  n_H = count(v == "_H" for v in values(sp_map))
+  n_S = count(v == "_S" for v in values(sp_map))
   @info "Species tiers  ($(length(sp_map)) total → $(length(exact_list)) exact / $(length(group_list)) groups / H=$n_H S=$n_S)  [min_trees=$min_trees, min_agb_frac=$min_agb_frac]" exact = join(exact_list, ", ") groups = join(group_list, ", ")
 end
 
