@@ -1,5 +1,5 @@
 using ..PanCore
-export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity, get_injection_cohorts, build_padded_sim_years
+export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity, get_injection_cohorts, build_padded_sim_years, print_cycle_coverage, build_cycle_map
 import DuckDB
 import Random
 import StatsBase
@@ -262,6 +262,57 @@ function get_spinup_cohorts(df::DataFrame)
   spinup_cohorts = unique(select(spinup_cohorts, [:year_deficit, :plot_id, :eco_id, :eco_species_id]))
   spinup_cohorts = sort!(spinup_cohorts, [:year_deficit, :plot_id, :eco_id, :eco_species_id])
   return spinup_cohorts
+end
+
+# Diagnostic for the tier-4 (population-level) loss: bucket each [sub]plot measurement into
+# fixed-width calendar cycles measured from the earliest measdate, and report how many land
+# in each — overall and per ecoregion — so we can confirm the population snapshots are
+# well-sampled and the first/last cycles aren't too thin to be representative.
+function print_cycle_coverage(splots::DataFrame; cycle_years::Real=10)
+  meas = unique(select(splots, [:plot_id, :eco_id, :measdate]))
+  epoch = minimum(meas.measdate)
+  yrs = Dates.value.(Dates.Day.(meas.measdate .- epoch)) ./ 365.25
+  meas.cycle = floor.(Int, yrs ./ cycle_years)
+  ncyc = maximum(meas.cycle) + 1
+  base_year = Dates.year(epoch)
+
+  println("\n=== Cycle coverage: $(cycle_years)-yr buckets from $(epoch) ===")
+  println("$(nrow(meas)) [sub]plot-measurements | $(length(unique(meas.plot_id))) plots | $(length(unique(meas.eco_id))) ecoregions | $(ncyc) cycles")
+
+  overall = sort!(combine(groupby(meas, :cycle), nrow => :n), :cycle)
+  mx = maximum(overall.n)
+  thin = max(5.0, 0.25 * (sum(overall.n) / ncyc))   # flag cycles below 25% of the mean (or < 5)
+  println("\nOverall (⚠ = thin, < $(round(Int, thin))):")
+  for r in eachrow(overall)
+    lo = base_year + Int(round(r.cycle * cycle_years))
+    hi = lo + Int(round(cycle_years))
+    bar = repeat("█", clamp(round(Int, 40 * r.n / mx), 0, 40))
+    println("  cycle $(lpad(r.cycle, 2)) [$(lo)–$(hi)): $(lpad(r.n, 5))  $(bar)$(r.n < thin ? "  ⚠" : "")")
+  end
+
+  println("\nPer ecoregion × cycle (counts; 0 = unsampled):")
+  ec = combine(groupby(meas, [:eco_id, :cycle]), nrow => :n)
+  wide = sort!(unstack(ec, :eco_id, :cycle, :n; fill=0), :eco_id)
+  show(wide; allrows=true, allcols=true)
+  println("\n")
+  return wide
+end
+
+# Maps each (plot_id, sim_year) measurement to a 1-based calendar cycle index, using the
+# same epoch (earliest measdate) and width as print_cycle_coverage. Used by the tier-4
+# population loss to bucket measurements into calendar snapshots. Returns (map, n_cycles).
+function build_cycle_map(splots::DataFrame; cycle_years::Real=8)
+  meas = unique(select(splots, [:plot_id, :sim_year, :measdate]))
+  epoch = minimum(meas.measdate)
+  cmap = Dict{Tuple{Int,Int},Int}()
+  n_cycles = 0
+  for r in eachrow(meas)
+    yrs = Dates.value(Dates.Day(r.measdate - epoch)) / 365.25
+    c = floor(Int, yrs / cycle_years) + 1            # 1-based cycle index
+    cmap[(Int(r.plot_id), Int(r.sim_year))] = c
+    c > n_cycles && (n_cycles = c)
+  end
+  return cmap, n_cycles
 end
 
 function check_cohort_continuity(splots::DataFrame; age_tol::Int=0)

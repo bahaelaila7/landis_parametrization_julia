@@ -43,7 +43,7 @@ yaml:
 	$(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN_YAML)
 
 yaml1:
-	$(JULIA_CMD) --threads=1 -e $(JULIA_RUN_YAML)
+	$(JULIA_CMD) --check-bounds=yes --threads=1 -e $(JULIA_RUN_YAML)
 
 debug-yaml:
 	JULIA_DEBUG=Pan $(JULIA_CMD) --threads=$(THREADS) -e $(JULIA_RUN_YAML)
