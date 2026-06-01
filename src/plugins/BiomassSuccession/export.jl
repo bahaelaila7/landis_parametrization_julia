@@ -127,18 +127,21 @@ function generate_rasters_from_output(; output_dir::String, ref_raster_path::Str
   end
 end
 
-function coalesce_to_duckdb(; output_dir::String, db_path::String)
+function coalesce_to_duckdb(; output_dir::String, db_path::String, fresh::Bool=true)
   chunk_files = sort(filter(
     f -> startswith(f, "cohorts_year") && endswith(f, ".arrow"),
     readdir(output_dir),
   ))
   isempty(chunk_files) && (@warn "No arrow files in $output_dir"; return)
 
-  con = DuckDB.connect(DuckDB.DB(db_path))
+  fresh && isfile(db_path) && rm(db_path)
+
+  db = DuckDB.DB(db_path)
+  con = DuckDB.connect(db)
   DuckDB.execute(
     con,
     """
-  CREATE TABLE IF NOT EXISTS cohorts (
+  CREATE OR REPLACE TABLE cohorts (
     year       UINTEGER,
     mapcode    UINTEGER,
     eco_id     UINTEGER,
@@ -165,7 +168,7 @@ function coalesce_to_duckdb(; output_dir::String, db_path::String)
     @info "Loaded $(fname): $n records"
   end
   DuckDB.close(app)
-  DuckDB.close(con)
+  DuckDB.close(db)
 end
 
 function export_landis_params(params::BiomassSuccessionParams;

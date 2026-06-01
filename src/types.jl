@@ -1,2 +1,2 @@
-const FloatType = Float32
+const FloatType = Float64
 const UIntType = UInt32

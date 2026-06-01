@@ -160,7 +160,7 @@ end
   #println(site.live)
   site.c_species[site.live] = species
   site.c_age[site.live] = age
-  site.c_bio[site.live] = biomass
+  site.c_bio[site.live] = trunc(biomass)
 end
 function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Vector{BiomassSuccessionEcoParams})
   #show(spinup_cohorts.year_deficit)
@@ -532,6 +532,10 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
     # remove age mortality from anpp and growth mortality
     m_age = site.c_m_tot[i]
     anpp_act -= m_age
+    anpp_act2 = anpp_act
+    if anpp_act2 < zero(FloatType)
+      anpp_act2 = zero(FloatType)
+    end
     if anpp_act < one(FloatType)
       anpp_act = one(FloatType)
     end
@@ -556,11 +560,11 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
     M_TOT += m_tot
     site.c_m_tot[i] = m_tot
 
-    nbio = bio + anpp_act - m_tot
+    nbio = bio + anpp_act2 - m_tot
     #@assert !isnan(nbio) "$bio, mtot  $m_tot, $m_age, $m_bio anpp_act $anpp_act, $anpp_max_c, $C, $(site.c_comp[i])"
 
     site.c_bio[i] = nbio
-    senescent = (nbio <= FloatType(1.0f-8))
+    senescent = (nbio <= FloatType(1.0f-8) || age >= params.LONGEVITY[sp])
     if !senescent
       new_B += nbio
       if age > FloatType(5.0f0)
@@ -619,7 +623,7 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
   site.B = new_B
   site.AGNPP = AGNPP
   #site.defoliationLoss = defoliationLoss_ij.sum()
-  site.prevYearMortality = M_TOT #M_TOT_ij.sum()
+  site.prevYearMortality = 0 #M_TOT #M_TOT_ij.sum()
   site.shade_class = shade_class
 
 
@@ -627,3 +631,211 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
 
 
 end
+
+
+# Order a site's live cohorts young → old (ascending by age). succession_step! then
+# walks from the back (oldest) toward the front, so a dying cohort can be removed by
+# copying the already-processed cohort at the live boundary over it — without
+# reordering any not-yet-processed (younger) cohort. Add a tiebreak key here if
+# same-age ordering must match LANDIS's priority queue.
+function sort_cohorts!(site::SiteView)
+  n = site.live
+  n <= 1 && return
+
+  age = site.c_age          # capture views once (they alias the CSR storage)
+  sp = site.c_species
+  bio = site.c_bio
+  mt = site.c_m_tot
+  cp = site.c_comp
+
+  # young → old; MergeSort = stable, so equal ages keep their original order
+  perm = sortperm(@view(age[1:n]); alg=MergeSort)
+
+  # indexing a view by a Vector copies → safe snapshot, then write back reordered
+  ksp, kage, kbio, kmt, kcp = sp[perm], age[perm], bio[perm], mt[perm], cp[perm]
+  @inbounds for j in 1:n
+    sp[j], age[j], bio[j], mt[j], cp[j] = ksp[j], kage[j], kbio[j], kmt[j], kcp[j]
+  end
+  return
+end
+
+# Per-cohort calibration print mirroring LANDIS CalibrateMode. Enable with
+# BiomassSuccessionPlugin.CALIBRATE[] = true; optionally pin one site via
+# CALIBRATE_SITE[] = <mapcode> (0 = all sites). Run single-threaded (THREADS=1)
+# so the per-cohort lines don't interleave across threads.
+const CALIBRATE = Ref(true)
+const CALIBRATE_SITE = Ref(1)
+
+function succession_step1!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
+  site.active || return
+
+  cbio = site.c_bio       # hoist views once (storage isn't resized during succession)
+  cage = site.c_age
+  csp = site.c_species
+  mature = site.sp_mature
+
+  # 1) site-biomass snapshot == LANDIS TotalBiomass = NonYoungBiomass.
+  #    With successionTimestep==1 every cohort counts. Taken BEFORE longevity
+  #    removal (LANDIS snapshots before GrowCohort prunes) and held FIXED all year.
+  B = zero(FloatType)
+  @inbounds for i in 1:site.live
+    B += cbio[i]
+  end
+
+  # 2) order old → young (no pruning — longevity removal is interleaved below)
+  sort_cohorts!(site)
+
+  capacityReduction = one(FloatType) - site.harvestCapacityReduction
+  new_B = zero(FloatType)
+  AGNPP = zero(FloatType)
+  M_TOT = zero(FloatType)
+  B_ACT = zero(FloatType)
+  mature .= false
+
+  cmt = site.c_m_tot
+  ccp = site.c_comp
+
+  calib = CALIBRATE[] && current_time > 0 &&
+          (CALIBRATE_SITE[] == 0 || Int(site.mapcode) == CALIBRATE_SITE[])
+
+  live = site.live
+  i = live
+  @inbounds while i >= 1
+    sp = csp[i]
+
+    # --- longevity: checked on the PRE-increment age; remove + short-circuit (no growth).
+    #     CohortMortality event (litter) — forest floor omitted; just drop the cohort.
+    #     Iterating oldest→youngest from the back, the live boundary holds an ALREADY-
+    #     processed cohort; copying it over slot i never reorders a younger one. ---
+    if cage[i] >= params.LONGEVITY[sp]
+      if i != live
+        csp[i] = csp[live]
+        cage[i] = cage[live]
+        cbio[i] = cbio[live]
+        cmt[i] = cmt[live]
+        ccp[i] = ccp[live]
+      end
+      live -= 1
+      i -= 1
+      continue
+    end
+
+    cage[i] += one(FloatType)                 # survives → age, then grow
+    age = cage[i]
+    bio = cbio[i]                             # this cohort not grown yet
+
+    # --- order-dependent competition: B_PM = comp_i / Σ_j comp_j over the CURRENT live set
+    #     (1..live). j > i are older & already grown this pass; j < i are younger & pre-growth.
+    #     A cohort that will be longevity-removed later still counts until the loop reaches it. ---
+    comp_i = bio^FloatType(0.95f0)
+    comp_i < one(FloatType) && (comp_i = one(FloatType))
+    C = zero(FloatType)
+    for j in 1:live
+      cj = cbio[j]^FloatType(0.95f0)
+      cj < one(FloatType) && (cj = one(FloatType))
+      C += cj
+    end
+    B_PM = comp_i / C
+
+    # --- age mortality (on incremented age) ---
+    m_age = bio
+    max_age = params.LONGEVITY[sp]
+    if age < max_age
+      f_age = exp(params.D[sp] * (age / max_age - one(FloatType)))
+      current_time <= 0 && (f_age += params.SPINUP_MORTALITY_FRACTION)
+      f_age < one(FloatType) && (m_age = bio * f_age)
+    end
+
+    # --- actual ANPP. b_pot uses the FIXED snapshot B, NOT the running biomass. ---
+    b_max = params.B_MAX_SPP[sp] * capacityReduction
+    b_pot = trunc(b_max - B + bio)
+    b_pot < one(FloatType) && (b_pot = one(FloatType))
+    (capacityReduction >= one(FloatType) && b_pot < site.prevYearMortality) && (b_pot = site.prevYearMortality)
+    b_ap = bio / b_pot
+    b_ap_s = b_ap^params.S[sp]
+    anpp_max = params.ANPP_MAX_SPP[sp] * B_PM          # == maxANPP·B_PM (your old anpp_max_c)
+    anpp_act = b_ap_s * exp(one(FloatType) - b_ap_s)
+    anpp_act > one(FloatType) && (anpp_act = one(FloatType))
+    anpp_act *= anpp_max
+    site.growthReduction > zero(FloatType) && (anpp_act *= one(FloatType) - site.growthReduction)
+
+    anpp_gross = anpp_act   # gross actualANPP, before the age-mortality discount (for calibration)
+    if calib
+      println("Yr=$(current_time). Calculate ANPPactual...")
+      println("Yr=$(current_time).     Spp=$(Int(sp)), Age=$(Int(round(age))).")
+      println("Yr=$(current_time).     MaxANPP=$(round(params.ANPP_MAX_SPP[sp];digits=1)), MaxB=$(round(b_max;digits=1)), Bsite=$(round(B;digits=1)), Bcohort=$(round(bio;digits=1)).")
+      println("Yr=$(current_time).     B_PM=$(round(B_PM;digits=4)), B_AP=$(round(b_ap;digits=4)), actualANPP=$(round(anpp_gross;digits=1)), capacityReduction=$(round(capacityReduction;digits=2)).")
+    end
+
+    AGNPP += anpp_act                        # current-year gross (LANDIS books prev year; output only)
+
+    anpp_act -= m_age
+    anpp_act < one(FloatType) && (anpp_act = one(FloatType))
+
+    # --- growth mortality ---
+    m_bio = anpp_max
+    b_ap <= one(FloatType) && (m_bio *= (FloatType(2.0f0) * b_ap) / (one(FloatType) + b_ap))
+    m_bio > bio && (m_bio = bio)
+    m_bio > anpp_max && (m_bio = anpp_max)
+    site.growthReduction > zero(FloatType) && (m_bio *= one(FloatType) - site.growthReduction)
+    m_bio -= m_age
+    m_bio < zero(FloatType) && (m_bio = zero(FloatType))
+    m_bio > anpp_act && (m_bio = anpp_act)
+
+    m_tot = m_age + m_bio
+    m_tot > bio && (m_tot = bio)
+    (current_time > 0 && rand(site.rng, FloatType) < params.PROB_MORT_SPP[sp]) && (m_tot = bio)
+
+    M_TOT += m_tot
+    nbio = bio + trunc(anpp_act - m_tot)
+    cbio[i] = nbio                           # in-place: younger cohorts see this grown value in competition
+
+    if calib
+      println("Yr=$(current_time). Calculate Delta Biomass...")
+      println("Yr=$(current_time).    Spp=$(Int(sp)), Age=$(Int(round(age))).")
+      println("Yr=$(current_time).    ANPPact=$(round(anpp_act;digits=1)), Mtotal=$(round(m_tot;digits=1)).")   # litter omitted (forest floor not tracked)
+      println("Yr=$(current_time).    DeltaB=$(round(nbio - bio;digits=1)), CohortB=$(round(bio;digits=1)), Bsite=$(round(B;digits=1))")
+    end
+
+    # --- biomass-based removal (cohort.Biomass <= 0). Dead in practice (nbio ≥ 1); kept for parity. ---
+    if nbio <= FloatType(1.0f-8)
+      if i != live
+        csp[i] = csp[live]
+        cage[i] = cage[live]
+        cbio[i] = cbio[live]
+        cmt[i] = cmt[live]
+        ccp[i] = ccp[live]
+      end
+      live -= 1
+      i -= 1
+      continue
+    end
+
+    new_B += nbio
+    age > FloatType(5.0f0) && (B_ACT += nbio)
+    age >= params.MATURITY[sp] && (mature[sp] = true)
+    i -= 1
+  end
+  site.live = live
+
+  # --- shade class ---
+  site_b_pot = params.B_MAX_ECO - site.prevYearMortality
+  B_ACT > site_b_pot && (B_ACT = site_b_pot)
+  b_am = B_ACT / params.B_MAX_ECO
+  shade_class = zero(UIntType)
+  for thr in params.MIN_REL_BIOMASS
+    if b_am > thr
+      shade_class += one(UIntType)
+    else
+      break
+    end
+  end
+
+  site.old = site.live
+  site.B = new_B
+  site.AGNPP = AGNPP
+  site.prevYearMortality = 0.0 #M_TOT
+  site.shade_class = shade_class
+  return
+end
+

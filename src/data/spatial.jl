@@ -605,6 +605,13 @@ const _SUFFICIENT_LIGHT_MATRIX = FloatType[
   1.00 1.00 1.00 1.00 0.50 0.25;
   1.00 1.00 1.00 1.00 1.00 0.50]
 
+const _SUFFICIENT_LIGHT_MATRIX2 = FloatType[
+  1.00 0.00 0.00 0.00 0.00 0.00;
+  1.00 1.00 0.00 0.00 0.00 0.00;
+  1.00 1.00 1.00 0.00 0.00 0.00;
+  1.00 1.00 1.00 1.00 0.00 0.00;
+  1.00 1.00 1.00 1.00 1.00 1.0]
+
 function make_landis_params(
   core_sp_df::DataFrame,
   species_df::DataFrame,
@@ -668,8 +675,8 @@ function make_landis_params(
     PROB_ESTAB_SPP[eco_id] = FloatType[r.ProbEstablish for r in valid]
   end
 
-  SUFFICIENT_LIGHT = [vec(_SUFFICIENT_LIGHT_MATRIX[:, sc])
-                      for sc in axes(_SUFFICIENT_LIGHT_MATRIX, 2)]
+  SUFFICIENT_LIGHT = [vec(_SUFFICIENT_LIGHT_MATRIX2[:, sc])
+                      for sc in axes(_SUFFICIENT_LIGHT_MATRIX2, 2)]
   MIN_REL_BIOMASS = [copy(min_rel_biomass) for _ in ECO_LIST]
 
   return BiomassSuccessionPlugin.BiomassSuccessionParams(

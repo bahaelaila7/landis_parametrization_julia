@@ -1770,6 +1770,8 @@ function simulate_and_test(;
   loss_params::PU.LossParams,
   site_sim_years,
   M::Int=10,
+  equiv_margin::Float64=0.2,   # equivalence band = ±equiv_margin · mean(ref)
+  tost_alpha::Float64=0.05,
   no_establishment::Bool=false,
   rng::Random.AbstractRNG,
 )::DataFrame
@@ -1846,28 +1848,56 @@ function simulate_and_test(;
     push!(sim_vals[eco_id][sp_eco][b], FloatType(total / sim_cnt[key]))
   end
 
-  # Mann-Whitney U per (eco, species, bin).
+  # TOST (two one-sided tests) for equivalence per (eco, species, bin), on log1p(AGB)
+  # so the band is multiplicative (handles skew + zeros). Δ = log1p(equiv_margin) is a
+  # fixed log-scale band ≈ a factor-(1+equiv_margin) tolerance on the original scale.
+  # Equivalent at tost_alpha iff BOTH one-sided Welch tests reject — i.e. the geometric-
+  # mean ratio sim/ref is provably inside [1/(1+m), (1+m)] (approximate under log1p).
   bin_label(b) = b <= length(loss_params.age_bins.bins_idx) ?
                  "<$(loss_params.age_bins.bins_idx[b])" : ">=$(loss_params.age_bins.bins_idx[end])"
+
+  Δ = log1p(equiv_margin)   # fixed band on the log1p scale
 
   rows = NamedTuple[]
   for eco_id in 1:n_ecos
     for sp_eco in eachindex(eco_species_ids[eco_id])
       gsp = eco_species_ids[eco_id][sp_eco]
       for b in 1:n_bins
-        ref = ref_vals[eco_id][sp_eco][b]
-        sim = sim_vals[eco_id][sp_eco][b]
-        (isempty(ref) || isempty(sim)) && continue
-        test = HypothesisTests.MannWhitneyUTest(Float64.(ref), Float64.(sim))
+        rawref = Float64.(ref_vals[eco_id][sp_eco][b])
+        rawsim = Float64.(sim_vals[eco_id][sp_eco][b])
+        (length(rawref) < 2 || length(rawsim) < 2) && continue   # need a variance per side
+
+        ref = log1p.(rawref)
+        sim = log1p.(rawsim)
+        d = Statistics.mean(sim) - Statistics.mean(ref)
+
+        if Statistics.var(ref) == 0 && Statistics.var(sim) == 0
+          # both bins constant → no sampling uncertainty; decide directly (Welch SE would be 0)
+          equiv = abs(d) < Δ
+          p_tost, ci_lo, ci_hi = (equiv ? 0.0 : 1.0), d, d
+        else
+          # two one-sided Welch tests against the shifted nulls ∓Δ (SE > 0 here)
+          p_lower = HypothesisTests.pvalue(HypothesisTests.UnequalVarianceTTest(sim .+ Δ, ref); tail=:right)  # H1: d > −Δ
+          p_upper = HypothesisTests.pvalue(HypothesisTests.UnequalVarianceTTest(sim .- Δ, ref); tail=:left)   # H1: d <  Δ
+          p_tost = max(p_lower, p_upper)
+          ci = HypothesisTests.confint(HypothesisTests.UnequalVarianceTTest(sim, ref); level=1 - 2 * tost_alpha)
+          ci_lo, ci_hi = ci[1], ci[2]
+        end
+
         push!(rows, (
           eco=eco_list[eco_id],
           species=species_list[gsp],
           bin=b,
           age_class=bin_label(b),
-          n_ref=length(ref),
-          n_sim=length(sim),
-          U_statistic=test.U,
-          p_value=HypothesisTests.pvalue(test),
+          n_ref=length(rawref),
+          n_sim=length(rawsim),
+          mean_ref=Statistics.mean(rawref),   # original scale, for context
+          log_diff=d,                          # mean(log1p sim) − mean(log1p ref)
+          ratio=exp(d),                        # ≈ geometric-mean ratio sim/ref
+          margin=Δ,                            # log-scale band
+          ci_lo=ci_lo, ci_hi=ci_hi,            # CI for log_diff
+          p_tost=p_tost,
+          equivalent=(p_tost < tost_alpha),
         ))
       end
     end
@@ -1957,7 +1987,7 @@ function simulate_spatial_treemap(;
   communities_db::Union{String,Nothing}=nothing,
   treemap_version::Int=2022,
   treemap_db_path::String="../data_eco_cohorts.duckdb",
-  rng_seed::Int=1337,
+  rng_seed::Int=113387,
   timehorizon_years::Int=50,
   output_every_years::Int=5,
 )
@@ -2060,10 +2090,10 @@ function simulate_spatial_landis(;
   species_data::String,
   eco_ecocode_mapping::String,
   spp_eco_year::Int=0,
-  min_rel_biomass::Vector{Float32}=Float32[0.15, 0.25, 0.50, 0.75, 0.85],
-  rng_seed::Int=147,
+  min_rel_biomass::Vector{Float32}=Float32[0.25, 0.45, 0.56, 0.70, 0.90],
+  rng_seed::Int=1337,
   timehorizon_years::Int=50,
-  output_every_years::Int=5,
+  output_every_years::Int=1,
 )
   rng = RNGType(UInt64(rng_seed))
 
@@ -2345,7 +2375,7 @@ function landis_main()
     eco_ecocode_mapping=joinpath(prefix, "eco_ecocode_mapping.csv"),
     spp_eco_year=0,
     timehorizon_years=50,
-    output_every_years=5,
+    output_every_years=1,
   )
 end
 
