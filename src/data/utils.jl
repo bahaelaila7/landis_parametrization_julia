@@ -232,7 +232,14 @@ function build_padded_sim_years(splots_subset::DataFrame, n_plots_total::Int)
   (sim_years=padded,)
 end
 
-function get_injection_cohorts(splots::DataFrame)::DataFrame
+function get_injection_cohorts(splots::DataFrame; all_cohorts::Bool=false)::DataFrame
+  # all_cohorts=true: return the FULL observed state at every measurement year
+  # (one row per observed cohort), so the caller can override the simulator
+  # entirely — replacing each measured site's cohorts with the empirical ones.
+  # Used for the override sanity test and the injection-noise sensitivity test.
+  if all_cohorts
+    return select(splots, [:plot_id, :sim_year, :eco_species_id, :age_calc, :agb_sum])
+  end
   # Cohorts with birth_sim_year = sim_year - age_calc > 0 were born after
   # simulation start and are not in the initial conditions. Return one row per
   # cohort at its first FIA measurement year so the caller can inject it into

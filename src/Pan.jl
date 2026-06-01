@@ -155,21 +155,124 @@ end
 const _SiteInjectionYear = Vector{Tuple{Int,Vector{Tuple{UIntType,FloatType,FloatType}}}}
 const _SiteInjectionDict = Dict{Int,_SiteInjectionYear}
 
+# Diagnostic toggle. When true, the injection path is switched to OVERRIDE mode:
+# get_injection_cohorts returns the full observed state at every measurement year,
+# and _inject_observed_cohorts! forces each observed cohort onto the site — overwriting
+# the biomass of the matching (species, age) cohort in place, or adding it if absent —
+# so sim matches obs at every loss point. Flip from the REPL: `Pan.OVERRIDE_INJECTION[] = false`.
+# Mirrors the BiomassSuccessionPlugin.CALIBRATE[] pattern. For the sensitivity test, set
+# OVERRIDE_INJECTION_NOISE[] > 0 (multiplicative jitter sd on injected biomass).
+# OVERRIDE_INJECTION_REPLACE[] = true switches override to FULL REPLACE: each measured
+# site is wiped (live/old/B reset) and rebuilt from exactly the observed cohorts, dropping
+# sim-only cohorts (ones that should have died but didn't). Gives an exact multi-cohort
+# state for stress-testing the CSR indexing. Requires OVERRIDE_INJECTION[] (for the data).
+const OVERRIDE_INJECTION = Ref(true)
+const OVERRIDE_INJECTION_NOISE = Ref(0.0)
+const OVERRIDE_INJECTION_REPLACE = Ref(true)
+
 # Only touches the sites that actually have injections (typically << n_sites).
 # _new_cohort_counts is already == site.live for all other sites after process_plugin!.
-function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear)
+# override=false (default): append every listed cohort as a new cohort — unchanged.
+# override=true: for each observed cohort, overwrite the biomass of the matching
+#   (species, age) cohort in place; add it only if no match exists. Sim cohorts with
+#   no observed counterpart are left untouched; capacity grows only by the unmatched count.
+function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; override::Bool=false, replace::Bool=false)
+  if !override
+    for (site_idx, cohorts) in site_cohorts
+      site = getsite(soa, site_idx)
+      site.active || continue
+      site._new_cohort_counts = Int(site.live) + length(cohorts)
+    end
+    PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+    for (site_idx, cohorts) in site_cohorts
+      site = getsite(soa, site_idx)
+      site.active || continue
+      for (sp, age, bio) in cohorts
+        BiomassSuccessionPlugin.add_cohort!(site, sp, age, bio)
+        site.B += bio
+      end
+    end
+    return
+  end
+
+  if replace
+    # Full replace: wipe each measured site and rebuild it from exactly the observed
+    # cohorts (raw biomass, no trunc; optional noise). Drops sim-only cohorts so the
+    # site state equals the data even when some sim cohorts should have died but didn't.
+    for (site_idx, cohorts) in site_cohorts
+      site = getsite(soa, site_idx)
+      site.active || continue
+      site._new_cohort_counts = length(cohorts)
+    end
+    PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+    noise = FloatType(OVERRIDE_INJECTION_NOISE[])
+    for (site_idx, cohorts) in site_cohorts
+      site = getsite(soa, site_idx)
+      site.active || continue
+      site.live = zero(UIntType)
+      site.old = zero(UIntType)
+      site.B = zero(FloatType)
+      cbio = site.c_bio
+      for (sp, age, bio) in cohorts
+        b = noise > zero(FloatType) ? bio * (one(FloatType) + noise * randn(site.rng, FloatType)) : bio
+        BiomassSuccessionPlugin.add_cohort!(site, sp, age, b)
+        cbio[Int(site.live)] = b   # overwrite add_cohort!'s trunc with the raw value
+        site.B += b
+      end
+    end
+    return
+  end
+
+  # Pass 1: size each site to live + (# observed cohorts with no (species,age) match).
   for (site_idx, cohorts) in site_cohorts
     site = getsite(soa, site_idx)
     site.active || continue
-    site._new_cohort_counts = site.live + length(cohorts)
+    csp = site.c_species
+    cage = site.c_age
+    live = Int(site.live)
+    n_new = 0
+    for (sp, age, _) in cohorts
+      matched = false
+      for j in 1:live
+        if csp[j] == sp && cage[j] == age
+          matched = true
+          break
+        end
+      end
+      matched || (n_new += 1)
+    end
+    site._new_cohort_counts = live + n_new
   end
   PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+
+  # Pass 2: overwrite matches in place (searching only the original live range),
+  # append the unmatched. Biomass is written RAW (no trunc) so the injected state
+  # equals the reference exactly — only this diagnostic path skips the integer-valued
+  # truncation that add_cohort!/succession use everywhere else (C# parity).
+  noise = FloatType(OVERRIDE_INJECTION_NOISE[])
   for (site_idx, cohorts) in site_cohorts
     site = getsite(soa, site_idx)
     site.active || continue
+    csp = site.c_species
+    cage = site.c_age
+    cbio = site.c_bio
+    orig_live = Int(site.live)
     for (sp, age, bio) in cohorts
-      BiomassSuccessionPlugin.add_cohort!(site, sp, age, bio)
-      site.B += bio
+      b = noise > zero(FloatType) ? bio * (one(FloatType) + noise * randn(site.rng, FloatType)) : bio
+      matched = false
+      for j in 1:orig_live
+        if csp[j] == sp && cage[j] == age
+          site.B += b - cbio[j]
+          cbio[j] = b
+          matched = true
+          break
+        end
+      end
+      if !matched
+        BiomassSuccessionPlugin.add_cohort!(site, sp, age, b)
+        cbio[Int(site.live)] = b   # overwrite add_cohort!'s trunc with the raw value
+        site.B += b
+      end
     end
   end
 end
@@ -643,7 +746,7 @@ function parametrize(; cohorts_db_path::String,
     val_spdf_plts = Data.make_spdf_dict(val_spdf, eco_species_ids)
     val_site_sim_years = Data.get_site_sim_years(val_spdf)
     val_spinup_cohorts = DataFrame()
-    val_injection_cohorts = no_establishment ? Data.get_injection_cohorts(splots_val_raw) : nothing
+    val_injection_cohorts = (no_establishment || OVERRIDE_INJECTION[]) ? Data.get_injection_cohorts(splots_val_raw; all_cohorts=OVERRIDE_INJECTION[]) : nothing
     val_ref_soa = make_sites(splots_val_raw, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment)
     val_splots = splots_val_raw
     println("Val: $(length(unique(splots_val_raw.plot_id))) plots, $(nrow(splots_val_raw)) rows")
@@ -683,7 +786,7 @@ function parametrize(; cohorts_db_path::String,
 
 
 
-  injection_cohorts = no_establishment ? Data.get_injection_cohorts(splots) : nothing
+  injection_cohorts = (no_establishment || OVERRIDE_INJECTION[]) ? Data.get_injection_cohorts(splots; all_cohorts=OVERRIDE_INJECTION[]) : nothing
   ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment)
   if search_mode == "sobol"
     return parametrize_sobol(; ref_soa=ref_soa,
@@ -869,7 +972,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       #println("\ttimestep $(t)")
       PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
       if !isnothing(injection_dict) && current_sim_year in injection_years
-        _inject_observed_cohorts!(soa, injection_dict[current_sim_year])
+        _inject_observed_cohorts!(soa, injection_dict[current_sim_year]; override=OVERRIDE_INJECTION[], replace=OVERRIDE_INJECTION_REPLACE[])
       end
       if search_tier == 1
         Threads.@threads :static for i in 1:soa.n
@@ -1632,7 +1735,7 @@ function _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
   PlotContext(splots, species_list, eco_species_ids, site_sim_years,
     spinup_cohorts, spdf_plts, loss_params, max_sim_year,
     no_establishment,
-    no_establishment ? Data.get_injection_cohorts(splots) : nothing)
+    (no_establishment || OVERRIDE_INJECTION[]) ? Data.get_injection_cohorts(splots; all_cohorts=OVERRIDE_INJECTION[]) : nothing)
 end
 
 function _run_and_plot(bio_params, label, ctx::PlotContext;
@@ -2014,6 +2117,7 @@ function simulate_spatial_treemap(;
     @time splots, eco_list, eff_eco_list, species_list = Data.load_treemap_cohorts(
       cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
+    println(species_list)
 
     println("Remapping params to data eco/species")
     @time mod_params, mapped_splots, eco_species_ids = Data.map_params_to_data_treemap(
