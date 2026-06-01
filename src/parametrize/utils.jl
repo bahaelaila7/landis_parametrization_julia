@@ -382,7 +382,7 @@ end
     #log_diff -= log10(1 + rec.sp_agb_sum) #+ loss_params.EPS)
     sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
     site_agb_loss -= rec.sp_agb_sum
-    if debug || true
+    if debug
       println("smoothing_weights $(loss_params.smoothing_weights)")
       smoothed_ages = smooth_ages(; ages=ages, smoothing_window=loss_params.smoothing_weights)
       binned_ages = bin_ages(smoothed_ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
@@ -406,8 +406,8 @@ end
 
 function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; lp::FloatType=one(FloatType), debug::Bool=false)::SiteLoss
   #Sort by species
-  println("-----------current_year $(current_year) -------------")
-  println("-----------current_site $(site.ref_cn) -------------")
+  #println("-----------current_year $(current_year) -------------")
+  #println("-----------current_site $(site.ref_cn) -------------")
   eco_n_species = length(site.sp_mature)
   species_id_map = eco_species_ids[site.eco_id]
   #@assert eco_n_species == length(spdf_plt.keys) "eco species numbers do not match"
@@ -448,10 +448,11 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
       # then use p[sp_start_index:sp_end_index] to gather from c_bio, c_age
       # conclude sp
       if sp != prev_sp
-        @debug "concluding_species: $(sp)"
+        @debug "concluding_species: $(prev_sp)"
         sp_end_idx = i - 1
-        println("here1: $(sp_start_idx):$(sp_end_idx), $(@view p[sp_start_idx:sp_end_idx])")
-        site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
+        #println("here1: $(sp_start_idx):$(sp_end_idx), $(@view p[sp_start_idx:sp_end_idx])")
+        # The segment [sp_start_idx:i-1] just finished belongs to prev_sp, NOT the new sp.
+        site_agb_loss = calculate_species_loss!(; sp=prev_sp, gsp=species_id_map[prev_sp],
           site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
           spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
         prev_sp = sp
@@ -461,7 +462,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
       if i == length(p)
         @debug ("concluding_species: $(sp)")
         sp_end_idx = i
-        println("here2: $(sp_start_idx):$(sp_end_idx), $(@view p[sp_start_idx:sp_end_idx])")
+        #println("here2: $(sp_start_idx):$(sp_end_idx), $(@view p[sp_start_idx:sp_end_idx])")
         site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
           site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
           spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)

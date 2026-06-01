@@ -166,9 +166,9 @@ const _SiteInjectionDict = Dict{Int,_SiteInjectionYear}
 # site is wiped (live/old/B reset) and rebuilt from exactly the observed cohorts, dropping
 # sim-only cohorts (ones that should have died but didn't). Gives an exact multi-cohort
 # state for stress-testing the CSR indexing. Requires OVERRIDE_INJECTION[] (for the data).
-const OVERRIDE_INJECTION = Ref(true)
+const OVERRIDE_INJECTION = Ref(false)
 const OVERRIDE_INJECTION_NOISE = Ref(0.0)
-const OVERRIDE_INJECTION_REPLACE = Ref(true)
+const OVERRIDE_INJECTION_REPLACE = Ref(false)
 
 # Only touches the sites that actually have injections (typically << n_sites).
 # _new_cohort_counts is already == site.live for all other sites after process_plugin!.
@@ -214,7 +214,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
       site.B = zero(FloatType)
       cbio = site.c_bio
       for (sp, age, bio) in cohorts
-        b = noise > zero(FloatType) ? bio * (one(FloatType) + noise * randn(site.rng, FloatType)) : bio
+        b = noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
         BiomassSuccessionPlugin.add_cohort!(site, sp, age, b)
         cbio[Int(site.live)] = b   # overwrite add_cohort!'s trunc with the raw value
         site.B += b
@@ -258,7 +258,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
     cbio = site.c_bio
     orig_live = Int(site.live)
     for (sp, age, bio) in cohorts
-      b = noise > zero(FloatType) ? bio * (one(FloatType) + noise * randn(site.rng, FloatType)) : bio
+      b = noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
       matched = false
       for j in 1:orig_live
         if csp[j] == sp && cage[j] == age
@@ -728,6 +728,7 @@ function parametrize(; cohorts_db_path::String,
   n_ecoregions = length(eco_list)
   n_plots = maximum(splots.plot_id)
   println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
+  println(species_list)
 
   if diagnose
     plot_biomass_bin_deltas(splots, loss_params; output_dir=output_dir)
@@ -2343,6 +2344,7 @@ function export_landis_scenario(;
     @time splots, eco_list, eff_eco_list, species_list = Data.load_treemap_cohorts(
       cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
+    println(species_list)
 
     println("Remapping params to data eco/species")
     @time mod_params, mapped_splots, eco_species_ids = Data.map_params_to_data_treemap(
