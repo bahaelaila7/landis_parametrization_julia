@@ -166,7 +166,7 @@ const _SiteInjectionDict = Dict{Int,_SiteInjectionYear}
 # site is wiped (live/old/B reset) and rebuilt from exactly the observed cohorts, dropping
 # sim-only cohorts (ones that should have died but didn't). Gives an exact multi-cohort
 # state for stress-testing the CSR indexing. Requires OVERRIDE_INJECTION[] (for the data).
-const OVERRIDE_INJECTION = Ref(true)
+const OVERRIDE_INJECTION = Ref(false)
 const OVERRIDE_INJECTION_NOISE = Ref(0.0)
 const OVERRIDE_INJECTION_REPLACE = Ref(false)
 # OVERRIDE_INJECTION_SYNC[] = true: SET-SYNC mode (choice B) — the injection manages the cohort
@@ -174,7 +174,7 @@ const OVERRIDE_INJECTION_REPLACE = Ref(false)
 # observed cohorts the sim lacks = "recruited", with observed biomass) but LEAVES matched
 # survivors' sim biomass untouched, so the simulator fits their biomass deterministically.
 # Requires OVERRIDE_INJECTION[]; mutually exclusive with REPLACE (REPLACE takes precedence).
-const OVERRIDE_INJECTION_SYNC = Ref(true)
+const OVERRIDE_INJECTION_SYNC = Ref(false)
 
 # Only touches the sites that actually have injections (typically << n_sites).
 # _new_cohort_counts is already == site.live for all other sites after process_plugin!.
@@ -1826,6 +1826,13 @@ function run_from_yaml(yaml_path::String)
 
   search_mode = get_cfg("search_mode", "lbsa")
 
+  # Injection-override flags (module Refs read at injection time). Default = the current Ref
+  # value, so omitting a key keeps the in-code default; set them in yaml to control a run.
+  OVERRIDE_INJECTION[] = Bool(get_cfg("override_injection", OVERRIDE_INJECTION[]))
+  OVERRIDE_INJECTION_REPLACE[] = Bool(get_cfg("override_injection_replace", OVERRIDE_INJECTION_REPLACE[]))
+  OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))
+  OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", OVERRIDE_INJECTION_NOISE[]))
+
   if search_mode == "plot_only"
     params_path = String(get_cfg("params_path", ""))
     isempty(params_path) && error("search_mode=plot_only requires params_path in yaml")
@@ -2340,6 +2347,7 @@ function simulate_spatial_treemap(;
   rng_seed::Int=113387,
   timehorizon_years::Int=50,
   output_every_years::Int=5,
+  simple_match::Bool=true,
 )
   rng = RNGType(UInt64(rng_seed))
 
@@ -2361,7 +2369,7 @@ function simulate_spatial_treemap(;
     @assert size(cn_raster) == size(eco_raster_data) "Raster size mismatch: treemap $(size(cn_raster)) ≠ eco $(size(eco_raster_data))"
 
     println("Extracting cohorts from DuckDB (treemap path)")
-    @time splots, eco_list, eff_eco_list, species_list = Data.load_treemap_cohorts(
+    @time splots, eco_list, eff_eco_list, species_list = (simple_match ? Data.load_treemap_cohorts_simple : Data.load_treemap_cohorts)(
       cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
     println(species_list)
@@ -2410,7 +2418,7 @@ function simulate_spatial_treemap(;
   ref_raster_path = !isnothing(treemap_raster) ?
                     joinpath(data_dir, treemap_raster) :
                     joinpath(data_dir, eco_raster)
-  BiomassSuccessionPlugin.generate_rasters_from_output(; output_dir=output_dir, ref_raster_path=ref_raster_path)
+  BiomassSuccessionPlugin.generate_rasters_from_output(; output_dir=output_dir, ef_raster_path=ref_raster_path)
 
   println("Coalescing Arrow files to DuckDB")
   BiomassSuccessionPlugin.coalesce_to_duckdb(; output_dir=output_dir, db_path=joinpath(output_dir, "cohorts.duckdb"))
@@ -2450,9 +2458,7 @@ function simulate_spatial_landis(;
 
   println("Loading LANDIS rasters")
   @time communities_raster = Data.load_landis_mapcode_raster(initial_communities_tif)
-  println(communities_raster)
   @time eco_raster = Data.load_eco_raster(ecoregion_tif)
-  println(eco_raster)
   @assert size(communities_raster) == size(eco_raster) "Raster size mismatch"
 
   println("Loading LANDIS tables")
@@ -2561,10 +2567,12 @@ function export_landis_scenario(;
   duration_years::Int=40,
   cell_length_m::Int=30,
   timestep::Int=5,
+  downsample::Int=1,
   # Ignored parameters (for signature compatibility with simulate_spatial_treemap)
   rng_seed::Int=1337,
   timehorizon_years::Int=50,
   output_every_years::Int=5,
+  simple_match::Bool=true,
 )
   mkpath(output_dir)
 
@@ -2579,6 +2587,7 @@ function export_landis_scenario(;
   eco_mapping_df = CSV.read(eco_mapping_path, DataFrame)
 
   local communities_df, combo_to_mapcode, mod_params, eco_species_ids, cn_raster
+  local mapcode_raster, coarse_eco_raster
 
   if !isnothing(treemap_raster)
     println("Loading treemap raster: $treemap_raster")
@@ -2586,9 +2595,21 @@ function export_landis_scenario(;
       joinpath(data_dir, treemap_raster); treemap_version=treemap_version)
     @assert size(cn_raster) == size(eco_raster_data) "Raster size mismatch: treemap $(size(cn_raster)) ≠ eco $(size(eco_raster_data))"
 
+    # Optional spatial downsample: group n×n fine pixels into one coarse cell. The eco
+    # raster used for species matching is replaced by its block-majority so the cohorts in
+    # each coarse cell are valid for that cell's (majority) ecoregion.
+    eco_match_raster = eco_raster_data
+    mapcode_raster = nothing
+    coarse_eco_raster = nothing
+    if downsample > 1
+      println("Downsampling rasters $(downsample)x ($(cell_length_m)m → $(cell_length_m * downsample)m), eco by majority vote")
+      valid_ecos = Set(Int.(eco_mapping_df.ecocode))
+      eco_match_raster, coarse_eco_raster = Data.block_majority_eco(eco_raster_data, downsample, valid_ecos)
+    end
+
     println("Extracting cohorts from DuckDB (treemap path)")
-    @time splots, eco_list, eff_eco_list, species_list = Data.load_treemap_cohorts(
-      cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params)
+    @time splots, eco_list, eff_eco_list, species_list = (simple_match ? Data.load_treemap_cohorts_simple : Data.load_treemap_cohorts)(
+      cn_raster, eco_match_raster, treemap_db_path, eco_mapping_path, params)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
     println(species_list)
 
@@ -2596,9 +2617,16 @@ function export_landis_scenario(;
     @time mod_params, mapped_splots, eco_species_ids = Data.map_params_to_data_treemap(
       params, eco_list, eff_eco_list, species_list, splots)
 
-    println("Deduplicating cohorts by (plt_cn, ecocode)")
-    @time communities_df, combo_to_mapcode = Data.deduplicate_for_export(
-      mapped_splots, cn_raster, eco_raster_data)
+    if downsample > 1
+      println("Aggregating cohorts into $(downsample)x coarse cells (combine species×age, biomass / $(downsample^2))")
+      @time communities_df, mapcode_raster = Data.aggregate_coarse_communities(
+        mapped_splots, cn_raster, eco_match_raster, downsample)
+      combo_to_mapcode = nothing
+    else
+      println("Deduplicating cohorts by (plt_cn, ecocode)")
+      @time communities_df, combo_to_mapcode = Data.deduplicate_for_export(
+        mapped_splots, cn_raster, eco_raster_data)
+    end
 
   elseif !isnothing(communities_csv) || !isnothing(communities_db)
     if !isnothing(communities_csv)
@@ -2614,6 +2642,8 @@ function export_landis_scenario(;
       ic_df, eco_raster_data, eco_mapping_df, params)
     cn_raster = nothing
     combo_to_mapcode = nothing
+    mapcode_raster = nothing
+    coarse_eco_raster = nothing
 
     # ic_df already has semantic columns (mapcode, species, age/CohortAge, biomass/CohortBiomass).
     # Normalize column names and filter to species present in mod_params.
@@ -2641,11 +2671,12 @@ function export_landis_scenario(;
   println("\nExporting LANDIS-II scenario files to $output_dir ...")
 
   # 1. scenario.txt
+  eff_cell_length = downsample > 1 ? cell_length_m * downsample : cell_length_m
   println("Exporting scenario.txt")
   BiomassSuccessionPlugin.export_scenario_file(;
     output_path=joinpath(output_dir, "scenario.txt"),
     duration_years=duration_years,
-    cell_length_m=cell_length_m,
+    cell_length_m=eff_cell_length,
     rng_seed=rng_seed,
   )
 
@@ -2654,9 +2685,17 @@ function export_landis_scenario(;
   BiomassSuccessionPlugin.export_ecoregions_txt(
     mod_params, eco_mapping_df;
     output_path=joinpath(output_dir, "ecoregion.txt"))
-  println("Copying ecoregion.tif")
-  cp(realpath(eco_raster_path), joinpath(output_dir, "ecoregion.tif"); force=true)
-  println("  ecoregion.tif")
+  if downsample > 1 && !isnothing(coarse_eco_raster)
+    println("Writing downsampled ecoregion.tif")
+    BiomassSuccessionPlugin.export_coarse_raster(
+      coarse_eco_raster, eco_raster_path, downsample;
+      output_path=joinpath(output_dir, "ecoregion.tif"),
+      dtype=Int16, nodata=0)
+  else
+    println("Copying ecoregion.tif")
+    cp(realpath(eco_raster_path), joinpath(output_dir, "ecoregion.tif"); force=true)
+    println("  ecoregion.tif")
+  end
 
   # 3. Climate config file + any data files it references
   climate_ref = nothing  # filename to embed in biomass_succession.txt
@@ -2679,7 +2718,14 @@ function export_landis_scenario(;
     output_path=joinpath(output_dir, "initial_communities.csv"))
 
   # 5. initial_communities.tif (treemap path only; mapcode raster)
-  if !isnothing(combo_to_mapcode)
+  if downsample > 1 && !isnothing(mapcode_raster)
+    println("Exporting downsampled initial_communities.tif")
+    ref_raster = joinpath(data_dir, treemap_raster)
+    BiomassSuccessionPlugin.export_coarse_raster(
+      mapcode_raster, ref_raster, downsample;
+      output_path=joinpath(output_dir, "initial_communities.tif"),
+      dtype=Int32, nodata=0)
+  elseif !isnothing(combo_to_mapcode)
     println("Exporting initial_communities.tif")
     ref_raster = joinpath(data_dir, treemap_raster)
     BiomassSuccessionPlugin.export_initial_communities_tif(
@@ -2702,15 +2748,33 @@ end
 
 function export_landis_scenario_main()
   export_landis_scenario(
-    data_dir="../",
-    output_dir="./outputs/landis_scenario",
-    eco_raster="eco_raster.tif",
-    eco_ecocode_mapping="eco_ecocode_mapping.csv",
-    biomass_params_path="landis_parametrization_julia/outputs/best_params.jld2",
-    treemap_raster="treemap.tif",
+    data_dir="../poster/fl5/",
+    output_dir="../poster/fl5/landis_90",
+    eco_raster="ecoregion.tif",
+    eco_ecocode_mapping="eco_ecocode_l3_mapping.csv",
+    biomass_params_path="params.jld2",
+    treemap_raster="FL5_22.tif",
     treemap_version=2022,
-    treemap_db_path="../data_eco_cohorts.duckdb",
-    climate_config_file="biomass-climate.txt",
+    treemap_db_path="../FIASQLITE2PGSQL/FIADB.duckdb",
+    climate_config_file="../poster/fl5/biomass-climate.txt",
+    downsample=3,
+  )
+end
+
+function landis_poster_main()
+  prefix = joinpath("../poster/fl5/landis_90")
+  simulate_spatial_landis(
+    output_dir="../poster/fl5/pan_outputs_90",
+    initial_communities_tif=joinpath(prefix, "initial_communities.tif"),
+    ecoregion_tif=joinpath(prefix, "ecoregion.tif"),
+    initial_communities_csv=joinpath(prefix, "initial_communities.csv"),
+    core_species_data=joinpath(prefix, "CoreSpeciesData.txt"),
+    spp_ecoregion_data=joinpath(prefix, "SppEcoregionData.csv"),
+    species_data=joinpath(prefix, "SpeciesData.csv"),
+    eco_ecocode_mapping=joinpath(prefix, "eco_ecocode_mapping.csv"),
+    spp_eco_year=0,
+    timehorizon_years=50,
+    output_every_years=5,
   )
 end
 

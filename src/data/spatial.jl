@@ -11,7 +11,7 @@ const AG = ArchGDAL
 const AttrDict = Dict{String,Any}
 const AttrTable = Dict{Int64,AttrDict}
 
-export load_eco_raster, load_treemap_raster, load_treemap_cohorts,
+export load_eco_raster, load_treemap_raster, load_treemap_cohorts, load_treemap_cohorts_simple,
   map_params_to_data_treemap, expand_to_pixels, deduplicate_for_export,
   load_csv_communities, load_duckdb_communities, prepare_general_splots,
   load_landis_mapcode_raster, load_landis_core_species,
@@ -311,6 +311,84 @@ function _make_effective_splots(df::DataFrame)
   return splots, eco_vals, eff_eco_vals, eff_sp_vals
 end
 
+# Simpler alternative to load_treemap_cohorts. Source = curated_cohorts_landis (not
+# data_eco_cohorts), and species are matched ONLY against the raster (target) ecoregion's
+# params — no eco-borrowing, no dominant-eco tie-break:
+#   1. exact species_symbol in that eco's params  → species_symbol
+#   2. else _GRP_<spgrpcd> in that eco's params   → _GRP_<spgrpcd>
+#   3. else _<sftwd_hrdwd> catchall               → _H / _S
+#   (none present → row dropped)
+# This mirrors assign_tiered_species!'s naming. The treemap raster's CN is the proper FIA
+# plot CN, which lives in the PLOT table; curated_cohorts_landis.plt_cn is a synthetic per-plot
+# key, so we resolve CN via PLOT and join curated on (plot keys + measdate) for that inventory.
+function load_treemap_cohorts_simple(
+  cn_raster::Array{Union{Missing,Int64}},
+  eco_raster::Matrix{Int16},
+  db_path::String,
+  eco_ecocode_mapping_csv::String,
+  params;
+  plot_table::String="PLOT",
+)
+  eco_ecocode_df = CSV.read(eco_ecocode_mapping_csv, DataFrame)
+
+  cn_eco_counts = StatsBase.countmap(
+    (cn, Int64(eco))
+    for (cn, eco) in zip(cn_raster, eco_raster)
+    if !ismissing(cn)
+  )
+  cn_eco_df = DataFrame(
+    CN=Int64[k[1] for k in keys(cn_eco_counts)],
+    ecocode=Int64[k[2] for k in keys(cn_eco_counts)],
+    count=collect(values(cn_eco_counts)),
+  )
+
+  params_eco_sp_df = DataFrame(
+    eco=[params.ECO_LIST[eid]
+         for eid in eachindex(params.ECO_LIST)
+         for _ in params.ECO_SPECIES_IDS[eid]],
+    species=[params.SPECIES_LIST[Int(sid)]
+             for eid in eachindex(params.ECO_LIST)
+             for sid in params.ECO_SPECIES_IDS[eid]],
+  )
+
+  db = DuckDB.DB(db_path)
+  con = DuckDB.connect(db)
+  DuckDB.register_data_frame(con, cn_eco_df, "cn_eco")
+  DuckDB.register_data_frame(con, eco_ecocode_df, "eco_ecocode_map")
+  DuckDB.register_data_frame(con, params_eco_sp_df, "params_eco_species")
+
+  df = DuckDB.execute(
+    con,
+    """
+    SELECT
+        df.CN::VARCHAR                                AS plt_cn,
+        df.ecocode                                   AS raster_ecocode,
+        e.eco                                        AS raster_eco,
+        e.eco                                        AS effective_eco,
+        o.statecd, o.unitcd, o.countycd, o.plot, o.subp,
+        o.agb, o.measdate, o.age_calc,
+        COALESCE(p1.species, p2.species, p3.species) AS effective_species_symbol_map
+    FROM cn_eco df
+    JOIN eco_ecocode_map e ON df.ecocode = e.ecocode
+    JOIN $(plot_table) pl  ON df.CN = pl.CN
+    JOIN curated_cohorts_landis o
+        ON  o.statecd  = pl.statecd
+        AND o.unitcd   = pl.unitcd
+        AND o.countycd = pl.countycd
+        AND o.plot     = pl.plot
+        AND o.measdate = MAKE_DATE(pl.measyear::INTEGER, pl.measmon::INTEGER, pl.measday::INTEGER)
+    -- match only against the raster (target) ecoregion, in priority order
+    LEFT JOIN params_eco_species p1 ON p1.eco = e.eco AND p1.species = o.species_symbol
+    LEFT JOIN params_eco_species p2 ON p2.eco = e.eco AND p2.species = '_GRP_' || o.spgrpcd
+    LEFT JOIN params_eco_species p3 ON p3.eco = e.eco AND p3.species = '_' || o.sftwd_hrdwd
+    WHERE COALESCE(p1.species, p2.species, p3.species) IS NOT NULL
+    """
+  ) |> DataFrame
+
+  DuckDB.close(db)
+  return _make_effective_splots(df)
+end
+
 function map_params_to_data_treemap(params, eco_list, effective_eco_list, species_list, splots)
   params_species_df = DataFrame(
     param_species=params.SPECIES_LIST,
@@ -479,6 +557,105 @@ function deduplicate_for_export(
   )
 
   return communities_df, combo_to_mapcode
+end
+
+# Downsample an ecoregion raster by grouping n×n fine pixels: each coarse cell takes the
+# majority ecoregion among its fine pixels, restricted to ecos present in valid_ecos
+# (a block with no valid eco becomes 0 = nodata). Returns (eco_fine, coarse_eco):
+#   eco_fine   — fine-resolution raster with every pixel overwritten by its block's majority
+#                (so cohort/species matching stays consistent with the coarse cell's eco)
+#   coarse_eco — the downsampled raster, size cld.(size(eco_raster), n)
+# Rasters are indexed (width, height) to match ArchGDAL's AG.read.
+function block_majority_eco(eco_raster::Matrix{Int16}, n::Int, valid_ecos::Set{Int})
+  w, h = size(eco_raster)
+  wc, hc = cld(w, n), cld(h, n)
+  coarse_eco = zeros(Int16, wc, hc)
+  eco_fine = zeros(Int16, w, h)
+  counts = Dict{Int16,Int}()
+  for cy in 1:hc, cx in 1:wc
+    empty!(counts)
+    xr = ((cx - 1) * n + 1):min(cx * n, w)
+    yr = ((cy - 1) * n + 1):min(cy * n, h)
+    for py in yr, px in xr
+      v = eco_raster[px, py]
+      (Int(v) in valid_ecos) || continue
+      counts[v] = get(counts, v, 0) + 1
+    end
+    maj = Int16(0)
+    best = -1
+    for (v, c) in counts
+      if c > best || (c == best && v < maj)
+        best = c
+        maj = v
+      end
+    end
+    coarse_eco[cx, cy] = maj
+    for py in yr, px in xr
+      eco_fine[px, py] = maj
+    end
+  end
+  return eco_fine, coarse_eco
+end
+
+# Group n×n fine pixels into coarse cells. Each coarse cell's community is the union of its
+# fine pixels' cohorts, with cohorts of the same (species, age) combined and the result
+# divided by n² (per-area density of the coarse cell). eco_fine must be the block-majority
+# eco (constant within each block, e.g. from block_majority_eco), matching the eco the
+# cohorts were extracted under. Returns (communities_df, mapcode_raster) where
+# mapcode_raster is the coarse mapcode grid (0 = nodata; sequential mapcode per non-empty cell).
+function aggregate_coarse_communities(
+  mapped_splots::DataFrame,
+  cn_raster::Array{Union{Missing,Int64}},
+  eco_fine::Matrix{Int16},
+  n::Int,
+)
+  combo_cohorts = Dict{Tuple{String,Int64},Vector{Tuple{String,FloatType,FloatType}}}()
+  for row in eachrow(mapped_splots)
+    key = (row.plt_cn, Int64(row.raster_ecocode))
+    push!(get!(combo_cohorts, key, Tuple{String,FloatType,FloatType}[]),
+      (row.species, FloatType(row.age_calc), FloatType(row.agb_sum)))
+  end
+
+  w, h = size(cn_raster)
+  wc, hc = cld(w, n), cld(h, n)
+  mapcode_raster = zeros(Int32, wc, hc)
+  inv_area = FloatType(1 / n^2)
+
+  mapcodes = Int[]
+  sp_out = String[]
+  age_out = FloatType[]
+  agb_out = FloatType[]
+  acc = Dict{Tuple{String,FloatType},FloatType}()
+  mc = 0
+  for cy in 1:hc, cx in 1:wc
+    empty!(acc)
+    xr = ((cx - 1) * n + 1):min(cx * n, w)
+    yr = ((cy - 1) * n + 1):min(cy * n, h)
+    for py in yr, px in xr
+      cn = cn_raster[px, py]
+      ismissing(cn) && continue
+      eco = Int64(eco_fine[px, py])
+      coh = get(combo_cohorts, ("$(cn)", eco), nothing)
+      isnothing(coh) && continue
+      for (sp, age, agb) in coh
+        k = (sp, age)
+        acc[k] = get(acc, k, zero(FloatType)) + agb
+      end
+    end
+    isempty(acc) && continue
+    mc += 1
+    mapcode_raster[cx, cy] = Int32(mc)
+    for ((sp, age), agb) in acc
+      push!(mapcodes, mc)
+      push!(sp_out, sp)
+      push!(age_out, age)
+      push!(agb_out, agb * inv_area)
+    end
+  end
+
+  communities_df = DataFrame(
+    mapcode=mapcodes, species=sp_out, age_calc=age_out, agb_sum=agb_out)
+  return communities_df, mapcode_raster
 end
 
 function load_csv_communities(path::String)::DataFrame

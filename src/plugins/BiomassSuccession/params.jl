@@ -48,14 +48,8 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   PROB_RESPROUT = zeros(FloatType, n_species)
   #println(typeof(MATURITY))
 
-  PROB_MORT_SPP = if no_establishment
-
-    [zeros(FloatType, length(eco_species)) for eco_species in eco_species_ids]
-
-  else
-    [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
-     for eco_species in eco_species_ids]
-  end
+  PROB_MORT_SPP = [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
+                   for eco_species in eco_species_ids]
   #println(typeof(PROB_MORT_SPP))
   PROB_ESTAB_SPP = if no_establishment
     [zeros(FloatType, length(eco_species)) for eco_species in eco_species_ids]

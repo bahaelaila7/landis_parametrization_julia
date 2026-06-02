@@ -371,6 +371,40 @@ function export_initial_communities_tif(
   println("  initial_communities.tif")
 end
 
+# Write a coarse (downsampled n×) raster to GeoTIFF, deriving CRS/extent from a reference
+# raster and scaling its pixel size by n (origin unchanged). `data` is indexed (width, height).
+function export_coarse_raster(
+  data::AbstractMatrix,
+  ref_raster_path::String,
+  n::Int;
+  output_path::String,
+  dtype::DataType,
+  nodata,
+)
+  ArchGDAL.read(ref_raster_path) do src
+    gt = ArchGDAL.getgeotransform(src)
+    proj = ArchGDAL.getproj(src)
+    gt[2] *= n  # pixel width
+    gt[3] *= n  # row rotation
+    gt[5] *= n  # column rotation
+    gt[6] *= n  # pixel height
+    wc, hc = size(data)
+    out = Array{dtype}(data)
+    ArchGDAL.create(
+      output_path,
+      driver=ArchGDAL.getdriver("GTiff"),
+      width=wc, height=hc, nbands=1, dtype=dtype,
+    ) do dst
+      ArchGDAL.setgeotransform!(dst, gt)
+      ArchGDAL.setproj!(dst, proj)
+      band = ArchGDAL.getband(dst, 1)
+      ArchGDAL.setnodatavalue!(band, nodata)
+      ArchGDAL.write!(band, out)
+    end
+  end
+  println("  $(basename(output_path)) (downsampled $(n)x)")
+end
+
 # ---------------------------------------------------------------------------
 # Export ecoregion.txt — LANDIS ecoregion table.
 # Format: Active  MapCode  Name  "Description"

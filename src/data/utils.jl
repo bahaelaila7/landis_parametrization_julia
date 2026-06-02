@@ -63,10 +63,23 @@ function mark_estab_year!(df::DataFrame)
 end
 function assign_tiered_species!(df::DataFrame;
   max_exact::Int=12, max_group::Int=4,
-  min_trees::Int=100, min_agb_frac::Float64=0.05)
-  sp_stats = combine(groupby(df, [:species_symbol, :spgrpcd, :sftwd_hrdwd]),
-    nrow => :n_rows,
-    :agb => sum => :sp_agb)
+  min_trees::Int=100, min_agb_frac::Float64=0.05,
+  tree_stats::Union{Nothing,DataFrame}=nothing)
+  if isnothing(tree_stats)
+    sp_stats = combine(groupby(df, [:species_symbol, :spgrpcd, :sftwd_hrdwd]),
+      nrow => :n_rows,
+      :agb => sum => :sp_agb)
+  else
+    # Tier on RAW per-distinct-tree stats from curated_trees (count + summed max DRYBIO_AG),
+    # grouped by (species, spgrpcd, sftwd_hrdwd) — not cohort-row counts / cohort agb. Cohort
+    # species absent from tree_stats fall to the H/S catchall (get(sp_map, s, "_H") below).
+    sp_stats = DataFrame(
+      species_symbol=tree_stats.species_symbol,
+      spgrpcd=tree_stats.spgrpcd,
+      sftwd_hrdwd=tree_stats.sftwd_hrdwd,
+      n_rows=Int.(tree_stats.n_trees),
+      sp_agb=Float64.(tree_stats.sp_biomass))
+  end
   total_agb = sum(sp_stats.sp_agb)
   sp_stats.agb_frac = sp_stats.sp_agb ./ max(total_agb, 1e-9)
   sort!(sp_stats, :n_rows, rev=true)
@@ -145,7 +158,8 @@ end
 function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[],
   by_subplot::Bool=false,
   val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing,
-  min_trees::Int=100, min_agb_frac::Float64=0.05)
+  min_trees::Int=100, min_agb_frac::Float64=0.05,
+  tree_stats::Union{Nothing,DataFrame}=nothing)
   eco_field = if eco == "epa_l4"
     :epa_l4
   elseif eco == "epa_l3"
@@ -154,7 +168,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
     :ecosubcd
   end
 
-  assign_tiered_species!(df; min_trees=min_trees, min_agb_frac=min_agb_frac)
+  assign_tiered_species!(df; min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats)
   if !isempty(filter_species)
     fs = Set(filter_species)
     filter!(row -> row.effective_species in fs, df)
@@ -415,12 +429,43 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   end
   println(sql)
   cohorts_df = DuckDB.execute(con, sql) |> DataFrame
-  println("Closing db. $(nrow(cohorts_df)) rows loaded.")
+  println("$(nrow(cohorts_df)) cohort rows loaded.")
+
+  # Per-species RAW tree stats from curated_trees, restricted to the loaded subplots, for
+  # species tiering (cohort-row counts under-count trees). Per DISTINCT tree (full TREE_ID)
+  # take max(DRYBIO_AG) — a tree measured multiple times counts once, biomass is its max, not
+  # a sum over visits — then per (species, spgrpcd, sftwd_hrdwd): COUNT distinct trees and SUM
+  # the per-tree maxes. spgrpcd/sftwd_hrdwd are carried so assign_tiered_species! can group on them.
+  subplots_df = unique(select(cohorts_df, [:statecd, :unitcd, :countycd, :plot, :subp]))
+  DuckDB.register_data_frame(con, subplots_df, "loaded_subplots")
+  tree_stats = DuckDB.execute(con, """
+    WITH tree_max AS (
+      SELECT t.STATECD, t.UNITCD, t.COUNTYCD, t.PLOT, t.SUBP, t.TREE,
+             max(t.SPCD)      AS spcd,
+             max(t.SPGRPCD)   AS spgrpcd,
+             max(t.DRYBIO_AG) AS drybio_max
+      FROM curated_trees t
+      JOIN loaded_subplots ls
+        ON ls.statecd = t.STATECD AND ls.unitcd = t.UNITCD AND ls.countycd = t.COUNTYCD
+       AND ls.plot = t.PLOT AND ls.subp = t.SUBP
+      WHERE t.STATUSCD = 1 AND t.DRYBIO_AG IS NOT NULL
+      GROUP BY t.STATECD, t.UNITCD, t.COUNTYCD, t.PLOT, t.SUBP, t.TREE
+    )
+    SELECT r.SPECIES_SYMBOL AS species_symbol,
+           tm.spgrpcd        AS spgrpcd,
+           r.SFTWD_HRDWD     AS sftwd_hrdwd,
+           COUNT(*)::BIGINT  AS n_trees,
+           SUM(tm.drybio_max)::DOUBLE AS sp_biomass
+    FROM tree_max tm
+    JOIN REF_SPECIES r ON r.SPCD = tm.spcd
+    GROUP BY r.SPECIES_SYMBOL, tm.spgrpcd, r.SFTWD_HRDWD
+  """) |> DataFrame
+  println("Tree stats: $(nrow(tree_stats)) (species,spgrpcd,sftwd) rows from curated_trees over $(nrow(subplots_df)) subplots.")
 
   @time splots, eco_list, species_list, eco_species_ids, splots_val =
     make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
       by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng,
-      min_trees=min_trees, min_agb_frac=min_agb_frac)
+      min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats)
   mark_estab_year!(splots)
   isnothing(splots_val) || mark_estab_year!(splots_val)
 
