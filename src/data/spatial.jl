@@ -84,7 +84,10 @@ function load_treemap_cohorts(
   eco_ecocode_mapping_csv::String,
   params;
   eco_field::String="epa_l4",
+  stratify_eco_mixed::Bool=false,
+  eco_ecocode_override::Union{Nothing,DataFrame}=nothing,
 )
+  stratify_eco_mixed && error("stratify_eco_mixed is only supported with simple_match=true (load_treemap_cohorts_simple)")
   species_field = if eco_field == "epa_l4"
     "species_symbol_map_l4"
   elseif eco_field == "epa_l3"
@@ -93,7 +96,7 @@ function load_treemap_cohorts(
     "species_symbol_map_ecosubcd"
   end
 
-  eco_ecocode_df = CSV.read(eco_ecocode_mapping_csv, DataFrame)
+  eco_ecocode_df = isnothing(eco_ecocode_override) ? CSV.read(eco_ecocode_mapping_csv, DataFrame) : eco_ecocode_override
 
   cn_eco_counts = StatsBase.countmap(
     (cn, Int64(eco))
@@ -269,6 +272,12 @@ function load_treemap_cohorts(
 end
 
 function _make_effective_splots(df::DataFrame)
+  isempty(df) && error(
+    "No cohorts matched the params ecoregions/species (loader returned 0 rows). The params' " *
+    "ECO_LIST eco names must equal `e.eco` from the eco_ecocode mapping — plus the _mixed/_pure " *
+    "suffix when stratify_eco_mixed=true. Common causes: the params were trained with a different " *
+    "stratify_eco_mixed setting than this loader, or an already-stratified eco_ecocode_mapping.csv " *
+    "was passed (so the loader double-suffixes, e.g. 63a_mixed_mixed).")
   eco_vals = sort(unique(df.raster_eco))
   eco_dict = Dict(eco => i for (i, eco) in enumerate(eco_vals))
 
@@ -328,8 +337,13 @@ function load_treemap_cohorts_simple(
   eco_ecocode_mapping_csv::String,
   params;
   plot_table::String="PLOT",
+  stratify_eco_mixed::Bool=false,
+  eco_ecocode_override::Union{Nothing,DataFrame}=nothing,
 )
-  eco_ecocode_df = CSV.read(eco_ecocode_mapping_csv, DataFrame)
+  # eco_ecocode_override lets the caller supply an already-stratified mapping (stratified
+  # ecocode → "<eco>_mixed"/"_pure") and pass stratify_eco_mixed=false — used by the
+  # downsample+stratify path, where the stratum is baked into the ecocode and majority-voted.
+  eco_ecocode_df = isnothing(eco_ecocode_override) ? CSV.read(eco_ecocode_mapping_csv, DataFrame) : eco_ecocode_override
 
   cn_eco_counts = StatsBase.countmap(
     (cn, Int64(eco))
@@ -357,14 +371,65 @@ function load_treemap_cohorts_simple(
   DuckDB.register_data_frame(con, eco_ecocode_df, "eco_ecocode_map")
   DuckDB.register_data_frame(con, params_eco_sp_df, "params_eco_species")
 
+  # When stratify_eco_mixed is on, stratify the (raster) ecoregion the cohorts are matched
+  # against into "<eco>_mixed" / "<eco>_pure" so they resolve to the stratified params. The
+  # spatial unit is the plot (one pixel = one treemap CN = one ecoregion), so mixedness is
+  # determined per PLOT over its entire curated history (vs per-subplot in parametrization):
+  # mixed = neither hardwood nor softwood exceeds 70% of the plot's aggregate biomass.
+  plot_mix_cte = stratify_eco_mixed ? """
+    WITH plot_mix AS (
+      SELECT statecd, unitcd, countycd, plot,
+             (GREATEST(
+                SUM(CASE WHEN sftwd_hrdwd = 'H' THEN agb ELSE 0 END),
+                SUM(CASE WHEN sftwd_hrdwd = 'S' THEN agb ELSE 0 END)
+              ) / NULLIF(SUM(agb), 0)) <= 0.7 AS plot_mixed
+      FROM curated_cohorts_landis
+      GROUP BY statecd, unitcd, countycd, plot
+    )
+  """ : ""
+  plot_mix_join = stratify_eco_mixed ? """
+    JOIN plot_mix pm
+        ON  pm.statecd  = o.statecd
+        AND pm.unitcd   = o.unitcd
+        AND pm.countycd = o.countycd
+        AND pm.plot     = o.plot
+  """ : ""
+  eco_expr = stratify_eco_mixed ?
+             "(e.eco || CASE WHEN pm.plot_mixed THEN '_mixed' ELSE '_pure' END)" :
+             "e.eco"
+
+  # Diagnostic: the eco names the loader matches against (params) vs the eco names the data
+  # actually presents (raster ecocode → eco, + _mixed/_pure when stratifying). A non-empty
+  # "NOT in params" set means those cohorts get dropped (and if it's all of them → 0 rows).
+  params_ecos = sort(unique(string.(params.ECO_LIST)))
+  data_eco_df = DuckDB.execute(con, """
+    $(plot_mix_cte)
+    SELECT DISTINCT $(eco_expr) AS data_eco
+    FROM cn_eco df
+    JOIN eco_ecocode_map e ON df.ecocode = e.ecocode
+    JOIN $(plot_table) pl  ON df.CN = pl.CN
+    JOIN curated_cohorts_landis o
+        ON  o.statecd  = pl.statecd AND o.unitcd = pl.unitcd
+        AND o.countycd = pl.countycd AND o.plot  = pl.plot
+        AND o.measdate = MAKE_DATE(pl.measyear::INTEGER, pl.measmon::INTEGER, pl.measday::INTEGER)
+    $(plot_mix_join)
+  """) |> DataFrame
+  data_ecos = sort(unique(string.(data_eco_df.data_eco)))
+  println("  params ECO_LIST ($(length(params_ecos))): $(params_ecos)")
+  println("  data ecos present ($(length(data_ecos))): $(data_ecos)")
+  let miss = setdiff(data_ecos, params_ecos)
+    isempty(miss) || println("  ⚠ data ecos NOT in params (cohorts dropped): $(miss)")
+  end
+
   df = DuckDB.execute(
     con,
     """
+    $(plot_mix_cte)
     SELECT
         df.CN::VARCHAR                                AS plt_cn,
         df.ecocode                                   AS raster_ecocode,
-        e.eco                                        AS raster_eco,
-        e.eco                                        AS effective_eco,
+        $(eco_expr)                                  AS raster_eco,
+        $(eco_expr)                                  AS effective_eco,
         o.statecd, o.unitcd, o.countycd, o.plot, o.subp,
         o.agb, o.measdate, o.age_calc,
         COALESCE(p1.species, p2.species, p3.species) AS effective_species_symbol_map
@@ -377,16 +442,75 @@ function load_treemap_cohorts_simple(
         AND o.countycd = pl.countycd
         AND o.plot     = pl.plot
         AND o.measdate = MAKE_DATE(pl.measyear::INTEGER, pl.measmon::INTEGER, pl.measday::INTEGER)
+    $(plot_mix_join)
     -- match only against the raster (target) ecoregion, in priority order
-    LEFT JOIN params_eco_species p1 ON p1.eco = e.eco AND p1.species = o.species_symbol
-    LEFT JOIN params_eco_species p2 ON p2.eco = e.eco AND p2.species = '_GRP_' || o.spgrpcd
-    LEFT JOIN params_eco_species p3 ON p3.eco = e.eco AND p3.species = '_' || o.sftwd_hrdwd
+    LEFT JOIN params_eco_species p1 ON p1.eco = $(eco_expr) AND p1.species = o.species_symbol
+    LEFT JOIN params_eco_species p2 ON p2.eco = $(eco_expr) AND p2.species = '_GRP_' || o.spgrpcd
+    LEFT JOIN params_eco_species p3 ON p3.eco = $(eco_expr) AND p3.species = '_' || o.sftwd_hrdwd
     WHERE COALESCE(p1.species, p2.species, p3.species) IS NOT NULL
     """
   ) |> DataFrame
 
   DuckDB.close(db)
   return _make_effective_splots(df)
+end
+
+# Per-treemap-CN plot-level mixed flag, matching load_treemap_cohorts_simple's plot_mix:
+# true when neither hardwood nor softwood exceeds 70% of the plot's aggregate biomass over its
+# entire curated history. Returns Dict{Int64,Bool} (CN → plot_mixed); CNs absent from the PLOT
+# table / curated_cohorts_landis are not in the dict.
+function load_plot_mixed(cn_raster::Array{Union{Missing,Int64}}, db_path::String;
+  plot_table::String="PLOT")
+  cns = unique(Int64[c for c in cn_raster if !ismissing(c)])
+  cn_df = DataFrame(CN=cns)
+  db = DuckDB.DB(db_path)
+  con = DuckDB.connect(db)
+  DuckDB.register_data_frame(con, cn_df, "cn_list")
+  res = DuckDB.execute(con, """
+    WITH plot_mix AS (
+      SELECT statecd, unitcd, countycd, plot,
+             (GREATEST(
+                SUM(CASE WHEN sftwd_hrdwd = 'H' THEN agb ELSE 0 END),
+                SUM(CASE WHEN sftwd_hrdwd = 'S' THEN agb ELSE 0 END)
+              ) / NULLIF(SUM(agb), 0)) <= 0.7 AS plot_mixed
+      FROM curated_cohorts_landis
+      GROUP BY statecd, unitcd, countycd, plot
+    )
+    SELECT c.CN AS cn, pm.plot_mixed
+    FROM cn_list c
+    JOIN $(plot_table) pl ON c.CN = pl.CN
+    JOIN plot_mix pm
+      ON  pm.statecd  = pl.statecd AND pm.unitcd = pl.unitcd
+      AND pm.countycd = pl.countycd AND pm.plot  = pl.plot
+  """) |> DataFrame
+  DuckDB.close(db)
+  return Dict{Int64,Bool}(Int64(r.cn) => Bool(r.plot_mixed) for r in eachrow(res))
+end
+
+# Expand a base eco_ecocode mapping into stratified rows for the mixed/pure scheme:
+#   new_ecocode = base_ecocode*10 + (mixed ? 1 : 2), eco = "<base>_mixed" / "<base>_pure".
+function stratified_eco_mapping(eco_mapping_df::DataFrame)
+  bases = Int.(eco_mapping_df.ecocode)
+  names = string.(eco_mapping_df.eco)
+  return DataFrame(
+    ecocode=vcat(bases .* 10 .+ 1, bases .* 10 .+ 2),
+    eco=vcat(names .* "_mixed", names .* "_pure"),
+  )
+end
+
+# Build a per-pixel stratified ecoregion raster (Int16): base_ecocode*10 + (mixed ? 1 : 2),
+# using each pixel's treemap CN plot-level mixed flag (cn_mixed). Pixels with no CN or an
+# unknown stratum become 0 (nodata) — they carry no community so the eco value is unused.
+function stratify_eco_raster(eco_raster::Matrix{Int16},
+  cn_raster::Array{Union{Missing,Int64}}, cn_mixed::Dict{Int64,Bool})
+  out = zeros(Int16, size(eco_raster))
+  for i in eachindex(eco_raster, cn_raster)
+    cn = cn_raster[i]
+    ismissing(cn) && continue
+    haskey(cn_mixed, cn) || continue
+    out[i] = Int16(Int(eco_raster[i]) * 10 + (cn_mixed[cn] ? 1 : 2))
+  end
+  return out
 end
 
 function map_params_to_data_treemap(params, eco_list, effective_eco_list, species_list, splots)

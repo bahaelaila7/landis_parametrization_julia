@@ -765,6 +765,7 @@ function parametrize(; cohorts_db_path::String,
   tier::Int=3,
   TRIALS::Int=30000,
   resume_from::Union{Nothing,String}=nothing,
+  start_from::Union{Nothing,String}=nothing,
   force_restart_from_random::Bool=false,
   sobol_n::Int=100,
   n_reps::Int=5,
@@ -777,6 +778,10 @@ function parametrize(; cohorts_db_path::String,
   split_seed::Int=42,
   min_trees::Int=100,
   min_agb_frac::Float64=0.05,
+  stratify_eco_mixed::Bool=false,
+  filter_extent::Union{Nothing,String}=nothing,
+  loss_lambda::Float64=1.0,
+  loss_alpha::Float64=1.0,
   diagnose::Bool=false,
   cycle_years::Real=8,
   rng::Random.AbstractRNG)
@@ -786,12 +791,14 @@ function parametrize(; cohorts_db_path::String,
   #bins_idx = vcat(5:5:30, 40:10:80, 100:20:160)
   @info bins_idx
   @info smoothing_window
+  PU.LOSS_ALPHA[] = FloatType(loss_alpha)   # 0 → optimize L2/AGB-level only (zero Wasserstein)
   loss_params = PU.LossParams(
     age_bins=PU.AgeBins(
       bins_idx=bins_idx .|> Int,
       last_bin_open=true
     ),
-    smoothing_weights=smoothing_window
+    smoothing_weights=smoothing_window,
+    lambda=FloatType(loss_lambda)
   )
   split_rng = val_frac > 0.0 ? RNGType(UInt64(split_seed)) : nothing
   splots, eco_list, species_list, eco_species_ids, splots_val_raw =
@@ -806,6 +813,8 @@ function parametrize(; cohorts_db_path::String,
       split_rng=split_rng,
       min_trees=min_trees,
       min_agb_frac=min_agb_frac,
+      stratify_eco_mixed=stratify_eco_mixed,
+      filter_extent=filter_extent,
       filter_eco_field=filter_eco_field,
       filter_ecos=filter_ecos,
       filter_plots=filter_plots,
@@ -819,7 +828,7 @@ function parametrize(; cohorts_db_path::String,
   println(species_list)
 
   if diagnose
-    Data.print_cycle_coverage(splots; cycle_years=cycle_years)
+    Data.print_cycle_coverage(splots; cycle_years=cycle_years, eco_list=eco_list)
     plot_biomass_bin_deltas(splots, loss_params; output_dir=output_dir)
   end
 
@@ -913,6 +922,7 @@ function parametrize(; cohorts_db_path::String,
     search_tier=tier,
     TRIALS=TRIALS,
     resume_from=resume_from,
+    start_from=start_from,
     force_restart_from_random=force_restart_from_random,
     n_reps=n_reps,
     sobol_candidates_db=sobol_candidates_db,
@@ -980,6 +990,8 @@ function calculate_aggregate_loss(t1_sim::Vector{Matrix{FloatType}}, t1_ref::Vec
       gsp = sp_map[sp_eco]
       sim_row = @view t1_sim[eco_id][sp_eco, :]
       ref_row = @view t1_ref[eco_id][sp_eco, :]
+      tot_sim = sum(sim_row)
+      tot_ref = sum(ref_row)
       let bw = loss_params.age_bins.bin_widths
         s = zero(FloatType)
         acc_sim = zero(FloatType)
@@ -987,11 +999,15 @@ function calculate_aggregate_loss(t1_sim::Vector{Matrix{FloatType}}, t1_ref::Vec
         @inbounds for k in eachindex(bw)
           acc_sim += sim_row[k]
           acc_ref += ref_row[k]
-          s += bw[k] * abs(acc_sim - acc_ref)
+          # W1 on the NORMALIZED biomass-by-age CDF → shape only, invariant to AGB level.
+          cdf_sim = tot_sim > 0 ? acc_sim / tot_sim : zero(FloatType)
+          cdf_ref = tot_ref > 0 ? acc_ref / tot_ref : zero(FloatType)
+          s += bw[k] * (cdf_sim - cdf_ref)^2
         end
         sp_w_loss[gsp] = s
       end
-      sp_agb_loss[gsp] = abs(sum(sim_row) - sum(ref_row))
+      # AGB LEVEL as a separate, gentle sqrt-difference term (weighted by loss_params.lambda).
+      sp_agb_loss[gsp] = loss_params.lambda * (sqrt(tot_sim) - sqrt(tot_ref))^2
     end
     eco_losses[eco_id] = PU.SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=zero(FloatType), num_sites=eco_site_counts[eco_id], num_obs=eco_obs_counts[eco_id])
   end
@@ -999,9 +1015,10 @@ function calculate_aggregate_loss(t1_sim::Vector{Matrix{FloatType}}, t1_ref::Vec
 end
 
 
-function calculate_t2_loss(t2_sim_bins, t2_sim_total, t2_ref, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
+function calculate_t2_loss(t2_sim_bins, t2_sim_total, t2_ref, n_species, eco_species_ids, eco_site_counts, eco_obs_counts, loss_params)
   eco_losses = Vector{PU.SiteLoss}(undef, length(eco_species_ids))
   n_bins = size(t2_ref.bins[1], 2)
+  _mean(v) = isempty(v) ? zero(FloatType) : sum(v) / length(v)
   for eco_id in eachindex(eco_species_ids)
     sp_w_loss = zeros(FloatType, n_species)
     sp_agb_loss = zeros(FloatType, n_species)
@@ -1011,7 +1028,8 @@ function calculate_t2_loss(t2_sim_bins, t2_sim_total, t2_ref, n_species, eco_spe
       for b in 1:n_bins
         sp_w_loss[gsp] += PU.wasserstein1d(t2_sim_bins[eco_id][sp_eco, b], t2_ref.bins[eco_id][sp_eco, b])
       end
-      sp_agb_loss[gsp] = PU.wasserstein1d(t2_sim_total[eco_id][sp_eco], t2_ref.total[eco_id][sp_eco])
+      # AGB LEVEL as a gentle sqrt-difference of mean totals (weighted by loss_params.lambda).
+      sp_agb_loss[gsp] = loss_params.lambda * (sqrt(_mean(t2_sim_total[eco_id][sp_eco])) - sqrt(_mean(t2_ref.total[eco_id][sp_eco])))^2
     end
     eco_losses[eco_id] = PU.SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=zero(FloatType), num_sites=eco_site_counts[eco_id], num_obs=eco_obs_counts[eco_id])
   end
@@ -1036,16 +1054,22 @@ function calculate_t4_loss(t4_sim, t4_ref, loss_params, n_species, eco_species_i
         gsp = sp_map[sp_eco]
         sim_row = @view sim_c[sp_eco, :]
         ref_row = @view ref_c[sp_eco, :]
+        tot_sim = sum(sim_row)
+        tot_ref = sum(ref_row)
         s = zero(FloatType)
         acc_sim = zero(FloatType)
         acc_ref = zero(FloatType)
         @inbounds for k in eachindex(bw)
           acc_sim += sim_row[k]
           acc_ref += ref_row[k]
-          s += bw[k] * abs(acc_sim - acc_ref)
+          # W1 on the NORMALIZED biomass-by-age CDF → shape only, invariant to AGB level.
+          cdf_sim = tot_sim > 0 ? acc_sim / tot_sim : zero(FloatType)
+          cdf_ref = tot_ref > 0 ? acc_ref / tot_ref : zero(FloatType)
+          s += bw[k] * (cdf_sim - cdf_ref)^2
         end
         sp_w_loss[gsp] += s
-        sp_agb_loss[gsp] += abs(sum(sim_row) - sum(ref_row))
+        # AGB LEVEL as a separate, gentle sqrt-difference term (weighted by loss_params.lambda).
+        sp_agb_loss[gsp] += loss_params.lambda * (sqrt(tot_sim) - sqrt(tot_ref))^2
       end
     end
     eco_losses[eco_id] = PU.SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=zero(FloatType),
@@ -1231,7 +1255,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     elseif search_tier == 2
       t2_sim_bins = [[vcat((t2_sim_bins_t[tid][eco_id][sp, b] for tid in 1:Threads.maxthreadid())...) for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_species_ids)]
       t2_sim_total = [[vcat((t2_sim_total_t[tid][eco_id][sp] for tid in 1:Threads.maxthreadid())...) for sp in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_species_ids)]
-      eco_losses = calculate_t2_loss(t2_sim_bins, t2_sim_total, t2_ref, n_species, eco_species_ids, eco_site_counts, eco_obs_counts)
+      eco_losses = calculate_t2_loss(t2_sim_bins, t2_sim_total, t2_ref, n_species, eco_species_ids, eco_site_counts, eco_obs_counts, loss_params)
       run_result = sum(eco_losses)
     elseif search_tier == 4
       for tid in 2:Threads.maxthreadid()
@@ -1413,7 +1437,7 @@ function _filter_cached_to_df(cached, sampled_ids::Set)
   DataFrame(filtered, [:plot_id, :sim_year, :species_id, :age, :agb])
 end
 
-function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8)
+function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   # Fixed plot sample chosen once at startup so progress is comparable across iterations
@@ -1494,7 +1518,13 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
   # move. Refreshing periodically to avoid overfitting one realization is a later knob.)
   fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
   if isnothing(resume_from)
-    bio_params = if !isempty(_sobol_cands)
+    bio_params = if !isnothing(start_from)
+      @info "Seeding initial candidate from $start_from (fresh search_state)"
+      p = _load_params_from_path(start_from)
+      (p.SPECIES_LIST == species_list && p.ECO_LIST == eco_list) ||
+        error("start_from params are incompatible with this run: their SPECIES_LIST/ECO_LIST differ from the loaded data (e.g. different stratify_eco_mixed, species tiering, or eco/plot filters). Seeding requires matching ecoregions and species.")
+      p
+    elseif !isempty(_sobol_cands)
       @info "Using Sobol candidate 1/$(length(_sobol_cands)) as initial point"
       _sobol_cands[1]
     else
@@ -1555,10 +1585,10 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       dynamic_weights = baseline_weights .* (1.0 .+ sensitivity_lambda .* param_sensitivities)
       dynamic_weights ./= sum(dynamic_weights)
       dynamic_cumsum = cumsum(dynamic_weights)
-      bio_params, chosen_param_idx = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations,
-        #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)),
-        #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss),
-        dynamic_cumsum=dynamic_cumsum)
+      bio_params, chosen_param_idx = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)
+      #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)),
+      #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss),
+      # dynamic_cumsum=dynamic_cumsum)
       for _ in 0:rand(rng, 0:2)
         bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
       end
@@ -1636,6 +1666,17 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
             for gsp in 1:n_species
               eco_loss.sp_w_loss[gsp] == 0f0 && continue
               DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+            end
+          end
+
+          # Raw per-eco / per-species SiteLoss breakdown (ecoregions and species sorted by
+          # contribution) so you can see where the remaining error concentrates.
+          println("Raw SiteLoss breakdown @ $iter (total=$(round(total, sigdigits=6))):")
+          for eco_id in sort(collect(eachindex(eco_losses)); by=e -> -convert(Float64, PU.get_total_loss(eco_losses[e])))
+            el = eco_losses[eco_id]
+            println("  [$(eco_list[eco_id])] eco_total=$(round(convert(Float64, PU.get_total_loss(el)), sigdigits=5))  sites=$(el.num_sites) obs=$(el.num_obs)")
+            for gsp in sort([g for g in 1:n_species if el.sp_w_loss[g] != 0f0]; by=g -> -el.sp_w_loss[g])
+              println("      $(rpad(species_list[gsp], 10)) w=$(round(el.sp_w_loss[gsp], sigdigits=4))  agb=$(round(el.sp_agb_loss[gsp], sigdigits=4))")
             end
           end
         end
@@ -1799,6 +1840,10 @@ function run_from_yaml(yaml_path::String)
 
   resume_from = get_cfg("resume_from", nothing)
   resume_from = (resume_from === nothing || resume_from == "null") ? nothing : String(resume_from)
+  start_from = get_cfg("start_from", nothing)
+  start_from = (start_from === nothing || start_from == "null") ? nothing : String(start_from)
+  filter_extent = get_cfg("filter_extent", nothing)
+  filter_extent = (filter_extent === nothing || filter_extent == "null") ? nothing : String(filter_extent)
   sobol_candidates_db = get_cfg("sobol_candidates_db", nothing)
   sobol_candidates_db = (sobol_candidates_db === nothing || sobol_candidates_db == "null") ? nothing : String(sobol_candidates_db)
 
@@ -1818,6 +1863,8 @@ function run_from_yaml(yaml_path::String)
     no_establishment=get_cfg("no_establishment", false),
     min_trees=Int(get_cfg("min_trees", 100)),
     min_agb_frac=Float64(get_cfg("min_agb_frac", 0.05)),
+    stratify_eco_mixed=Bool(get_cfg("stratify_eco_mixed", false)),
+    filter_extent=filter_extent,
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
   n_output_plots = get_cfg("n_output_plots", 0)
@@ -1859,6 +1906,7 @@ function run_from_yaml(yaml_path::String)
     smoothing_window=smoothing_window,
     TRIALS=get_cfg("trials", 1000000),
     resume_from=resume_from,
+    start_from=start_from,
     force_restart_from_random=get_cfg("force_restart_from_random", false),
     sobol_n=get_cfg("sobol_n", 100),
     n_reps=get_cfg("n_reps", 5),
@@ -1869,6 +1917,8 @@ function run_from_yaml(yaml_path::String)
     split_seed=Int(get_cfg("split_seed", 42)),
     diagnose=get_cfg("diagnose", false),
     cycle_years=get_cfg("cycle_years", 8),
+    loss_lambda=Float64(get_cfg("loss_lambda", 1.0)),
+    loss_alpha=Float64(get_cfg("loss_alpha", 1.0)),
     rng=rng)
 end
 
@@ -1958,7 +2008,7 @@ end
 function _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
   skip_disturbances, spinup, by_subplot=false, no_establishment=false, filter_eco_field,
   filter_ecos, filter_plots, filter_species,
-  min_trees=100, min_agb_frac=0.05,
+  min_trees=100, min_agb_frac=0.05, stratify_eco_mixed=false, filter_extent=nothing,
   bins_idx, smoothing_window_size, smoothing_variance, rng)
   smoothing_window = smoothing_window_size > 0 ?
                      PU.get_smoothing_window(; smoothing_window=smoothing_window_size,
@@ -1972,7 +2022,8 @@ function _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
     Data.prepare_parametrization_data(;
       cohorts_db_path, eco_field, tablename, output_dir,
       skip_disturbances, spinup, by_subplot, filter_eco_field,
-      filter_ecos, filter_plots, filter_species, min_trees, min_agb_frac, RNG=rng)
+      filter_ecos, filter_plots, filter_species, min_trees, min_agb_frac,
+      stratify_eco_mixed, filter_extent, RNG=rng)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate .- splots.start_measdate)) ./ 365.25 .|> round .|> Int
   max_sim_year = maximum(splots.sim_year)
   max_age = Int(maximum(splots.age_calc))
@@ -2026,6 +2077,8 @@ function plot_sample(;
   smoothing_variance::Float64=1.2,
   min_trees::Int=100,
   min_agb_frac::Float64=0.05,
+  stratify_eco_mixed::Bool=false,
+  filter_extent::Union{Nothing,String}=nothing,
   n_output_plots::Int=20,
   rng_seed::Int=1337,
 )
@@ -2035,7 +2088,7 @@ function plot_sample(;
   ctx = _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
     skip_disturbances, spinup, by_subplot, no_establishment, filter_eco_field,
     filter_ecos, filter_plots, filter_species,
-    min_trees, min_agb_frac,
+    min_trees, min_agb_frac, stratify_eco_mixed, filter_extent,
     bins_idx, smoothing_window_size, smoothing_variance, rng)
   all_ids = UIntType.(unique(ctx.splots.plot_id))
   sampled_ids = _sample_plot_ids(all_ids, n_output_plots, rng; injection_cohorts=ctx.injection_cohorts)
@@ -2067,6 +2120,8 @@ function plot_sample_sobol(;
   smoothing_variance::Float64=1.2,
   min_trees::Int=100,
   min_agb_frac::Float64=0.05,
+  stratify_eco_mixed::Bool=false,
+  filter_extent::Union{Nothing,String}=nothing,
   n_output_plots::Int=10,              # fixed forest-plot sample size
   n_sobol_params_to_plot::Int=5,               # sobol param sets to simulate
   rng_seed::Int=1337,
@@ -2100,7 +2155,7 @@ function plot_sample_sobol(;
   ctx = _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
     skip_disturbances, spinup, by_subplot, no_establishment, filter_eco_field,
     filter_ecos, filter_plots, filter_species,
-    min_trees, min_agb_frac,
+    min_trees, min_agb_frac, stratify_eco_mixed, filter_extent,
     bins_idx, smoothing_window_size, smoothing_variance, rng)
   all_ids = UIntType.(unique(ctx.splots.plot_id))
   sampled_ids = _sample_plot_ids(all_ids, n_output_plots, rng; injection_cohorts=ctx.injection_cohorts)
@@ -2348,6 +2403,7 @@ function simulate_spatial_treemap(;
   timehorizon_years::Int=50,
   output_every_years::Int=5,
   simple_match::Bool=true,
+  stratify_eco_mixed::Bool=false,
 )
   rng = RNGType(UInt64(rng_seed))
 
@@ -2370,7 +2426,7 @@ function simulate_spatial_treemap(;
 
     println("Extracting cohorts from DuckDB (treemap path)")
     @time splots, eco_list, eff_eco_list, species_list = (simple_match ? Data.load_treemap_cohorts_simple : Data.load_treemap_cohorts)(
-      cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params)
+      cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params; stratify_eco_mixed=stratify_eco_mixed)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
     println(species_list)
 
@@ -2573,6 +2629,7 @@ function export_landis_scenario(;
   timehorizon_years::Int=50,
   output_every_years::Int=5,
   simple_match::Bool=true,
+  stratify_eco_mixed::Bool=false,
 )
   mkpath(output_dir)
 
@@ -2588,6 +2645,10 @@ function export_landis_scenario(;
 
   local communities_df, combo_to_mapcode, mod_params, eco_species_ids, cn_raster
   local mapcode_raster, coarse_eco_raster
+  # When stratifying, the exported ecoregion files encode the stratum in the ecocode
+  # (base*10 + mixed?1:2); otherwise these stay at the base raster/mapping (copy as-is).
+  strat_eco_raster = nothing
+  eco_export_mapping = eco_mapping_df
 
   if !isnothing(treemap_raster)
     println("Loading treemap raster: $treemap_raster")
@@ -2595,21 +2656,35 @@ function export_landis_scenario(;
       joinpath(data_dir, treemap_raster); treemap_version=treemap_version)
     @assert size(cn_raster) == size(eco_raster_data) "Raster size mismatch: treemap $(size(cn_raster)) ≠ eco $(size(eco_raster_data))"
 
-    # Optional spatial downsample: group n×n fine pixels into one coarse cell. The eco
-    # raster used for species matching is replaced by its block-majority so the cohorts in
-    # each coarse cell are valid for that cell's (majority) ecoregion.
+    # Optional spatial downsample: group n×n fine pixels into one coarse cell. The eco raster
+    # used for species matching is replaced by its block-majority so a coarse cell has a single
+    # ecoregion. With stratify_eco_mixed, the per-plot stratum is baked into the ecocode FIRST
+    # (base*10 + mixed?1:2) and then majority-voted together with the base eco — so the cell's
+    # stratum is a majority vote too, and the loader matches every cohort in the block against
+    # that single stratified ecoregion (consistent base+stratum majority vote).
     eco_match_raster = eco_raster_data
+    eco_loader_override = nothing      # stratified mapping df handed to the loader
+    loader_stratify = stratify_eco_mixed
     mapcode_raster = nothing
     coarse_eco_raster = nothing
     if downsample > 1
       println("Downsampling rasters $(downsample)x ($(cell_length_m)m → $(cell_length_m * downsample)m), eco by majority vote")
-      valid_ecos = Set(Int.(eco_mapping_df.ecocode))
-      eco_match_raster, coarse_eco_raster = Data.block_majority_eco(eco_raster_data, downsample, valid_ecos)
+      if stratify_eco_mixed
+        cn_mixed = Data.load_plot_mixed(cn_raster, treemap_db_path)
+        strat_fine = Data.stratify_eco_raster(eco_raster_data, cn_raster, cn_mixed)
+        eco_export_mapping = Data.stratified_eco_mapping(eco_mapping_df)
+        eco_match_raster, coarse_eco_raster = Data.block_majority_eco(strat_fine, downsample, Set(Int.(eco_export_mapping.ecocode)))
+        eco_loader_override = eco_export_mapping  # ecocodes already stratified → loader runs unstratified
+        loader_stratify = false
+      else
+        eco_match_raster, coarse_eco_raster = Data.block_majority_eco(eco_raster_data, downsample, Set(Int.(eco_mapping_df.ecocode)))
+      end
     end
 
     println("Extracting cohorts from DuckDB (treemap path)")
     @time splots, eco_list, eff_eco_list, species_list = (simple_match ? Data.load_treemap_cohorts_simple : Data.load_treemap_cohorts)(
-      cn_raster, eco_match_raster, treemap_db_path, eco_mapping_path, params)
+      cn_raster, eco_match_raster, treemap_db_path, eco_mapping_path, params;
+      stratify_eco_mixed=loader_stratify, eco_ecocode_override=eco_loader_override)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
     println(species_list)
 
@@ -2626,6 +2701,15 @@ function export_landis_scenario(;
       println("Deduplicating cohorts by (plt_cn, ecocode)")
       @time communities_df, combo_to_mapcode = Data.deduplicate_for_export(
         mapped_splots, cn_raster, eco_raster_data)
+    end
+
+    # Non-downsample stratification: build a full-res stratified ecoregion raster + mapping.
+    # (The downsample+stratify case already produced coarse_eco_raster/eco_export_mapping above.)
+    if stratify_eco_mixed && downsample == 1
+      println("Building stratified ecoregion raster + mapping (base*10 + mixed?1:2)")
+      cn_mixed = Data.load_plot_mixed(cn_raster, treemap_db_path)
+      strat_eco_raster = Data.stratify_eco_raster(eco_raster_data, cn_raster, cn_mixed)
+      eco_export_mapping = Data.stratified_eco_mapping(eco_mapping_df)
     end
 
   elseif !isnothing(communities_csv) || !isnothing(communities_db)
@@ -2680,12 +2764,18 @@ function export_landis_scenario(;
     rng_seed=rng_seed,
   )
 
-  # 2. ecoregion.txt + copy ecoregion.tif (resolve symlinks for a real file copy)
+  # 2. ecoregion.txt + ecoregion.tif (stratified, downsampled, or copied as-is)
   println("Exporting ecoregion.txt")
   BiomassSuccessionPlugin.export_ecoregions_txt(
-    mod_params, eco_mapping_df;
+    mod_params, eco_export_mapping;
     output_path=joinpath(output_dir, "ecoregion.txt"))
-  if downsample > 1 && !isnothing(coarse_eco_raster)
+  if !isnothing(strat_eco_raster)
+    println("Writing stratified ecoregion.tif")
+    BiomassSuccessionPlugin.export_coarse_raster(
+      strat_eco_raster, eco_raster_path, 1;
+      output_path=joinpath(output_dir, "ecoregion.tif"),
+      dtype=Int16, nodata=0)
+  elseif downsample > 1 && !isnothing(coarse_eco_raster)
     println("Writing downsampled ecoregion.tif")
     BiomassSuccessionPlugin.export_coarse_raster(
       coarse_eco_raster, eco_raster_path, downsample;
@@ -2735,7 +2825,7 @@ function export_landis_scenario(;
 
   # 6. eco_ecocode_mapping.csv (lookup table, not read by LANDIS directly)
   BiomassSuccessionPlugin.export_eco_ecocode_mapping(
-    mod_params, eco_mapping_df;
+    mod_params, eco_export_mapping;
     output_path=joinpath(output_dir, "eco_ecocode_mapping.csv"))
   println("  eco_ecocode_mapping.csv")
 
@@ -2748,8 +2838,8 @@ end
 
 function export_landis_scenario_main()
   export_landis_scenario(
-    data_dir="../poster/fl5/",
-    output_dir="../poster/fl5/landis_90",
+    data_dir="../poster/fl5_strat4_prob_spinup/",
+    output_dir="../poster/fl5_strat4_prob_spinup/landis_90_2",
     eco_raster="ecoregion.tif",
     eco_ecocode_mapping="eco_ecocode_l3_mapping.csv",
     biomass_params_path="params.jld2",
@@ -2758,13 +2848,14 @@ function export_landis_scenario_main()
     treemap_db_path="../FIASQLITE2PGSQL/FIADB.duckdb",
     climate_config_file="../poster/fl5/biomass-climate.txt",
     downsample=3,
+    stratify_eco_mixed=true,
   )
 end
 
 function landis_poster_main()
-  prefix = joinpath("../poster/fl5/landis_90")
+  prefix = joinpath("../poster/fl5_strat4_prob_spinup/landis_90_2")
   simulate_spatial_landis(
-    output_dir="../poster/fl5/pan_outputs_90",
+    output_dir="../poster/fl5_strat4_prob_spinup/pan_outputs_90_2",
     initial_communities_tif=joinpath(prefix, "initial_communities.tif"),
     ecoregion_tif=joinpath(prefix, "ecoregion.tif"),
     initial_communities_csv=joinpath(prefix, "initial_communities.csv"),
@@ -2775,6 +2866,189 @@ function landis_poster_main()
     spp_eco_year=0,
     timehorizon_years=50,
     output_every_years=5,
+  )
+end
+
+# ---------------------------------------------------------------------------
+# Figure: forest species composition by ecoregion (stacked bars) from the
+# coalesced cohorts.duckdb. One subplot per ecoregion; a stacked bar per year
+# (default 0/25/50), stacked by species. Species labelled with FIA common names.
+#
+# The coalesced cohorts table stores integer (eco_id, species_id) where species_id
+# is ECO-LOCAL; we rebuild the sim's params from the scenario dir to resolve
+# species_id → ECO_SPECIES_IDS[eco_id][species_id] → SPECIES_LIST → symbol, then
+# map symbols to common names (REF_SPECIES / REF_SPECIES_GROUP).
+# ---------------------------------------------------------------------------
+function plot_species_composition(;
+  cohorts_db::String,
+  scenario_dir::String,          # exported LANDIS files (CoreSpeciesData.txt, SpeciesData.csv, SppEcoregionData.csv)
+  fia_db::String,                # DB holding REF_SPECIES (+ REF_SPECIES_GROUP)
+  output_path::String,
+  years::Vector{Int}=[0, 25, 50],
+  spp_eco_year::Int=0,
+  relative::Bool=false,          # normalize each bar to fractions of total biomass
+  species_order::Vector{String}=String[],  # canonical symbol order for stable colors across plots
+)
+  # 1. Reconstruct the sim's id scheme.
+  core_sp_df = Data.load_landis_core_species(joinpath(scenario_dir, "CoreSpeciesData.txt"))
+  species_df = CSV.read(joinpath(scenario_dir, "SpeciesData.csv"), DataFrame)
+  spp_eco_df = Data.load_landis_spp_ecoregion(joinpath(scenario_dir, "SppEcoregionData.csv"); year=spp_eco_year)
+  params = Data.make_landis_params(core_sp_df, species_df, spp_eco_df)
+  SPECIES_LIST = params.SPECIES_LIST
+  ECO_LIST = params.ECO_LIST
+  eco_species_ids = params.ECO_SPECIES_IDS
+
+  # 2. Aggregate biomass per (eco_id, species_id, year).
+  db = DuckDB.DB(cohorts_db)
+  con = DuckDB.connect(db)
+  agg = DuckDB.execute(
+    con,
+    """
+  SELECT year, eco_id, species_id, SUM(biomass) AS biomass
+  FROM cohorts WHERE year IN ($(join(years, ",")))
+  GROUP BY year, eco_id, species_id
+"""
+  ) |> DataFrame
+  DuckDB.close(db)
+  isempty(agg) && error("No cohorts for years $(years) in $(cohorts_db)")
+  present_years = sort(unique(Int.(agg.year)))
+  miss = setdiff(years, present_years)
+  isempty(miss) || @warn "requested years absent in cohorts.duckdb (skipped)" absent = miss
+
+  # 3. Common-name labels + softwood/hardwood class (REF_SPECIES_GROUP.CLASS).
+  fdb = DuckDB.DB(fia_db)
+  fcon = DuckDB.connect(fdb)
+  ref_sp = DuckDB.execute(fcon, "SELECT r.SPECIES_SYMBOL AS sym, r.COMMON_NAME AS cn, r.SFTWD_HRDWD AS sh FROM REF_SPECIES r") |> DataFrame
+  grp = DataFrame(spgrpcd=Int[], name=String[], class=String[])
+  try
+    grp = DuckDB.execute(fcon, "SELECT g.SPGRPCD AS spgrpcd, g.NAME AS name, g.CLASS AS class FROM REF_SPECIES_GROUP g") |> DataFrame
+  catch e
+    @warn "REF_SPECIES_GROUP unavailable; _GRP_ labels stay raw and their soft/hard defaults to hardwood" exception = e
+  end
+  DuckDB.close(fdb)
+  common = Dict(uppercase(strip(String(r.sym))) => String(r.cn) for r in eachrow(ref_sp))
+  sym_sh = Dict(uppercase(strip(String(r.sym))) => uppercase(strip(String(r.sh))) for r in eachrow(ref_sp) if !ismissing(r.sh))
+  grpname = Dict(Int(r.spgrpcd) => String(r.name) for r in eachrow(grp))
+  grpclass = Dict(Int(r.spgrpcd) => String(r.class) for r in eachrow(grp))
+
+  # softwood (blue–green) vs hardwood (yellow–red):
+  #   real species → REF_SPECIES.SFTWD_HRDWD ; _GRP_<spgrpcd> → REF_SPECIES_GROUP.CLASS ; _S/_H explicit.
+  function is_soft(sym::AbstractString)
+    s = uppercase(strip(sym))
+    s == "_S" && return true
+    s == "_H" && return false
+    if startswith(s, "_GRP_")
+      g = tryparse(Int, s[6:end])
+      return startswith(uppercase(isnothing(g) ? "" : get(grpclass, g, "")), "S")
+    end
+    return get(sym_sh, s, "H") == "S"   # default (unknown) → hardwood
+  end
+
+  function label_for(sym::AbstractString)
+    if startswith(sym, "_GRP_")
+      g = tryparse(Int, sym[6:end])
+      return (!isnothing(g) && haskey(grpname, g)) ? "Other $(grpname[g])" : "Other group $(sym[6:end])"
+    elseif sym == "_H"
+      return "Other hardwood"
+    elseif sym == "_S"
+      return "Other softwood"
+    else
+      cn = get(common, uppercase(strip(sym)), nothing)
+      return isnothing(cn) ? sym : "$(cn) ($(sym))"
+    end
+  end
+
+  # 4. id (eco-local) → global symbol → label; eco_id → name. Drop any out-of-range ids.
+  neco = length(ECO_LIST)
+  keep = [1 <= Int(r.eco_id) <= neco && 1 <= Int(r.species_id) <= length(eco_species_ids[Int(r.eco_id)])
+          for r in eachrow(agg)]
+  agg = agg[keep, :]
+  agg.symbol = [string(SPECIES_LIST[Int(eco_species_ids[Int(r.eco_id)][Int(r.species_id)])]) for r in eachrow(agg)]
+  agg.label = label_for.(agg.symbol)
+  agg.eco = [ECO_LIST[Int(r.eco_id)] for r in eachrow(agg)]
+  agg = combine(groupby(agg, [:eco, :year, :symbol, :label]), :biomass => sum => :biomass)
+
+  # 5. Color & stack by each species' CANONICAL position so the same species gets the same
+  #    color across different plots. Default order = SPECIES_LIST (identical across runs of the
+  #    same scenario); pass `species_order` (a shared symbol list) for cross-scenario consistency.
+  #    Any present symbol not in the order is appended deterministically (sorted) at the end.
+  order = String[string(s) for s in (isempty(species_order) ? SPECIES_LIST : species_order)]
+  seen = Set(order)
+  for s in sort(unique(agg.symbol))
+    s in seen || (push!(order, s); push!(seen, s))
+  end
+  # Split canonically into softwoods (blue→green) and hardwoods (yellow→red); shade each
+  # species by its position WITHIN its class (over the full order, so shades are plot-stable).
+  soft_all = [s for s in order if is_soft(s)]
+  hard_all = [s for s in order if !is_soft(s)]
+  soft_grad = CairoMakie.cgrad([:navy, :dodgerblue, :darkturquoise, :seagreen, :limegreen])
+  hard_grad = CairoMakie.cgrad([:gold, :orange, :orangered, :red, :darkred])
+  shade(i, n) = n <= 1 ? 0.5 : (i - 1) / (n - 1)
+  color_of = Dict{String,CairoMakie.RGBAf}()
+  for (i, s) in enumerate(soft_all)
+    color_of[s] = CairoMakie.RGBAf(soft_grad[shade(i, length(soft_all))])
+  end
+  for (i, s) in enumerate(hard_all)
+    color_of[s] = CairoMakie.RGBAf(hard_grad[shade(i, length(hard_all))])
+  end
+  # stack order: softwoods (bottom) then hardwoods, each in canonical order.
+  stack_order = vcat(soft_all, hard_all)
+  sym_idx = Dict(s => i for (i, s) in enumerate(stack_order))
+
+  # 6. figure: one axis per ecoregion + shared legend column.
+  ecos = sort(unique(agg.eco))
+  yx = Dict(y => i for (i, y) in enumerate(present_years))
+  ncols = max(1, ceil(Int, sqrt(length(ecos))))   # square-ish grid (4 ecoregions → 2×2)
+  nrows = cld(length(ecos), ncols)
+  f = CairoMakie.Figure(size=(360 * ncols + 340, 80 + 320 * nrows))
+  CairoMakie.Label(f[0, 1:(ncols+1)],
+    "Forest species composition by ecoregion" * (relative ? " (relative)" : " (biomass g/m²)");
+    fontsize=16, font=:bold, tellwidth=false)
+
+  for (ei, eco) in enumerate(ecos)
+    r = cld(ei, ncols)
+    c = mod1(ei, ncols)
+    ax = CairoMakie.Axis(f[r, c]; title="Ecoregion: $(eco)", xlabel="year",
+      ylabel=relative ? "biomass fraction" : "biomass (g/m²)",
+      xticks=(collect(1:length(present_years)), string.(present_years)))
+    sub = agg[agg.eco.==eco, :]
+    ymap = relative ? Dict(row.year => row.ytot for row in eachrow(combine(groupby(sub, :year), :biomass => sum => :ytot))) : Dict()
+    xs = Int[]
+    ys = Float64[]
+    stk = Int[]
+    cs = CairoMakie.RGBAf[]
+    for row in eachrow(sub)
+      haskey(yx, Int(row.year)) || continue
+      h = relative ? Float64(row.biomass) / max(ymap[row.year], eps()) : Float64(row.biomass)
+      push!(xs, yx[Int(row.year)])
+      push!(ys, h)
+      push!(stk, sym_idx[row.symbol])
+      push!(cs, color_of[row.symbol])
+    end
+    isempty(xs) || CairoMakie.barplot!(ax, xs, ys; stack=stk, color=cs)
+  end
+
+  # Legend: present species in stack order (softwoods then hardwoods), each with its fixed color.
+  present = sort(unique(agg.symbol); by=s -> sym_idx[s])
+  label_of = Dict(r.symbol => r.label for r in eachrow(agg))
+  elems = [CairoMakie.PolyElement(color=color_of[s]) for s in present]
+  CairoMakie.Legend(f[1:nrows, ncols+1], elems, [label_of[s] for s in present],
+    "Species  (softwood: blue–green, hardwood: yellow–red)"; framevisible=false, labelsize=10)
+
+  mkpath(dirname(output_path))
+  CairoMakie.save(output_path, f)
+  println("Wrote $output_path  ($(length(ecos)) ecoregions, $(length(present)) species, years $(present_years))")
+  return output_path
+end
+
+function species_composition_main()
+  prefix = joinpath("../poster/fl5_strat4/landis_90_2")
+  plot_species_composition(
+    cohorts_db=joinpath("../poster/fl5_strat4_prob_spinup/pan_outputs_90_2", "cohorts.duckdb"),
+    scenario_dir=prefix,
+    fia_db="../FIASQLITE2PGSQL/FIADB.duckdb",
+    output_path=joinpath("../poster/fl5_strat4_prob_spinup/pan_outputs_90_2", "species_composition.png"),
+    years=[0, 25, 50],
   )
 end
 

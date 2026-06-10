@@ -155,10 +155,29 @@ function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
   return df_train, df_val
 end
 
+# Tag each plot with :mixed_plot over its entire (loaded) history. true = mixed stand:
+# neither hardwood nor softwood makes up more than `threshold` of the plot's aggregate
+# biomass. false = one type dominates (≥ threshold). Returns df with the :mixed_plot column.
+function with_mixed_plot(df::DataFrame; threshold::Float64=0.7)
+  ks = [:statecd, :unitcd, :countycd, :plot]
+  m = combine(groupby(df, ks)) do rows
+    tot = sum(rows.agb)
+    if tot <= 0
+      (; mixed_plot=true)
+    else
+      hw = sum((a for (a, s) in zip(rows.agb, rows.sftwd_hrdwd) if coalesce(s, "") == "H"); init=0.0)
+      sw = sum((a for (a, s) in zip(rows.agb, rows.sftwd_hrdwd) if coalesce(s, "") == "S"); init=0.0)
+      (; mixed_plot=(max(hw, sw) / tot <= threshold))
+    end
+  end
+  return leftjoin(df, m, on=ks)
+end
+
 function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[],
   by_subplot::Bool=false,
   val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing,
   min_trees::Int=100, min_agb_frac::Float64=0.05,
+  stratify_eco_mixed::Bool=false,
   tree_stats::Union{Nothing,DataFrame}=nothing)
   eco_field = if eco == "epa_l4"
     :epa_l4
@@ -174,13 +193,21 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
     filter!(row -> row.effective_species in fs, df)
   end
 
-  eco_vals = sort(unique(getproperty(df, eco_field)))
+  # Optionally stratify the ecoregion by stand mixedness: :eco is the base ecoregion,
+  # :eco_mixed splits it into "<eco>_mixed" / "<eco>_pure" per (plot-level) mixed_plot. When
+  # enabled the model fits params per eco_mixed; otherwise eco_mixed == the base ecoregion.
+  df.eco = string.(getproperty(df, eco_field))
+  df.eco_mixed = stratify_eco_mixed ?
+                 df.eco .* ifelse.(coalesce.(df.mixed_plot, true), "_mixed", "_pure") :
+                 df.eco
+
+  eco_vals = sort(unique(df.eco_mixed))
   eco_dict = Dict(eco => i for (i, eco) in enumerate(eco_vals))
   species_symbol_map_vals = sort(unique(df.effective_species))
   species_symbol_map_dict = Dict(ssm => i for (i, ssm) in enumerate(species_symbol_map_vals))
 
   df.species_id = getindex.(Ref(species_symbol_map_dict), df.effective_species)
-  df.eco_id = getindex.(Ref(eco_dict), getproperty(df, eco_field))
+  df.eco_id = getindex.(Ref(eco_dict), df.eco_mixed)
 
   # eco→species_ids built from full df so train and val share the same vocabulary
   ddf = combine(groupby(df, :eco_id, sort=true)) do rows
@@ -197,7 +224,12 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
 
   id_cols = by_subplot ? [:statecd, :unitcd, :countycd, :plot, :subp] :
             [:statecd, :unitcd, :countycd, :plot]
-  base_fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate, :sim_year,
+  # NB: sim_year is deliberately NOT a grouping key. In curated_cohorts_landis sim_year is
+  # anchored to each SUBPLOT's first measurement, so two subplots at the same plot visit can
+  # carry different sim_year for the same (plot-level) measdate — which would split otherwise
+  # identical species×age cohorts when by_subplot=false. We group on measdate (plot-level) and
+  # recompute sim_year per id_cols below.
+  base_fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate,
     :species_id, :effective_species, :age_calc]
   fields = by_subplot ? vcat(base_fields, [:subp]) : base_fields
 
@@ -223,6 +255,8 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
     end
     sp = sort!(innerjoin(plots, sm, on=id_cols),
       [:measdate, :statecd, :unitcd, :countycd, :plot, :age_calc, :species_id])
+    # sim_year anchored to id_cols' first measurement (per plot, or per subplot if by_subplot).
+    sp.sim_year = round.(Int, Dates.value.(Dates.Day.(sp.measdate .- sp.start_measdate)) ./ 365.25)
     sp.plot_id .= groupindices(groupby(sp, id_cols)) .|> UIntType
     sp.eco_species_id .= getindex.(Ref(eco_species_id_map), zip(sp.eco_id, sp.species_id))
     sp
@@ -282,7 +316,7 @@ end
 # fixed-width calendar cycles measured from the earliest measdate, and report how many land
 # in each — overall and per ecoregion — so we can confirm the population snapshots are
 # well-sampled and the first/last cycles aren't too thin to be representative.
-function print_cycle_coverage(splots::DataFrame; cycle_years::Real=10)
+function print_cycle_coverage(splots::DataFrame; cycle_years::Real=10, eco_list::Union{Nothing,Vector{String}}=nothing)
   meas = unique(select(splots, [:plot_id, :eco_id, :measdate]))
   epoch = minimum(meas.measdate)
   yrs = Dates.value.(Dates.Day.(meas.measdate .- epoch)) ./ 365.25
@@ -307,6 +341,10 @@ function print_cycle_coverage(splots::DataFrame; cycle_years::Real=10)
   println("\nPer ecoregion × cycle (counts; 0 = unsampled):")
   ec = combine(groupby(meas, [:eco_id, :cycle]), nrow => :n)
   wide = sort!(unstack(ec, :eco_id, :cycle, :n; fill=0), :eco_id)
+  if !isnothing(eco_list)
+    wide.eco_name = [get(eco_list, Int(id), "?") for id in wide.eco_id]
+    select!(wide, :eco_id, :eco_name, Not([:eco_id, :eco_name]))
+  end
   show(wide; allrows=true, allcols=true)
   println("\n")
   return wide
@@ -401,7 +439,82 @@ function check_cohort_continuity(splots::DataFrame; age_tol::Int=0)
   n_viol
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, min_trees::Int=100, min_agb_frac::Float64=0.05, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
+# Keep only the cohort rows whose FIA plot location falls inside the supplied shapefile.
+# Plot coordinates come from the PLOT table (LON/LAT, treated as EPSG:4326); the shapefile is
+# reprojected to 4326 and a point-in-polygon test selects plots. Ecoregion assignment is
+# untouched — this only restricts WHICH plots are used for calibration.
+function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::String; plot_table::String="PLOT")
+  isfile(shapefile_path) || error("filter_extent shapefile not found: $shapefile_path")
+  plot_keys = [:statecd, :unitcd, :countycd, :plot]
+  plots = unique(select(cohorts_df, plot_keys))
+  DuckDB.register_data_frame(con, plots, "extent_plots")
+  coords = DuckDB.execute(con, """
+    SELECT p.statecd AS statecd, p.unitcd AS unitcd, p.countycd AS countycd, p.plot AS plot,
+           ANY_VALUE(p.LAT) AS lat, ANY_VALUE(p.LON) AS lon
+    FROM $(plot_table) p
+    JOIN extent_plots e
+      ON e.statecd  = p.statecd AND e.unitcd = p.unitcd
+     AND e.countycd = p.countycd AND e.plot  = p.plot
+    WHERE p.LAT IS NOT NULL AND p.LON IS NOT NULL
+    GROUP BY p.statecd, p.unitcd, p.countycd, p.plot
+  """) |> DataFrame
+  DuckDB.execute(con, "DROP VIEW IF EXISTS extent_plots")
+  println("  filter_extent: $(nrow(plots)) loaded plots, $(nrow(coords)) with coords from $(plot_table)")
+  if isempty(coords)
+    error("filter_extent: no plot coordinates found — does $(plot_table) exist in this DB with LAT/LON for the loaded plots?")
+  end
+  println("  plot coords: lon [$(round(minimum(coords.lon),digits=4)), $(round(maximum(coords.lon),digits=4))], lat [$(round(minimum(coords.lat),digits=4)), $(round(maximum(coords.lat),digits=4))]")
+
+  # Union all shapefile geometries, reprojected to EPSG:4326 (lon/lat) to match plot coords.
+  geom = AG.read(shapefile_path) do ds
+    layer = AG.getlayer(ds, 0)
+    src_srs = AG.getspatialref(layer)
+    acc = nothing
+    for feat in layer
+      g = AG.getgeom(feat)
+      g === nothing && continue
+      acc = isnothing(acc) ? AG.clone(g) : AG.union(acc, g)
+    end
+    isnothing(acc) && error("filter_extent shapefile has no geometries: $shapefile_path")
+    # Only reproject when the shapefile is PROJECTED. A geographic shapefile already stores
+    # coords as (X=lon, Y=lat), matching FIA LON/LAT; reprojecting 4326→4326 just triggers
+    # GDAL's authority lat,lon axis order and silently swaps them. PROJ4 "+proj=longlat" target
+    # forces traditional lon,lat output for the projected case.
+    is_proj = false
+    if !isnothing(src_srs)
+      try
+        is_proj = AG.isprojected(src_srs)
+      catch
+        is_proj = false
+      end
+    end
+    if is_proj
+      AG.createcoordtrans(src_srs, AG.importPROJ4("+proj=longlat +datum=WGS84 +no_defs")) do ct
+        AG.transform!(acc, ct)
+      end
+    end
+    acc
+  end
+
+  try
+    env = AG.envelope(geom)
+    println("  polygon bbox (lon/lat after reproject): lon [$(round(env.MinX,digits=4)), $(round(env.MaxX,digits=4))], lat [$(round(env.MinY,digits=4)), $(round(env.MaxY,digits=4))]")
+  catch e
+    @warn "could not compute polygon envelope" exception = e
+  end
+
+  inside = Set{NTuple{4,Int}}()
+  for r in eachrow(coords)
+    AG.contains(geom, AG.createpoint(Float64(r.lon), Float64(r.lat))) &&
+      push!(inside, (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)))
+  end
+  println("  plots inside polygon: $(length(inside)) of $(nrow(coords))")
+
+  keep = [(Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)) in inside for r in eachrow(cohorts_df)]
+  return cohorts_df[keep, :]
+end
+
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
   con = DuckDB.connect(DuckDB.DB(cohorts_db_path))
   println("Creating index if necessary")
@@ -430,6 +543,20 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   println(sql)
   cohorts_df = DuckDB.execute(con, sql) |> DataFrame
   println("$(nrow(cohorts_df)) cohort rows loaded.")
+
+  # Restrict to plots whose location falls inside the supplied shapefile (eco_field still
+  # decides each plot's ecoregion). Applied before any other per-plot processing.
+  if !isnothing(filter_extent)
+    cohorts_df = filter_cohorts_by_extent(con, cohorts_df, filter_extent)
+    println("After filter_extent ($(basename(filter_extent))): $(nrow(cohorts_df)) rows, $(length(unique(zip(cohorts_df.statecd,cohorts_df.unitcd,cohorts_df.countycd,cohorts_df.plot)))) plots")
+    isempty(cohorts_df) && error("filter_extent kept 0 plots — compare the 'plot coords' and 'polygon bbox' ranges printed above. If they don't overlap it's a CRS/axis issue: try pre-reprojecting the shapefile with `ogr2ogr -t_srs EPSG:4326 out.shp $(filter_extent)`.")
+  end
+
+  # Tag each plot mixed/pure over its entire loaded history (used to stratify ecoregions).
+  if stratify_eco_mixed
+    cohorts_df = with_mixed_plot(cohorts_df)
+    println("Plots tagged mixed_plot: $(sum(unique(select(cohorts_df, [:statecd,:unitcd,:countycd,:plot,:mixed_plot])).mixed_plot)) mixed of $(length(unique(zip(cohorts_df.statecd,cohorts_df.unitcd,cohorts_df.countycd,cohorts_df.plot))))")
+  end
 
   # Per-species RAW tree stats from curated_trees, restricted to the loaded subplots, for
   # species tiering (cohort-row counts under-count trees). Per DISTINCT tree (full TREE_ID)
@@ -465,7 +592,8 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   @time splots, eco_list, species_list, eco_species_ids, splots_val =
     make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
       by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng,
-      min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats)
+      min_trees=min_trees, min_agb_frac=min_agb_frac,
+      stratify_eco_mixed=stratify_eco_mixed, tree_stats=tree_stats)
   mark_estab_year!(splots)
   isnothing(splots_val) || mark_estab_year!(splots_val)
 

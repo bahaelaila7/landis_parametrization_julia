@@ -151,23 +151,20 @@ function coalesce_to_duckdb(; output_dir::String, db_path::String, fresh::Bool=t
   )
 """
   )
-  app = DuckDB.Appender(con, "cohorts")
+  # Bulk-insert each chunk via a registered view: vectorized (fast) and each INSERT
+  # auto-commits, so a populated table is durable even if a later chunk fails (vs. a single
+  # long-lived Appender whose ~200M-row transaction commits only at close — if that never ran
+  # the whole append rolled back, leaving the table empty despite all "Loaded" logs).
   for fname in chunk_files
-    tbl = Arrow.Table(joinpath(output_dir, fname))
-    n = length(tbl.year)
-    for i in 1:n
-      DuckDB.append(app, tbl.year[i])
-      DuckDB.append(app, tbl.mapcode[i])
-      DuckDB.append(app, tbl.eco_id[i])
-      DuckDB.append(app, tbl.species_id[i])
-      DuckDB.append(app, tbl.age[i])
-      DuckDB.append(app, tbl.biomass[i])
-      DuckDB.end_row(app)
-    end
-    DuckDB.flush(app)
-    @info "Loaded $(fname): $n records"
+    df = DataFrame(Arrow.Table(joinpath(output_dir, fname)))
+    DuckDB.execute(con, "DROP VIEW IF EXISTS _chunk")
+    DuckDB.register_data_frame(con, df, "_chunk")
+    DuckDB.execute(con, "INSERT INTO cohorts SELECT year, mapcode, eco_id, species_id, age, biomass FROM _chunk")
+    @info "Loaded $(fname): $(nrow(df)) records"
   end
-  DuckDB.close(app)
+  DuckDB.execute(con, "DROP VIEW IF EXISTS _chunk")
+  n_final = first(DuckDB.execute(con, "SELECT COUNT(*) AS n FROM cohorts") |> DataFrame).n
+  @info "coalesced cohorts: $n_final rows → $db_path"
   DuckDB.close(db)
 end
 

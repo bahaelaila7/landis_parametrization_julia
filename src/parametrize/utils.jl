@@ -190,7 +190,7 @@ end
 Base.@kwdef struct LossParams
   age_bins::AgeBins
   smoothing_weights::Vector{FloatType}
-  lambda::FloatType = FloatType(1.0f-2)
+  lambda::FloatType = FloatType(1.0f0)   # weight of the AGB-level (sqrt-difference) term vs the shape W1
   EPS::FloatType = FloatType(1.0f-7)
 end
 
@@ -233,8 +233,15 @@ function Base.sum(losses::AbstractVector{SiteLoss})
   end
   SiteLoss(sp_w_loss=sp_w, sp_agb_loss=sp_agb, site_agb_loss=site_agb, num_sites=n_sites, num_obs=n_obs)
 end
-@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=FloatType(1.0f0), beta::FloatType=FloatType(1.0f0))::FloatType
-  return sum((alpha .* loss.sp_w_loss)) / loss.num_obs
+# Global weight on the Wasserstein (shape) term in the optimized scalar. Set to 0 to keep only
+# the L2/AGB-level term (sp_w_loss is still computed — it drives loss-weighted sampling and the
+# per-species breakdown). Wired from `loss_alpha` (yaml / parametrize).
+const LOSS_ALPHA = Ref{FloatType}(one(FloatType))
+
+@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=LOSS_ALPHA[], beta::FloatType=FloatType(1.0f0))::FloatType
+  # sp_w_loss = age-distribution SHAPE (normalized-CDF W1, AGB-invariant);
+  # sp_agb_loss = AGB LEVEL (gentle sqrt-difference term, already scaled by loss_params.lambda).
+  return (alpha * sum(loss.sp_w_loss) + beta * sum(loss.sp_agb_loss)) / loss.num_obs
 end
 @inline Base.convert(::Type{Float64}, a::SiteLoss) = Float64(get_total_loss(a))
 #@inline Base.promote_rule(::Type{SiteLoss}, ::Type{Float64}) = Float64
@@ -374,13 +381,14 @@ end
     let bw = loss_params.age_bins.bin_widths
       s = zero(FloatType)
       @inbounds for k in eachindex(bw)
-        s += bw[k] * abs((sim_agb_sum) * sim_age_cdf[k] - (rec.sp_agb_sum) * rec.sp_age_cdf[k])^lp
+        # Squared difference of the NORMALIZED age CDF → distribution SHAPE only.
+        s += bw[k] * (sim_age_cdf[k] - rec.sp_age_cdf[k])^2
       end
       sp_w_loss[gsp] = s
     end
     #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
-    #log_diff -= log10(1 + rec.sp_agb_sum) #+ loss_params.EPS)
-    sp_agb_loss[gsp] = abs(sim_agb_sum - rec.sp_agb_sum)
+    # AGB LEVEL as a separate, gentle sqrt-difference term (weighted by loss_params.lambda).
+    sp_agb_loss[gsp] = loss_params.lambda * (sqrt(sim_agb_sum) - sqrt(rec.sp_agb_sum))^2
     site_agb_loss -= rec.sp_agb_sum
     if debug
       println("smoothing_weights $(loss_params.smoothing_weights)")
@@ -473,16 +481,16 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
   for sp in (1:length(spdf_plt.keys))[spdf_plt.keys.&(.!insite)]
     @inbounds rec = spdf_plt.records[UIntType(sp)]
     @inbounds gsp = species_id_map[sp]
-    sp_agb_loss[gsp] = rec.sp_agb_sum
-    #@assert sp_w_loss[gsp] == 0
+    # Species present in REF but absent in SIM: sim CDF = 0, sim AGB = 0.
+    # Shape penalty = full ref CDF²; level penalty = (sqrt(ref AGB))² = ref AGB (sim sqrt = 0).
     let bw = loss_params.age_bins.bin_widths
       s = zero(FloatType)
       @inbounds for k in eachindex(bw)
-        s += bw[k] * (rec.sp_agb_sum * rec.sp_age_cdf[k])^lp
+        s += bw[k] * rec.sp_age_cdf[k]^2
       end
       sp_w_loss[gsp] = s
     end
-    #sp_w_loss[gsp] = loss_params.lambda * abs(log10(1+rec.sp_agb_sum)) # + loss_params.EPS))
+    sp_agb_loss[gsp] = loss_params.lambda * rec.sp_agb_sum
     site_agb_loss -= rec.sp_agb_sum
   end
 
