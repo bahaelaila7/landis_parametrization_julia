@@ -15,7 +15,7 @@ using .PanCore
 using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin
 import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
-using .Search: SA, LBSA
+using .Search: SA, LBSA, MOLBSA
 import .Data as Data
 import .Spatial
 import Dates
@@ -909,7 +909,8 @@ function parametrize(; cohorts_db_path::String,
       n_output_plots=n_output_plots,
       cycle_years=cycle_years)
   end
-  parametrize_LBSA(; ref_soa=ref_soa,
+  driver = search_mode == "molbsa" ? parametrize_MOLBSA : parametrize_LBSA
+  driver(; ref_soa=ref_soa,
     output_dir=output_dir,
     splots=splots,
     spdf_plts=spdf_plts,
@@ -1139,6 +1140,13 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       max_age_scratch = max_sim_year + max(1, length(loss_params.smoothing_weights) >> 1) + 5
       scratch_perm_t = [Vector{Int}(undef, max_cohorts_scratch) for _ in 1:Threads.maxthreadid()]
       scratch_ages_t = [Vector{FloatType}(undef, max_age_scratch) for _ in 1:Threads.maxthreadid()]
+    else
+      # tier 3: per-ecoregion accumulators so the MO search can read a per-(eco,species) loss
+      # breakdown. These regroup the same per-site SiteLoss values run_result is summed from.
+      eco3_w = [zeros(FloatType, n_species) for _ in eachindex(eco_species_ids)]
+      eco3_agb = [zeros(FloatType, n_species) for _ in eachindex(eco_species_ids)]
+      eco3_site_agb = zeros(FloatType, length(eco_species_ids))
+      eco3_obs = zeros(Int, length(eco_species_ids))
     end
     for current_sim_year in starting_sim_year:max_sim_year
       #println("\ttimestep $(t)")
@@ -1242,6 +1250,15 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
         if length(year_results_no_missing) > 0
           years_results[current_sim_year+1] = sum(year_results_no_missing)
         end
+        for i in 1:soa.n
+          isassigned(sites_results, i) || continue
+          eco_id = Int(getsite(soa, i).eco_id)
+          sl = sites_results[i]
+          eco3_w[eco_id] .+= sl.sp_w_loss
+          eco3_agb[eco_id] .+= sl.sp_agb_loss
+          eco3_site_agb[eco_id] += sl.site_agb_loss
+          eco3_obs[eco_id] += 1
+        end
       end
     end
     if search_tier == 1
@@ -1268,7 +1285,8 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       eco_losses = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles)
       run_result = sum(eco_losses)
     else
-      eco_losses = nothing
+      # Per-ecoregion breakdown (num_sites mirrors num_obs here, as in the scalar tier-3 sum).
+      eco_losses = [PU.SiteLoss(sp_w_loss=eco3_w[e], sp_agb_loss=eco3_agb[e], site_agb_loss=eco3_site_agb[e], num_sites=eco3_obs[e], num_obs=eco3_obs[e]) for e in eachindex(eco_species_ids)]
       run_result = sum(PU.skipundef(years_results))
     end
     #@assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
@@ -1718,6 +1736,292 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
   return search_state
 end
 
+# Flatten the per-ecoregion SiteLoss breakdown into the multi-objective vector:
+# for each (ecoregion, species-in-eco) two coordinates — the age-distribution
+# (Wasserstein) loss and the AGB-level loss. Order is fixed across candidates, so
+# the vector is coordinate-comparable in MOLBSA.mo_delta / dominance.
+function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}})::Vector{FloatType}
+  objs = FloatType[]
+  for (eco_id, el) in enumerate(eco_losses)
+    for gsp in eco_species_ids[eco_id]
+      push!(objs, el.sp_w_loss[gsp])
+      push!(objs, el.sp_agb_loss[gsp])
+    end
+  end
+  return objs
+end
+
+# Background writer for MOLBSA: checkpoints the full state (archive included) and
+# the representative params, and generates plots, off the search thread. Mirrors
+# start_writer but reads `state.representative` instead of `state.best`.
+function start_mo_writer(::Type{State}, output_dir::AbstractString; buffer_size::Int=8) where {State}
+  ch = Channel{Union{WriterJob{State},Symbol}}(buffer_size)
+  task = Threads.@spawn begin
+    try
+      for job in ch
+        job === STOP && break
+        state = job.state
+        if job.is_new_best
+          try
+            @info "New best: $(state.representative.fx.aggregate)" iter = state.i archive = length(state.archive)
+            mkpath(output_dir)
+            JLD2.save_object(joinpath(output_dir, "search_state@$(state.i).jld2"), state)
+            PU.save_json(joinpath(output_dir, "best_params@$(state.i).json"), state.representative.x)
+            JLD2.save_object(joinpath(output_dir, "best_params@$(state.i).jld2"), state.representative.x)
+          catch e
+            @error "mo_writer: save failed" iter = state.i exception = (e, catch_backtrace())
+          end
+          if !isnothing(job.emp_sample) && !isnothing(job.sim_sample)
+            try
+              generate_plots(job.emp_sample, job.sim_sample, "training_$(state.i)", state.representative.fx.aggregate, output_dir)
+            catch e
+              @error "mo_writer: generate_plots (train) failed" iter = state.i exception = (e, catch_backtrace())
+            end
+          end
+          if !isnothing(job.emp_sample_val) && !isnothing(job.sim_sample_val)
+            try
+              generate_plots(job.emp_sample_val, job.sim_sample_val, "validation_$(state.i)", state.representative.fx.aggregate, output_dir)
+            catch e
+              @error "mo_writer: generate_plots (val) failed" iter = state.i exception = (e, catch_backtrace())
+            end
+          end
+        else
+          @info ("Best@$(state.best_iteration): agg=$(state.representative.fx.aggregate), archive=$(length(state.archive)), Avg diff: $(state.diff_avg), Temp: $(state.t), Prob: $(state.prob_avg)")
+        end
+      end
+    catch e
+      @error "mo_writer: fatal" exception = (e, catch_backtrace())
+      rethrow()
+    end
+  end
+  return ch, task
+end
+
+# Multi-objective LBSA driver. Mirrors parametrize_LBSA, but scores each candidate
+# by the per-(eco,species,{w,agb}) loss vector and compares candidates by net
+# objective win-count (MOLBSA.mo_delta) rather than by the scalar total loss.
+# All tiers (1, 2, 3, 4) expose the per-ecoregion breakdown that the objective
+# vector is built from.
+function parametrize_MOLBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200)
+  search_tier in (1, 2, 3, 4) || error("parametrize_MOLBSA: unknown search_tier=$search_tier (expected 1, 2, 3, or 4)")
+  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
+
+  all_plot_ids = UIntType.(unique(splots.plot_id))
+  sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
+  emp_sample = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
+
+  n_species = length(species_list)
+  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment)
+  _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
+  injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
+  injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
+
+  have_val = !isnothing(val_ref_soa)
+  inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
+  inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
+  sampled_ids_val = (have_val && n_output_plots > 0) ?
+                    _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) :
+                    Set{UIntType}()
+  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
+
+  # Per-tier reference setup (mirrors parametrize_LBSA; tier 3 needs no reference and falls through).
+  t4_ref = nothing
+  cycle_map = nothing
+  n_cycles = 0
+  t1_ref = nothing
+  t2_ref = nothing
+  if search_tier == 1
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
+    for ((_, eco_id), year_dict) in spdf_plts
+      for (_, spdf_gt) in year_dict
+        for (sp_eco, rec) in spdf_gt.records
+          t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
+        end
+      end
+    end
+  elseif search_tier == 2
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
+    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
+    for ((_, eco_id), year_dict) in spdf_plts
+      for (_, spdf_gt) in year_dict
+        for (sp_eco, rec) in spdf_gt.records
+          bin_probs = diff([0f0; rec.sp_age_cdf])
+          for b in 1:n_bins
+            push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum)
+          end
+          push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
+        end
+      end
+    end
+    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
+  elseif search_tier == 4
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
+    for ((plot_id, eco_id), year_dict) in spdf_plts
+      for (sy, spdf_gt) in year_dict
+        cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0)
+        cyc == 0 && continue
+        for (sp_eco, rec) in spdf_gt.records
+          t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
+        end
+      end
+    end
+  end
+  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
+
+  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
+  # Score a candidate's repetitions into one MOFitness (eco_losses summed over reps).
+  function _fitness(rep_results)
+    run_result = sum(r[1] for r in rep_results)
+    eco_losses = [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
+    objs = _mo_objectives(eco_losses, eco_species_ids)
+    MOLBSA.MOFitness(objs, convert(Float64, PU.get_total_loss(run_result))), run_result, eco_losses
+  end
+
+  if isnothing(resume_from)
+    bio_params = if !isnothing(start_from)
+      @info "Seeding initial candidate from $start_from (fresh search_state)"
+      p = _load_params_from_path(start_from)
+      (p.SPECIES_LIST == species_list && p.ECO_LIST == eco_list) ||
+        error("start_from params are incompatible with this run: their SPECIES_LIST/ECO_LIST differ from the loaded data.")
+      p
+    elseif !isempty(_sobol_cands)
+      @info "Using Sobol candidate 1/$(length(_sobol_cands)) as initial point"
+      _sobol_cands[1]
+    else
+      BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
+    end
+    fx0, _, _ = _fitness(_run(bio_params))
+    cur = MOLBSA.MOCandidate(bio_params, fx0)
+    search_state = MOLBSA.MOLBSAState(cur, cur, rng; max_iter=TRIALS, archive_cap=archive_cap)
+    search_state.sobol_cand_idx = 2
+  else
+    @info "Resuming from $resume_from"
+    search_state = JLD2.load_object(resume_from)
+    search_state.max_iter = TRIALS
+    bio_params = search_state.current.x
+    force_restart_from_random && (search_state._should_restart = true)
+  end
+  if TRIALS < 1 || MOLBSA.is_search_over(search_state)
+    return search_state
+  end
+  next_candidate() =
+    if search_state.sobol_cand_idx <= length(_sobol_cands)
+      p = _sobol_cands[search_state.sobol_cand_idx]
+      search_state.sobol_cand_idx += 1
+      p
+    else
+      BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
+    end
+
+  writer_ch, writer_task = start_mo_writer(typeof(search_state), output_dir)
+
+  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
+  losses_db = DuckDB.connect(losses_db_file)
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
+
+  caused_by_interrupt(e) =
+    e isa InterruptException ? true :
+    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
+    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) :
+    false
+
+  try
+    TProgress.@track for trial in (search_state.i+1):TRIALS
+      bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)
+      for _ in 0:rand(rng, 0:2)
+        bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)
+      end
+
+      rep_results = _run(bio_params)
+      fx, run_result, eco_losses = _fitness(rep_results)
+      cached_sites_state = _median_rep_cached(rep_results)
+
+      next = MOLBSA.MOCandidate(bio_params, fx)
+      is_new_best = MOLBSA.search_cmp!(next, search_state)
+      if MOLBSA.should_restart(search_state)
+        @info "Restarting @ $(search_state.i)"
+        bio_params = next_candidate()
+        rfx, _, _ = _fitness(_run(bio_params))
+        is_new_best = MOLBSA.restart(search_state, MOLBSA.MOCandidate(bio_params, rfx))
+      end
+
+      val_sim_sample = nothing
+      if is_new_best
+        iter = search_state.best_iteration
+        total = search_state.representative.fx.aggregate
+        @info "New best @ $iter | agg=$total | archive=$(length(search_state.archive))"
+        try
+          test_df = simulate_and_test(; splots=splots, bio_params=search_state.representative.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng)
+          println("Train stats:")
+          show(test_df; allrows=true, allcols=true)
+          println()
+        catch e
+          @warn "simulate_and_test (train) failed" exception = (e, catch_backtrace())
+        end
+        if have_val
+          try
+            val_result = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species,
+              eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params;
+              debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
+            @info "Val loss @ $iter | loss=$(convert(Float64, PU.get_total_loss(val_result[1])))"
+            val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
+          catch e
+            @warn "val fit_params failed" exception = (e, catch_backtrace())
+          end
+        end
+        let buf = IOBuffer()
+          Serialization.serialize(buf, search_state.representative.x)
+          DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?, ?)", [iter, run_result.num_sites, run_result.num_obs, total, length(search_state.archive), take!(buf)])
+        end
+        for (eco_id, eco_loss) in enumerate(eco_losses)
+          eco_name = eco_list[eco_id]
+          DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, convert(Float64, PU.get_total_loss(eco_loss))])
+          n = max(1, eco_loss.num_sites)
+          for gsp in 1:n_species
+            eco_loss.sp_w_loss[gsp] == 0f0 && continue
+            DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+          end
+        end
+      end
+      if is_new_best || search_state.i % 50 == 0
+        cached_sites_state_df = DataFrame(cached_sites_state, [:plot_id, :sim_year, :species_id, :age, :agb])
+        sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(cached_sites_state, sampled_ids) : nothing
+        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample, is_new_best ? emp_sample_val : nothing, val_sim_sample))
+      end
+      MOLBSA.is_search_over(search_state) && break
+    end
+  catch e
+    if caused_by_interrupt(e)
+      @info "Search interrupted by user @ trial $(search_state.i); finalizing checkpoint…"
+    else
+      rethrow()
+    end
+  finally
+    stop_writer(writer_ch, writer_task)
+    close(losses_db_file)
+    try
+      mkpath(output_dir)
+      fname = "search_state@$(search_state.i).jld2"
+      JLD2.save_object(joinpath(output_dir, fname), search_state)
+      link_path = joinpath(output_dir, "search_state_latest.jld2")
+      islink(link_path) && rm(link_path)
+      symlink(fname, link_path)
+      @info "Search state saved @ $(search_state.i)"
+    catch e
+      @error "Failed to save search state on exit" exception = (e, catch_backtrace())
+    end
+  end
+
+  return search_state
+end
+
 function load_best_params(db_path::String; iteration::Union{Nothing,Int}=nothing)
   db = DuckDB.DB(db_path)
   con = DuckDB.connect(db)
@@ -1982,6 +2286,9 @@ function _load_params_from_path(params_path::String)
   if raw isa LBSA.LBSAState
     @info "Loaded LBSAState — using best params" loss = convert(Float64, raw.best.fx) iter = raw.best_iteration
     return raw.best.x
+  elseif raw isa MOLBSA.MOLBSAState
+    @info "Loaded MOLBSAState — using representative params" agg = raw.representative.fx.aggregate iter = raw.best_iteration
+    return raw.representative.x
   elseif raw isa Vector  # sobol results
     @info "Loaded sobol results — using rank-1 params" mean_loss = raw[1].mean_loss
     return raw[1].params
