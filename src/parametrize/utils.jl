@@ -1,5 +1,5 @@
 using ..PanCore
-export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples, wasserstein1d, find_age_bin
+export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples, wasserstein1d, find_age_bin, build_slots, u_to_params, params_to_u
 
 import Setfield
 import Sobol
@@ -18,7 +18,16 @@ struct MutableParam{S,T}
   type::Type
   sampler::S             # how to pick the target element
   applier::Any           # how to write the sampled value back
+  quantum::FloatType     # snap sampled values to a multiple of this; 0 = no quantization (continuous)
 end
+# Back-compat 7-arg form (no quantization). Pass `quantum=…` to put a parameter on a coarse grid
+# (e.g. B_MAX_SPP by 100). The quantum is honored project-wide by every value-producing path:
+# mutate_params (LBSA/MOLBSA), u_to_params (CMA-ES/MOCMAES) and sobol_samples.
+MutableParam(name::Symbol, dist::Dists.Distribution, bounds::Tuple, sigma::T, type::Type, sampler::S, applier; quantum::Real=0) where {S,T} =
+  MutableParam{S,T}(name, dist, bounds, sigma, type, sampler, applier, FloatType(quantum))
+
+# Snap `v` to the nearest multiple of `q` (q == 0 → unchanged), returning the parameter's type.
+@inline _quantize(v, q::FloatType, ::Type{T}) where {T} = q > zero(FloatType) ? T(round(Float64(v) / q) * q) : T(v)
 struct ParamDists{T} # subtyping here to make different plugins have different ParamDists
   params::Vector{MutableParam}
   weights_cumsum::Vector{Float64}
@@ -153,6 +162,7 @@ function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG
       else
         r
       end |> param.type
+      r = _quantize(r, param.quantum, param.type)   # snap to the param's grid (e.g. B_MAX by 100)
     end
     r
   end
@@ -535,53 +545,103 @@ function wasserstein1d(a::AbstractVector, b::AbstractVector)::FloatType
   return FloatType(w1)
 end
 
-# Generate N quasi-random Sobol samples covering the full parameter space.
-# `param_dists` comes from e.g. BSP.make_biomass_param_dists(...).
-# `initial_params` is the template struct (provides ECO_SPECIES_IDS, SPECIES_LIST, ECO_LIST).
-function sobol_samples(param_dists::ParamDists{T}, initial_params::T, N::Int)::Vector{T} where T
+# Flat enumeration of every tunable scalar dimension as (param_idx, target_idx), where
+# target_idx is nothing (Global), an Int (Species/Eco), or an (eco,sp) tuple (EcoSpecies).
+# `template` provides ECO_SPECIES_IDS, SPECIES_LIST, ECO_LIST. `length(build_slots(...))`
+# is the search-space dimensionality `d` shared by sobol_samples and the CMA-ES bridge.
+function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,Any}} where T
   slots = Tuple{Int,Any}[]
   for (pi, param) in enumerate(param_dists.params)
     if param.sampler isa GlobalSampler
       push!(slots, (pi, nothing))
     elseif param.sampler isa SpeciesSampler
-      for i in 1:length(initial_params.SPECIES_LIST)
+      for i in 1:length(template.SPECIES_LIST)
         push!(slots, (pi, i))
       end
     elseif param.sampler isa EcoSampler
-      for i in 1:length(initial_params.ECO_LIST)
+      for i in 1:length(template.ECO_LIST)
         push!(slots, (pi, i))
       end
     elseif param.sampler isa EcoSpeciesSampler
-      for (eco_id, sp_ids) in enumerate(initial_params.ECO_SPECIES_IDS)
+      for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS)
         for sp_id in eachindex(sp_ids)
           push!(slots, (pi, (eco_id, sp_id)))
         end
       end
     end
   end
+  return slots
+end
 
+# Map a u-vector in [0,1]^d to a params struct via each prior's quantile, then bounds-clip and
+# cast to the param's type — identical to the sobol_samples inner mapping. Bounds and discrete
+# priors (DiscreteUniform) are handled automatically by quantile, so any u is representable.
+function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}, template::T)::T where T
+  p = template
+  for (dim, (pi, idx)) in enumerate(slots)
+    param = param_dists.params[pi]
+    raw = Dists.quantile(param.dist, clamp(Float64(u[dim]), 1e-10, 1 - 1e-10))
+    min_, max_ = param.bounds
+    val = if !isnothing(min_) && raw < min_
+      param.type(min_)
+    elseif !isnothing(max_) && raw > max_
+      param.type(max_)
+    else
+      param.type(raw)
+    end
+    val = _quantize(val, param.quantum, param.type)   # snap to the param's grid (e.g. B_MAX by 100)
+    new_field = apply_mutation(param.applier, getproperty(p, param.name), idx, val)
+    p = Setfield.@set p.$(param.name) = new_field
+  end
+  return p
+end
+
+# Inverse of u_to_params (on the prior-grid): map each tunable value to u = cdf(prior, value).
+# Used once to seed the CMA-ES mean from an initial params struct. Clamped off the open
+# endpoints so the round-trip through quantile stays inside the bounds.
+function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}})::Vector{Float64} where T
+  u = Vector{Float64}(undef, length(slots))
+  for (dim, (pi, idx)) in enumerate(slots)
+    param = param_dists.params[pi]
+    cur = get_field_val(param.applier, getproperty(params, param.name), idx)
+    u[dim] = clamp(Float64(Dists.cdf(param.dist, Float64(cur))), 1e-6, 1 - 1e-6)
+  end
+  return u
+end
+
+# Hansen-style mixed-integer handling: a per-u-coordinate lower bound on the CMA-ES sampling
+# std-dev, so discrete coordinates keep flipping integers even as σ shrinks (otherwise a coarse
+# discrete like SHADE_TOL freezes once σ·√C_ii drops below its plateau width and all offspring
+# round to the same value). Each DiscreteUniform prior with L levels has a u-space step width of
+# 1/L; the floor is `factor/L`. Continuous priors get 0 (no floor). The floor self-targets coarse
+# discretes — for fine ones (large L) it is tiny and effectively never binds. Returns a length-d
+# vector aligned with `slots` (used to top up the marginal std in CMAES.ask).
+function integer_u_min_std(param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}, factor::Float64=0.3)::Vector{Float64} where T
+  s = zeros(Float64, length(slots))
+  for (dim, (pi, _)) in enumerate(slots)
+    p = param_dists.params[pi]
+    if p.dist isa Dists.DiscreteUniform
+      span = Float64(Dists.maximum(p.dist) - Dists.minimum(p.dist))   # value-range width
+      step = p.quantum > zero(FloatType) ? Float64(p.quantum) : 1.0   # effective grid step
+      L = floor(span / step) + 1                                      # number of reachable levels
+      L > 1 && (s[dim] = factor / L)                                  # u-width of one step ≈ 1/L
+    end
+  end
+  return s
+end
+
+# Generate N quasi-random Sobol samples covering the full parameter space.
+# `param_dists` comes from e.g. BSP.make_biomass_param_dists(...).
+# `initial_params` is the template struct (provides ECO_SPECIES_IDS, SPECIES_LIST, ECO_LIST).
+function sobol_samples(param_dists::ParamDists{T}, initial_params::T, N::Int)::Vector{T} where T
+  slots = build_slots(param_dists, initial_params)
   d = length(slots)
   seq = Sobol.SobolSeq(d)
   u = zeros(Float64, d)
   results = Vector{T}(undef, N)
   for n in 1:N
     Sobol.next!(seq, u)
-    p = initial_params
-    for (dim, (pi, idx)) in enumerate(slots)
-      param = param_dists.params[pi]
-      raw = Dists.quantile(param.dist, clamp(u[dim], 1e-10, 1 - 1e-10))
-      min_, max_ = param.bounds
-      val = if !isnothing(min_) && raw < min_
-        param.type(min_)
-      elseif !isnothing(max_) && raw > max_
-        param.type(max_)
-      else
-        param.type(raw)
-      end
-      new_field = apply_mutation(param.applier, getproperty(p, param.name), idx, val)
-      p = Setfield.@set p.$(param.name) = new_field
-    end
-    results[n] = p
+    results[n] = u_to_params(u, param_dists, slots, initial_params)
   end
   return results
 end

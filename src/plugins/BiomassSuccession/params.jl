@@ -60,7 +60,8 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   ANPP_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(700, 100), 100, 1500), length(eco_species)) .|> FloatType
                   for eco_species in eco_species_ids]
   #println(typeof(ANPP_MAX_SPP))
-  B_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(25000, 1000), 20000, 35000), length(eco_species)) .|> FloatType
+  # B_MAX_SPP lives on a 100-grid (see make_biomass_param_dists quantum=100); seed it on-grid too.
+  B_MAX_SPP = [rand(rng, Dists.truncated(Dists.Normal(25000, 1000), 20000, 35000), length(eco_species)) .|> (x -> FloatType(round(x / 100) * 100))
                for eco_species in eco_species_ids]
 
 
