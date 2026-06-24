@@ -60,12 +60,15 @@ mutable struct IgelState{Tx,TRNG<:Random.AbstractRNG}
   _sobol::Sobol.SobolSeq                         # space-filling source for re-seed locations
   _reseed::Vector{Bool}                          # which offspring this generation are fresh re-seeds (set by ask)
   _off::Vector{Individual}                       # offspring of the current generation (set by ask)
+  blocks::Vector{Vector{Int}}                    # block-diagonal covariance partition (1 block ⇒ full (1+1)-CMA)
 end
 
 # init_us: μ starting u-vectors; init_cands: their evaluated MOCandidates (params + MOFitness)
 function IgelState(init_us::Vector{Vector{Float64}}, init_cands::Vector{MOCandidate{Tx}}, rng::TRNG;
-                   sigma0::Float64=0.3, archive_cap::Int=200, max_iter::Int=1_000_000, niche_radius::Float64=0.0, reseed_sigma::Float64=0.0, maturity_period::Int=0) where {Tx,TRNG<:Random.AbstractRNG}
+                   sigma0::Float64=0.3, archive_cap::Int=200, max_iter::Int=1_000_000, niche_radius::Float64=0.0, reseed_sigma::Float64=0.0, maturity_period::Int=0,
+                   blocks::Union{Nothing,Vector{Vector{Int}}}=nothing) where {Tx,TRNG<:Random.AbstractRNG}
   μ = length(init_us); n = length(init_us[1])
+  blk = isnothing(blocks) ? [collect(1:n)] : blocks
   d = 1 + n/2
   p_target = 1 / (5 + sqrt(1.0)/2)              # λ=1 offspring per parent
   c_p = p_target / (2 + p_target)
@@ -77,7 +80,7 @@ function IgelState(init_us::Vector{Vector{Float64}}, init_cands::Vector{MOCandid
   sob = Sobol.SobolSeq(n); for _ in 1:μ; Sobol.next!(sob); end   # skip past the init points so re-seeds explore new regions
   st = IgelState{Tx,TRNG}(pop, rep, rep, MOCandidate{Tx}[], archive_cap, rng,
     Tuple{Int,Float64,MOCandidate{Tx}}[], 0, 0, 0, μ, max_iter, sigma0, 0.0, 0.0,
-    n, μ, d, p_target, c_p, p_thresh, c_c, c_cov, niche_radius, sigma0, reseed_sigma, maturity_period, sob, falses(μ), Individual[])
+    n, μ, d, p_target, c_p, p_thresh, c_c, c_cov, niche_radius, sigma0, reseed_sigma, maturity_period, sob, falses(μ), Individual[], blk)
   for c in init_cands; _archive!(st, c); end
   return st
 end
@@ -97,8 +100,14 @@ function ask(st::IgelState)::Vector{Vector{Float64}}
       st._off[k] = Individual(xo, st.sigma0, st.p_target, Matrix{Float64}(LA.I, n, n), zeros(n), ind.fx, 0)  # fresh strategy
       st._reseed[k] = true
     else
-      F = LA.eigen(LA.Symmetric(ind.C)); A = F.vectors * LA.Diagonal(sqrt.(max.(F.values, 1e-30)))
-      xo = clamp.(ind.x .+ ind.sigma .* (A * randn(st.rng, n)), 0.0, 1.0)
+      xo = copy(ind.x)                              # per-block: y_b ~ N(0, C[b,b]), assembled into xo
+      for idx in st.blocks
+        Cb = ind.C[idx, idx]
+        F = LA.eigen(LA.Symmetric(Cb)); Ab = F.vectors * LA.Diagonal(sqrt.(max.(F.values, 1e-30)))
+        yb = Ab * randn(st.rng, length(idx))
+        @inbounds for (j, gi) in enumerate(idx); xo[gi] = ind.x[gi] + ind.sigma * yb[j]; end
+      end
+      xo = clamp.(xo, 0.0, 1.0)
       offs[k] = xo
       st._off[k] = Individual(xo, ind.sigma, ind.p_succ, copy(ind.C), copy(ind.p_c), ind.fx, ind.mature_at)
     end
@@ -157,13 +166,20 @@ end
   ind.sigma *= exp((1 / st.d) * (ind.p_succ - st.p_target) / (1 - st.p_target))
 end
 
+# BLOCK-DIAGONAL (1+1)-CMA covariance update: p_c evolves over the full vector, but the rank-1 C update
+# is applied only WITHIN each block's submatrix (off-block entries stay zero), so each parameter group
+# keeps its own small covariance. With one block this is the standard full-C update.
 @inline function _update_cov!(ind::Individual, step::Vector{Float64}, st::IgelState)
-  if ind.p_succ < st.p_thresh
-    ind.p_c = (1 - st.c_c) .* ind.p_c .+ sqrt(st.c_c * (2 - st.c_c)) .* step
-    ind.C = (1 - st.c_cov) .* ind.C .+ st.c_cov .* (ind.p_c * ind.p_c')
-  else
-    ind.p_c = (1 - st.c_c) .* ind.p_c
-    ind.C = (1 - st.c_cov) .* ind.C .+ st.c_cov .* (ind.p_c * ind.p_c' .+ st.c_c * (2 - st.c_c) .* ind.C)
+  active = ind.p_succ < st.p_thresh
+  ind.p_c = active ? (1 - st.c_c) .* ind.p_c .+ sqrt(st.c_c * (2 - st.c_c)) .* step : (1 - st.c_c) .* ind.p_c
+  for idx in st.blocks
+    pcb = @view ind.p_c[idx]
+    Cb = @view ind.C[idx, idx]
+    if active
+      ind.C[idx, idx] = (1 - st.c_cov) .* Cb .+ st.c_cov .* (pcb * pcb')
+    else
+      ind.C[idx, idx] = (1 - st.c_cov) .* Cb .+ st.c_cov .* (pcb * pcb' .+ st.c_c * (2 - st.c_c) .* Cb)
+    end
   end
 end
 

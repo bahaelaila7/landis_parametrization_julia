@@ -4,7 +4,7 @@ function generate_eco_params(params::BiomassSuccessionParams)::Vector{BiomassSuc
     BiomassSuccessionEcoParams(
       SPINUP_MORTALITY_FRACTION=params.SPINUP_MORTALITY_FRACTION,
       SUFFICIENT_LIGHT=params.SUFFICIENT_LIGHT, D=(@dimslice params.D species),
-      S=(@dimslice params.S species),
+      S=params.S[eco_id],
       LONGEVITY=(@dimslice params.LONGEVITY species),
       MATURITY=(@dimslice params.MATURITY species),
       SHADE_TOL=(@dimslice params.SHADE_TOL species),
@@ -31,8 +31,9 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   SPINUP_MORTALITY_FRACTION = 0.15f0 #rand(Dists.Uniform(0f0,0.20f0))
   #println(typeof(SPINUP_MORTALITY_FRACTION))
 
-  S = rand(rng, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), n_species) .|> FloatType #Random.rand(rng, FloatType, n_species),#
-  #println(typeof(S))
+  # S (growth-curve shape) is now PER-(eco,species) so it can join the per-ecoregion CMA-ES block.
+  S = [rand(rng, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), length(eco_species)) .|> FloatType
+       for eco_species in eco_species_ids]
   D = rand(rng, Dists.truncated(Dists.Normal(15, 10), 5, 25), n_species) .|> FloatType
   #println(typeof(D))
   #LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200, 100), 100, 300), n_species) .|> FloatType

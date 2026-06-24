@@ -15,7 +15,7 @@ using .PanCore
 using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin
 import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
-using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES
+using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE
 import .Data as Data
 import .Spatial
 import Dates
@@ -797,6 +797,11 @@ function parametrize(; cohorts_db_path::String,
   igel_niche_radius::Float64=0.0,
   igel_reseed_sigma::Float64=0.0,
   igel_maturity::Int=0,
+  cmame_alpha::Float64=0.02,
+  cmame_grid::Int=15,
+  cmame_reseed_explore::Float64=1.0,
+  cmame_restart_patience::Int=6,
+  cmame_sobol_reseed::Bool=false,
   rng::Random.AbstractRNG)
 
   mkpath(output_dir)
@@ -925,11 +930,13 @@ function parametrize(; cohorts_db_path::String,
   driver = search_mode == "molbsa" ? parametrize_MOLBSA :
            search_mode == "cmaes" ? parametrize_CMAES :
            search_mode == "mocmaes" ? parametrize_MOCMAES :
-           search_mode == "igelmo" ? parametrize_IgelMOCMAES : parametrize_LBSA
+           search_mode == "igelmo" ? parametrize_IgelMOCMAES :
+           search_mode == "cmame" ? parametrize_CMAMAE : parametrize_LBSA
   # CMA-ES-only knobs; LBSA/MOLBSA don't accept these, so only splat them for the (MO)CMA-ES drivers.
   cmaes_kw = search_mode == "cmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, ipop=ipop, ipop_stagnation=ipop_stagnation, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor) :
              search_mode == "mocmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, ipop=ipop, ipop_stagnation=ipop_stagnation, archive_cap=cmaes_archive_cap, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor) :
              search_mode == "igelmo" ? (archive_cap=cmaes_archive_cap, igel_mu=igel_mu, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity) :
+             search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed) :
              NamedTuple()
   driver(; ref_soa=ref_soa,
     output_dir=output_dir,
@@ -1870,7 +1877,9 @@ function parametrize_CMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
     init_run = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))
     mean0 = PU.params_to_u(bio_params, param_dists, slots)
     init_best = CMAES.CMAESCandidate(bio_params, convert(Float64, PU.get_total_loss(init_run)))
-    search_state = CMAES.CMAESState(mean0, cmaes_sigma0, init_best, rng; lambda=cmaes_lambda, max_iter=typemax(Int))
+    groups = PU.build_groups(param_dists, slots, BSP.BIOMASS_PER_ECO_GROUPS)   # block-diagonal CMA-ES
+    @info "CMA-ES block-diagonal: $(length(groups)) covariance blocks (sizes $(length.(groups)))"
+    search_state = CMAES.CMAESState(mean0, cmaes_sigma0, init_best, rng; lambda=cmaes_lambda, blocks=groups, max_iter=typemax(Int))
     search_state.n_evals = 1
   else
     @info "Resuming from $resume_from"
@@ -2140,7 +2149,9 @@ function parametrize_MOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, s
     fx0, _, _ = _fitness(_run(bio_params))
     mean0 = PU.params_to_u(bio_params, param_dists, slots)
     rep = MOLBSA.MOCandidate(bio_params, fx0)
-    search_state = MOCMAES.MOCMAESState(mean0, cmaes_sigma0, rep, rng; lambda=cmaes_lambda, max_iter=typemax(Int), archive_cap=archive_cap)
+    groups = PU.build_groups(param_dists, slots, BSP.BIOMASS_PER_ECO_GROUPS)   # block-diagonal MO-CMA-ES
+    @info "MO-CMA-ES block-diagonal: $(length(groups)) covariance blocks (sizes $(length.(groups)))"
+    search_state = MOCMAES.MOCMAESState(mean0, cmaes_sigma0, rep, rng; lambda=cmaes_lambda, blocks=groups, max_iter=typemax(Int), archive_cap=archive_cap)
     search_state.n_evals = 1
   else
     @info "Resuming from $resume_from"
@@ -2352,7 +2363,9 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
                   [BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment) for _ in 1:igel_mu]
     init_us = [PU.params_to_u(p, param_dists, slots) for p in init_params]
     init_cands = [MOLBSA.MOCandidate(init_params[k], _fitness(_run(init_params[k]))[1]) for k in 1:igel_mu]
-    search_state = IgelMOCMAES.IgelState(init_us, init_cands, rng; sigma0=igel_sigma0, archive_cap=archive_cap, max_iter=typemax(Int), niche_radius=igel_niche_radius, reseed_sigma=igel_reseed_sigma, maturity_period=igel_maturity)
+    groups = PU.build_groups(param_dists, slots, BSP.BIOMASS_PER_ECO_GROUPS)   # block-diagonal per-individual (1+1)-CMA
+    @info "Igel MO-CMA-ES block-diagonal: $(length(groups)) covariance blocks per individual (sizes $(length.(groups)))"
+    search_state = IgelMOCMAES.IgelState(init_us, init_cands, rng; sigma0=igel_sigma0, archive_cap=archive_cap, max_iter=typemax(Int), niche_radius=igel_niche_radius, reseed_sigma=igel_reseed_sigma, maturity_period=igel_maturity, blocks=groups)
     search_state.n_evals = igel_mu
     bio_params = template
   else
@@ -2398,6 +2411,192 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
       if is_new_best
         iter = search_state.best_iteration; total = search_state.representative.fx.aggregate
         @info "New best @ gen $iter | agg=$total | archive=$(length(search_state.archive))"
+        try
+          test_df = simulate_and_test(; splots=splots, bio_params=search_state.representative.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng)
+          println("Train stats:"); show(test_df; allrows=true, allcols=true); println()
+        catch e; @warn "simulate_and_test (train) failed" exception = (e, catch_backtrace()); end
+        if have_val
+          try
+            val_result = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
+            @info "Val loss @ gen $iter | loss=$(convert(Float64, PU.get_total_loss(val_result[1])))"
+            val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
+          catch e; @warn "val fit_params failed" exception = (e, catch_backtrace()); end
+        end
+        let buf = IOBuffer()
+          Serialization.serialize(buf, search_state.representative.x)
+          DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?, ?)", [iter, gb_run.num_sites, gb_run.num_obs, total, length(search_state.archive), take!(buf)])
+        end
+        for (eco_id, eco_loss) in enumerate(gb_eco)
+          eco_name = eco_list[eco_id]
+          DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, convert(Float64, PU.get_total_loss(eco_loss))])
+          n = max(1, eco_loss.num_sites)
+          for gsp in 1:n_species
+            eco_loss.sp_w_loss[gsp] == 0f0 && continue
+            DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+          end
+        end
+      end
+      cached_sites_state_df = DataFrame(gb_cached, [:plot_id, :sim_year, :species_id, :age, :agb])
+      sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(gb_cached, sampled_ids) : nothing
+      put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample, is_new_best ? emp_sample_val : nothing, val_sim_sample))
+    end
+  catch e
+    caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
+  finally
+    stop_writer(writer_ch, writer_task); close(losses_db_file)
+    try
+      mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
+      JLD2.save_object(joinpath(output_dir, fname), search_state)
+      link_path = joinpath(output_dir, "search_state_latest.jld2"); islink(link_path) && rm(link_path); symlink(fname, link_path)
+      @info "Search state saved @ $(search_state.i)"
+    catch e; @error "Failed to save search state on exit" exception = (e, catch_backtrace()); end
+  end
+  return search_state
+end
+
+# CMA-MAE driver (Fontaine & Nikolaidis 2022): one archive-driven CMA-ES emitter over a 2-D MAP-Elites
+# grid. Behaviour descriptor = (Σ Wasserstein loss, Σ AGB loss) — the two halves of the MO objective
+# vector; quality = the aggregate loss. The archive keeps one elite parameter set per behaviour cell
+# (a quality-diversity set of fits), the representative is the lowest-aggregate elite. Same MO objective
+# vector, writer, archive logging and losses.duckdb schema as parametrize_MOCMAES; the emitter re-seeds
+# itself on convergence/stagnation (no external IPOP). Grid bounds are auto-scaled from the seed loss.
+function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmame_alpha::Float64=0.02, cmame_grid::Int=15, cmame_reseed_explore::Float64=1.0, cmame_restart_patience::Int=6, cmame_sobol_reseed::Bool=false)
+  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
+  all_plot_ids = UIntType.(unique(splots.plot_id))
+  sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
+  emp_sample = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
+  n_species = length(species_list)
+  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  param_dists = BSP.make_biomass_param_dists(length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment)
+  _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
+  injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
+  injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
+  have_val = !isnothing(val_ref_soa)
+  inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
+  inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
+  sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
+  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
+  t4_ref = nothing; cycle_map = nothing; n_cycles = 0; t1_ref = nothing; t2_ref = nothing
+  if search_tier == 1
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
+    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
+      t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
+    end
+  elseif search_tier == 2
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
+    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
+    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
+      bin_probs = diff([0f0; rec.sp_age_cdf])
+      for b in 1:n_bins; push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum); end
+      push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
+    end
+    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
+  elseif search_tier == 4
+    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
+    for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
+      cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
+      for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
+    end
+  end
+  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
+  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
+  function _fitness(rep_results)
+    run_result = sum(r[1] for r in rep_results)
+    eco_losses = [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
+    MOLBSA.MOFitness(_mo_objectives(eco_losses, eco_species_ids), convert(Float64, PU.get_total_loss(run_result))), run_result, eco_losses
+  end
+  sobol_idx = Ref(1)
+  next_candidate() =
+    if sobol_idx[] <= length(_sobol_cands)
+      p = _sobol_cands[sobol_idx[]]; sobol_idx[] += 1; p
+    else
+      BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
+    end
+
+  if isnothing(resume_from)
+    bio_params = if !isnothing(start_from)
+      @info "Seeding initial candidate from $start_from (fresh search_state)"
+      p = _load_params_from_path(start_from)
+      (p.SPECIES_LIST == species_list && p.ECO_LIST == eco_list) ||
+        error("start_from params are incompatible with this run: their SPECIES_LIST/ECO_LIST differ from the loaded data.")
+      p
+    else
+      next_candidate()
+    end
+    slots = PU.build_slots(param_dists, bio_params)
+    fx0, _, _ = _fitness(_run(bio_params))
+    mean0 = PU.params_to_u(bio_params, param_dists, slots)
+    rep = MOLBSA.MOCandidate(bio_params, fx0)
+    # auto-scale the 2-D measure grid from the seed candidate's loss (worse than any fit we'll keep),
+    # so the archive cells bracket the reachable (Wasserstein, AGB) range; quality ceiling t0 above it.
+    m0 = CMAMAE.measure(fx0)
+    meas_hi = (max(2.0 * Float64(m0[1]), 1e-9), max(2.0 * Float64(m0[2]), 1e-9))
+    t0 = 1.5 * convert(Float64, fx0.aggregate)
+    groups = PU.build_groups(param_dists, slots, BSP.BIOMASS_PER_ECO_GROUPS)   # block-diagonal CMA-MAE emitter
+    @info "CMA-MAE block-diagonal: $(length(groups)) covariance blocks (sizes $(length.(groups)))"
+    search_state = CMAMAE.CMAMAEMOState(mean0, cmaes_sigma0, rep, rng; meas_lo=(0.0, 0.0), meas_hi=meas_hi,
+      lambda=cmaes_lambda, grid=cmame_grid, alpha=cmame_alpha, t0=t0, reseed_explore=cmame_reseed_explore,
+      restart_patience=cmame_restart_patience, sobol_reseed=cmame_sobol_reseed, blocks=groups, max_iter=typemax(Int))
+    search_state.n_evals = 1
+    @info "CMA-MAE grid $(cmame_grid)×$(cmame_grid) over measure∈[0,$(round.(meas_hi,sigdigits=3))], λ=$(search_state.engine.emitter.lambda), α=$(cmame_alpha)"
+  else
+    @info "Resuming from $resume_from"
+    search_state = JLD2.load_object(resume_from)
+    bio_params = search_state.representative.x
+    slots = PU.build_slots(param_dists, bio_params)
+  end
+  if TRIALS < 1 || search_state.n_evals >= TRIALS
+    return search_state
+  end
+
+  writer_ch, writer_task = start_mo_writer(typeof(search_state), output_dir)
+  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
+  losses_db = DuckDB.connect(losses_db_file)
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
+  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
+  caused_by_interrupt(e) = e isa InterruptException ? true :
+    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
+    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
+
+  evals_done = search_state.n_evals
+  est_gens = max(1, cld(TRIALS - evals_done, search_state.engine.emitter.lambda))
+  try
+    TProgress.@track for _gen in 1:est_gens
+      evals_done >= TRIALS && break
+      xs_u = CMAMAE.ask(search_state)
+      λ = search_state.engine.emitter.lambda
+      fxs = Vector{MOLBSA.MOFitness}(undef, λ)
+      cands = Vector{MOLBSA.MOCandidate{typeof(bio_params)}}(undef, λ)
+      meas = Vector{Tuple{Float64,Float64}}(undef, λ)
+      gen_best_agg = Inf
+      local gb_run, gb_eco, gb_cached, gb_idx
+      for k in 1:λ                                    # SERIAL (fit_params threads internally over sites)
+        cand = PU.u_to_params(xs_u[k], param_dists, slots, bio_params)
+        rep_results = _run(cand)
+        fx_k, run_k, eco_k = _fitness(rep_results)
+        cands[k] = MOLBSA.MOCandidate(cand, fx_k)
+        m = CMAMAE.measure(fx_k); meas[k] = (Float64(m[1]), Float64(m[2]))
+        fxs[k] = fx_k
+        evals_done += 1
+        if fx_k.aggregate < gen_best_agg
+          gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results)
+        end
+      end
+
+      is_new_best = CMAMAE.tell_mo!(search_state, cands, meas, xs_u)
+      search_state.n_evals = evals_done
+      search_state.current = cands[gb_idx]
+
+      val_sim_sample = nothing
+      if is_new_best
+        iter = search_state.best_iteration
+        total = search_state.representative.fx.aggregate
+        @info "New best @ gen $iter | agg=$total | archive=$(length(search_state.archive)) | re-seeds=$(search_state.engine.n_restarts)"
         try
           test_df = simulate_and_test(; splots=splots, bio_params=search_state.representative.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng)
           println("Train stats:"); show(test_df; allrows=true, allcols=true); println()
@@ -2941,6 +3140,11 @@ function run_from_yaml(yaml_path::String)
     igel_niche_radius=Float64(get_cfg("igel_niche_radius", 0.0)),
     igel_reseed_sigma=Float64(get_cfg("igel_reseed_sigma", 0.0)),
     igel_maturity=Int(get_cfg("igel_maturity", 0)),
+    cmame_alpha=Float64(get_cfg("cmame_alpha", 0.02)),
+    cmame_grid=Int(get_cfg("cmame_grid", 15)),
+    cmame_reseed_explore=Float64(get_cfg("cmame_reseed_explore", 1.0)),
+    cmame_restart_patience=Int(get_cfg("cmame_restart_patience", 6)),
+    cmame_sobol_reseed=Bool(get_cfg("cmame_sobol_reseed", false)),
     rng=rng)
 end
 
@@ -3015,6 +3219,9 @@ function _load_params_from_path(params_path::String)
     return raw.representative.x
   elseif raw isa IgelMOCMAES.IgelState
     @info "Loaded IgelState — using representative params" agg = raw.representative.fx.aggregate iter = raw.best_iteration archive = length(raw.archive)
+    return raw.representative.x
+  elseif raw isa CMAMAE.CMAMAEMOState
+    @info "Loaded CMAMAEMOState — using representative params" agg = raw.representative.fx.aggregate iter = raw.best_iteration archive = length(raw.archive)
     return raw.representative.x
   elseif raw isa Vector  # sobol results
     @info "Loaded sobol results — using rank-1 params" mean_loss = raw[1].mean_loss

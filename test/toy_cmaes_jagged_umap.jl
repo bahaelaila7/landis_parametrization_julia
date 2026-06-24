@@ -12,6 +12,7 @@ const CMAES   = Pan.Search.CMAES
 const MOCMAES = Pan.Search.MOCMAES
 const IGEL    = Pan.Search.IgelMOCMAES
 const MOLBSA  = Pan.Search.MOLBSA
+const CMAMAE  = Pan.Search.CMAMAE
 import Random, Statistics, Sobol, LinearAlgebra
 const LA = LinearAlgebra
 import UMAP
@@ -145,8 +146,26 @@ function run_igel(init_means; mu=20, sigma0=0.25, gens=150, reseed_sigma=0.0, ma
   return st, U, C, G
 end
 
+# CMA-MAE: one archive-driven CMA-ES emitter over a 2-D MAP-Elites grid (measure = objective vector,
+# quality = aggregate, both on the UNSCALED g1/g2 ⇒ scale-invariant). The archive keeps one elite per
+# objective-space cell, so the common wells (distinct anti-diagonal cells) are held simultaneously.
+function run_cmame(u0; gens=300, lambda=12, alpha=0.02, explore=1.0)
+  rng = Random.MersenneTwister(123)
+  st = CMAMAE.CMAMAEState(collect(Float64, u0), 0.3, rng; lambda=lambda, grid_dims=(25,25),
+        meas_lo=(-1.3,-1.3), meas_hi=(0.1,0.1), alpha=alpha, t0=0.0, restart_sigma=0.02,
+        restart_patience=6, reseed_explore=explore, max_iter=10^6)
+  U = Vector{Vector{Float64}}(); C = Float64[]; G = Int[]
+  for g in 1:gens
+    xs = CMAMAE.ask(st); quals = Float64[]; meas = Tuple{Float64,Float64}[]
+    for x in xs; uu = cl(x); a = g1(uu); b = g2(uu); push!(quals, a+b); push!(meas, (a,b)); push!(U, uu); push!(C, agg(x)); push!(G, g); end
+    CMAMAE.tell!(st, quals, meas, xs)
+  end
+  return st, U, C, G
+end
+
 # how many wells of a set are reached (decision-near + the relevant objective(s) low)
 so_wells(ends, set) = count(any(sum((e .- w).^2) < 0.22^2 && g1(e) < G1REACH for e in ends) for w in set)
+mo_common_el(el)    = count(any(sum((p .- w).^2) < 0.22^2 && g1(p) < G1REACH && g2(p) < G2REACH for p in el) for w in COMMON)
 mo_common(st)       = count(any(sum((m.x .- w).^2) < 0.22^2 && g1(m.x) < G1REACH && g2(m.x) < G2REACH for m in st.archive) for w in COMMON)
 mo_f1only(st)       = count(any(sum((m.x .- w).^2) < 0.22^2 for m in st.archive) for w in F1ONLY)
 mo_f2only(st)       = count(any(sum((m.x .- w).^2) < 0.22^2 for m in st.archive) for w in F2ONLY)
@@ -160,6 +179,11 @@ stmo1,Umo1,Cmo1,Gmo1 = run_mo(u0mo)
 stmoI,UmoI,CmoI,GmoI,nrestart = run_mo_ipop(sobol_pts(16))
 stIg,UIg,CIg,GIg = run_igel(sobol_pts(24))                  # Igel, Sobol-initialised population
 stIgR,_,_,_ = run_igel([rand(Random.MersenneTwister(900+i), N) for i in 1:24])  # Igel, random-initialised (for comparison)
+stCM,UCM,CCM,GCM = run_cmame(fill(0.5, N))                  # CMA-MAE (MAP-Elites archive over objective space)
+elCM = CMAMAE.elites(stCM)
+# non-dominated subset (minimization) for the objective-space plot — the archive covers all cells.
+_ndmask(o) = (k=trues(length(o)); for i in eachindex(o), j in eachindex(o); (i!=j && o[j][1]<=o[i][1] && o[j][2]<=o[i][2] && (o[j][1]<o[i][1]||o[j][2]<o[i][2])) && (k[i]=false); end; k)
+elCMfr = elCM[_ndmask([(f1(p),f2(p)) for p in elCM])]
 # Igel + re-seed with a maturity period, over several seeds (high variance, so report the spread).
 # Re-seeds need budget to mature AND then converge, so give these runs more generations.
 igM  = [mo_common(run_igel(sobol_pts(24); mu=24, gens=300, reseed_sigma=0.02, maturity=40, seed=s)[1]) for s in 1:4]
@@ -167,7 +191,8 @@ igNo = [mo_common(run_igel(sobol_pts(24); mu=24, gens=300, reseed_sigma=0.02, ma
 
 configs = [("SO · no Sobol", Uso0,Cso0,Gso0), ("SO · Sobol", Uso1,Cso1,Gso1),
            ("MO · no Sobol", Umo0,Cmo0,Gmo0), ("MO · Sobol", Umo1,Cmo1,Gmo1),
-           ("MO · IPOP", UmoI,CmoI,GmoI), ("MO · Igel (pop)", UIg,CIg,GIg)]
+           ("MO · IPOP", UmoI,CmoI,GmoI), ("MO · Igel (pop)", UIg,CIg,GIg),
+           ("MO · CMA-MAE", UCM,CCM,GCM)]
 nso0, nso1 = so_wells(Eso0, vcat(COMMON,F1ONLY)), so_wells(Eso1, vcat(COMMON,F1ONLY))
 println("SO (minimizes f1) distinct f1-wells found:  no-Sobol=$nso0/7,  Sobol=$nso1/7")
 println("MO wells reached  (COMMON non-dominated / f1-only / f2-only — dominated):")
@@ -175,6 +200,7 @@ for (lbl, st) in (("no-Sobol",stmo0),("Sobol",stmo1),("IPOP",stmoI),("Igel(pop)"
   println("   $lbl:  COMMON=$(mo_common(st))/4   f1-only=$(mo_f1only(st))/3   f2-only=$(mo_f2only(st))/3   (archive $(length(st.archive)))")
 end
 println("Igel initial-population effect:  random-init COMMON=$(mo_common(stIgR))/4   vs   Sobol-init COMMON=$(mo_common(stIg))/4")
+println("CMA-MAE (MAP-Elites):  COMMON=$(mo_common_el(elCM))/4   archive elites=$(length(elCM))   emitter re-seeds=$(stCM.n_restarts)")
 println("Igel re-seed across 4 seeds:  maturity=0 → COMMON=$igNo (mean $(round(Statistics.mean(igNo),digits=1)))   vs   maturity=40 → COMMON=$igM (mean $(round(Statistics.mean(igM),digits=1)))   [IPOP=$(mo_common(stmoI))/4] — the maturity period closes the gap")
 @assert nso1 >= 2
 @assert nrestart >= 2 "MO-IPOP should restart multiple times (got $nrestart)"
@@ -217,11 +243,12 @@ end
 
 # ---- Figure 1: fitness UMAP (SO by f1; MO by aggregate). Does MO land on the white ★ common wells? ----
 let
-  fig = MK.Figure(size=(1150, 1500))
+  fig = MK.Figure(size=(1150, 1950))
   MK.Label(fig[0,1:2], "6-D jagged, shared wells — ★ COMMON (non-dominated) · ▲ f1-only · ▼ f2-only (both dominated).  Does MO reach the ★?"; fontsize=14, font=:bold)
   titles = ["SO · no Sobol  ($nso0/7 f1-wells)", "SO · Sobol  ($nso1/7 f1-wells)",
             "MO · no Sobol  ($(mo_common(stmo0))/4 common ★)", "MO · Sobol  ($(mo_common(stmo1))/4 common ★)",
-            "MO · IPOP  ($(mo_common(stmoI))/4 common ★, $nrestart restarts)", "MO · Igel pop  ($(mo_common(stIg))/4 common ★)"]
+            "MO · IPOP  ($(mo_common(stmoI))/4 common ★, $nrestart restarts)", "MO · Igel pop  ($(mo_common(stIg))/4 common ★)",
+            "MO · CMA-MAE  ($(mo_common_el(elCM))/4 common ★, $(stCM.n_restarts) re-seeds)"]
   for i in 1:length(configs)
     r=(i-1)÷2+1; c=(i-1)%2+1
     cv = isSO(i) ? colf(f1.(configs[i][2])) : aggvals(configs[i])
@@ -232,7 +259,7 @@ let
     draw_wells!(ax)
   end
   MK.Colorbar(fig[1,3];   colormap=:viridis, colorrange=cr1, label="SO: log₁₀(f1 − min)")
-  MK.Colorbar(fig[2:3,3]; colormap=:viridis, colorrange=cr2, label="MO: aggregate f1+f2  (low = common optimum)")
+  MK.Colorbar(fig[2:4,3]; colormap=:viridis, colorrange=cr2, label="MO: aggregate f1+f2  (low = common optimum)")
   MK.save(joinpath(OUTDIR,"toy_jagged_nd_umap_fitness.png"), fig); println("wrote toy_jagged_nd_umap_fitness.png")
 end
 
@@ -248,6 +275,7 @@ let
   for (lbl,st,col) in (("MO · no Sobol",stmo0,:gray),("MO · Sobol",stmo1,:dodgerblue),("MO · IPOP",stmoI,:orangered),("MO · Igel pop",stIg,:seagreen))
     MK.scatter!(ax, [Float64(m.fx.objectives[1]) for m in st.archive], [Float64(m.fx.objectives[2]) for m in st.archive]; color=col, markersize=9, strokecolor=:black, strokewidth=0.4, label=lbl)
   end
+  MK.scatter!(ax, [f1(p) for p in elCMfr], [f2(p) for p in elCMfr]; color=:purple, markersize=8, strokecolor=:black, strokewidth=0.4, label="MO · CMA-MAE")
   MK.axislegend(ax; position=:rt, framevisible=true)
   MK.save(joinpath(OUTDIR,"toy_jagged_nd_mo_objspace.png"), fig); println("wrote toy_jagged_nd_mo_objspace.png")
 end

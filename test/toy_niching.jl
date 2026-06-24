@@ -55,11 +55,41 @@ mo_niche = run_igel(mofit, 28, 0.2; sigma0=0.22)
 println("MO niching (4 common non-dominated wells):  plain Igel archive hits $(common_hit(mo_plain))/4,  niched hits $(common_hit(mo_niche))/4")
 @assert common_hit(mo_niche) >= common_hit(mo_plain) "MO niching should reach ≥ as many common wells as plain Igel"
 
+# CMA-MAE: MAP-Elites archive tiling objective space (f1,f2) recovers the scattered common wells
+const CMAMAE = Pan.Search.CMAMAE
+function run_cmame_mo(; lambda=12, gens=190)
+  rng = Random.MersenneTwister(4)
+  u0 = first(sobol_pts(1))
+  st = CMAMAE.CMAMAEState(u0, 0.3, rng; lambda=lambda, grid_dims=(25,25),
+        meas_lo=(-1.2,-1.2), meas_hi=(0.1,0.1), alpha=0.02, t0=0.0, restart_sigma=0.02,
+        restart_patience=6, reseed_explore=1.0, max_iter=10^6)
+  for g in 1:gens
+    xs = CMAMAE.ask(st)
+    quals = Float64[]; meas = Tuple{Float64,Float64}[]
+    for x in xs; uu = clamp.(x,0,1); a = f1(uu); b = f2(uu); push!(quals, agg(uu)); push!(meas, (a,b)); end
+    CMAMAE.tell!(st, quals, meas, xs)
+  end
+  CMAMAE.elites(st)
+end
+common_hit_el(el) = count(any(sum((p .- w).^2) < 0.07^2 && agg(p) < -1.6 for p in el) for w in COMMON)
+# non-dominated subset (minimization): show CMA-MAE's Pareto front (deep elites), like the Igel archive,
+# rather than the full MAP-Elites archive (which covers all objective cells → a decision-space cloud).
+function _nd(o)
+  k = trues(length(o))
+  for i in eachindex(o), j in eachindex(o)
+    (i != j && o[j][1] <= o[i][1] && o[j][2] <= o[i][2] && (o[j][1] < o[i][1] || o[j][2] < o[i][2])) && (k[i] = false)
+  end
+  k
+end
+mo_cmame = run_cmame_mo()
+mo_cmame_fr = mo_cmame[_nd([(f1(p), f2(p)) for p in mo_cmame])]    # CMA-MAE non-dominated front
+println("MO CMA-MAE (MAP-Elites):  archive hits $(common_hit_el(mo_cmame))/4 common wells")
+
 # =================== figures ===================
 let
   gx=range(0,1;length=200); gy=range(0,1;length=200)
-  fig = MK.Figure(size=(1300,680))
-  MK.Label(fig[0,1:2], "Decision-space niching (Igel engine): SO finds many optima at once · MO recovers scattered non-dominated wells"; fontsize=15, font=:bold)
+  fig = MK.Figure(size=(1900,680))
+  MK.Label(fig[0,1:3], "Decision-space niching (Igel engine): SO finds many optima at once · MO recovers scattered non-dominated wells"; fontsize=15, font=:bold)
   # SO panels
   Zso=[fso((x,y)) for x in gx, y in gy]
   for (c,(lbl,st,nn)) in enumerate((("SO · plain Igel ($nso_plain/8)",so_plain,nso_plain),("SO · niched ($nso_niche/8)",so_niche,nso_niche)))
@@ -77,6 +107,15 @@ let
     MK.scatter!(ax,[w[1] for w in F1ONLY],[w[2] for w in F1ONLY];marker=:utriangle,markersize=11,color=:deepskyblue,strokecolor=:black,strokewidth=1)
     MK.scatter!(ax,[w[1] for w in F2ONLY],[w[2] for w in F2ONLY];marker=:dtriangle,markersize=11,color=:magenta,strokecolor=:black,strokewidth=1)
     MK.scatter!(ax,[m.x[1] for m in st.archive],[m.x[2] for m in st.archive];color=:orangered,markersize=8,strokecolor=:black,strokewidth=0.4)
+  end
+  # MO CMA-MAE panel (elites are plain decision vectors, not MOCandidates → drawn explicitly)
+  let
+    ax=MK.Axis(fig[2,3]; title="MO · CMA-MAE ($(common_hit_el(mo_cmame))/4 common)", aspect=1, limits=(0,1,0,1))
+    MK.contourf!(ax,gx,gy,Zf1;levels=18,colormap=:viridis)
+    MK.scatter!(ax,[w[1] for w in COMMON],[w[2] for w in COMMON];marker=:star5,markersize=18,color=:white,strokecolor=:black,strokewidth=1.2)
+    MK.scatter!(ax,[w[1] for w in F1ONLY],[w[2] for w in F1ONLY];marker=:utriangle,markersize=11,color=:deepskyblue,strokecolor=:black,strokewidth=1)
+    MK.scatter!(ax,[w[1] for w in F2ONLY],[w[2] for w in F2ONLY];marker=:dtriangle,markersize=11,color=:magenta,strokecolor=:black,strokewidth=1)
+    MK.scatter!(ax,[p[1] for p in mo_cmame_fr],[p[2] for p in mo_cmame_fr];color=:seagreen,markersize=8,strokecolor=:black,strokewidth=0.4)
   end
   MK.save(joinpath(OUTDIR,"toy_niching.png"), fig); println("wrote ", joinpath(OUTDIR,"toy_niching.png"))
 end

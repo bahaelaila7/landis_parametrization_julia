@@ -19,12 +19,34 @@ struct MutableParam{S,T}
   sampler::S             # how to pick the target element
   applier::Any           # how to write the sampled value back
   quantum::FloatType     # snap sampled values to a multiple of this; 0 = no quantization (continuous)
+  group::Symbol          # block-diagonal CMA-ES group of (assumed-)correlated params (see build_groups)
 end
 # Back-compat 7-arg form (no quantization). Pass `quantum=…` to put a parameter on a coarse grid
 # (e.g. B_MAX_SPP by 100). The quantum is honored project-wide by every value-producing path:
-# mutate_params (LBSA/MOLBSA), u_to_params (CMA-ES/MOCMAES) and sobol_samples.
-MutableParam(name::Symbol, dist::Dists.Distribution, bounds::Tuple, sigma::T, type::Type, sampler::S, applier; quantum::Real=0) where {S,T} =
-  MutableParam{S,T}(name, dist, bounds, sigma, type, sampler, applier, FloatType(quantum))
+# mutate_params (LBSA/MOLBSA), u_to_params (CMA-ES/MOCMAES) and sobol_samples. `group` tags the
+# parameter's block-diagonal CMA-ES group (default :default ⇒ all params in one block = plain CMA-ES).
+MutableParam(name::Symbol, dist::Dists.Distribution, bounds::Tuple, sigma::T, type::Type, sampler::S, applier; quantum::Real=0, group::Symbol=:default) where {S,T} =
+  MutableParam{S,T}(name, dist, bounds, sigma, type, sampler, applier, FloatType(quantum), group)
+
+# Partition the u-coordinates (one per `slots` entry) into BLOCK-DIAGONAL CMA-ES groups by each
+# parameter's `group`. Groups whose symbol is in `per_eco_groups` are FURTHER split per ecoregion (a
+# separate block per eco) — so eco-scoped params (Eco/EcoSpecies) yield one block per ecoregion, giving
+# the "2 global + #ecoregion matrices" layout. Returns a Vector of u-index vectors (a partition of 1:d),
+# in first-seen order. A single group (the default) ⇒ one block = plain CMA-ES.
+function build_groups(param_dists, slots::Vector{Tuple{Int,Any}}, per_eco_groups)
+  keyed = Dict{Tuple{Symbol,Int},Vector{Int}}()
+  order = Tuple{Symbol,Int}[]
+  for (dim, (pi, target)) in enumerate(slots)
+    g = param_dists.params[pi].group
+    eco = (g in per_eco_groups) ? (target isa Tuple ? Int(target[1]) : (target isa Integer ? Int(target) : 0)) : 0
+    key = (g, eco)
+    if !haskey(keyed, key)
+      keyed[key] = Int[]; push!(order, key)
+    end
+    push!(keyed[key], dim)
+  end
+  return Vector{Int}[keyed[k] for k in order]
+end
 
 # Snap `v` to the nearest multiple of `q` (q == 0 → unchanged), returning the parameter's type.
 @inline _quantize(v, q::FloatType, ::Type{T}) where {T} = q > zero(FloatType) ? T(round(Float64(v) / q) * q) : T(v)

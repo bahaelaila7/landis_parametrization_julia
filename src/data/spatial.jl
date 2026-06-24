@@ -596,7 +596,7 @@ function map_params_to_data_treemap(params, eco_list, effective_eco_list, specie
     ECO_SPECIES_IDS=eco_species_ids,
     MIN_REL_BIOMASS=params.MIN_REL_BIOMASS[joint_eco_df.param_eco_id],
     D=params.D[joint_species_df.param_species_id],
-    S=params.S[joint_species_df.param_species_id],
+    S=slice_eco_sp(:S),   # S is now per-(eco,species) → reindex like B_MAX_SPP/ANPP_MAX_SPP
     LONGEVITY=params.LONGEVITY[joint_species_df.param_species_id],
     SHADE_TOL=params.SHADE_TOL[joint_species_df.param_species_id],
     MATURITY=params.MATURITY[joint_species_df.param_species_id],
@@ -988,7 +988,7 @@ function make_landis_params(
     SUFFICIENT_LIGHT=SUFFICIENT_LIGHT,
     MIN_REL_BIOMASS=MIN_REL_BIOMASS,
     D=D,
-    S=S,
+    S=[FloatType[S[Int(sid)] for sid in spids] for spids in ECO_SPECIES_IDS],  # per-species GrowthCurve → per-(eco,sp)
     LONGEVITY=LONGEVITY,
     SHADE_TOL=SHADE_TOL,
     PROB_RESPROUT=PROB_RESPROUT,

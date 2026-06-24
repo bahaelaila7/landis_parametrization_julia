@@ -34,45 +34,39 @@ Base.@kwdef mutable struct MOCMAESState{Tx,TRNG<:Random.AbstractRNG}
   diff_avg::Float64 = 0.0
   prob_avg::Float64 = 0.0
 
-  # ---- CMA-ES static config (same as CMAESState; recomputed on IPOP restart) ----
+  # ---- CMA-ES config + BLOCK-DIAGONAL distribution (shared engine; CMAES.ask / _update_distribution!
+  #      duck-type on .blocks/.n/.lambda/.i/.t/.u_min_std). 1 block ⇒ plain MO-CMA-ES. ----
   n::Int
   lambda::Int
-  mu::Int
-  weights::Vector{Float64}
-  mu_eff::Float64
-  c_sigma::Float64
-  d_sigma::Float64
-  c_c::Float64
-  c_1::Float64
-  c_mu::Float64
-  chiN::Float64
-
-  # ---- CMA-ES dynamic state (u-space R^d, Float64) ----
-  mean::Vector{Float64}
-  sigma::Float64
-  C::Matrix{Float64}
-  p_sigma::Vector{Float64}
-  p_c::Vector{Float64}
-  B::Matrix{Float64}
-  D::Vector{Float64}
+  blocks::Vector{CMAES.CMABlock}
 
   # Hansen-style mixed-integer handling floor (see CMAES.ask); empty ⇒ disabled.
   u_min_std::Vector{Float64} = Float64[]
 end
 
+# `.sigma` = max-over-blocks σ (so a `< ε` collapse test fires only when ALL blocks are tiny); `.mu`
+# from the first block (drivers read it for the progress estimate).
+function Base.getproperty(s::MOCMAESState, f::Symbol)
+  if f === :sigma
+    bl = getfield(s, :blocks); return isempty(bl) ? 0.0 : maximum(b.sigma for b in bl)
+  elseif f === :mu
+    bl = getfield(s, :blocks); return isempty(bl) ? 0 : bl[1].mu
+  end
+  return getfield(s, f)
+end
+
 function MOCMAESState(mean0::Vector{Float64}, sigma0::Float64, representative::MOCandidate{Tx}, rng::TRNG;
                       lambda::Union{Nothing,Int}=nothing, max_iter::Int=1_000_000, archive_cap::Int=200,
+                      blocks::Union{Nothing,Vector{Vector{Int}}}=nothing,
                       archive::Vector{MOCandidate{Tx}}=MOCandidate{Tx}[representative],
                       best_iterations=Tuple{Int,Float64,MOCandidate{Tx}}[]) where {Tx,TRNG<:Random.AbstractRNG}
   n = length(mean0)
   λ = isnothing(lambda) ? 4 + floor(Int, 3 * log(n)) : lambda
-  k = CMAES._strategy_constants(n, λ)
+  blk_idx = isnothing(blocks) ? [collect(1:n)] : blocks
+  blks = [CMAES._make_block(idx, mean0, sigma0, λ) for idx in blk_idx]
   MOCMAESState{Tx,TRNG}(; representative=representative, current=representative, archive=archive,
     archive_cap=archive_cap, rng=rng, best_iterations=best_iterations, max_iter=max_iter, t=sigma0,
-    n=n, lambda=λ, mu=k.mu, weights=k.weights, mu_eff=k.mu_eff,
-    c_sigma=k.c_sigma, d_sigma=k.d_sigma, c_c=k.c_c, c_1=k.c_1, c_mu=k.c_mu, chiN=k.chiN,
-    mean=copy(mean0), sigma=sigma0, C=Matrix{Float64}(LA.I, n, n),
-    p_sigma=zeros(n), p_c=zeros(n), B=Matrix{Float64}(LA.I, n, n), D=ones(n))
+    n=n, lambda=λ, blocks=blks)
 end
 
 @inline is_search_over(state::MOCMAESState)::Bool = state.i >= state.max_iter
@@ -168,25 +162,8 @@ end
 # IPOP restart: reset the search distribution (optionally with a larger population) while keeping the
 # Pareto archive, representative, generation counter, rng and history.
 function restart!(state::MOCMAESState, mean0::Vector{Float64}, sigma0::Float64; lambda::Int=state.lambda)
-  n = state.n
-  k = CMAES._strategy_constants(n, lambda)
   state.lambda = lambda
-  state.mu = k.mu
-  state.weights = k.weights
-  state.mu_eff = k.mu_eff
-  state.c_sigma = k.c_sigma
-  state.d_sigma = k.d_sigma
-  state.c_c = k.c_c
-  state.c_1 = k.c_1
-  state.c_mu = k.c_mu
-  state.chiN = k.chiN
-  state.mean = copy(mean0)
-  state.sigma = sigma0
-  state.C = Matrix{Float64}(LA.I, n, n)
-  state.B = Matrix{Float64}(LA.I, n, n)
-  state.D = ones(n)
-  state.p_sigma = zeros(n)
-  state.p_c = zeros(n)
+  CMAES._reset_blocks!(state.blocks, mean0, sigma0, lambda)
   state.t = sigma0
   return nothing
 end
