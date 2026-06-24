@@ -4,9 +4,11 @@ module Search
     include("search/MOLBSA.jl")
     include("search/CMAES.jl")
     include("search/MOCMAES.jl")
+    include("search/IgelMOCMAES.jl")
     using .SA
     using .LBSA
     using .MOLBSA
     using .CMAES
     using .MOCMAES
+    using .IgelMOCMAES
 end
