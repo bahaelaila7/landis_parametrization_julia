@@ -152,7 +152,8 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
 end
 
 
-const _SiteInjectionYear = Vector{Tuple{Int,Vector{Tuple{UIntType,FloatType,FloatType}}}}
+# Each cohort tuple = (eco_species_id, age, observed_biomass, disturbance_drop_pct).
+const _SiteInjectionYear = Vector{Tuple{Int,Vector{Tuple{UIntType,FloatType,FloatType,FloatType}}}}
 const _SiteInjectionDict = Dict{Int,_SiteInjectionYear}
 
 # Diagnostic toggle. When true, the injection path is switched to OVERRIDE mode:
@@ -176,6 +177,17 @@ const OVERRIDE_INJECTION_REPLACE = Ref(false)
 # Requires OVERRIDE_INJECTION[]; mutually exclusive with REPLACE (REPLACE takes precedence).
 const OVERRIDE_INJECTION_SYNC = Ref(false)
 
+# Partial-disturbance handling in SYNC mode. Each observed cohort carries a disturbance_drop_pct
+# (from curation). Modes:
+#   :off              — ignore drop (current behaviour).
+#   :scale            — scale the matched (survivor) sim cohort's biomass by (1-drop) at the
+#                       disturbance year (one-time shock); the cohort STAYS in the loss, so growth
+#                       params fit the undisturbed trajectory with the disturbance applied.
+#   :exclude_overwrite— overwrite the matched cohort with the observed (already-reduced) biomass and
+#                       EXCLUDE it from the site loss at that year.
+#   :exclude_noscale  — leave the sim biomass and EXCLUDE the cohort from the site loss at that year.
+const OVERRIDE_INJECTION_DISTURBANCE = Ref(:off)
+
 # Only touches the sites that actually have injections (typically << n_sites).
 # _new_cohort_counts is already == site.live for all other sites after process_plugin!.
 # override=false (default): append every listed cohort as a new cohort — unchanged.
@@ -193,7 +205,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
     for (site_idx, cohorts) in site_cohorts
       site = getsite(soa, site_idx)
       site.active || continue
-      for (sp, age, bio) in cohorts
+      for (sp, age, bio, _drop) in cohorts
         BiomassSuccessionPlugin.add_cohort!(site, sp, age, bio)
         site.B += bio
       end
@@ -219,7 +231,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
       site.old = zero(UIntType)
       site.B = zero(FloatType)
       cbio = site.c_bio
-      for (sp, age, bio) in cohorts
+      for (sp, age, bio, _drop) in cohorts
         b = noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
         BiomassSuccessionPlugin.add_cohort!(site, sp, age, b)
         cbio[Int(site.live)] = b   # overwrite add_cohort!'s trunc with the raw value
@@ -235,7 +247,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
     for (site_idx, cohorts) in site_cohorts
       site = getsite(soa, site_idx)
       site.active || continue
-      keep = Set{Tuple{UIntType,FloatType}}((sp, age) for (sp, age, _) in cohorts)
+      keep = Set{Tuple{UIntType,FloatType}}((sp, age) for (sp, age, _, _) in cohorts)
       csp = site.c_species
       cage = site.c_age
       cbio = site.c_bio
@@ -255,6 +267,31 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
         end
       end
     end
+    # Disturbance handling for matched (survivor) cohorts at the disturbance year. Only survivors
+    # (present after Pass A) are touched; recruits added in Pass C keep their observed biomass.
+    #   :scale            — biomass *= (1-drop): a known shock; cohort STAYS in the loss (growth fits it).
+    #   :exclude_overwrite— biomass := observed survivor biomass; cohort EXCLUDED from loss (loss side).
+    #   :exclude_noscale  — biomass unchanged; cohort EXCLUDED from loss (loss side).
+    let dmode = OVERRIDE_INJECTION_DISTURBANCE[]
+      if dmode === :scale || dmode === :exclude_overwrite
+        for (site_idx, cohorts) in site_cohorts
+          site = getsite(soa, site_idx)
+          site.active || continue
+          csp = site.c_species; cage = site.c_age; cbio = site.c_bio
+          for (sp, age, bio, drop) in cohorts
+            drop > zero(FloatType) || continue
+            @inbounds for j in 1:Int(site.live)
+              if csp[j] == sp && cage[j] == age
+                newb = dmode === :scale ? cbio[j] * (one(FloatType) - drop) : bio
+                site.B += newb - cbio[j]
+                cbio[j] = newb
+                break
+              end
+            end
+          end
+        end
+      end
+    end
     # Pass B: size each site to survivors + (# observed (species,age) absent from the sim).
     for (site_idx, cohorts) in site_cohorts
       site = getsite(soa, site_idx)
@@ -263,7 +300,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
       cage = site.c_age
       live = Int(site.live)
       n_new = 0
-      for (sp, age, _) in cohorts
+      for (sp, age, _, _) in cohorts
         matched = false
         for j in 1:live
           if csp[j] == sp && cage[j] == age
@@ -285,7 +322,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
       cage = site.c_age
       cbio = site.c_bio
       orig_live = Int(site.live)
-      for (sp, age, bio) in cohorts
+      for (sp, age, bio, _drop) in cohorts
         matched = false
         for j in 1:orig_live
           if csp[j] == sp && cage[j] == age
@@ -377,11 +414,12 @@ function _build_injection_dict(injection_cohorts::DataFrame, ref_soa)::_SiteInje
     year_list = get!(by_year, year, _SiteInjectionYear())
     pos = get(site_year_pos, (site_idx, year), 0)
     if pos == 0
-      push!(year_list, (site_idx, Tuple{UIntType,FloatType,FloatType}[]))
+      push!(year_list, (site_idx, Tuple{UIntType,FloatType,FloatType,FloatType}[]))
       pos = length(year_list)
       site_year_pos[(site_idx, year)] = pos
     end
-    push!(year_list[pos][2], (UIntType(row.eco_species_id), FloatType(row.age_calc), FloatType(row.agb_sum)))
+    drop = hasproperty(injection_cohorts, :disturbance_drop_pct) ? FloatType(row.disturbance_drop_pct) : zero(FloatType)
+    push!(year_list[pos][2], (UIntType(row.eco_species_id), FloatType(row.age_calc), FloatType(row.agb_sum), drop))
   end
   by_year
 end
@@ -802,6 +840,7 @@ function parametrize(; cohorts_db_path::String,
   cmame_reseed_explore::Float64=1.0,
   cmame_restart_patience::Int=6,
   cmame_sobol_reseed::Bool=false,
+  cmame_mo_rank::Bool=false,
   rng::Random.AbstractRNG)
 
   mkpath(output_dir)
@@ -936,7 +975,7 @@ function parametrize(; cohorts_db_path::String,
   cmaes_kw = search_mode == "cmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, ipop=ipop, ipop_stagnation=ipop_stagnation, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor) :
              search_mode == "mocmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, ipop=ipop, ipop_stagnation=ipop_stagnation, archive_cap=cmaes_archive_cap, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor) :
              search_mode == "igelmo" ? (archive_cap=cmaes_archive_cap, igel_mu=igel_mu, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity) :
-             search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed) :
+             search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed, cmame_mo_rank=cmame_mo_rank) :
              NamedTuple()
   driver(; ref_soa=ref_soa,
     output_dir=output_dir,
@@ -1109,6 +1148,20 @@ function calculate_t4_loss(t4_sim, t4_ref, loss_params, n_species, eco_species_i
 end
 
 function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0)
+  # Disturbance exclude-modes derive a (year → site_idx → excluded eco_species) lookup from the
+  # injection cohorts with drop>0, so those (site, species) are skipped from the loss at that year.
+  exclusion_dict = nothing
+  if OVERRIDE_INJECTION_DISTURBANCE[] in (:exclude_overwrite, :exclude_noscale) && injection_dict !== nothing
+    exclusion_dict = Dict{Int,Dict{Int,Set{UIntType}}}()
+    for (yr, sites) in injection_dict
+      sd = Dict{Int,Set{UIntType}}()
+      for (site_idx, cohorts) in sites
+        s = Set{UIntType}(sp for (sp, _age, _bio, drop) in cohorts if drop > zero(FloatType))
+        isempty(s) || (sd[site_idx] = s)
+      end
+      isempty(sd) || (exclusion_dict[yr] = sd)
+    end
+  end
   return map(seeds) do seed
     soa = copy_and_reseed_soa(ref_soa, seed)
     eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
@@ -1264,7 +1317,12 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
             spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
             sim_years = site_sim_years.sim_years[site.mapcode]
             if current_sim_year in sim_years
-              sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug)
+              excluded = nothing
+              if exclusion_dict !== nothing
+                yd = get(exclusion_dict, current_sim_year, nothing)
+                yd === nothing || (excluded = get(yd, i, nothing))
+              end
+              sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug, excluded=excluded)
               sites_results[i] = sloss
               for j in 1:site.live
                 push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
@@ -2460,7 +2518,7 @@ end
 # (a quality-diversity set of fits), the representative is the lowest-aggregate elite. Same MO objective
 # vector, writer, archive logging and losses.duckdb schema as parametrize_MOCMAES; the emitter re-seeds
 # itself on convergence/stagnation (no external IPOP). Grid bounds are auto-scaled from the seed loss.
-function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmame_alpha::Float64=0.02, cmame_grid::Int=15, cmame_reseed_explore::Float64=1.0, cmame_restart_patience::Int=6, cmame_sobol_reseed::Bool=false)
+function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmame_alpha::Float64=0.02, cmame_grid::Int=15, cmame_reseed_explore::Float64=1.0, cmame_restart_patience::Int=6, cmame_sobol_reseed::Bool=false, cmame_mo_rank::Bool=false)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -2540,7 +2598,7 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
     @info "CMA-MAE block-diagonal: $(length(groups)) covariance blocks (sizes $(length.(groups)))"
     search_state = CMAMAE.CMAMAEMOState(mean0, cmaes_sigma0, rep, rng; meas_lo=(0.0, 0.0), meas_hi=meas_hi,
       lambda=cmaes_lambda, grid=cmame_grid, alpha=cmame_alpha, t0=t0, reseed_explore=cmame_reseed_explore,
-      restart_patience=cmame_restart_patience, sobol_reseed=cmame_sobol_reseed, blocks=groups, max_iter=typemax(Int))
+      restart_patience=cmame_restart_patience, sobol_reseed=cmame_sobol_reseed, mo_rank=cmame_mo_rank, blocks=groups, max_iter=typemax(Int))
     search_state.n_evals = 1
     @info "CMA-MAE grid $(cmame_grid)×$(cmame_grid) over measure∈[0,$(round.(meas_hi,sigdigits=3))], λ=$(search_state.engine.emitter.lambda), α=$(cmame_alpha)"
   else
@@ -2559,6 +2617,16 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
+  # Per-generation trajectory: best (representative) train+val loss, emitter population size, archive size.
+  metrics_io = open(joinpath(output_dir, "metrics.csv"), "w")
+  println(metrics_io, "iteration,best_train_loss,best_val_loss,pop_size,archive_size")
+  rep_val_loss = Inf
+  if have_val
+    try
+      vr0 = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
+      rep_val_loss = convert(Float64, PU.get_total_loss(vr0[1]))
+    catch; end
+  end
   caused_by_interrupt(e) = e isa InterruptException ? true :
     e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
     e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
@@ -2604,7 +2672,8 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
         if have_val
           try
             val_result = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
-            @info "Val loss @ gen $iter | loss=$(convert(Float64, PU.get_total_loss(val_result[1])))"
+            rep_val_loss = convert(Float64, PU.get_total_loss(val_result[1]))
+            @info "Val loss @ gen $iter | loss=$rep_val_loss"
             val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
           catch e; @warn "val fit_params failed" exception = (e, catch_backtrace()); end
         end
@@ -2625,10 +2694,13 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
       cached_sites_state_df = DataFrame(gb_cached, [:plot_id, :sim_year, :species_id, :age, :agb])
       sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(gb_cached, sampled_ids) : nothing
       put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample, is_new_best ? emp_sample_val : nothing, val_sim_sample))
+      println(metrics_io, "$(search_state.i),$(Float64(search_state.representative.fx.aggregate)),$(isfinite(rep_val_loss) ? rep_val_loss : ""),$(search_state.engine.emitter.lambda),$(length(search_state.archive))")
+      flush(metrics_io)
     end
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
   finally
+    try; close(metrics_io); catch; end
     stop_writer(writer_ch, writer_task); close(losses_db_file)
     try
       mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
@@ -2636,6 +2708,20 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
       link_path = joinpath(output_dir, "search_state_latest.jld2"); islink(link_path) && rm(link_path); symlink(fname, link_path)
       @info "Search state saved @ $(search_state.i)"
     catch e; @error "Failed to save search state on exit" exception = (e, catch_backtrace()); end
+    # Re-evaluate every archive elite on the held-out validation set so each carries train+val loss
+    # (aligned to the saved archive order). train_loss is the elite's stored aggregate.
+    if have_val
+      try
+        open(joinpath(output_dir, "archive_eval.csv"), "w") do io
+          println(io, "candidate,train_loss,val_loss")
+          for (ci, m) in enumerate(search_state.archive)
+            vr = only(fit_params(val_ref_soa, m.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
+            println(io, "$ci,$(Float64(m.fx.aggregate)),$(convert(Float64, PU.get_total_loss(vr[1])))")
+          end
+        end
+        @info "Wrote archive_eval.csv (train+val loss per archive elite)"
+      catch e; @warn "archive validation eval failed" exception = (e, catch_backtrace()); end
+    end
   end
   return search_state
 end
@@ -3028,6 +3114,21 @@ function parametrize_SA(; ref_soa::ActiveSoA, output_dir::AbstractString, spdf_p
 
 end
 
+# Load the data-derived per-species LONGEVITY table (species_symbol -> years) from species_longevity_ref
+# in the cohorts DB. Returns nothing (with a warning) if the table is absent. See species_longevity_ref_README.md.
+function _load_longevity_table(db_path::String)
+  con = DuckDB.connect(DuckDB.DB(db_path))
+  has = (DuckDB.execute(con, "SELECT count(*) AS n FROM information_schema.tables WHERE table_name='species_longevity_ref'") |> DataFrame).n[1]
+  if has == 0
+    @warn "longevity_from_data=true but species_longevity_ref not found in $db_path — LONGEVITY stays in the search"
+    return nothing
+  end
+  df = DuckDB.execute(con, "SELECT species_symbol, longevity FROM species_longevity_ref WHERE longevity IS NOT NULL") |> DataFrame
+  d = Dict{String,Float64}(String(r.species_symbol) => Float64(r.longevity) for r in eachrow(df))
+  @info "longevity_from_data: pinned LONGEVITY for $(length(d)) species from species_longevity_ref (out of search)"
+  d
+end
+
 function run_from_yaml(yaml_path::String)
   cfg = YAML.load_file(yaml_path)
   get_cfg(key, default) = get(cfg, key, default)
@@ -3087,6 +3188,10 @@ function run_from_yaml(yaml_path::String)
   OVERRIDE_INJECTION_REPLACE[] = Bool(get_cfg("override_injection_replace", OVERRIDE_INJECTION_REPLACE[]))
   OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))
   OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", OVERRIDE_INJECTION_NOISE[]))
+  OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(get_cfg("override_injection_disturbance", String(OVERRIDE_INJECTION_DISTURBANCE[])))
+  BiomassSuccessionPlugin.FIXED_LONGEVITY[] = (let v = get_cfg("fix_longevity", nothing); isnothing(v) ? nothing : Float64(v) end)
+  BiomassSuccessionPlugin.LONGEVITY_TABLE[] = Bool(get_cfg("longevity_from_data", false)) ?
+    _load_longevity_table(String(get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"))) : nothing
 
   if search_mode == "plot_only"
     params_path = String(get_cfg("params_path", ""))
@@ -3145,6 +3250,7 @@ function run_from_yaml(yaml_path::String)
     cmame_reseed_explore=Float64(get_cfg("cmame_reseed_explore", 1.0)),
     cmame_restart_patience=Int(get_cfg("cmame_restart_patience", 6)),
     cmame_sobol_reseed=Bool(get_cfg("cmame_sobol_reseed", false)),
+    cmame_mo_rank=Bool(get_cfg("cmame_mo_rank", false)),
     rng=rng)
 end
 

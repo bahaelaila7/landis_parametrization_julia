@@ -444,7 +444,10 @@ end
   return site_agb_loss
 end
 
-function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; lp::FloatType=one(FloatType), debug::Bool=false)::SiteLoss
+function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; lp::FloatType=one(FloatType), debug::Bool=false, excluded::Union{Nothing,Set{UIntType}}=nothing)::SiteLoss
+  # `excluded`: eco-species (local sp index) to SKIP from this site's loss at this year — used by the
+  # disturbance exclude-modes (a partially-disturbed cohort the growth model can't fairly reproduce).
+  _excl(sp) = excluded !== nothing && UIntType(sp) in excluded
   #Sort by species
   #println("-----------current_year $(current_year) -------------")
   #println("-----------current_site $(site.ref_cn) -------------")
@@ -492,9 +495,11 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
         sp_end_idx = i - 1
         #println("here1: $(sp_start_idx):$(sp_end_idx), $(@view p[sp_start_idx:sp_end_idx])")
         # The segment [sp_start_idx:i-1] just finished belongs to prev_sp, NOT the new sp.
-        site_agb_loss = calculate_species_loss!(; sp=prev_sp, gsp=species_id_map[prev_sp],
-          site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-          spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
+        if !_excl(prev_sp)
+          site_agb_loss = calculate_species_loss!(; sp=prev_sp, gsp=species_id_map[prev_sp],
+            site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
+            spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
+        end
         prev_sp = sp
         sp_start_idx = i
       end
@@ -503,14 +508,17 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
         @debug ("concluding_species: $(sp)")
         sp_end_idx = i
         #println("here2: $(sp_start_idx):$(sp_end_idx), $(@view p[sp_start_idx:sp_end_idx])")
-        site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
-          site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-          spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
+        if !_excl(sp)
+          site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
+            site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
+            spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
+        end
       end
     end
   end
 
   for sp in (1:length(spdf_plt.keys))[spdf_plt.keys.&(.!insite)]
+    _excl(sp) && continue   # disturbance-excluded species: don't penalize as "missing" either
     @inbounds rec = spdf_plt.records[UIntType(sp)]
     @inbounds gsp = species_id_map[sp]
     # Species present in REF but absent in SIM: sim CDF = 0, sim AGB = 0.

@@ -37,7 +37,12 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   D = rand(rng, Dists.truncated(Dists.Normal(15, 10), 5, 25), n_species) .|> FloatType
   #println(typeof(D))
   #LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200, 100), 100, 300), n_species) .|> FloatType
-  LONGEVITY = fill(FloatType(400), n_species)
+  LONGEVITY = if !isnothing(LONGEVITY_TABLE[])
+    tbl = LONGEVITY_TABLE[]
+    FloatType[get(tbl, sym, LONGEVITY_DEFAULT[]) for sym in species_list]   # per-species, data-derived
+  else
+    fill(FloatType(something(FIXED_LONGEVITY[], 400.0)), n_species)
+  end
   #println(typeof(LONGEVITY))
   SHADE_TOL = rand(rng, Dists.DiscreteUniform(1, 5), n_species) .|> UIntType # ::Vector{FloatType}
   #println(typeof(SHADE_TOL))
@@ -49,8 +54,15 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   PROB_RESPROUT = zeros(FloatType, n_species)
   #println(typeof(MATURITY))
 
-  PROB_MORT_SPP = [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
-                   for eco_species in eco_species_ids]
+  # Under no_establishment (sync/manual-injection mode) random "act-of-god" mortality is disabled too:
+  # introduction AND removal are done by the injection, so PROB_MORT must be 0 (else it removes cohorts
+  # that are present in the observations). rand()<0 never fires (plugin.jl mortality checks).
+  PROB_MORT_SPP = if no_establishment
+    [zeros(FloatType, length(eco_species)) for eco_species in eco_species_ids]
+  else
+    [rand(rng, Dists.Uniform(), length(eco_species)) .|> FloatType  #::Matrix{FloatType}
+     for eco_species in eco_species_ids]
+  end
   #println(typeof(PROB_MORT_SPP))
   PROB_ESTAB_SPP = if no_establishment
     [zeros(FloatType, length(eco_species)) for eco_species in eco_species_ids]

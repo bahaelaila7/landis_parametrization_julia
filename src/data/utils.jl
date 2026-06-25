@@ -179,13 +179,16 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   min_trees::Int=100, min_agb_frac::Float64=0.05,
   stratify_eco_mixed::Bool=false,
   tree_stats::Union{Nothing,DataFrame}=nothing)
-  eco_field = if eco == "epa_l4"
-    :epa_l4
-  elseif eco == "epa_l3"
-    :epa_l3
+  # eco_field can be any column of the loaded cohorts (epa_l4/epa_l3/ecosubcd, or a curated
+  # stratifier like land_use). Falls back to ecosubcd only for the legacy unspecified case.
+  eco_field = if eco in ("epa_l4", "epa_l3", "ecosubcd", "land_use")
+    Symbol(eco)
+  elseif hasproperty(df, Symbol(eco))
+    Symbol(eco)
   else
     :ecosubcd
   end
+  hasproperty(df, eco_field) || error("make_splots: eco_field :$eco_field is not a column of the cohorts table")
 
   assign_tiered_species!(df; min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats)
   if !isempty(filter_species)
@@ -221,6 +224,10 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
     df.measdate = Dates.DateTime.(df.measdate, Dates.dateformat"yyyy-mm-dd")
   end
   df.age_calc = df.age_calc .|> UIntType
+  # Per-cohort partial-disturbance biomass-drop fraction (from curation; 0 where absent/un-attached).
+  # The override-sync scales matched cohorts by (1-drop) at the disturbance year.
+  df.disturbance_drop_pct = hasproperty(df, :disturbance_drop_pct) ?
+    Float32.(coalesce.(df.disturbance_drop_pct, 0.0)) : zeros(Float32, nrow(df))
 
   id_cols = by_subplot ? [:statecd, :unitcd, :countycd, :plot, :subp] :
             [:statecd, :unitcd, :countycd, :plot]
@@ -241,7 +248,8 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
 
   # Aggregate a raw cohort df into a splots DataFrame with contiguous plot_ids.
   function _agg(df_sub::DataFrame)
-    raw = combine(groupby(df_sub, fields, sort=false), nrow => :count, :agb => sum => :agb_sum)
+    raw = combine(groupby(df_sub, fields, sort=false), nrow => :count, :agb => sum => :agb_sum,
+      [:agb, :disturbance_drop_pct] => _weighted_cohort_drop => :disturbance_drop_pct)
     plots = if by_subplot
       raw
     else
@@ -280,13 +288,26 @@ function build_padded_sim_years(splots_subset::DataFrame, n_plots_total::Int)
   (sim_years=padded,)
 end
 
+# Biomass-weighted aggregation of per-row cohort disturbance drop. would_be_i = agb_i/(1-drop_i);
+# aggregated drop = 1 - Σagb / Σwould_be (a ratio → unaffected by later subplot normalization).
+function _weighted_cohort_drop(agb, drop)
+  wb = 0.0; s = 0.0
+  @inbounds for k in eachindex(agb)
+    a = Float64(agb[k]); s += a
+    wb += a / (1.0 - clamp(Float64(drop[k]), 0.0, 0.999))
+  end
+  wb > 0.0 ? Float32(1.0 - s / wb) : 0.0f0
+end
+
+const _INJECT_COLS = [:plot_id, :sim_year, :eco_species_id, :age_calc, :agb_sum, :disturbance_drop_pct]
+
 function get_injection_cohorts(splots::DataFrame; all_cohorts::Bool=false)::DataFrame
   # all_cohorts=true: return the FULL observed state at every measurement year
   # (one row per observed cohort), so the caller can override the simulator
   # entirely — replacing each measured site's cohorts with the empirical ones.
   # Used for the override sanity test and the injection-noise sensitivity test.
   if all_cohorts
-    return select(splots, [:plot_id, :sim_year, :eco_species_id, :age_calc, :agb_sum])
+    return select(splots, _INJECT_COLS)
   end
   # Cohorts with birth_sim_year = sim_year - age_calc > 0 were born after
   # simulation start and are not in the initial conditions. Return one row per
@@ -294,7 +315,7 @@ function get_injection_cohorts(splots::DataFrame; all_cohorts::Bool=false)::Data
   # the simulation at the right time with the observed age and biomass.
   birth_sym = Int.(splots.sim_year) .- Int.(splots.age_calc)
   inject = splots[birth_sym.>0, :]
-  isempty(inject) && return select(inject, [:plot_id, :sim_year, :eco_species_id, :age_calc, :agb_sum])
+  isempty(inject) && return select(inject, _INJECT_COLS)
   inject = transform(inject,
     [:sim_year, :age_calc] => ByRow((s, a) -> Int(s) - Int(a)) => :_birth_sym)
   first_app = combine(groupby(inject, [:plot_id, :eco_species_id, :_birth_sym]),
@@ -302,7 +323,7 @@ function get_injection_cohorts(splots::DataFrame; all_cohorts::Bool=false)::Data
   result = innerjoin(inject,
     rename(first_app, :_inject_year => :sim_year),
     on=[:plot_id, :eco_species_id, :_birth_sym, :sim_year])
-  return select(result, [:plot_id, :sim_year, :eco_species_id, :age_calc, :agb_sum])
+  return select(result, _INJECT_COLS)
 end
 
 function get_spinup_cohorts(df::DataFrame)

@@ -3,6 +3,7 @@ import Random
 import Sobol
 import ..CMAES
 import ..MOLBSA
+import ..MOCMAES: mo_sortperm
 
 export CMAMAEState, CMAMAEMOState, ask, tell!, tell_mo!, elites, elite_count, measure
 
@@ -91,7 +92,7 @@ end
 
 # One generation: update the archive from (quality, measure) of each offspring, then update the
 # CMA-ES distribution with the per-cell improvement ranking. Flags a restart on convergence.
-function tell!(st::CMAMAEState, quals::Vector{Float64}, meas::AbstractVector, xs_u::Vector{Vector{Float64}})
+function tell!(st::CMAMAEState, quals::Vector{Float64}, meas::AbstractVector, xs_u::Vector{Vector{Float64}}; emitter_rank::Union{Nothing,Vector{Int}}=nothing)
   λ = length(quals)
   delta = Vector{Float64}(undef, λ)
   improved = false
@@ -107,7 +108,10 @@ function tell!(st::CMAMAEState, quals::Vector{Float64}, meas::AbstractVector, xs
       st.threshold[c] = (1 - st.alpha) * st.threshold[c] + st.alpha * q
     end
   end
-  CMAES._update_distribution!(st.emitter, sortperm(delta; rev=true), xs_u)  # most-improving first
+  # emitter recombination order: scalar improvement ranking (CMA-MAE default), or a caller-supplied MO
+  # net-win ranking (cmame_mo_rank). Both put the best offspring first for _update_distribution!.
+  ranking = emitter_rank === nothing ? sortperm(delta; rev=true) : emitter_rank
+  CMAES._update_distribution!(st.emitter, ranking, xs_u)
   st.i += 1
   # CMA-ME improvement-emitter restart: re-seed when the emitter has converged (σ collapsed) OR has
   # stopped adding to the archive for `restart_patience` generations — so a wandering emitter that
@@ -145,12 +149,13 @@ mutable struct CMAMAEMOState{Tx,TRNG<:Random.AbstractRNG}
   t::Float64
   diff_avg::Float64
   prob_avg::Float64
+  mo_rank::Bool   # rank the emitter by MO net-win count instead of scalar quality improvement
 end
 
 function CMAMAEMOState(mean0::Vector{Float64}, sigma0::Float64, rep::MOLBSA.MOCandidate{Tx}, rng::Random.AbstractRNG;
                        meas_lo::NTuple{2,Real}, meas_hi::NTuple{2,Real}, lambda::Union{Nothing,Int}=nothing,
                        grid::Int=15, alpha::Float64=0.02, t0::Float64=1.0, reseed_explore::Float64=1.0,
-                       restart_patience::Int=6, sobol_reseed::Bool=false,
+                       restart_patience::Int=6, sobol_reseed::Bool=false, mo_rank::Bool=false,
                        blocks::Union{Nothing,Vector{Vector{Int}}}=nothing, max_iter::Int=typemax(Int)) where {Tx}
   λ = isnothing(lambda) ? 4 + floor(Int, 3 * log(length(mean0))) : lambda
   eng = CMAMAEState(copy(mean0), sigma0, rng; lambda=λ, grid_dims=(grid, grid), meas_lo=meas_lo, meas_hi=meas_hi,
@@ -159,7 +164,7 @@ function CMAMAEMOState(mean0::Vector{Float64}, sigma0::Float64, rep::MOLBSA.MOCa
   ncell = prod(eng.dims)
   CMAMAEMOState{Tx,typeof(rng)}(eng, Vector{Union{Nothing,MOLBSA.MOCandidate{Tx}}}(nothing, ncell),
     rep, rep, MOLBSA.MOCandidate{Tx}[rep], Tuple{Int,Float64,MOLBSA.MOCandidate{Tx}}[],
-    0, 0, 0, max_iter, sigma0, 0.0, 0.0)
+    0, 0, 0, max_iter, sigma0, 0.0, 0.0, mo_rank)
 end
 
 ask(w::CMAMAEMOState) = ask(w.engine)
@@ -187,7 +192,8 @@ function tell_mo!(w::CMAMAEMOState, cands::Vector{<:MOLBSA.MOCandidate}, meas::A
       is_new_best = true
     end
   end
-  tell!(eng, quals, meas, xs_u)                    # ranking + emitter update + thresholds + restart
+  emitter_rank = w.mo_rank ? mo_sortperm(MOLBSA.MOFitness[c.fx for c in cands]) : nothing
+  tell!(eng, quals, meas, xs_u; emitter_rank=emitter_rank)   # ranking + emitter update + thresholds + restart
   w.i = eng.i
   w.t = eng.emitter.sigma
   w.archive = [c for c in w.cell_cand if c !== nothing]
