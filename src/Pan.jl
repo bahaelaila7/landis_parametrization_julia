@@ -817,9 +817,19 @@ function parametrize(; cohorts_db_path::String,
   min_trees::Int=100,
   min_agb_frac::Float64=0.05,
   stratify_eco_mixed::Bool=false,
+  single_ecoregion::Bool=false,
+  stratify_landuse::Bool=false,
   filter_extent::Union{Nothing,String}=nothing,
   loss_lambda::Float64=1.0,
   loss_alpha::Float64=1.0,
+  agb_hinge::Bool=false,
+  agb_hinge_threshold::Float64=10.0,
+  agb_hinge_pct::Float64=0.0,
+  agb_hinge_pct_min::Float64=0.0,
+  agb_hinge_pct_max::Float64=Inf,
+  agb_hinge_l2::Bool=false,
+  init_perturb_frac::Float64=0.0,
+  init_perturb_cap::Float64=Inf,
   diagnose::Bool=false,
   cycle_years::Real=8,
   cmaes_lambda::Union{Nothing,Int}=nothing,
@@ -849,6 +859,15 @@ function parametrize(; cohorts_db_path::String,
   @info bins_idx
   @info smoothing_window
   PU.LOSS_ALPHA[] = FloatType(loss_alpha)   # 0 → optimize L2/AGB-level only (zero Wasserstein)
+  PU.AGB_HINGE[] = agb_hinge                 # AGB term: hinge-L1 (tolerance band) vs sqrt-difference
+  PU.AGB_HINGE_THRESHOLD[] = FloatType(agb_hinge_threshold)
+  PU.AGB_HINGE_PCT[] = FloatType(agb_hinge_pct)          # >0 ⇒ band = clamp(obs*pct, min, max)
+  PU.AGB_HINGE_PCT_MIN[] = FloatType(agb_hinge_pct_min)
+  PU.AGB_HINGE_PCT_MAX[] = FloatType(agb_hinge_pct_max)
+  PU.AGB_HINGE_L2[] = agb_hinge_l2                       # square the hinge excess (L2/MSE) vs L1
+  INIT_PERTURB_FRAC[] = init_perturb_frac    # >0 ⇒ n_reps initial-biomass perturbations, scored by best
+  INIT_PERTURB_CAP[] = FloatType(init_perturb_cap)   # cap on |absolute biomass change| per cohort
+  init_perturb_frac > 0 && @info "Initial-condition perturbation: ±$(round(100*init_perturb_frac;digits=2))% over $(n_reps) reps (best-of), shared seed" * (isfinite(init_perturb_cap) ? ", capped at ±$(init_perturb_cap) g/m²" : "")
   loss_params = PU.LossParams(
     age_bins=PU.AgeBins(
       bins_idx=bins_idx .|> Int,
@@ -871,6 +890,8 @@ function parametrize(; cohorts_db_path::String,
       min_trees=min_trees,
       min_agb_frac=min_agb_frac,
       stratify_eco_mixed=stratify_eco_mixed,
+      single_ecoregion=single_ecoregion,
+      stratify_landuse=stratify_landuse,
       filter_extent=filter_extent,
       filter_eco_field=filter_eco_field,
       filter_ecos=filter_ecos,
@@ -1162,8 +1183,20 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       isempty(sd) || (exclusion_dict[yr] = sd)
     end
   end
-  return map(seeds) do seed
-    soa = copy_and_reseed_soa(ref_soa, seed)
+  init_scales = _init_scales(length(seeds))   # per-rep initial-biomass scale (identity unless perturbing)
+  return map(eachindex(seeds)) do ri
+    soa = copy_and_reseed_soa(ref_soa, seeds[ri])
+    if init_scales[ri] != one(FloatType)       # perturb the sim-year-0 population (not scored, only propagated)
+      sc = init_scales[ri]; cap = INIT_PERTURB_CAP[]
+      for i in 1:soa.n
+        site = getsite(soa, i)
+        site.active || continue
+        @inbounds for j in 1:Int(site.live)
+          b = site.c_bio[j]
+          site.c_bio[j] = b + clamp(b * (sc - one(FloatType)), -cap, cap)   # cap the |absolute change|
+        end
+      end
+    end
     eco_params = BiomassSuccessionPlugin.generate_eco_params(bio_params)
     ctx = (BiomassSuccession=(eco_params=eco_params,),)
     years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
@@ -1200,7 +1233,8 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       end
       t2_sim_bins_t = [[[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
       t2_sim_total_t = [[[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_species_ids)] for _ in 1:Threads.maxthreadid()]
-    elseif search_tier == 4
+    elseif search_tier == 4 || search_tier == 5
+      # tier 4 (and tier 5, which is tier 3 + tier 4) need per-cycle bin accumulators.
       n_bins = size(t4_ref[1][1], 2)
       # per (eco, cycle): #measurements (obs) and #distinct plots, mirroring tier-1 counts
       t4_site_counts = [zeros(Int, n_cycles) for _ in eachindex(eco_species_ids)]
@@ -1222,8 +1256,9 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       max_age_scratch = max_sim_year + max(1, length(loss_params.smoothing_weights) >> 1) + 5
       scratch_perm_t = [Vector{Int}(undef, max_cohorts_scratch) for _ in 1:Threads.maxthreadid()]
       scratch_ages_t = [Vector{FloatType}(undef, max_age_scratch) for _ in 1:Threads.maxthreadid()]
-    else
-      # tier 3: per-ecoregion accumulators so the MO search can read a per-(eco,species) loss
+    end
+    if search_tier == 3 || search_tier == 5
+      # tier 3 (and tier 5): per-ecoregion accumulators so the MO search can read a per-(eco,species) loss
       # breakdown. These regroup the same per-site SiteLoss values run_result is summed from.
       eco3_w = [zeros(FloatType, n_species) for _ in eachindex(eco_species_ids)]
       eco3_agb = [zeros(FloatType, n_species) for _ in eachindex(eco_species_ids)]
@@ -1308,6 +1343,50 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
             end
           end
         end
+      elseif search_tier == 5
+        # tier 5 = tier 3 (per-measurement per-site loss) + tier 4 (per-cycle bins) in ONE sim pass.
+        sites_results = Vector{PU.SiteLoss}(undef, soa.n)
+        Threads.@threads :static for i in 1:soa.n
+          @inbounds begin
+            site = getsite(soa, i)
+            !site.active && continue
+            sim_years = site_sim_years.sim_years[site.mapcode]
+            if current_sim_year in sim_years
+              # tier-4 contribution: accumulate this measurement into its cycle's bins
+              cyc = get(cycle_map, (Int(site.mapcode), current_sim_year), 0)
+              if cyc != 0
+                accumulate_site_bins!(t4_sim_t[Threads.threadid()][site.eco_id][cyc], site, loss_params, scratch_perm_t[Threads.threadid()], scratch_ages_t[Threads.threadid()])
+              end
+              # tier-3 contribution: per-site loss at this measurement year
+              spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
+              excluded = nothing
+              if exclusion_dict !== nothing
+                yd = get(exclusion_dict, current_sim_year, nothing)
+                yd === nothing || (excluded = get(yd, i, nothing))
+              end
+              sites_results[i] = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug, excluded=excluded)
+              for j in 1:site.live
+                push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
+              end
+            end
+            if current_sim_year == last(sim_years)
+              site.active = false
+            end
+          end
+        end
+        year_results_no_missing = PU.skipundef(sites_results)
+        if length(year_results_no_missing) > 0
+          years_results[current_sim_year+1] = sum(year_results_no_missing)
+        end
+        for i in 1:soa.n
+          isassigned(sites_results, i) || continue
+          eco_id = Int(getsite(soa, i).eco_id)
+          sl = sites_results[i]
+          eco3_w[eco_id] .+= sl.sp_w_loss
+          eco3_agb[eco_id] .+= sl.sp_agb_loss
+          eco3_site_agb[eco_id] += sl.site_agb_loss
+          eco3_obs[eco_id] += 1
+        end
       else
         sites_results = Vector{PU.SiteLoss}(undef, soa.n)
         Threads.@threads :static for i in 1:soa.n
@@ -1371,6 +1450,17 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       end
       eco_losses = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles)
       run_result = sum(eco_losses)
+    elseif search_tier == 5
+      # tier 5 = tier 3 + tier 4. SO: run_result is the SUM of the two scalar SiteLosses.
+      # MO: eco_losses = [tier-3 per-eco …; tier-4 per-eco …] (length 2·n_eco) → _mo_objectives
+      # then yields 4·n_ess objectives (W,AGB)×{tier3,tier4} (see its modulo over eco_species_ids).
+      eco_losses_3 = [PU.SiteLoss(sp_w_loss=eco3_w[e], sp_agb_loss=eco3_agb[e], site_agb_loss=eco3_site_agb[e], num_sites=eco3_obs[e], num_obs=eco3_obs[e]) for e in eachindex(eco_species_ids)]
+      for tid in 2:Threads.maxthreadid(), eco_id in eachindex(eco_species_ids), cyc in 1:n_cycles
+        t4_sim_t[1][eco_id][cyc] .+= t4_sim_t[tid][eco_id][cyc]
+      end
+      eco_losses_4 = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles)
+      run_result = sum(PU.skipundef(years_results)) + sum(eco_losses_4)
+      eco_losses = vcat(eco_losses_3, eco_losses_4)
     else
       # Per-ecoregion breakdown (num_sites mirrors num_obs here, as in the scalar tier-3 sum).
       eco_losses = [PU.SiteLoss(sp_w_loss=eco3_w[e], sp_agb_loss=eco3_agb[e], site_agb_loss=eco3_site_agb[e], num_sites=eco3_obs[e], num_obs=eco3_obs[e]) for e in eachindex(eco_species_ids)]
@@ -1531,8 +1621,40 @@ function _make_emp_df(splots::DataFrame, sampled_ids::Set)
   )
 end
 
+# Initial-condition perturbation. When INIT_PERTURB_FRAC[] > 0 the n_reps "reps" are NOT RNG re-seeds
+# but evenly-spaced scalings of the INITIAL cohort biomass over [1-frac, 1+frac] (the sim-year-0
+# population only — year 0 is never scored, so this is pure boundary-condition slack), and an
+# individual's fitness is the BEST (min) rep, not the sum. frac=0 ⇒ legacy behavior (seed-varied reps,
+# summed). fit_params reads this Ref directly off the number of seeds, so callers need no new args.
+const INIT_PERTURB_FRAC = Ref{Float64}(0.0)
+# Optional absolute cap (g/m²) on the per-cohort biomass CHANGE: the perturbation is bio*(scale-1)
+# clamped to ±INIT_PERTURB_CAP, so e.g. 5% on a 4000 g/m² cohort is limited to ±100 instead of ±200.
+# Inf ⇒ uncapped (pure multiplicative scaling).
+const INIT_PERTURB_CAP = Ref{FloatType}(FloatType(Inf))
+# n evenly-spaced initial-biomass scale factors across [1-frac, 1+frac]; identity when off or n≤1.
+_init_scales(n::Int) = (INIT_PERTURB_FRAC[] <= 0 || n <= 1) ? fill(one(FloatType), n) :
+  FloatType[1 - INIT_PERTURB_FRAC[] + 2 * INIT_PERTURB_FRAC[] * (k - 1) / (n - 1) for k in 1:n]
+# Per-rep RNG seeds. Perturb mode shares ONE seed across reps so the only thing that varies is the
+# initial-biomass scaling (sync path has no RNG influence anyway, but this makes it exact); legacy
+# draws an independent seed per rep.
+_fixed_seeds(rng, n::Int) = INIT_PERTURB_FRAC[] > 0 ? fill(rand(rng, UInt64), n) : [rand(rng, UInt64) for _ in 1:n]
+
+# Aggregate per-rep results into (run_result, eco_losses, picked_idx). Legacy (frac=0): SUM across reps.
+# Perturb mode (frac>0 & >1 rep): pick the SINGLE BEST rep (min total loss).
+function _agg_reps(rep_results)
+  if INIT_PERTURB_FRAC[] > 0 && length(rep_results) > 1
+    b = argmin(Float64[convert(Float64, PU.get_total_loss(r[1])) for r in rep_results])
+    return rep_results[b][1], rep_results[b][3], b
+  end
+  run_result = sum(r[1] for r in rep_results)
+  eco_losses = isnothing(rep_results[1][3]) ? nothing : [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
+  return run_result, eco_losses, 1
+end
+
 function _median_rep_cached(rep_results)
   losses = Float64[convert(Float64, PU.get_total_loss(r[1])) for r in rep_results]
+  # perturb mode caches the BEST rep's trajectory (matching _agg_reps); legacy caches the median rep.
+  (INIT_PERTURB_FRAC[] > 0 && length(rep_results) > 1) && return rep_results[argmin(losses)][2]
   rep_results[argmin(abs.(losses .- Statistics.median(losses)))][2]
 end
 
@@ -1597,7 +1719,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4
+  elseif search_tier == 4 || search_tier == 5
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -1621,7 +1743,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
   # comparison, smoothing the surface — vs drawing fresh seeds per trial (high variance).
   # (On resume this is a new realization; the incumbent self-heals after the first accepted
   # move. Refreshing periodically to avoid overfitting one realization is a later knob.)
-  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
+  fixed_seeds = _fixed_seeds(rng, n_reps)
   if isnothing(resume_from)
     bio_params = if !isnothing(start_from)
       @info "Seeding initial candidate from $start_from (fresh search_state)"
@@ -1635,7 +1757,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
     else
       BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     end
-    best_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))
+    best_result = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))[1]
     cur = LBSA.LBSACandidate(bio_params, best_result)
     search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS)
     search_state.sobol_cand_idx = 2
@@ -1699,9 +1821,8 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       end
 
       rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
-      run_result = sum(r[1] for r in rep_results)
+      run_result, eco_losses, _ = _agg_reps(rep_results)
       cached_sites_state = _median_rep_cached(rep_results)
-      eco_losses = isnothing(rep_results[1][3]) ? nothing : [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
 
       current_loss = convert(Float64, search_state.current.fx)
       delta_loss = abs(convert(Float64, run_result) - current_loss)
@@ -1719,7 +1840,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
       if LBSA.should_restart(search_state)
         @info "Restarting @ $(search_state.i)"
         bio_params = next_candidate()
-        cur_result = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))
+        cur_result = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))[1]
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, cur_result))
       end
       val_sim_sample = nothing
@@ -1764,7 +1885,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
         end
         if !isnothing(eco_losses)
           for (eco_id, eco_loss) in enumerate(eco_losses)
-            eco_name = eco_list[eco_id]
+            eco_name = _eco_name(eco_list, eco_id)
             eco_total = convert(Float64, PU.get_total_loss(eco_loss))
             DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
             n = max(1, eco_loss.num_sites)
@@ -1779,7 +1900,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
           println("Raw SiteLoss breakdown @ $iter (total=$(round(total, sigdigits=6))):")
           for eco_id in sort(collect(eachindex(eco_losses)); by=e -> -convert(Float64, PU.get_total_loss(eco_losses[e])))
             el = eco_losses[eco_id]
-            println("  [$(eco_list[eco_id])] eco_total=$(round(convert(Float64, PU.get_total_loss(el)), sigdigits=5))  sites=$(el.num_sites) obs=$(el.num_obs)")
+            println("  [$(_eco_name(eco_list, eco_id))] eco_total=$(round(convert(Float64, PU.get_total_loss(el)), sigdigits=5))  sites=$(el.num_sites) obs=$(el.num_obs)")
             for gsp in sort([g for g in 1:n_species if el.sp_w_loss[g] != 0f0]; by=g -> -el.sp_w_loss[g])
               println("      $(rpad(species_list[gsp], 10)) w=$(round(el.sp_w_loss[gsp], sigdigits=4))  agb=$(round(el.sp_agb_loss[gsp], sigdigits=4))")
             end
@@ -1884,7 +2005,7 @@ function parametrize_CMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4
+  elseif search_tier == 4 || search_tier == 5
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -1907,7 +2028,7 @@ function parametrize_CMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
   # scored on the *same* stochastic realization (required for a fair CMA-ES ranking — a noisier
   # candidate must not win on a lucky seed). Fixing it for the whole run smooths the surface;
   # refreshing per generation to avoid overfitting one realization is a later knob.
-  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
+  fixed_seeds = _fixed_seeds(rng, n_reps)
 
   # Sobol-or-random source for the initial mean and any IPOP restart mean.
   sobol_idx = Ref(1)
@@ -1932,7 +2053,7 @@ function parametrize_CMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
       next_candidate()
     end
     slots = PU.build_slots(param_dists, bio_params)
-    init_run = sum(r[1] for r in fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))
+    init_run = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years))[1]
     mean0 = PU.params_to_u(bio_params, param_dists, slots)
     init_best = CMAES.CMAESCandidate(bio_params, convert(Float64, PU.get_total_loss(init_run)))
     groups = PU.build_groups(param_dists, slots, BSP.BIOMASS_PER_ECO_GROUPS)   # block-diagonal CMA-ES
@@ -1990,14 +2111,14 @@ function parametrize_CMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
       for k in 1:λ
         cand = PU.u_to_params(xs_u[k], param_dists, slots, bio_params)
         rep_results = fit_params(ref_soa, cand, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
-        run_result = sum(r[1] for r in rep_results)
+        run_result, eco_losses_k, _ = _agg_reps(rep_results)
         fitnesses[k] = convert(Float64, PU.get_total_loss(run_result))
         evals_done += 1
         if fitnesses[k] < gen_best_f
           gen_best_f = fitnesses[k]
           gen_best_params = cand
           gen_best_run = run_result
-          gen_best_eco = isnothing(rep_results[1][3]) ? nothing : [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
+          gen_best_eco = eco_losses_k
           gen_best_cached = _median_rep_cached(rep_results)
         end
       end
@@ -2050,7 +2171,7 @@ function parametrize_CMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
         end
         if !isnothing(gen_best_eco)
           for (eco_id, eco_loss) in enumerate(gen_best_eco)
-            eco_name = eco_list[eco_id]
+            eco_name = _eco_name(eco_list, eco_id)
             eco_total = convert(Float64, PU.get_total_loss(eco_loss))
             DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
             n = max(1, eco_loss.num_sites)
@@ -2158,7 +2279,7 @@ function parametrize_MOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, s
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4
+  elseif search_tier == 4 || search_tier == 5
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -2172,13 +2293,12 @@ function parametrize_MOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, s
       end
     end
   end
-  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
+  fixed_seeds = _fixed_seeds(rng, n_reps)
 
   _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
   # Score a candidate's repetitions into one MOFitness (eco_losses summed over reps) + aux.
   function _fitness(rep_results)
-    run_result = sum(r[1] for r in rep_results)
-    eco_losses = [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
+    run_result, eco_losses, _ = _agg_reps(rep_results)
     objs = _mo_objectives(eco_losses, eco_species_ids)
     MOLBSA.MOFitness(objs, convert(Float64, PU.get_total_loss(run_result))), run_result, eco_losses
   end
@@ -2309,7 +2429,7 @@ function parametrize_MOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, s
           DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?, ?)", [iter, gb_run.num_sites, gb_run.num_obs, total, length(search_state.archive), take!(buf)])
         end
         for (eco_id, eco_loss) in enumerate(gb_eco)
-          eco_name = eco_list[eco_id]
+          eco_name = _eco_name(eco_list, eco_id)
           DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, convert(Float64, PU.get_total_loss(eco_loss))])
           n = max(1, eco_loss.num_sites)
           for gsp in 1:n_species
@@ -2392,7 +2512,7 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
       push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4
+  elseif search_tier == 4 || search_tier == 5
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -2401,11 +2521,10 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
       for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
     end
   end
-  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
+  fixed_seeds = _fixed_seeds(rng, n_reps)
   _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
   function _fitness(rep_results)
-    run_result = sum(r[1] for r in rep_results)
-    eco_losses = [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
+    run_result, eco_losses, _ = _agg_reps(rep_results)
     MOLBSA.MOFitness(_mo_objectives(eco_losses, eco_species_ids), convert(Float64, PU.get_total_loss(run_result))), run_result, eco_losses
   end
   next_param() = !isempty(_sobol_cands) && length(_sobol_cands) >= 1 ? popfirst!(_sobol_cands) :
@@ -2485,7 +2604,7 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
           DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?, ?)", [iter, gb_run.num_sites, gb_run.num_obs, total, length(search_state.archive), take!(buf)])
         end
         for (eco_id, eco_loss) in enumerate(gb_eco)
-          eco_name = eco_list[eco_id]
+          eco_name = _eco_name(eco_list, eco_id)
           DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, convert(Float64, PU.get_total_loss(eco_loss))])
           n = max(1, eco_loss.num_sites)
           for gsp in 1:n_species
@@ -2551,7 +2670,7 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
       push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4
+  elseif search_tier == 4 || search_tier == 5
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -2560,11 +2679,10 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
       for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
     end
   end
-  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
+  fixed_seeds = _fixed_seeds(rng, n_reps)
   _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
   function _fitness(rep_results)
-    run_result = sum(r[1] for r in rep_results)
-    eco_losses = [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
+    run_result, eco_losses, _ = _agg_reps(rep_results)
     MOLBSA.MOFitness(_mo_objectives(eco_losses, eco_species_ids), convert(Float64, PU.get_total_loss(run_result))), run_result, eco_losses
   end
   sobol_idx = Ref(1)
@@ -2620,10 +2738,22 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
   # Per-generation trajectory: best (representative) train+val loss, emitter population size, archive size.
   metrics_io = open(joinpath(output_dir, "metrics.csv"), "w")
   println(metrics_io, "iteration,best_train_loss,best_val_loss,pop_size,archive_size")
+  # Validation mirrors the TRAINING tier so the held-out loss ranks candidates by the SAME objective
+  # (tier 5 ⇒ tier-5 val). Tier 4/5 need per-cycle bins built from the validation split.
+  val_t4_ref = nothing; val_cycle_map = nothing; val_n_cycles = 0
+  if have_val && (search_tier == 4 || search_tier == 5)
+    _vnb = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+    val_cycle_map, val_n_cycles = Data.build_cycle_map(val_splots; cycle_years=cycle_years)
+    val_t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), _vnb) for _ in 1:val_n_cycles] for eco_id in eachindex(eco_list)]
+    for ((plot_id, eco_id), year_dict) in val_spdf_plts, (sy, spdf_gt) in year_dict
+      cyc = get(val_cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
+      for (sp_eco, rec) in spdf_gt.records; val_t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
+    end
+  end
   rep_val_loss = Inf
   if have_val
     try
-      vr0 = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
+      vr0 = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
       rep_val_loss = convert(Float64, PU.get_total_loss(vr0[1]))
     catch; end
   end
@@ -2671,7 +2801,7 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
         catch e; @warn "simulate_and_test (train) failed" exception = (e, catch_backtrace()); end
         if have_val
           try
-            val_result = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
+            val_result = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
             rep_val_loss = convert(Float64, PU.get_total_loss(val_result[1]))
             @info "Val loss @ gen $iter | loss=$rep_val_loss"
             val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
@@ -2682,7 +2812,7 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
           DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?, ?)", [iter, gb_run.num_sites, gb_run.num_obs, total, length(search_state.archive), take!(buf)])
         end
         for (eco_id, eco_loss) in enumerate(gb_eco)
-          eco_name = eco_list[eco_id]
+          eco_name = _eco_name(eco_list, eco_id)
           DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, convert(Float64, PU.get_total_loss(eco_loss))])
           n = max(1, eco_loss.num_sites)
           for gsp in 1:n_species
@@ -2715,7 +2845,7 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
         open(joinpath(output_dir, "archive_eval.csv"), "w") do io
           println(io, "candidate,train_loss,val_loss")
           for (ci, m) in enumerate(search_state.archive)
-            vr = only(fit_params(val_ref_soa, m.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
+            vr = only(fit_params(val_ref_soa, m.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection_dict=inj_dict_val, injection_years=inj_years_val, seeds=[rand(rng, UInt64)]))
             println(io, "$ci,$(Float64(m.fx.aggregate)),$(convert(Float64, PU.get_total_loss(vr[1])))")
           end
         end
@@ -2730,10 +2860,17 @@ end
 # for each (ecoregion, species-in-eco) two coordinates — the age-distribution
 # (Wasserstein) loss and the AGB-level loss. Order is fixed across candidates, so
 # the vector is coordinate-comparable in MOLBSA.mo_delta / dominance.
+# Eco name for a per-eco loss index. Tier 5 returns 2·n_eco losses (tier-3 block then tier-4 block);
+# indices past n_eco name the tier-4 copy with a suffix so per-eco logs stay unique.
+_eco_name(eco_list, idx::Integer) = idx <= length(eco_list) ? eco_list[idx] : eco_list[idx-length(eco_list)] * "·t4"
+
 function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}})::Vector{FloatType}
   objs = FloatType[]
-  for (eco_id, el) in enumerate(eco_losses)
-    for gsp in eco_species_ids[eco_id]
+  ne = length(eco_species_ids)
+  # eco_losses is length n_eco for tiers 1-4, but 2·n_eco for tier 5 (tier-3 block then tier-4 block).
+  # Cycling over eco_species_ids maps the second block back onto the same species → 4·n_ess objectives.
+  for (idx, el) in enumerate(eco_losses)
+    for gsp in eco_species_ids[(idx - 1) % ne + 1]
       push!(objs, el.sp_w_loss[gsp])
       push!(objs, el.sp_agb_loss[gsp])
     end
@@ -2793,7 +2930,7 @@ end
 # All tiers (1, 2, 3, 4) expose the per-ecoregion breakdown that the objective
 # vector is built from.
 function parametrize_MOLBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200)
-  search_tier in (1, 2, 3, 4) || error("parametrize_MOLBSA: unknown search_tier=$search_tier (expected 1, 2, 3, or 4)")
+  search_tier in (1, 2, 3, 4, 5) || error("parametrize_MOLBSA: unknown search_tier=$search_tier (expected 1, 2, 3, 4, or 5)")
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   all_plot_ids = UIntType.(unique(splots.plot_id))
@@ -2847,7 +2984,7 @@ function parametrize_MOLBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4
+  elseif search_tier == 4 || search_tier == 5
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -2861,13 +2998,12 @@ function parametrize_MOLBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
       end
     end
   end
-  fixed_seeds = [rand(rng, UInt64) for _ in 1:n_reps]
+  fixed_seeds = _fixed_seeds(rng, n_reps)
 
   _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years)
   # Score a candidate's repetitions into one MOFitness (eco_losses summed over reps).
   function _fitness(rep_results)
-    run_result = sum(r[1] for r in rep_results)
-    eco_losses = [sum(r[3][e] for r in rep_results) for e in eachindex(rep_results[1][3])]
+    run_result, eco_losses, _ = _agg_reps(rep_results)
     objs = _mo_objectives(eco_losses, eco_species_ids)
     MOLBSA.MOFitness(objs, convert(Float64, PU.get_total_loss(run_result))), run_result, eco_losses
   end
@@ -2971,7 +3107,7 @@ function parametrize_MOLBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
           DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?, ?)", [iter, run_result.num_sites, run_result.num_obs, total, length(search_state.archive), take!(buf)])
         end
         for (eco_id, eco_loss) in enumerate(eco_losses)
-          eco_name = eco_list[eco_id]
+          eco_name = _eco_name(eco_list, eco_id)
           DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, convert(Float64, PU.get_total_loss(eco_loss))])
           n = max(1, eco_loss.num_sites)
           for gsp in 1:n_species
@@ -3173,6 +3309,8 @@ function run_from_yaml(yaml_path::String)
     min_trees=Int(get_cfg("min_trees", 100)),
     min_agb_frac=Float64(get_cfg("min_agb_frac", 0.05)),
     stratify_eco_mixed=Bool(get_cfg("stratify_eco_mixed", false)),
+    single_ecoregion=Bool(get_cfg("single_ecoregion", false)),
+    stratify_landuse=Bool(get_cfg("stratify_landuse", false)),
     filter_extent=filter_extent,
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
@@ -3189,6 +3327,7 @@ function run_from_yaml(yaml_path::String)
   OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))
   OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", OVERRIDE_INJECTION_NOISE[]))
   OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(get_cfg("override_injection_disturbance", String(OVERRIDE_INJECTION_DISTURBANCE[])))
+  Data.USE_FIA_CYCLE[] = Bool(get_cfg("fia_cycle", false))   # tier-4/5 cycles from FIA `cycle` vs computed split
   BiomassSuccessionPlugin.FIXED_LONGEVITY[] = (let v = get_cfg("fix_longevity", nothing); isnothing(v) ? nothing : Float64(v) end)
   BiomassSuccessionPlugin.LONGEVITY_TABLE[] = Bool(get_cfg("longevity_from_data", false)) ?
     _load_longevity_table(String(get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"))) : nothing
@@ -3232,6 +3371,14 @@ function run_from_yaml(yaml_path::String)
     cycle_years=get_cfg("cycle_years", 8),
     loss_lambda=Float64(get_cfg("loss_lambda", 1.0)),
     loss_alpha=Float64(get_cfg("loss_alpha", 1.0)),
+    agb_hinge=Bool(get_cfg("agb_hinge", false)),
+    agb_hinge_threshold=Float64(get_cfg("agb_hinge_threshold", 10.0)),
+    agb_hinge_pct=Float64(get_cfg("agb_hinge_pct", 0.0)),
+    agb_hinge_pct_min=Float64(get_cfg("agb_hinge_pct_min", 0.0)),
+    agb_hinge_pct_max=Float64(get_cfg("agb_hinge_pct_max", Inf)),
+    agb_hinge_l2=Bool(get_cfg("agb_hinge_l2", false)),
+    init_perturb_frac=Float64(get_cfg("init_perturb_frac", 0.0)),
+    init_perturb_cap=Float64(get_cfg("init_perturb_cap", Inf)),
     cmaes_lambda=(haskey(cfg, "cmaes_lambda") ? Int(get_cfg("cmaes_lambda", 0)) : nothing),
     cmaes_sigma0=Float64(get_cfg("cmaes_sigma0", 0.3)),
     ipop=get_cfg("ipop", false),

@@ -29,7 +29,7 @@ function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species
     ((isnothing(FIXED_LONGEVITY[]) && isnothing(LONGEVITY_TABLE[])) ? (MutableParam(:LONGEVITY, DiscreteUniform(100, 600), (100, 600), 50, FloatType, SpeciesSampler(), IndexApplier(); quantum=50, group=:longevity_decay),) : ())...,
     (no_establishment ? () : (MutableParam(:MATURITY, DiscreteUniform(1, 50), (1, 50), 3, FloatType, SpeciesSampler(), IndexApplier(); group=:maturity),))...,
     (no_establishment ? () : (MutableParam(:SHADE_TOL, DiscreteUniform(1, 5), (1, 5), 1, UIntType, SpeciesSampler(), IndexApplier(); group=:shade),))...,
-    MutableParam(:S, Uniform(0.01f0, 1.0f0), (0.01f0, 1.0f0), 0.01f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),
+    MutableParam(:S, Uniform(0.01f0, 1.0f0), (0.01f0, 1.0f0), 0.01f0, FloatType, SpeciesSampler(), IndexApplier(); group=:longevity_decay),
     MutableParam(:ANPP_MAX_SPP, DiscreteUniform(100, 1500), (100, 1500), 100, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),
     MutableParam(:B_MAX_SPP, DiscreteUniform(15000, 30000), (15000, 30000), 1000, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); quantum=100, group=:growth_biomass),
     (no_establishment ? () : (MutableParam(:PROB_MORT_SPP, Uniform(0.0f0, 0.05f0), (0.0f0, 0.05f0), 0.01f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),))...,

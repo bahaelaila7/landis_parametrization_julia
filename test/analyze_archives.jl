@@ -6,14 +6,14 @@
 # train loss if absent.
 #   Run:  ./julia_gdal.sh --project=. test/analyze_archives.jl <out_dir1> [<out_dir2> ...]
 using Pan
-import JLD2, UMAP, Random, Statistics
+import JLD2, UMAP, Random, Statistics, DuckDB
 import CairoMakie
 const MK = CairoMakie
 
 dirs = isempty(ARGS) ?
   ["runs/cmame_lu_v1_base_outputs", "runs/cmame_lu_v2_sobol_outputs", "runs/cmame_lu_v3_alpha05_outputs", "runs/cmame_lu_v4_explore05_outputs"] :
   ARGS
-label(d) = replace(basename(d), "cmame_lu_" => "", "_outputs" => "")
+label(d) = replace(basename(d), "cmame_lonbh_" => "hinge:", "cmame_lonb_" => "nobin:", "cmame_lu_" => "", "_outputs" => "")
 const HEADER = "candidate,train_loss,val_loss,eco_landuse,species,D,LONGEVITY,MATURITY,SHADE_TOL,S,ANPP_MAX,B_MAX,PROB_MORT,PROB_ESTAB,MIN_REL_BIOMASS"
 
 # candidate -> val_loss from the driver's archive_eval.csv (empty Dict if missing)
@@ -34,7 +34,8 @@ function feat(p)
             Float64(length(p.MATURITY) >= gsp ? p.MATURITY[gsp] : 0), Float64(p.SHADE_TOL[gsp]))
   end
   for eco_id in eachindex(p.ECO_LIST), sp_local in eachindex(p.ECO_SPECIES_IDS[eco_id])
-    push!(v, Float64(p.S[eco_id][sp_local]), Float64(p.ANPP_MAX_SPP[eco_id][sp_local]),
+    gsp = Int(p.ECO_SPECIES_IDS[eco_id][sp_local])     # S is global per-species now
+    push!(v, Float64(p.S[gsp]), Float64(p.ANPP_MAX_SPP[eco_id][sp_local]),
             Float64(p.B_MAX_SPP[eco_id][sp_local]), Float64(p.PROB_MORT_SPP[eco_id][sp_local]),
             Float64(length(p.PROB_ESTAB_SPP) >= eco_id ? p.PROB_ESTAB_SPP[eco_id][sp_local] : 0))
   end
@@ -51,7 +52,7 @@ function candidate_rows!(io, ci, tr, vl, p)
     println(io, join([ci, round(tr, digits=3), vl === missing ? "" : round(vl, digits=3),
       p.ECO_LIST[eco_id], p.SPECIES_LIST[gsp],
       round(Float64(p.D[gsp]), digits=3), round(Float64(p.LONGEVITY[gsp]), digits=1), mat, Int(p.SHADE_TOL[gsp]),
-      round(Float64(p.S[eco_id][sp_local]), digits=4), round(Float64(p.ANPP_MAX_SPP[eco_id][sp_local]), digits=1),
+      round(Float64(p.S[gsp]), digits=4), round(Float64(p.ANPP_MAX_SPP[eco_id][sp_local]), digits=1),
       round(Float64(p.B_MAX_SPP[eco_id][sp_local]), digits=1), round(Float64(p.PROB_MORT_SPP[eco_id][sp_local]), digits=5),
       pes, round(Float64(p.MIN_REL_BIOMASS[eco_id][1]), digits=4)], ","))
   end
@@ -81,10 +82,10 @@ for d in dirs
     cval = isempty(valmap) ? trains : vals
     clab = isempty(valmap) ? "train loss" : "validation loss"
     fig = MK.Figure(size=(820, 660))
-    MK.Label(fig[0, 1:2], "$v — UMAP of CMA-MAE archive parameter sets ($(length(feats)) elites) — colour = $clab"; fontsize=13, font=:bold)
+    MK.Label(fig[0, 1:2], "$v — UMAP of archive parameter sets ($(length(feats)) elites) — colour = $clab"; fontsize=13, font=:bold)
     ax = MK.Axis(fig[1, 1]; xlabel="UMAP-1", ylabel="UMAP-2")
-    MK.scatter!(ax, emb[1, :], emb[2, :]; color=cval, colormap=:viridis, markersize=13, strokecolor=:black, strokewidth=0.5)
-    MK.Colorbar(fig[1, 2]; colormap=:viridis, colorrange=(minimum(cval), maximum(cval)), label="$clab (lower = better)")
+    MK.scatter!(ax, emb[1, :], emb[2, :]; color=cval, colormap=MK.cgrad(:viridis; rev=true), markersize=13, strokecolor=:black, strokewidth=0.5)
+    MK.Colorbar(fig[1, 2]; colormap=MK.cgrad(:viridis; rev=true), colorrange=(minimum(cval), maximum(cval)), label="$clab (yellow = lower = better)")
     MK.save(joinpath(d, "archive_umap.png"), fig)
     println("   wrote $(joinpath(d, "archive_umap.png"))")
   else
@@ -113,6 +114,22 @@ for d in dirs
     MK.axislegend(ax2; position=:rb)
     MK.save(joinpath(d, "archive_metrics.png"), fig)
     println("   wrote $(joinpath(d, "archive_metrics.png"))  ($(length(it)) iterations)")
+  elseif isfile(joinpath(d, "losses.duckdb"))
+    # MOLBSA (and other writers without metrics.csv): convergence from losses.duckdb's per-new-best rows.
+    db = DuckDB.connect(DuckDB.DB(joinpath(d, "losses.duckdb")))
+    cv = DuckDB.execute(db, "SELECT iteration, total_loss, archive_size FROM total_loss ORDER BY iteration")
+    it = Int[]; tr = Float64[]; asz = Float64[]
+    for r in cv; push!(it, Int(r.iteration)); push!(tr, Float64(r.total_loss)); push!(asz, Float64(r.archive_size)); end
+    if !isempty(it)
+      fig = MK.Figure(size=(920, 780))
+      ax1 = MK.Axis(fig[1, 1]; xlabel="iteration", ylabel="best train loss", yscale=log10, title="$v — convergence (best-so-far train loss)")
+      MK.lines!(ax1, it, tr; color=:steelblue, linewidth=2)
+      MK.scatter!(ax1, it, tr; color=:steelblue, markersize=5)
+      ax2 = MK.Axis(fig[2, 1]; xlabel="iteration", ylabel="archive size", title="$v — archive size")
+      MK.lines!(ax2, it, asz; color=:darkorange, linewidth=2)
+      MK.save(joinpath(d, "archive_metrics.png"), fig)
+      println("   wrote $(joinpath(d, "archive_metrics.png"))  ($(length(it)) new-best steps, from losses.duckdb)")
+    end
   end
 end
 println("=== ARCHIVE ANALYSIS DONE ===")

@@ -269,6 +269,25 @@ end
 # the L2/AGB-level term (sp_w_loss is still computed — it drives loss-weighted sampling and the
 # per-species breakdown). Wired from `loss_alpha` (yaml / parametrize).
 const LOSS_ALPHA = Ref{FloatType}(one(FloatType))
+# AGB-level loss form. AGB_HINGE[]=true replaces the gentle sqrt-difference AGB term with a HINGE-L1:
+# loss = lambda * max(0, |sim_agb - obs_agb| - threshold) — a tolerance band below which AGB differences
+# are not penalized; threshold 0 ⇒ plain L1. Wired from agb_hinge / agb_hinge_threshold.
+const AGB_HINGE = Ref{Bool}(false)
+const AGB_HINGE_THRESHOLD = Ref{FloatType}(FloatType(10.0))
+# Percentage tolerance: when AGB_HINGE_PCT[] > 0 the band is a fraction of the OBSERVED AGB,
+# clamped to [AGB_HINGE_PCT_MIN, AGB_HINGE_PCT_MAX] — e.g. pct=0.04, min=10, max=200 ⇒
+# threshold = clamp(obs*0.04, 10, 200). pct ≤ 0 ⇒ fall back to the flat AGB_HINGE_THRESHOLD.
+const AGB_HINGE_PCT = Ref{FloatType}(zero(FloatType))
+const AGB_HINGE_PCT_MIN = Ref{FloatType}(zero(FloatType))
+const AGB_HINGE_PCT_MAX = Ref{FloatType}(FloatType(Inf))
+# Per-observation hinge tolerance for an observed AGB level `obs`.
+@inline _agb_hinge_thresh(obs::FloatType)::FloatType =
+  AGB_HINGE_PCT[] > zero(FloatType) ?
+    clamp(obs * AGB_HINGE_PCT[], AGB_HINGE_PCT_MIN[], AGB_HINGE_PCT_MAX[]) :
+    AGB_HINGE_THRESHOLD[]
+# AGB_HINGE_L2[]=true squares the hinge excess (L2/MSE: max(0,|sim-obs|-thr)²) instead of L1.
+const AGB_HINGE_L2 = Ref{Bool}(false)
+@inline _agb_hinge_pen(h::FloatType)::FloatType = AGB_HINGE_L2[] ? h * h : h
 
 @inline function get_total_loss(loss::SiteLoss, alpha::FloatType=LOSS_ALPHA[], beta::FloatType=FloatType(1.0f0))::FloatType
   # sp_w_loss = age-distribution SHAPE (normalized-CDF W1, AGB-invariant);
@@ -419,8 +438,11 @@ end
       sp_w_loss[gsp] = s
     end
     #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
-    # AGB LEVEL as a separate, gentle sqrt-difference term (weighted by loss_params.lambda).
-    sp_agb_loss[gsp] = loss_params.lambda * (sqrt(sim_agb_sum) - sqrt(rec.sp_agb_sum))^2
+    # AGB LEVEL term (weighted by loss_params.lambda): hinge-L1 with a tolerance band, or the gentle
+    # sqrt-difference (default). Hinge: max(0, |sim - obs| - threshold); threshold 0 ⇒ plain L1.
+    sp_agb_loss[gsp] = AGB_HINGE[] ?
+      loss_params.lambda * _agb_hinge_pen(max(zero(FloatType), abs(sim_agb_sum - rec.sp_agb_sum) - _agb_hinge_thresh(rec.sp_agb_sum))) :
+      loss_params.lambda * (sqrt(sim_agb_sum) - sqrt(rec.sp_agb_sum))^2
     site_agb_loss -= rec.sp_agb_sum
     if debug
       println("smoothing_weights $(loss_params.smoothing_weights)")
@@ -530,7 +552,9 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
       end
       sp_w_loss[gsp] = s
     end
-    sp_agb_loss[gsp] = loss_params.lambda * rec.sp_agb_sum
+    sp_agb_loss[gsp] = AGB_HINGE[] ?
+      loss_params.lambda * _agb_hinge_pen(max(zero(FloatType), rec.sp_agb_sum - _agb_hinge_thresh(rec.sp_agb_sum))) :   # sim AGB = 0
+      loss_params.lambda * rec.sp_agb_sum
     site_agb_loss -= rec.sp_agb_sum
   end
 

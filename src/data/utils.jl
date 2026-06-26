@@ -178,6 +178,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing,
   min_trees::Int=100, min_agb_frac::Float64=0.05,
   stratify_eco_mixed::Bool=false,
+  single_ecoregion::Bool=false, stratify_landuse::Bool=false,
   tree_stats::Union{Nothing,DataFrame}=nothing)
   # eco_field can be any column of the loaded cohorts (epa_l4/epa_l3/ecosubcd, or a curated
   # stratifier like land_use). Falls back to ecosubcd only for the legacy unspecified case.
@@ -199,7 +200,14 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   # Optionally stratify the ecoregion by stand mixedness: :eco is the base ecoregion,
   # :eco_mixed splits it into "<eco>_mixed" / "<eco>_pure" per (plot-level) mixed_plot. When
   # enabled the model fits params per eco_mixed; otherwise eco_mixed == the base ecoregion.
-  df.eco = string.(getproperty(df, eco_field))
+  # single_ecoregion collapses the EPA ecoregion to one group ("ALL"); stratify_landuse then (or on its
+  # own) re-splits by the land_use column. So: single only → 1 eco; single+landuse → land_use classes
+  # (EPA ignored); neither → the eco_field grouping as before.
+  df.eco = single_ecoregion ? fill("ALL", nrow(df)) : string.(getproperty(df, eco_field))
+  if stratify_landuse && eco_field != :land_use
+    hasproperty(df, :land_use) || error("stratify_landuse=true but the cohorts table has no :land_use column")
+    df.eco = df.eco .* "|lu=" .* string.(coalesce.(df.land_use, "NA"))
+  end
   df.eco_mixed = stratify_eco_mixed ?
                  df.eco .* ifelse.(coalesce.(df.mixed_plot, true), "_mixed", "_pure") :
                  df.eco
@@ -237,7 +245,8 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   # identical species×age cohorts when by_subplot=false. We group on measdate (plot-level) and
   # recompute sim_year per id_cols below.
   base_fields = [:plt_cn, :statecd, :unitcd, :countycd, :plot, :eco_id, :measdate,
-    :species_id, :effective_species, :age_calc]
+    :species_id, :effective_species, :age_calc,
+    (hasproperty(df, :cycle) ? [:cycle] : Symbol[])...]   # carry FIA inventory cycle when present
   fields = by_subplot ? vcat(base_fields, [:subp]) : base_fields
 
   # Split right here — after mapping, before aggregation — so each half gets its
@@ -374,7 +383,23 @@ end
 # Maps each (plot_id, sim_year) measurement to a 1-based calendar cycle index, using the
 # same epoch (earliest measdate) and width as print_cycle_coverage. Used by the tier-4
 # population loss to bucket measurements into calendar snapshots. Returns (map, n_cycles).
+# When USE_FIA_CYCLE[] is set, cycles come from the FIA inventory `cycle` column verbatim (raw value
+# as the 1-based index, so train and val share the same mapping; empty low slots cost a little memory
+# but add zero loss). Otherwise cycles are the calculated cycle_years-wide buckets from the first visit.
+const USE_FIA_CYCLE = Ref{Bool}(false)
 function build_cycle_map(splots::DataFrame; cycle_years::Real=8)
+  if USE_FIA_CYCLE[] && hasproperty(splots, :cycle)
+    meas = unique(select(splots, [:plot_id, :sim_year, :cycle]))
+    cmap = Dict{Tuple{Int,Int},Int}()
+    n_cycles = 0
+    for r in eachrow(meas)
+      ismissing(r.cycle) && continue
+      c = Int(r.cycle)
+      cmap[(Int(r.plot_id), Int(r.sim_year))] = c
+      c > n_cycles && (n_cycles = c)
+    end
+    return cmap, n_cycles
+  end
   meas = unique(select(splots, [:plot_id, :sim_year, :measdate]))
   epoch = minimum(meas.measdate)
   cmap = Dict{Tuple{Int,Int},Int}()
@@ -535,7 +560,7 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   return cohorts_df[keep, :]
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
   con = DuckDB.connect(DuckDB.DB(cohorts_db_path))
   println("Creating index if necessary")
@@ -614,7 +639,7 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
     make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
       by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng,
       min_trees=min_trees, min_agb_frac=min_agb_frac,
-      stratify_eco_mixed=stratify_eco_mixed, tree_stats=tree_stats)
+      stratify_eco_mixed=stratify_eco_mixed, single_ecoregion=single_ecoregion, stratify_landuse=stratify_landuse, tree_stats=tree_stats)
   mark_estab_year!(splots)
   isnothing(splots_val) || mark_estab_year!(splots_val)
 

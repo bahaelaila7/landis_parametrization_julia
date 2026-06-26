@@ -97,7 +97,7 @@ Base.@kwdef struct BiomassSuccessionParams
 
   # Species Specific
   D::Vector{FloatType}
-  S::Vector{Vector{FloatType}}   # PER-(eco,species) growth-curve shape (per-ecoregion CMA-ES block)
+  S::Vector{FloatType}           # GLOBAL per-species growth-curve shape (one value across all ecoregions)
   LONGEVITY::Vector{FloatType}
   SHADE_TOL::Vector{UIntType}
   MATURITY::Vector{FloatType}
