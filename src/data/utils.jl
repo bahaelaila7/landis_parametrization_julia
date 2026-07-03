@@ -128,17 +128,18 @@ function assign_tiered_species!(df::DataFrame;
   @info "Species tiers  ($(length(sp_map)) total → $(length(exact_list)) exact / $(length(group_list)) groups / H=$n_H S=$n_S)  [min_trees=$min_trees, min_agb_frac=$min_agb_frac]" exact = join(exact_list, ", ") groups = join(group_list, ", ")
 end
 
-# Split raw cohort-level df by site (plot or subplot), stratified by species.
-# Each site goes to exactly one stratum (its rarest species) so the total val
-# fraction stays close to val_frac. Returns (df_train, df_val).
+# Split raw cohort-level df by site (plot or subplot), stratified by eco×lu × species.
+# Each site goes to exactly one stratum — (its eco_id, its rarest species) — so the val fraction
+# stays close to val_frac WITHIN every ecoregion×land-use, not just globally per species (the
+# per-cell normalization needs each eco×lu×sp cell represented in both halves). Returns (df_train, df_val).
 function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
   val_frac::Float64, rng::Random.AbstractRNG)
-  site_sp = unique(select(df, vcat(id_cols, [:effective_species])))
+  site_sp = unique(select(df, vcat(id_cols, [:eco_id, :effective_species])))
   sp_count = Dict(r.effective_species => r.n_sites
                   for r in eachrow(combine(groupby(site_sp, :effective_species), nrow => :n_sites)))
   site_strata = combine(groupby(site_sp, id_cols)) do rows
     idx = argmin(i -> get(sp_count, rows.effective_species[i], typemax(Int)), 1:nrow(rows))
-    (; stratum=rows.effective_species[idx])
+    (; stratum=(rows.eco_id[1], rows.effective_species[idx]))   # eco×lu × rarest species
   end
   val_sites = vcat([
     begin
@@ -259,14 +260,11 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   function _agg(df_sub::DataFrame)
     raw = combine(groupby(df_sub, fields, sort=false), nrow => :count, :agb => sum => :agb_sum,
       [:agb, :disturbance_drop_pct] => _weighted_cohort_drop => :disturbance_drop_pct)
-    plots = if by_subplot
-      raw
-    else
-      sc = combine(groupby(df_sub, :plt_cn), :subp => (x -> length(unique(x))) => :subp_count)
-      p = leftjoin(raw, sc, on=:plt_cn)
-      p.agb_sum ./= p.subp_count
-      p
-    end
+    # NB: curated cohort `agb` already carries the plot-level TPA_UNADJ expansion (each subplot is
+    # 1/nsub of the plot), so Step-1's `:agb => sum` over subplots IS the plot per-acre density
+    # (verified against TreeMap DRYBIO_L). Do NOT divide by subplot count again — that deflated the
+    # ground-truth AGB ~4× and pushed B_MAX/ANPP_MAX low.
+    plots = raw
     sm = combine(groupby(plots, id_cols, sort=false)) do rows
       (; start_measdate=[minimum(rows.measdate)])
     end
@@ -387,16 +385,22 @@ end
 # as the 1-based index, so train and val share the same mapping; empty low slots cost a little memory
 # but add zero loss). Otherwise cycles are the calculated cycle_years-wide buckets from the first visit.
 const USE_FIA_CYCLE = Ref{Bool}(false)
+# Merge this many consecutive FIA cycles into one group (1 = no merge). e.g. 3 ⇒ {7,8,9},{10,11,12}.
+# A plot measured in >1 cycle of a group contributes a (duplicate) measurement to that group.
+const FIA_CYCLE_MERGE = Ref{Int}(3)
 function build_cycle_map(splots::DataFrame; cycle_years::Real=8)
   if USE_FIA_CYCLE[] && hasproperty(splots, :cycle)
     meas = unique(select(splots, [:plot_id, :sim_year, :cycle]))
+    vals = Int[Int(r.cycle) for r in eachrow(meas) if !ismissing(r.cycle)]
+    isempty(vals) && return Dict{Tuple{Int,Int},Int}(), 0
+    mn = minimum(vals); mrg = max(1, FIA_CYCLE_MERGE[])   # merge mrg consecutive FIA cycles into one group
     cmap = Dict{Tuple{Int,Int},Int}()
     n_cycles = 0
     for r in eachrow(meas)
       ismissing(r.cycle) && continue
-      c = Int(r.cycle)
-      cmap[(Int(r.plot_id), Int(r.sim_year))] = c
-      c > n_cycles && (n_cycles = c)
+      g = (Int(r.cycle) - mn) ÷ mrg + 1                   # group index (1-based); mrg=1 ⇒ raw FIA cycle (shifted)
+      cmap[(Int(r.plot_id), Int(r.sim_year))] = g
+      g > n_cycles && (n_cycles = g)
     end
     return cmap, n_cycles
   end
@@ -497,7 +501,7 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   coords = DuckDB.execute(con, """
     SELECT p.statecd AS statecd, p.unitcd AS unitcd, p.countycd AS countycd, p.plot AS plot,
            ANY_VALUE(p.LAT) AS lat, ANY_VALUE(p.LON) AS lon
-    FROM $(plot_table) p
+    FROM src.$(plot_table) p
     JOIN extent_plots e
       ON e.statecd  = p.statecd AND e.unitcd = p.unitcd
      AND e.countycd = p.countycd AND e.plot  = p.plot
@@ -562,10 +566,13 @@ end
 
 function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
-  con = DuckDB.connect(DuckDB.DB(cohorts_db_path))
-  println("Creating index if necessary")
-  DuckDB.execute(con, "CREATE INDEX IF NOT EXISTS PLT_ECO_IDX_$(eco_field) ON $(tablename)($(eco_field));")
-  sql = "SELECT * FROM $(tablename) WHERE true"
+  # In-memory main DB + ATTACH the file READ-ONLY: a killed run can never corrupt the file (a mid-write
+  # checkpoint was the corruption cause), yet df registrations (loaded_subplots) still land in the writable
+  # in-memory catalog. DB tables are qualified `src.…`; registered views stay unqualified. No CREATE INDEX
+  # on a read-only DB — DuckDB's columnar scans are fast enough for the one-shot load.
+  con = DuckDB.connect(DuckDB.DB())
+  DuckDB.execute(con, "ATTACH '$(cohorts_db_path)' AS src (READ_ONLY);")
+  sql = "SELECT * FROM src.$(tablename) WHERE true"
   if length(filter_ecos) > 0
     sql *= " AND $(filter_eco_field) in ('$(join(filter_ecos,"','"))')"
   end
@@ -584,7 +591,7 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
     sql *= " AND (statecd, unitcd, countycd, plot) IN ($(tuples_str))"
   end
   if filter_planted
-    sql *= " AND (statecd, unitcd, countycd, plot, subp) IN (SELECT statecd, unitcd, countycd, plot, subp FROM $(tablename) WHERE intro_type = 'planted')"
+    sql *= " AND (statecd, unitcd, countycd, plot, subp) IN (SELECT statecd, unitcd, countycd, plot, subp FROM src.$(tablename) WHERE intro_type = 'planted')"
   end
   println(sql)
   cohorts_df = DuckDB.execute(con, sql) |> DataFrame
@@ -617,7 +624,7 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
              max(t.SPCD)      AS spcd,
              max(t.SPGRPCD)   AS spgrpcd,
              max(t.DRYBIO_AG) AS drybio_max
-      FROM curated_trees t
+      FROM src.curated_trees t
       JOIN loaded_subplots ls
         ON ls.statecd = t.STATECD AND ls.unitcd = t.UNITCD AND ls.countycd = t.COUNTYCD
        AND ls.plot = t.PLOT AND ls.subp = t.SUBP
@@ -630,7 +637,7 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
            COUNT(*)::BIGINT  AS n_trees,
            SUM(tm.drybio_max)::DOUBLE AS sp_biomass
     FROM tree_max tm
-    JOIN REF_SPECIES r ON r.SPCD = tm.spcd
+    JOIN src.REF_SPECIES r ON r.SPCD = tm.spcd
     GROUP BY r.SPECIES_SYMBOL, tm.spgrpcd, r.SFTWD_HRDWD
   """) |> DataFrame
   println("Tree stats: $(nrow(tree_stats)) (species,spgrpcd,sftwd) rows from curated_trees over $(nrow(subplots_df)) subplots.")

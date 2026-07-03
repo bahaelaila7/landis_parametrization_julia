@@ -71,18 +71,28 @@ end
 
 # One TREEDATA record. `point` is the FVS point (we use 1 for all), `tree` a
 # stand-unique id. Missing ht/cr are passed as 0 → FVS estimates them.
+# `damage` = up to 3 (agent,severity) pairs → the 6 IDAMCD fields; `birth_age` =
+# ABIRTH (so FVS TreeAge tracks initial-tree age). TREEFMT reserves both slots
+# (…6I3,I3,I3,5I3,F7.1): 6 damage, mort, cut, 5 pest, birth_age — written in full
+# so the fixed-column layout never reverts.
 function tree_record(point::Integer, tree::Integer, spcd::Integer,
-  dbh::Real, ht::Real, cr::Real, tpa::Real)
+  dbh::Real, ht::Real, cr::Real, tpa::Real;
+  damage::NTuple{6,Int}=(0, 0, 0, 0, 0, 0), birth_age::Real=0.0)
   sp = spcd > 0 && spcd <= 999 ? string(spcd) : "OT"
   icr = round(Int, clamp(cr, 0, 99))
   # point tree PROB hist species  DBH  DG   HT   THT  HTG  ICR
-  return @sprintf("%4d%4d%9.3f%1d%-3s%7.2f%7.2f%7.2f%7.2f%7.2f%3d",
-    point, tree, float(tpa), 1, sp,
-    float(dbh), 0.0, float(ht), 0.0, 0.0, icr)
+  head = @sprintf("%4d%4d%9.3f%1d%-3s%7.2f%7.2f%7.2f%7.2f%7.2f%3d",
+    point, tree, float(tpa), 1, sp, float(dbh), 0.0, float(ht), 0.0, 0.0, icr)
+  # 6 damage, mort(0), cut(0), 5 pest(0), birth_age
+  tail = @sprintf("%3d%3d%3d%3d%3d%3d%3d%3d%3d%3d%3d%3d%3d%7.1f",
+    damage[1], damage[2], damage[3], damage[4], damage[5], damage[6],
+    0, 0, 0, 0, 0, 0, 0, float(birth_age))
+  return head * tail
 end
 
-# DESIGN so each record's PROB is read as trees-per-acre directly.
-design_keyword() = _kw("DESIGN", 0.0, 1.0, 999.0, 1.0, 0.0, 1.0)
+# DESIGN so each record's PROB is read as trees-per-acre directly. Field 4 = NUMBER OF PLOTS: set to the
+# stand's point count so multi-plot (strata) stands average density across their FIA plots correctly.
+design_keyword(nplots::Integer=1) = _kw("DESIGN", 0.0, 1.0, 999.0, Float64(nplots), 0.0, 1.0)
 
 # STDINFO: location & habitat left blank (FVS default), then age, aspect, slope,
 # elevation in 100s of feet. Pass `nothing` for unknown values.
@@ -127,8 +137,11 @@ One FVS stand to simulate.
   * `inv_year`     : calendar year of the initial state (sim_year 0)
   * `target_years` : later calendar years to project to (cycle boundaries)
   * `slope/aspect/elev_ft` : site descriptors (or `nothing`)
-  * `trees`        : iterable of `(spcd, dbh, ht, cr, tpa)` tuples
+  * `trees`        : iterable of `(spcd, dbh, ht, cr, tpa, damage, birth_age)` tuples
+                     (`damage`=6-tuple of IDAMCD ints, `birth_age`=initial age in yr)
 """
+const TreeRec = NamedTuple{(:spcd, :dbh, :ht, :cr, :tpa, :damage, :birth_age),
+  Tuple{Int,Float64,Float64,Float64,Float64,NTuple{6,Int},Float64}}
 Base.@kwdef struct StandSpec
   id::String
   inv_year::Int
@@ -136,11 +149,12 @@ Base.@kwdef struct StandSpec
   slope::Union{Nothing,Float64} = nothing
   aspect::Union{Nothing,Float64} = nothing
   elev_ft::Union{Nothing,Float64} = nothing
-  trees::Vector{NamedTuple{(:spcd, :dbh, :ht, :cr, :tpa),
-    Tuple{Int,Float64,Float64,Float64,Float64}}}
+  trees::Vector{TreeRec}
+  n_plots::Int = 1            # FVS points/plots in this stand (>1 for multi-plot strata stands; ≤ MAXPLT=500)
+  points::Vector{Int} = Int[] # per-tree FVS point (1..n_plots); empty ⇒ all trees on point 1 (single-plot stand)
 end
 
-function _write_stand_block!(key::IO, tre::IO, s::StandSpec; fiavbc::Bool=false)
+function _write_stand_block!(key::IO, tre::IO, s::StandSpec; fiavbc::Bool=false, ffe::Bool=true, compute_db::Bool=false)
   lengths = cycle_plan(s.inv_year, s.target_years)
   isempty(lengths) && (lengths = [10])   # no targets → project one default cycle
 
@@ -152,15 +166,16 @@ function _write_stand_block!(key::IO, tre::IO, s::StandSpec; fiavbc::Bool=false)
   end
   println(key, _kw("NUMCYCLE", length(lengths)))
   println(key, stdinfo_keyword(; aspect=s.aspect, slope=s.slope, elev_ft=s.elev_ft))
-  println(key, design_keyword())
+  println(key, design_keyword(s.n_plots))
   println(key, "TREEFMT")
   println(key, TREEFMT)
   println(key, "TREEDATA")
-  # FFE on → aboveground biomass/carbon in FVS_Carbon
-  println(key, "FMIN")
-  println(key, _kw("CARBREPT", 2))
-  println(key, _kw("CARBCALC", 0, 0))
-  println(key, "END")
+  if ffe   # FFE on → aboveground biomass/carbon in FVS_Carbon (expensive per cycle)
+    println(key, "FMIN")
+    println(key, _kw("CARBREPT", 2))
+    println(key, _kw("CARBCALC", 0, 0))
+    println(key, "END")
+  end
   # FIA-consistent National Volume/Biomass/Carbon (gives FVS_FIAVBC_Summary with
   # aboveground biomass AbvGrdBio). Base keyword; DB table enabled by VBCSUMDB.
   fiavbc && println(key, "FIAVBC")
@@ -173,14 +188,17 @@ function _write_stand_block!(key::IO, tre::IO, s::StandSpec; fiavbc::Bool=false)
   println(key, "DATABASE")
   println(key, _kw("SUMMARY", 2))
   println(key, _kw("TREELIDB", 2))
-  println(key, _kw("CARBREDB", 1))
+  ffe && println(key, _kw("CARBREDB", 1))
   fiavbc && println(key, "VBCSUMDB")   # → FVS_FIAVBC_Summary (requires FIAVBC)
+  compute_db && println(key, "COMPUTE")   # → FVS_Compute table (event-monitor Compute vars, for diagnostics)
   println(key, "END")
   println(key, "PROCESS")
 
   # tree records: all on point 1, stand-unique tree ids, then -999 terminator
   for (j, t) in enumerate(s.trees)
-    println(tre, tree_record(1, j, t.spcd, t.dbh, t.ht, t.cr, t.tpa))
+    pt = isempty(s.points) ? 1 : s.points[j]
+    println(tre, tree_record(pt, j, t.spcd, t.dbh, t.ht, t.cr, t.tpa;
+      damage=t.damage, birth_age=t.birth_age))
   end
   println(tre, "-999")
 end
@@ -196,7 +214,10 @@ Write a batched run: one `.key` containing a block per stand and one matching
 `.tre`. Returns paths; `dbpath` is the FVS default output DB FVS will write.
 """
 function write_run(stands::AbstractVector{StandSpec}; dir::AbstractString,
-  basename::AbstractString="run", fiavbc::Bool=false)
+  basename::AbstractString="run", fiavbc::Bool=false, estab::Symbol=:noauto, ffe::Bool=true,
+  ranseed::Union{Nothing,Integer}=nothing, regimpute::Union{Nothing,AbstractString}=nothing,
+  compute_db::Bool=false)
+  estab in (:auto, :noauto) || error("estab must be :auto or :noauto, got $estab")
   mkpath(dir)
   keypath = joinpath(dir, basename * ".key")
   trepath = joinpath(dir, basename * ".tre")
@@ -205,9 +226,26 @@ function write_run(stands::AbstractVector{StandSpec}; dir::AbstractString,
   open(keypath, "w") do key
     open(trepath, "w") do tre
       println(key, "SCREEN")
-      println(key, "NOAUTOES")          # project observed trees only
+      # RANNSEED sets FVS's random stream (mortality allocation, regen/ingrowth). Omit → FVS default seed.
+      ranseed !== nothing && println(key, _kw("RANNSEED", Float64(ranseed)))
+      # AUTOES = FVS automatic establishment (default); NOAUTOES = observed trees only
+      println(key, estab === :auto ? "AUTOES" : "NOAUTOES")
+      # REGIMPUTE addfile: inject FIA-imputed natural-regen keywords (ESTAB/Natural, one per species,
+      # gated on stocking + in-stand seed source). Placed globally (before the first STDIDENT) so it
+      # applies to every stand, exactly like AUTOES. SN's establishment model is partial — AUTOES enables
+      # the extension but adds no natural ingrowth by itself; this addfile supplies the regeneration.
+      # This FVS build rejects the ADDFILE keyword, so we INLINE the kcp verbatim (a kcp is designed to be
+      # merged into the keyword stream). Skip pure-comment (!/*) and blank lines; write originals to keep
+      # FVS's column-sensitive formatting intact.
+      if regimpute !== nothing
+        for ln in eachline(regimpute)
+          s = strip(ln)
+          (isempty(s) || startswith(s, '!') || startswith(s, '*')) && continue
+          println(key, ln)
+        end
+      end
       for s in stands
-        _write_stand_block!(key, tre, s; fiavbc=fiavbc)
+        _write_stand_block!(key, tre, s; fiavbc=fiavbc, ffe=ffe, compute_db=compute_db)
       end
       println(key, "STOP")
     end
@@ -319,11 +357,15 @@ function stands_from_df(df::DataFrame)
     isempty(init) && continue
     inv_year = _year(first(init.measdate))
     targets = sort(unique(_year.(g.measdate[g.sim_year.>sim0])))
-    trees = [(spcd=Int(r.spcd),
+    has_age = "estimated_age" in names(init)
+    trees = TreeRec[(spcd=Int(r.spcd),
       dbh=Float64(r.dia),
       ht=ismissing(r.ht) ? 0.0 : Float64(r.ht),
       cr=ismissing(r.cr) ? 0.0 : Float64(r.cr),
-      tpa=Float64(r.tpa_unadj)) for r in eachrow(init)]
+      tpa=Float64(r.tpa_unadj),
+      damage=(0, 0, 0, 0, 0, 0),
+      birth_age=(has_age && !ismissing(r.estimated_age)) ? Float64(r.estimated_age) : 0.0)
+      for r in eachrow(init)]
     k = first(init)
     id = join(string.((k.statecd, k.unitcd, k.countycd, k.plot)), "_")
     push!(stands, StandSpec(
@@ -542,11 +584,15 @@ function stands_from_cns(df::DataFrame; timehorizon::Int, output_every::Int)
     iv = _year(first(g.measdate))
     invyr[cn] = iv
     targets = collect((iv+output_every):output_every:(iv+timehorizon))
-    trees = [(spcd=Int(r.spcd),
+    has_age = "estimated_age" in names(g)
+    trees = TreeRec[(spcd=Int(r.spcd),
               dbh=Float64(r.dia),
               ht=ismissing(r.ht) ? 0.0 : Float64(r.ht),
               cr=ismissing(r.cr) ? 0.0 : Float64(r.cr),
-              tpa=Float64(r.tpa_unadj)) for r in eachrow(g)]
+              tpa=Float64(r.tpa_unadj),
+              damage=(0, 0, 0, 0, 0, 0),
+              birth_age=(has_age && !ismissing(r.estimated_age)) ? Float64(r.estimated_age) : 0.0)
+              for r in eachrow(g)]
     push!(stands, StandSpec(id=string(cn), inv_year=iv, target_years=targets,
       slope=_toF(_firstnn(g.site_slope)), aspect=_toF(_firstnn(g.site_aspect)),
       elev_ft=_toF(_firstnn(g.site_elev)), trees=trees))

@@ -26,9 +26,9 @@ mutable struct CMAMAEState{TRNG<:Random.AbstractRNG}
   emitter::CMAES.CMAESState                 # the CMA-ES distribution (reused engine)
   rng::TRNG
   # ---- MAP-Elites archive (flat, column-major over `dims`) ----
-  dims::NTuple{2,Int}
-  lo::NTuple{2,Float64}
-  hi::NTuple{2,Float64}
+  dims::Vector{Int}
+  lo::Vector{Float64}
+  hi::Vector{Float64}
   elite_x::Vector{Union{Nothing,Vector{Float64}}}   # best u-vector per cell
   elite_f::Vector{Float64}                          # its quality (lower = better)
   threshold::Vector{Float64}                        # soft acceptance threshold t_e per cell
@@ -50,15 +50,15 @@ end
 
 # mean0/sigma0 are in u-space ([0,1]^d). meas_lo/meas_hi bound the 2-D measure (behavior) space.
 function CMAMAEState(mean0::Vector{Float64}, sigma0::Float64, rng::Random.AbstractRNG;
-                     lambda::Int=12, grid_dims::NTuple{2,Int}=(25, 25),
-                     meas_lo::NTuple{2,Real}, meas_hi::NTuple{2,Real},
+                     lambda::Int=12, grid_dims::AbstractVector{<:Integer}=[25, 25],
+                     meas_lo::AbstractVector, meas_hi::AbstractVector,
                      alpha::Float64=0.02, t0::Float64=0.0, restart_sigma::Float64=0.02,
                      restart_patience::Int=6, reseed_explore::Float64=0.5, sobol_reseed::Bool=false,
                      blocks::Union{Nothing,Vector{Vector{Int}}}=nothing, max_iter::Int=1_000_000)
   cand = CMAES.CMAESCandidate(copy(mean0), Inf)     # emitter's best is unused (we track elites here)
   em = CMAES.CMAESState(copy(mean0), sigma0, cand, rng; lambda=lambda, blocks=blocks, max_iter=max_iter)
   ncell = prod(grid_dims)
-  CMAMAEState(em, rng, grid_dims, Tuple(float.(meas_lo)), Tuple(float.(meas_hi)),
+  CMAMAEState(em, rng, collect(Int, grid_dims), collect(Float64, meas_lo), collect(Float64, meas_hi),
     Vector{Union{Nothing,Vector{Float64}}}(nothing, ncell), fill(Inf, ncell), fill(t0, ncell),
     alpha, t0, sigma0, restart_sigma, restart_patience, false, 0, 0, 0, max_iter, reseed_explore,
     sobol_reseed, Sobol.SobolSeq(length(mean0)))
@@ -67,7 +67,7 @@ end
 # Map a 2-D measure to a flat cell index (clamped to the grid).
 @inline function _cell(st::CMAMAEState, m)::Int
   idx = 1; stride = 1
-  @inbounds for d in 1:2
+  @inbounds for d in eachindex(st.dims)
     f = (m[d] - st.lo[d]) / (st.hi[d] - st.lo[d])
     j = clamp(floor(Int, f * st.dims[d]), 0, st.dims[d] - 1)
     idx += j * stride; stride *= st.dims[d]
@@ -150,22 +150,30 @@ mutable struct CMAMAEMOState{Tx,TRNG<:Random.AbstractRNG}
   diff_avg::Float64
   prob_avg::Float64
   mo_rank::Bool   # rank the emitter by MO net-win count instead of scalar quality improvement
+  balanced::Bool  # per-cell quality = rescaled ΣW + rescaled ΣAGB (grid bounds) instead of raw aggregate sum
+  _rep_qual::Vector{Float64}   # breadth mode: running representative's scalar quality (len 0 or 1)
 end
 
 function CMAMAEMOState(mean0::Vector{Float64}, sigma0::Float64, rep::MOLBSA.MOCandidate{Tx}, rng::Random.AbstractRNG;
-                       meas_lo::NTuple{2,Real}, meas_hi::NTuple{2,Real}, lambda::Union{Nothing,Int}=nothing,
-                       grid::Int=15, alpha::Float64=0.02, t0::Float64=1.0, reseed_explore::Float64=1.0,
-                       restart_patience::Int=6, sobol_reseed::Bool=false, mo_rank::Bool=false,
+                       meas_lo::AbstractVector, meas_hi::AbstractVector, grid_dims::AbstractVector{<:Integer},
+                       lambda::Union{Nothing,Int}=nothing,
+                       alpha::Float64=0.02, t0::Float64=1.0, reseed_explore::Float64=1.0,
+                       restart_patience::Int=6, sobol_reseed::Bool=false, mo_rank::Bool=false, balanced::Bool=false,
                        blocks::Union{Nothing,Vector{Vector{Int}}}=nothing, max_iter::Int=typemax(Int)) where {Tx}
   λ = isnothing(lambda) ? 4 + floor(Int, 3 * log(length(mean0))) : lambda
-  eng = CMAMAEState(copy(mean0), sigma0, rng; lambda=λ, grid_dims=(grid, grid), meas_lo=meas_lo, meas_hi=meas_hi,
+  eng = CMAMAEState(copy(mean0), sigma0, rng; lambda=λ, grid_dims=grid_dims, meas_lo=meas_lo, meas_hi=meas_hi,
         alpha=alpha, t0=t0, restart_sigma=0.02, restart_patience=restart_patience, reseed_explore=reseed_explore,
         sobol_reseed=sobol_reseed, blocks=blocks, max_iter=max_iter)
   ncell = prod(eng.dims)
   CMAMAEMOState{Tx,typeof(rng)}(eng, Vector{Union{Nothing,MOLBSA.MOCandidate{Tx}}}(nothing, ncell),
     rep, rep, MOLBSA.MOCandidate{Tx}[rep], Tuple{Int,Float64,MOLBSA.MOCandidate{Tx}}[],
-    0, 0, 0, max_iter, sigma0, 0.0, 0.0, mo_rank)
+    0, 0, 0, max_iter, sigma0, 0.0, 0.0, mo_rank, balanced, Float64[])
 end
+
+# Balanced (scale-fair) scalar quality from a 2-D measure: rescale each axis to [0,1] by the grid
+# bounds, then sum → equal weight to ΣW and ΣAGB, no raw cross-scale sum. (Grid bounds always exist:
+# Sobol-calibrated if supplied, else the 2×-seed fallback — so this needs no Sobol.)
+@inline _balanced_q(m, lo, hi) = (m[1] - lo[1]) / (hi[1] - lo[1]) + (m[2] - lo[2]) / (hi[2] - lo[2])
 
 ask(w::CMAMAEMOState) = ask(w.engine)
 
@@ -177,7 +185,10 @@ measure(fx::MOLBSA.MOFitness) = (sum(@view fx.objectives[1:2:end]), sum(@view fx
 # engine with the aggregate quality. Returns true iff the representative (best aggregate) improved.
 function tell_mo!(w::CMAMAEMOState, cands::Vector{<:MOLBSA.MOCandidate}, meas::AbstractVector, xs_u::Vector{Vector{Float64}})
   eng = w.engine
-  quals = Float64[convert(Float64, c.fx.aggregate) for c in cands]
+  # quality = balanced rescaled (ΣW,ΣAGB) sum (scale-fair) OR the raw aggregate sum (legacy), per w.balanced.
+  quals = w.balanced ? Float64[_balanced_q(meas[k], eng.lo, eng.hi) for k in eachindex(cands)] :
+                       Float64[convert(Float64, c.fx.aggregate) for c in cands]
+  bestq = w.balanced ? _balanced_q(measure(w.representative.fx), eng.lo, eng.hi) : convert(Float64, w.representative.fx.aggregate)
   localf = copy(eng.elite_f)                       # mirror the engine's per-cell elite as we scan
   is_new_best = false
   for k in eachindex(cands)
@@ -186,16 +197,69 @@ function tell_mo!(w::CMAMAEMOState, cands::Vector{<:MOLBSA.MOCandidate}, meas::A
       localf[c] = q
       w.cell_cand[c] = cands[k]
     end
-    if q < convert(Float64, w.representative.fx.aggregate)
+    if q < bestq
       w.representative = cands[k]
       w.best_iteration = eng.i + 1
       is_new_best = true
+      bestq = q
     end
   end
   emitter_rank = w.mo_rank ? mo_sortperm(MOLBSA.MOFitness[c.fx for c in cands]) : nothing
   tell!(eng, quals, meas, xs_u; emitter_rank=emitter_rank)   # ranking + emitter update + thresholds + restart
   w.i = eng.i
   w.t = eng.emitter.sigma
+  w.archive = [c for c in w.cell_cand if c !== nothing]
+  is_new_best && push!(w.best_iterations, (w.best_iteration, convert(Float64, w.representative.fx.aggregate), w.representative))
+  return is_new_best
+end
+
+# Per-species MAP-Elites: each candidate is placed into ONE cell PER SPECIES — at that species' own
+# (normalized W_s, AGB_s) coords in the species' grid slice — competing on its PER-SPECIES loss. So a
+# single candidate can be the elite of several species-cells. The CMA-ES emitter is driven by the SUM
+# of per-cell improvements (a candidate that betters many species-cells ranks high). The representative
+# is still tracked on the global aggregate. sp_meas[k][s] = 3-vector [W_norm, AGB_norm, sp_coord];
+# sp_qual[k][s] = that species' scalar loss (skip non-finite, e.g. species absent for that candidate).
+function tell_species_mo!(w::CMAMAEMOState, cands::Vector{<:MOLBSA.MOCandidate},
+                          sp_meas::Vector, sp_qual::Vector, xs_u::Vector{Vector{Float64}})
+  eng = w.engine
+  λ = length(cands)
+  delta = zeros(Float64, λ)
+  improved = false
+  is_new_best = false
+  for k in 1:λ
+    @inbounds for sidx in eachindex(sp_meas[k])
+      q = sp_qual[k][sidx]
+      isfinite(q) || continue
+      c = _cell(eng, sp_meas[k][sidx])
+      delta[k] += eng.threshold[c] - q
+      if q < eng.elite_f[c]
+        eng.elite_f[c] = q
+        eng.elite_x[c] = copy(xs_u[k])
+        w.cell_cand[c] = cands[k]
+        improved = true
+      end
+      if q < eng.threshold[c]
+        eng.threshold[c] = (1 - eng.alpha) * eng.threshold[c] + eng.alpha * q
+      end
+    end
+    # representative = candidate with the best (lowest) scalar quality among those with breadth ≥ 1
+    # (sp_qual carries the driver's balanced-or-aggregate scalar, repeated per filled level).
+    if !isempty(sp_qual[k])
+      cq = sp_qual[k][1]
+      repq = isempty(w._rep_qual) ? Inf : w._rep_qual[1]
+      if cq < repq
+        w.representative = cands[k]; w.best_iteration = eng.i + 1; is_new_best = true
+        isempty(w._rep_qual) ? push!(w._rep_qual, cq) : (w._rep_qual[1] = cq)
+      end
+    end
+  end
+  CMAES._update_distribution!(eng.emitter, sortperm(delta; rev=true), xs_u)
+  eng.i += 1
+  eng.stagnation = improved ? 0 : eng.stagnation + 1
+  if eng.emitter.sigma < eng.restart_sigma || eng.stagnation >= eng.restart_patience
+    eng.pending_restart = true; eng.stagnation = 0; eng.n_restarts += 1
+  end
+  w.i = eng.i; w.t = eng.emitter.sigma
   w.archive = [c for c in w.cell_cand if c !== nothing]
   is_new_best && push!(w.best_iterations, (w.best_iteration, convert(Float64, w.representative.fx.aggregate), w.representative))
   return is_new_best

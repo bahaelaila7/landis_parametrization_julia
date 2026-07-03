@@ -104,7 +104,7 @@ end
       state._c_up_attempted += 1
       if state.search_method == SimulatedAnnealing
         r = rand(state.rng)
-        if exp(-diff_fit / state._t_list[state._t_max_idx]) >= r
+        if r < exp(-diff_fit / state._t_list[state._t_max_idx])
           state._c += 1
           accept = true
           state._t_sum += -diff_fit / log(r)

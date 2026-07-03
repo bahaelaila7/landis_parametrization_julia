@@ -28,10 +28,11 @@ end
 function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, no_establishment::Bool=false)
   n_species = length(species_list) |> UIntType
   n_ecoregions = length(eco_list) |> UIntType
-  SPINUP_MORTALITY_FRACTION = 0.15f0 #rand(Dists.Uniform(0f0,0.20f0))
+  SPINUP_MORTALITY_FRACTION = 0.0f0 # was 0.15f0 (uncalibrated; added extra age-mortality during spinup only) — disabled per request
   #println(typeof(SPINUP_MORTALITY_FRACTION))
 
-  # S (growth-curve shape) is GLOBAL per-species (one value shared across all ecoregions, like D).
+  # S (growth-curve shape) is GLOBAL per-species (one value shared across ecoregions, like D): keeping S
+  # shared forces the per-eco ANPP_MAX/B_MAX to acclimate to a single S that works across all ecoregions.
   S = rand(rng, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), n_species) .|> FloatType
   D = rand(rng, Dists.truncated(Dists.Normal(15, 10), 5, 25), n_species) .|> FloatType
   #println(typeof(D))
@@ -43,7 +44,12 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
     fill(FloatType(something(FIXED_LONGEVITY[], 400.0)), n_species)
   end
   #println(typeof(LONGEVITY))
-  SHADE_TOL = rand(rng, Dists.DiscreteUniform(1, 5), n_species) .|> UIntType # ::Vector{FloatType}
+  SHADE_TOL = if !isnothing(SHADE_TOL_TABLE[])
+    tbl = SHADE_TOL_TABLE[]
+    UIntType[get(tbl, sym, SHADE_TOL_DEFAULT[]) for sym in species_list]   # per-species, data-derived (out of search)
+  else
+    rand(rng, Dists.DiscreteUniform(1, 5), n_species) .|> UIntType
+  end
   #println(typeof(SHADE_TOL))
   MATURITY = if no_establishment
     zeros(FloatType, n_species)
@@ -88,12 +94,21 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   # Biomass Documentation shadeclass 0 (no shade) to 5 (full shade) but julia arrays are 1-indexed
   # julia is column major, much faster to pickout the site's shade class as one chunk
   # then reference the species' shade_tol within
+  # SufficientLight taper widened to [1, 0.75, 0.5, 0.25], encroaching on the 1's plateau
+  # (data-derived: matches the soft empirical light ramp; see FIA_DATA_PREP/plot_estab_raw_scatter.py).
+  # Previous LANDIS default taper [1, 0.5, 0.25]:
+  # SUFFICIENT_LIGHT_MATRIX = FloatType[
+  #   1.00 0.50 0.25 0.00 0.00 0.00;
+  #   1.00 1.00 0.50 0.25 0.00 0.00;
+  #   1.00 1.00 1.00 0.50 0.25 0.00;
+  #   1.00 1.00 1.00 1.00 0.50 0.25;
+  #   1.00 1.00 1.00 1.00 1.00 0.50]
   SUFFICIENT_LIGHT_MATRIX = FloatType[
-    1.00 0.50 0.25 0.00 0.00 0.00;
-    1.00 1.00 0.50 0.25 0.00 0.00;
-    1.00 1.00 1.00 0.50 0.25 0.00;
-    1.00 1.00 1.00 1.00 0.50 0.25;
-    1.00 1.00 1.00 1.00 1.00 0.50]
+    0.75 0.50 0.25 0.00 0.00 0.00;
+    1.00 0.75 0.50 0.25 0.00 0.00;
+    1.00 1.00 0.75 0.50 0.25 0.00;
+    1.00 1.00 1.00 0.75 0.50 0.25;
+    1.00 1.00 1.00 1.00 0.75 0.50]
   # transforming to (shade_class -> shade_tol) to be able to save to json Vector{Vector{FloatType}}, Matrix{FloatType} is not easily serde'd
   SUFFICIENT_LIGHT = [vec(SUFFICIENT_LIGHT_MATRIX[:, shade_class]) for shade_class in axes(SUFFICIENT_LIGHT_MATRIX, 2)]
   #[1.0, 1.0, 1.0, 1.0, 1.0]  for shade_class = 1 (no shade), plants of all shade tolerance can reproduce
@@ -105,16 +120,12 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
 
   #println(typeof(SUFFICIENT_LIGHT))
 
-  # by ecoregion
-  firstMINRel = rand(rng, Dists.Uniform(0.0, 0.5), n_ecoregions) .|> FloatType
+  # by ecoregion. Default gradient: base ∈ [0.05, 0.2], fixed 0.175 spacing → last bucket 0.75–0.90.
+  # (Was base ∈ [0.0, 0.5], 0.10 spacing.) Pinned target [0.10, 0.275, 0.45, 0.625, 0.80] = base 0.10 + 0.175·k.
+  firstMINRel = rand(rng, Dists.Uniform(0.05, 0.2), n_ecoregions) .|> FloatType
   #MIN_REL_BIOMASS = FloatType[[0.25, 0.45, 0.56, 0.70, 0.90] for _ in 1:2]
-  # (shade_class x eco) -> bio percent
-  # again, column major, pickout the relevant column for ecoregion
-  #MIN_REL_BIOMASS = [fmin + k * 0.10f0
-  #                   for k in 0:4,
-  #                   fmin in firstMINRel]
   # transforming to eco -> shade_class
-  MIN_REL_BIOMASS = [[fmin + k * 0.10f0 for k in 0:4]
+  MIN_REL_BIOMASS = [[fmin + k * 0.175f0 for k in 0:4]
                      for fmin in firstMINRel]
   #println(typeof(MIN_REL_BIOMASS))
   #println(MIN_REL_BIOMASS)

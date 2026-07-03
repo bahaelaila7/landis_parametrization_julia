@@ -87,11 +87,20 @@ end
   return wins - losses
 end
 
-# Best→worst total order over the λ offspring for the CMA-ES recombination. Each offspring is
-# scored by its summed net pairwise objective win-count against the rest of the population (higher =
-# better), tie-broken by the scalar aggregate. Generalizes MOLBSA.mo_delta to a population and stays
-# informative even when strict Pareto fronts collapse (≈everything non-dominated at many objectives).
+# Offspring-ranking selector. false (default) → net pairwise win-count; true → TRUE NSGA-II
+# non-dominated sorting (Pareto fronts + crowding). Set from yaml `mocmaes_true_nds`.
+const USE_NDS = Ref{Bool}(false)
+
+# Best→worst total order over the λ offspring for the CMA-ES recombination.
 function mo_sortperm(fxs::Vector{MOFitness})::Vector{Int}
+  USE_NDS[] ? _nds_sortperm(fxs) : _winrank_sortperm(fxs)
+end
+
+# Win-count ranking: each offspring scored by its summed net pairwise objective win-count against the
+# rest of the population (higher = better), tie-broken by the scalar aggregate. Generalizes
+# MOLBSA.mo_delta to a population and stays informative even when strict Pareto fronts collapse
+# (≈everything non-dominated at many objectives).
+function _winrank_sortperm(fxs::Vector{MOFitness})::Vector{Int}
   m = length(fxs)
   score = zeros(Int, m)
   @inbounds for k in 1:m
@@ -101,6 +110,68 @@ function mo_sortperm(fxs::Vector{MOFitness})::Vector{Int}
     end
   end
   return sortperm(1:m; by = k -> (-score[k], fxs[k].aggregate))
+end
+
+# TRUE NSGA-II ranking: fast non-dominated sort into Pareto fronts (rank 1 = non-dominated), ordered
+# best→worst; within a front, more-isolated points (higher crowding distance) rank first, tie-broken by
+# scalar aggregate. NOTE: at high objective count most offspring share front 1, so crowding does most of
+# the ordering — the classic many-objective degeneracy the win-count avoids (hence the flag defaults off).
+function _nds_sortperm(fxs::Vector{MOFitness})::Vector{Int}
+  m = length(fxs)
+  m <= 1 && return collect(1:m)
+  domcount = zeros(Int, m)                     # #offspring dominating p
+  dominated = [Int[] for _ in 1:m]             # offspring p dominates
+  front = Int[]
+  @inbounds for p in 1:m
+    op = fxs[p].objectives
+    for q in 1:m
+      p == q && continue
+      oq = fxs[q].objectives
+      if dominates(op, oq)
+        push!(dominated[p], q)
+      elseif dominates(oq, op)
+        domcount[p] += 1
+      end
+    end
+    domcount[p] == 0 && push!(front, p)        # front 1
+  end
+  order = Int[]
+  while !isempty(front)
+    if length(front) <= 2
+      append!(order, sort(front; by = k -> fxs[k].aggregate))
+    else
+      cd = _crowding_fx(fxs, front)
+      append!(order, front[sortperm(1:length(front); by = t -> (-cd[t], fxs[front[t]].aggregate))])
+    end
+    nxt = Int[]                                # peel next front
+    @inbounds for p in front, q in dominated[p]
+      domcount[q] -= 1
+      domcount[q] == 0 && push!(nxt, q)
+    end
+    front = nxt
+  end
+  return order
+end
+
+# NSGA-II crowding distance over a subset `idxs` of `fxs` (higher = more isolated; per-objective
+# boundary points = Inf). Same formula as `_crowding`, but over offspring MOFitness rather than the archive.
+function _crowding_fx(fxs::Vector{MOFitness}, idxs::Vector{Int})::Vector{Float64}
+  N = length(idxs)
+  N <= 2 && return fill(Inf, N)
+  M = length(fxs[idxs[1]].objectives)
+  cd = zeros(Float64, N); vals = Vector{Float64}(undef, N)
+  for o in 1:M
+    @inbounds for i in 1:N; vals[i] = Float64(fxs[idxs[i]].objectives[o]); end
+    ord = sortperm(vals)
+    span = vals[ord[end]] - vals[ord[1]]
+    cd[ord[1]] = Inf; cd[ord[end]] = Inf
+    if span > 0
+      for r in 2:N-1
+        cd[ord[r]] += (vals[ord[r+1]] - vals[ord[r-1]]) / span
+      end
+    end
+  end
+  return cd
 end
 
 # One generation update, driven by the multi-objective ranking of the offspring.
@@ -138,12 +209,14 @@ end
 # (smallest crowding distance) rather than the worst aggregate — unlike MOLBSA, the CMA-ES
 # distribution converges, so aggregate-based eviction would collapse the archive onto the
 # compromise point; crowding eviction retains the spread and extremes discovered during early
-# exploration. Returns true only when `cand` improves the representative's aggregate (gates
-# checkpoints; the representative is still the min-aggregate member, as in MOLBSA).
-function update_archive!(state::MOCMAESState, cand::MOCandidate)::Bool
+# exploration. Returns (changed, improved): `changed` = `cand` was ACCEPTED (non-dominated → archive
+# contents change, whether it grows the archive or swaps a member out); `improved` = it also became the
+# new representative (aggregate dropped). improved ⟹ changed. Callers checkpoint the archive on any
+# `changed` (so params are pullable at every archive change, not just representative improvements).
+function update_archive!(state::MOCMAESState, cand::MOCandidate)
   objs = cand.fx.objectives
   for m in state.archive
-    dominates(m.fx.objectives, objs) && return false
+    dominates(m.fx.objectives, objs) && return (changed=false, improved=false)
   end
   filter!(m -> !dominates(objs, m.fx.objectives), state.archive)
   push!(state.archive, cand)
@@ -156,7 +229,7 @@ function update_archive!(state::MOCMAESState, cand::MOCandidate)::Bool
     state.best_iteration = state.i
     push!(state.best_iterations, (state.i, cand.fx.aggregate, cand))
   end
-  return improved
+  return (changed=true, improved=improved)
 end
 
 # IPOP restart: reset the search distribution (optionally with a larger population) while keeping the

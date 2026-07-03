@@ -9,10 +9,10 @@ import JLD2, YAML, CairoMakie, Statistics, Dates, DataFrames, HypothesisTests, P
 const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames; const HT = HypothesisTests
 
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
-EQM = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 0.2     # equivalence margin (±20% by default)
+MARGINS = length(ARGS) >= 2 ? parse.(Float64, split(ARGS[2], ",")) : [0.2]   # one or more equivalence margins
 ALPHA = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 0.05
-Δ = log1p(EQM)
-outdir = cfg["output_dir"]
+base_outdir = cfg["output_dir"]
+outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
 P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
 P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
 P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
@@ -35,8 +35,12 @@ splots, eco_list, species_list, eco_species_ids, splots_val = D.prepare_parametr
 n_species = length(species_list)
 bins = Int.(g("bins_idx", [20, 60, 120]))
 loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))
-st = JLD2.load_object(joinpath(outdir, "search_state_latest.jld2"))
-best = hasproperty(st, :representative) ? st.representative.x : st.best.x
+best = if haskey(ENV, "PAN_PARAMS")
+  JLD2.load_object(ENV["PAN_PARAMS"])
+else
+  st = JLD2.load_object(joinpath(base_outdir, "search_state_latest.jld2"))
+  hasproperty(st, :representative) ? st.representative.x : st.best.x
+end
 
 function paired_for(sp, label)
   max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
@@ -64,7 +68,7 @@ function paired_for(sp, label)
   paired
 end
 
-function tost(d)
+function tost(d, Δ)
   n = length(d); md = Statistics.mean(d)
   n < 3 && return (n=n, mean=md, lo=NaN, hi=NaN, p=NaN, equiv=false)
   if Statistics.std(d) < 1e-9
@@ -76,48 +80,53 @@ function tost(d)
   (n=n, mean=md, lo=ci[1], hi=ci[2], p=max(pl, pu), equiv=(max(pl, pu) < ALPHA))
 end
 
-rows = DF.DataFrame(split=String[], eco=String[], species=String[], n=Int[], mean_logdiff=Float64[],
-  ci_lo=Float64[], ci_hi=Float64[], pct_bias=Float64[], p_tost=Float64[], equivalent=Bool[])
-for (sp, label) in ((splots, "train"), (splots_val, "val"))
-  (isnothing(sp) || DF.nrow(sp) == 0) && continue
-  pr = paired_for(sp, label)
-  for e in sort(unique(pr.eco))
-    pe = DF.subset(pr, :eco => DF.ByRow(==(e))); econame = replace(split(eco_list[e], "=")[end], r"[^A-Za-z0-9]" => "_")
-    res = NamedTuple[]; names_ = String[]
-    for s in sort(unique(pe.sp))
-      d = DF.subset(pe, :sp => DF.ByRow(==(s)))
-      length(d.obs_agb) < 3 && continue
-      dd = log1p.(Float64.(d.sim_agb)) .- log1p.(Float64.(d.obs_agb))
-      t = tost(dd); push!(res, t); push!(names_, species_list[s])
-      push!(rows, (label, eco_list[e], species_list[s], t.n, t.mean, t.lo, t.hi, expm1(t.mean) * 100, t.p, t.equiv))
+# compute the matched sim/obs pairs ONCE per split (the expensive fit_params step), reuse for every margin
+paired_splits = [(paired_for(sp, label), label) for (sp, label) in ((splots, "train"), (splots_val, "val"))
+                 if !(isnothing(sp) || DF.nrow(sp) == 0)]
+
+for EQM in MARGINS
+  Δ = log1p(EQM); pct = round(Int, 100EQM)
+  rows = DF.DataFrame(split=String[], eco=String[], species=String[], n=Int[], mean_logdiff=Float64[],
+    ci_lo=Float64[], ci_hi=Float64[], pct_bias=Float64[], p_tost=Float64[], equivalent=Bool[])
+  for (pr, label) in paired_splits
+    for e in sort(unique(pr.eco))
+      pe = DF.subset(pr, :eco => DF.ByRow(==(e))); econame = replace(eco_list[e], r"[^A-Za-z0-9]" => "_")
+      res = NamedTuple[]; names_ = String[]
+      for s in sort(unique(pe.sp))
+        d = DF.subset(pe, :sp => DF.ByRow(==(s)))
+        length(d.obs_agb) < 3 && continue
+        dd = log1p.(Float64.(d.sim_agb)) .- log1p.(Float64.(d.obs_agb))
+        t = tost(dd, Δ); push!(res, t); push!(names_, "$(species_list[s])  (n=$(t.n))")
+        push!(rows, (label, eco_list[e], species_list[s], t.n, t.mean, t.lo, t.hi, expm1(t.mean) * 100, t.p, t.equiv))
+      end
+      isempty(res) && continue
+      # forest plot: species rows, mean log-diff ± CI, ±Δ equivalence band
+      fig = MK.Figure(size=(760, 90 + 26 * length(res)))
+      neq = count(r -> r.equiv, res)
+      ax = MK.Axis(fig[1, 1]; xlabel="mean  log1p(sim) − log1p(obs)   (← sim low | sim high →)",
+        title="TOST equivalence — $label · $(eco_list[e]) — ±$(pct)% band, α=$ALPHA — $neq/$(length(res)) equivalent",
+        yticks=(1:length(res), names_))
+      MK.vspan!(ax, -Δ, Δ; color=(:seagreen, 0.10))                       # equivalence band
+      MK.vlines!(ax, [-Δ, Δ]; color=:seagreen, linestyle=:dash); MK.vlines!(ax, [0.0]; color=:gray60)
+      for (i, r) in enumerate(res)
+        col = r.equiv ? :seagreen : :firebrick
+        isnan(r.lo) || MK.lines!(ax, [r.lo, r.hi], [i, i]; color=col, linewidth=2)
+        MK.scatter!(ax, [r.mean], [i]; color=col, markersize=11)
+        MK.text!(ax, Δ * 1.05, i; text=Printf.@sprintf("%+.0f%%  p=%.3f", expm1(r.mean) * 100, r.p), align=(:left, :center), fontsize=9, color=col)
+      end
+      MK.xlims!(ax, min(-2Δ, minimum(r -> isnan(r.lo) ? r.mean : r.lo, res) * 1.1), max(3Δ, maximum(r -> isnan(r.hi) ? r.mean : r.hi, res) * 1.3))
+      out = joinpath(outdir, "tost_$(pct)pct_$(label)_$(econame).png"); MK.save(out, fig)
+      println("$label/$econame: ±$(pct)% → $neq/$(length(res)) species equivalent → $out")
     end
-    isempty(res) && continue
-    # forest plot: species rows, mean log-diff ± CI, ±Δ equivalence band
-    fig = MK.Figure(size=(760, 90 + 26 * length(res)))
-    neq = count(r -> r.equiv, res)
-    ax = MK.Axis(fig[1, 1]; xlabel="mean  log1p(sim) − log1p(obs)   (← sim low | sim high →)",
-      title="TOST equivalence — $label · $(eco_list[e]) — ±$(round(Int,100EQM))% band, α=$ALPHA — $neq/$(length(res)) equivalent",
-      yticks=(1:length(res), names_))
-    MK.vspan!(ax, -Δ, Δ; color=(:seagreen, 0.10))                       # equivalence band
-    MK.vlines!(ax, [-Δ, Δ]; color=:seagreen, linestyle=:dash); MK.vlines!(ax, [0.0]; color=:gray60)
-    for (i, r) in enumerate(res)
-      col = r.equiv ? :seagreen : :firebrick
-      isnan(r.lo) || MK.lines!(ax, [r.lo, r.hi], [i, i]; color=col, linewidth=2)
-      MK.scatter!(ax, [r.mean], [i]; color=col, markersize=11)
-      MK.text!(ax, Δ * 1.05, i; text=Printf.@sprintf("%+.0f%%  p=%.3f", expm1(r.mean) * 100, r.p), align=(:left, :center), fontsize=9, color=col)
+  end
+  DF.sort!(rows, [:split, :eco, :species])
+  csv = joinpath(outdir, "tost_sim_obs_$(pct)pct.csv")
+  open(csv, "w") do io
+    println(io, "split,eco,species,n,mean_logdiff,ci_lo,ci_hi,pct_bias,p_tost,equivalent")
+    for r in eachrow(rows)
+      println(io, join([r.split, r.eco, r.species, r.n, round(r.mean_logdiff, digits=4), round(r.ci_lo, digits=4),
+        round(r.ci_hi, digits=4), round(r.pct_bias, digits=1), round(r.p_tost, digits=4), r.equivalent], ","))
     end
-    MK.xlims!(ax, min(-2Δ, minimum(r -> isnan(r.lo) ? r.mean : r.lo, res) * 1.1), max(3Δ, maximum(r -> isnan(r.hi) ? r.mean : r.hi, res) * 1.3))
-    out = joinpath(outdir, "tost_$(label)_$(econame).png"); MK.save(out, fig)
-    println("$label/$econame: $neq/$(length(res)) species equivalent within ±$(round(Int,100EQM))% → $out")
   end
+  println("wrote $csv  (±$(pct)%: $(DF.nrow(rows)) rows; $(count(rows.equivalent))/$(DF.nrow(rows)) equivalent)")
 end
-DF.sort!(rows, [:split, :eco, :species])
-csv = joinpath(outdir, "tost_sim_obs.csv")
-open(csv, "w") do io
-  println(io, "split,eco,species,n,mean_logdiff,ci_lo,ci_hi,pct_bias,p_tost,equivalent")
-  for r in eachrow(rows)
-    println(io, join([r.split, r.eco, r.species, r.n, round(r.mean_logdiff, digits=4), round(r.ci_lo, digits=4),
-      round(r.ci_hi, digits=4), round(r.pct_bias, digits=1), round(r.p_tost, digits=4), r.equivalent], ","))
-  end
-end
-println("wrote $csv  ($(DF.nrow(rows)) rows; $(count(rows.equivalent))/$(DF.nrow(rows)) equivalent)")

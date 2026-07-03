@@ -3,7 +3,7 @@ import Random
 import LinearAlgebra
 const LA = LinearAlgebra
 
-export CMAESCandidate, CMAESState, CMABlock, ask, tell!, note_best!, restart!, is_search_over
+export CMAESCandidate, CMAESState, CMABlock, ask, tell!, note_best!, restart!, is_search_over, warmstart_blocks!
 
 # (μ/μ_w, λ)-CMA-ES with an optional BLOCK-DIAGONAL covariance: instead of one d×d matrix the search
 # distribution is a set of independent CMA-ES sub-distributions, one per GROUP of (assumed-)correlated
@@ -240,6 +240,38 @@ function _reset_blocks!(blocks::Vector{CMABlock}, mean0::Vector{Float64}, sigma0
     b.C = Matrix{Float64}(LA.I, b.n, b.n); b.B = Matrix{Float64}(LA.I, b.n, b.n); b.D = ones(b.n)
     b.p_sigma = zeros(b.n); b.p_c = zeros(b.n)
   end
+end
+
+# Warm-start each block's mean + covariance SHAPE from a set of seed u-vectors `us` (e.g. the top-K Sobol
+# points), with recombination weights `w` (Σw=1, best-first). mean = Σ wᵢ·usᵢ (clamped to [0,1]); each
+# block's C = shrink·I + (1−shrink)·(weighted empirical covariance over that block's coords, normalized to
+# mean-diagonal 1). Shrinking toward I keeps C positive-definite when K ≤ block dim; mean-diagonal-1 means
+# σ (the config sigma0) still carries the OVERALL scale — C injects only the seeds' anisotropy/correlations.
+# With a single seed this leaves mean=that seed and C≈I (i.e. the old single-point behavior).
+function warmstart_blocks!(blocks::Vector{CMABlock}, us::Vector{Vector{Float64}}, w::Vector{Float64}; shrink::Float64=0.5)
+  isempty(blocks) && return Float64[]
+  n = maximum(maximum(b.idx) for b in blocks)
+  mean0 = zeros(n)
+  @inbounds for i in eachindex(us); mean0 .+= w[i] .* us[i]; end
+  clamp!(mean0, 0.0, 1.0)
+  for b in blocks
+    idx = b.idx; ng = b.n
+    b.mean = mean0[idx]
+    Cb = zeros(ng, ng)
+    @inbounds for i in eachindex(us)
+      d = us[i][idx] .- b.mean
+      Cb .+= w[i] .* (d * d')
+    end
+    tr_ = LA.tr(Cb)
+    if tr_ > 0
+      Cb .*= ng / tr_                                                     # mean diagonal → 1 (shape only; σ carries scale)
+      Cb .= (1 - shrink) .* Cb .+ shrink .* Matrix{Float64}(LA.I, ng, ng) # shrink toward I → PD when K ≤ ng
+      Csym = LA.Symmetric(Cb)
+      F = LA.eigen(Csym)
+      b.D = sqrt.(max.(F.values, 1e-30)); b.B = Matrix(F.vectors); b.C = Matrix(Csym)
+    end
+  end
+  return mean0
 end
 
 # IPOP restart: re-initialize every block's distribution (optionally with a larger λ) while keeping the

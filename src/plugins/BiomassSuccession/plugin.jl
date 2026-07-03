@@ -97,7 +97,7 @@ Base.@kwdef struct BiomassSuccessionParams
 
   # Species Specific
   D::Vector{FloatType}
-  S::Vector{FloatType}           # GLOBAL per-species growth-curve shape (one value across all ecoregions)
+  S::Vector{FloatType}           # GLOBAL per-species growth-curve shape (1 value across ecoregions; per-eco ANPP/B_MAX acclimate to it)
   LONGEVITY::Vector{FloatType}
   SHADE_TOL::Vector{UIntType}
   MATURITY::Vector{FloatType}
@@ -224,6 +224,7 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
       #        reproduction_step!(current_year, site, eco_params)
       #    end
       #end
+      SPINUP_CAPTURE[] === nothing || SPINUP_CAPTURE[](current_year, soa)
       current_year += 1
     end
     @debug ("Done catching up $(current_year)")
@@ -287,21 +288,36 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
     #println("Adding cohort $(row.species_symbol_map) to ", row.plot_id)
   end
   @debug ("year $(current_year), final before recounting $((soa.refs.cohort))")
-  Threads.@threads :static for i in 1:soa.n
-    @inbounds site = getsite(soa, i)
-    @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
+  # Catch up to year -1 (the year before sim year 0). When the youngest spinup cohort is old
+  # (global max year_deficit < -2 — e.g. a single all-old plot with no later year_deficit group to
+  # drive growth), commit the marked sprouts and keep running succession+repro until -1 so cohorts
+  # reach the correct age at sim year 0. In the usual multi-plot case current_year is already -1, so
+  # this runs exactly one iteration (commit, then break) — identical to the previous final block.
+  while current_year <= -1
+    Threads.@threads :static for i in 1:soa.n
+      @inbounds site = getsite(soa, i)
+      @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
+    end
+    @debug ("year $(current_year), final after recounting $((soa.refs.cohort))")
+    @debug (soa.scalar._new_cohort_counts)
+    soa = PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+    Threads.@threads :static for i in 1:soa.n
+      @inbounds site = getsite(soa, i)
+      reproduction_commit_step!(current_year, site, eco_params[site.eco_id])
+    end
+    if current_year == -1
+      SPINUP_CAPTURE[] === nothing || SPINUP_CAPTURE[](current_year, soa)
+      break
+    end
+    Threads.@threads :static for i in 1:soa.n
+      @inbounds site = getsite(soa, i)
+      succession_step!(current_year, site, eco_params[site.eco_id])
+      reproduction_check_step!(current_year, site, eco_params[site.eco_id])
+      @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
+    end
+    SPINUP_CAPTURE[] === nothing || SPINUP_CAPTURE[](current_year, soa)
+    current_year += 1
   end
-  @debug ("year $(current_year), final after recounting $((soa.refs.cohort))")
-  @debug (soa.scalar._new_cohort_counts)
-  soa = #PanCore.with_thread_sync() do
-    PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
-  #end
-  Threads.@threads :static for i in 1:soa.n
-    @inbounds site = getsite(soa, i)
-    #sprouting_step!(current_year, site, eco_params[site.eco_id])
-    reproduction_commit_step!(current_year, site, eco_params[site.eco_id])
-  end
-  @assert current_year == -1 "$(current_year)"
   #update(pbar)
   # cohorts with year_deficit = 0 will have been added but not succeeded yet
   return soa
@@ -665,6 +681,10 @@ end
 # so the per-cohort lines don't interleave across threads.
 const CALIBRATE = Ref(true)
 const CALIBRATE_SITE = Ref(1)
+# Diagnostic hook: when set to a function f(current_year::Int, soa), spinup_cohorts! calls it at the end
+# of every spinup year so callers can record the per-year stand state (the back-cast). Default nothing =
+# no behaviour change. Mirrors the CAPTURE_T4SIM pattern used for the tier-4 loss.
+const SPINUP_CAPTURE = Ref{Any}(nothing)
 
 function succession_step1!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
   site.active || return

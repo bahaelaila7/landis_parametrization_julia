@@ -899,12 +899,21 @@ function load_landis_spp_ecoregion(path::String; year::Int=0)::DataFrame
   return df[df.Year.==use_year, :]
 end
 
+# SufficientLight taper widened to [1, 0.75, 0.5, 0.25], encroaching on the 1's plateau
+# (data-derived: matches the soft empirical light ramp; see FIA_DATA_PREP/plot_estab_raw_scatter.py).
+# Previous LANDIS default taper [1, 0.5, 0.25]:
+# const _SUFFICIENT_LIGHT_MATRIX = FloatType[
+#   1.00 0.50 0.25 0.00 0.00 0.00;
+#   1.00 1.00 0.50 0.25 0.00 0.00;
+#   1.00 1.00 1.00 0.50 0.25 0.00;
+#   1.00 1.00 1.00 1.00 0.50 0.25;
+#   1.00 1.00 1.00 1.00 1.00 0.50]
 const _SUFFICIENT_LIGHT_MATRIX = FloatType[
-  1.00 0.50 0.25 0.00 0.00 0.00;
-  1.00 1.00 0.50 0.25 0.00 0.00;
-  1.00 1.00 1.00 0.50 0.25 0.00;
-  1.00 1.00 1.00 1.00 0.50 0.25;
-  1.00 1.00 1.00 1.00 1.00 0.50]
+  0.75 0.50 0.25 0.00 0.00 0.00;
+  1.00 0.75 0.50 0.25 0.00 0.00;
+  1.00 1.00 0.75 0.50 0.25 0.00;
+  1.00 1.00 1.00 0.75 0.50 0.25;
+  1.00 1.00 1.00 1.00 0.75 0.50]
 
 const _SUFFICIENT_LIGHT_MATRIX2 = FloatType[
   1.00 0.00 0.00 0.00 0.00 0.00;

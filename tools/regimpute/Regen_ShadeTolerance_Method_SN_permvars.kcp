@@ -1,0 +1,602 @@
+!This script (REGIMPUTE) assesses and adds species-specific natural tree regeneration (small saplings)
+!into FVS simulations when appropriate (stand is not already overstocked for its structural state).
+!Capacity for the stand to support tree establishment is assessed every FVS cycle by default.
+!Saplings are added into stands in the following FVS cycle, if appropriate. 
+!Triggering of regen frequency and conditionality is user-modifiable.
+!REGIMPUTE methodology and scripts were adapted from REPUTE (Don Vandendrische) by Sebastian Busby, Leila Giovannoni, Daniel Swann
+!to simulate background natural tree regeneration and pulses expected after silvicultural treatments.
+!Mark Castle updated base scripts into customizable functions. See methodological documentation for more information.
+
+!*****Important Notes***********
+
+!This script uses the Shade Tolerance method. Relative to the Species Specific Method, this method may overgeneralize
+!species-level establishment based on seed source species' shade tolerance ranking.
+!The Shade Tolerance method, however, is more computationally efficient, defines fewer variables in the event monitor,
+!and is less likely to cause errors (i.e., activity and event monitor maximum limits reached),
+!especially in FVS variants that support a large number of species (e.g., NE, SN, CR variants).
+
+!This script uses local seed source (live trees where DBH >= 5in and height >= 10ft) within the stand as a condition for adding tree regen.
+!If no live seed source trees exist within the stand, this script will not functionally add tree regen.
+
+!Minor tree species with few empirical regen observations (n = FIA conditions in which regen [small saplings] are present; user-defined value)
+!calculated at the variant level, do not experience regen addition due to uncertainty.
+
+!This methodology is not particularly appropriate for representing tree species whose seeds are largely animal dispersed
+!or have primarily serotinous (wildfire activated) seed dispersal modes.
+
+******Start Regen Code*************
+*The following code computes the forest structure state class (RGNST), an intersection between overstory QMD and canopy cover classes.
+
+*******************************************************************************
+*   Cmp_VegSt.kcp: Compute Vegetation State                                    *
+*   - Composite of: Cover Type = Ecoregion/Forest Group                        *
+*                   Size Class = QMD 5 inch class widths                       *
+*                   OS Density = Canopy Cover L=10-40%/M=40-70%/H=70+%         *
+*                   Stories    = Single vs Multiple                            *
+********************************************************************************
+*This code chunk computes the RGNST forest structure variable (Canopy cover * overstory QMD classes)
+*for each stand and all FVS cycles
+
+IF        10
+CYCLE GE 1
+THEN
+
+Compute            0
+ZTotTrCt =Max((SpMcDBH(1,All,0,0.20,200.0,1.0,500.0,0),1))
+ZLrgTrCt =Max((SpMcDBH(1,All,0,0.20,200.0,1.0,500.0,0)*0.20),20)
+ZLrgTrCt =LinInt(ZLrgTrCt/ZTotTrCt,0,1,1,99999,ZLrgTrCt,ZLrgTrCt,0,0)
+ZDiaLl   =DBHDist(3,Max(LinInt( &
+                 ((1.00-ZLrgTrCt/ZTotTrCt)*100), &
+                   0,10,10,30,30,50,50,70,70,90,90,100, &
+                   1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6,  6)-1,1))
+ZDiaLu   =DBHDist(3,Max(LinInt( &
+                 ((1.00-ZLrgTrCt/ZTotTrCt)*100), &
+                   0,10,10,30,30,50,50,70,70,90,90,100, &
+                   1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6,  6),1))
+ZDiaL    =LinInt((Mod(((1.00-ZLrgTrCt/ZTotTrCt)*100)-10,20)/20), &
+                 0,1,ZDiaLl,ZDiaLu)                   
+ZDiaU    =DBHDist(3,6)+0.1
+ZQMDc    =SpMcDBH(5,All,0,ZDiaL,ZDiaU,5.0,500.0,0)
+
+ZCC00p   =SpMcDBH(7,All,0,00.00,99.0,0.0,500.0,0)
+ZCC05p   =SpMcDBH(7,All,0,05.00,99.0,0.0,500.0,0)
+ZCC10p   =SpMcDBH(7,All,0,10.00,99.0,0.0,500.0,0)
+ZCC15p   =SpMcDBH(7,All,0,15.00,99.0,0.0,500.0,0)
+ZCC20p   =SpMcDBH(7,All,0,20.00,99.0,0.0,500.0,0)
+
+ZCCx     =LinInt(ZCC00p,0,10,10,999,0,0,1,1)
+ZQMDc    =ZQMDc*ZCCx
+
+ZDomLayr =LinInt(ZQMDc,00,05,05,10,10,15,15,20,20,99,1,1,2,2,3,3,4,4,5,5)*ZCCx
+ZDomCC   =LinInt(ZDomLayr, &
+             1,     2,     2,     3,     3,     4,     4,     5,     5,     9, &
+        ZCC00p,ZCC00p,ZCC05p,ZCC05p,ZCC10p,ZCC10p,ZCC15p,ZCC15p,ZCC20p,ZCC20p) &
+        *ZCCx
+ZCanopy  =LinInt(ZCC00p,0,40,40,70,70,999,1,1,2,2,3,3)*ZCCx
+
+RGNST   =LinInt((ZDomLayr*10+ZCanopy),0,1,1,2,2,9, &
+                 0,0,1,1,(ZDomLayr*10+ZCanopy),(ZDomLayr*10+ZCanopy))
+End
+ENDIF
+
+********************************************************************************
+*   End of Cmp_VegSt.kcp                                                       *
+********************************************************************************
+
+********************************************************************************
+*Define empirically estimated species-specific average expected sapling density by RGNST class and species
+********************************************************************************
+**Assign sapling count (number of trees added via regeneration) based on stand RGNST value. 
+**This is done via LININT keyword, a way of assigning values based on another value. 
+**RGNST value is based on cc and qmd class. The way to interpret the LININT coding is that values
+**on the first row are sequentually linked to values on the second row.
+
+*The matrices have been pre-calculated as mean empirical regen (small sapling density 1-3 inches diameter)
+*WHERE species-specific seed source is present (Species-specific TPA > 0 [Trees GE 5 inches DBH and 10 feet tall])
+*across FIA conditions by RGNST class. The matrices are calculated from, and for the SN variant.
+
+IF        10
+CYCLE GE 1
+THEN
+
+Compute            0
+
+ST1MR=LinInt(RGNST, 11, 12, 13, 21, 22, 23, 31, 32, 33, 41, 42, 43, 51, 52, 53, &
+                   215, 366, 435, 39, 99, 144, 25, 25, 43, 25, 25, 25, 25, 25, 25)
+
+ST2MR=LinInt(RGNST, 11, 12, 13, 21, 22, 23, 31, 32, 33, 41, 42, 43, 51, 52, 53, &
+                   111, 208, 307, 25, 57, 105, 25, 25, 38, 25, 25, 25, 25, 25, 25)
+
+ST3MR=LinInt(RGNST, 11, 12, 13, 21, 22, 23, 31, 32, 33, 41, 42, 43, 51, 52, 53, &
+                   109, 213, 379, 25, 78, 169, 25, 28, 82, 25, 25, 33, 25, 25, 25)
+
+ST4MR=LinInt(RGNST, 11, 12, 13, 21, 22, 23, 31, 32, 33, 41, 42, 43, 51, 52, 53, &
+                   83, 105, 175, 25, 47, 108, 25, 25, 64, 25, 25, 39, 25, 25, 25)
+
+END
+ENDIF
+
+********************************************************************************
+*Tally species-specific observed small sapling counts and adjust expected regen                               
+********************************************************************************
+*SpCount adds up the number of species associated with each shade tolerance class in the stand (SpCount1)
+*with seed source present (> 0 TPA where DBH GE 5 inches AND HT GE 10 feet).
+*Expected mean regen by shade tolerance class is reduced by the number of small saplings already present within that shade tolerance class
+*and this adjusted number is divided by the total number of seed source species present within that shade tolerance class ((ST1MR-SAPST1)/SpCount1)
+*This process prevents adding regen into a stand when it is already well stocked for its structural state (RGNST class)
+
+* Define Shade Tolerance groups (Intolerant to Tolerant)
+SpGroup     ST1
+ JU LP LL SP SU VP
+SpGroup     ST2
+ BC CO HH PO SA SD SK YP WK WO
+SpGroup     ST3
+ AE BG WP GA HB LK RM TS MV WE
+SpGroup     ST4
+ AB HY AH HI SM
+
+
+IF        10
+CYCLE GE 1
+THEN
+
+
+Compute            0
+SAPALL=SpMcDBH(1,All,0,1.00,3.0,0,500.0,0)
+SAPST1=SpMcDBH(1,ST1,0,1.00,3.0,0,500.0,0)
+SAPST2=SpMcDBH(1,ST2,0,1.00,3.0,0,500.0,0)
+SAPST3=SpMcDBH(1,ST3,0,1.00,3.0,0,500.0,0)
+SAPST4=SpMcDBH(1,ST4,0,1.00,3.0,0,500.0,0)
+
+ZAB=LinInt(SpMcDBH(1,AB,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZAE=LinInt(SpMcDBH(1,AE,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZHY=LinInt(SpMcDBH(1,HY,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZAH=LinInt(SpMcDBH(1,AH,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZBC=LinInt(SpMcDBH(1,BC,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZBG=LinInt(SpMcDBH(1,BG,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZCO=LinInt(SpMcDBH(1,CO,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZWP=LinInt(SpMcDBH(1,WP,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZGA=LinInt(SpMcDBH(1,GA,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZHB=LinInt(SpMcDBH(1,HB,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZHH=LinInt(SpMcDBH(1,HH,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZHI=LinInt(SpMcDBH(1,HI,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZJU=LinInt(SpMcDBH(1,JU,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZLK=LinInt(SpMcDBH(1,LK,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZLP=LinInt(SpMcDBH(1,LP,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZLL=LinInt(SpMcDBH(1,LL,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZPO=LinInt(SpMcDBH(1,PO,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZRM=LinInt(SpMcDBH(1,RM,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZSP=LinInt(SpMcDBH(1,SP,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZSA=LinInt(SpMcDBH(1,SA,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZSD=LinInt(SpMcDBH(1,SD,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZSK=LinInt(SpMcDBH(1,SK,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZSM=LinInt(SpMcDBH(1,SM,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZTS=LinInt(SpMcDBH(1,TS,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZMV=LinInt(SpMcDBH(1,MV,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZSU=LinInt(SpMcDBH(1,SU,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZYP=LinInt(SpMcDBH(1,YP,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZVP=LinInt(SpMcDBH(1,VP,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZWK=LinInt(SpMcDBH(1,WK,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZWO=LinInt(SpMcDBH(1,WO,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+ZWE=LinInt(SpMcDBH(1,WE,0,5.0,999,10.0,999,0), 0.001, 0.001, 0, 1)
+
+SpCount1=ZJU+ZLP+ZLL+ZSP+ZSU+ZVP
+SpCount2=ZBC+ZCO+ZHH+ZPO+ZSA+ZSD+ZSK+ZYP+ZWK+ZWO
+SpCount3=ZAE+ZBG+ZWP+ZGA+ZHB+ZLK+ZRM+ZTS+ZMV+ZWE
+SpCount4=ZAB+ZHY+ZAH+ZHI+ZSM
+
+ST1MRA=MAX(0,((ST1MR-SAPST1)/SpCount1))
+ST2MRA=MAX(0,((ST2MR-SAPST2)/SpCount2))
+ST3MRA=MAX(0,((ST3MR-SAPST3)/SpCount3))
+ST4MRA=MAX(0,((ST4MR-SAPST4)/SpCount4))
+
+RegTotal = 0
+
+END
+ENDIF
+
+********************************************************************************
+*Add species-level regeneration into simulation, if appropriate
+*(AB, AE, HY, AH, BC, BG, CO, WP, GA, HB, HH, HI, JU, LK, LP, LL, PO, RM, SP, SA, SD, SK, SM, TS, MV, SU, YP, VP, WK, WO, WE)                                          
+********************************************************************************
+*Species with few empirical regen observations in the variant-level FIA sample are not added due to uncertainty
+*Regen statements are evaluated every FVS cycle by default, based on setting the REGTRIG variable value to 1
+*User's can modify when the regen statements are evaluated by changing the REGTRIG conditional statement below
+*Assuming 10yr FVS cycles, small sapling regen is added into the stand in the following FVS Cycle
+*(i.e., ~10 years after assessment of the stand's capacity to support new natural tree establishment)
+
+*Consolidates scheduled tree regen (TPA) into fewer unique tree records in the treelist - reduces output file size
+ESTAB
+MINPLOTS          20
+END
+
+*Edit your simulation cycle length below if different from 10 year default for REGENAGE variable
+*REGENAGE sets the age of regen trees added into the simulation in the following cycle
+*This will vary depending on your cycle length (e.g., 10 year cycle assumes 8 year old regen trees)
+
+Compute            0
+REGTRIG = 0
+REGENAGE = 10 - 2
+END
+
+IF        10
+CYCLE GE 1
+THEN
+
+Compute            0
+REGTRIG = 1
+END
+ENDIF
+
+** American beech
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,AB,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(AB, ST4MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST4MRA
+End
+EndIf
+
+** American elm
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,AE,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(AE, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** American holly
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,HY,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(HY, ST4MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST4MRA
+End
+EndIf
+
+** American hornbeam
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,AH,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(AH, ST4MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST4MRA
+End
+EndIf
+
+** black cherry
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,BC,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(BC, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** blackgum
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,BG,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(BG, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** chestnut oak
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,CO,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(CO, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** eastern white pine
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,WP,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(WP, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** green ash
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,GA,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(GA, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** hackberry
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,HB,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(HB, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** hophernbeam
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,HH,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(HH, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** hybrid hickory
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,HI,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(HI, ST4MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST4MRA
+End
+EndIf
+
+** juniper
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,JU,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(JU, ST1MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST1MRA
+End
+EndIf
+
+** laurel oak
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,LK,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(LK, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** loblolly pine
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,LP,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(LP, ST1MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST1MRA
+End
+EndIf
+
+** longleaf pine
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,LL,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(LL, ST1MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST1MRA
+End
+EndIf
+
+** post oak
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,PO,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(PO, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** red maple
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,RM,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(RM, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** shortleaf pine
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,SP,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(SP, ST1MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST1MRA
+End
+EndIf
+
+** slash pine
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,SA,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(SA, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** sourwood
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,SD,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(SD, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** southern red oak
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,SK,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(SK, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** sugar maple
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,SM,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(SM, ST4MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST4MRA
+End
+EndIf
+
+** swamp tupelo
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,TS,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(TS, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** sweetbay
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,MV,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(MV, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
+** sweetgum
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,SU,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(SU, ST1MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST1MRA
+End
+EndIf
+
+** tuliptree
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,YP,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(YP, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** Virginia pine
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,VP,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(VP, ST1MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST1MRA
+End
+EndIf
+
+** water oak
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,WK,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(WK, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** white oak
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,WO,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(WO, ST2MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST2MRA
+End
+EndIf
+
+** winged elm
+IF        10
+SpMcDBH(11,ALL,0,1.0,999,1.0,999,0) LE BSDIMAX*0.75 AND SpMcDBH(1,WE,0,5,999,10,999,0) GT 0.001 AND REGTRIG EQ 1
+Then
+Estab
+Natural            1    Parms(WE, ST3MRA, 100, REGENAGE, 0, 0)
+End
+Compute            1
+RegTotal = Regtotal + ST3MRA
+End
+EndIf
+
