@@ -46,13 +46,22 @@ MIN_REL_BIOMASS = [P.FloatType[0.1, 0.2, 0.3, 0.4, 0.5] for _ in 1:n_eco]
 println("establishment from file → MATURITY[1:5]=", round.(MATURITY[1:min(5,end)];digits=1),
         " SHADE_TOL[1:5]=", Int.(SHADE_TOL[1:min(5,end)]), " PROB_ESTAB eco1[1:5]=", round.(PROB_ESTAB_SPP[1][1:min(5,end)];digits=2))
 
-# --- candidate growth params + file establishment params ---
+# --- candidate growth params + establishment params ---
+# Default: establishment {SHADE_TOL, MATURITY, PROB_ESTAB, MIN_REL} pulled from file (data seed), only
+# growth+PROB_MORT taken from the candidate (the original Sim-A comparison behaviour). Set
+# PAN_USE_CAND_ESTAB=1 to instead KEEP the candidate's OWN calibrated establishment — required for a
+# Sim-B candidate, whose whole point is the fitted PROB_ESTAB (else the calibration is thrown away and
+# only the calibrated PROB_MORT survives, an inconsistent mix).
 base = JLD2.load_object(candpath)
 p = base
-p = Setfield.@set p.SHADE_TOL = SHADE_TOL
-p = Setfield.@set p.MATURITY = MATURITY
-p = Setfield.@set p.PROB_ESTAB_SPP = PROB_ESTAB_SPP
-p = Setfield.@set p.MIN_REL_BIOMASS = MIN_REL_BIOMASS
+if haskey(ENV, "PAN_USE_CAND_ESTAB")
+  println("PAN_USE_CAND_ESTAB set → keeping candidate's OWN calibrated establishment (file ignored)")
+else
+  p = Setfield.@set p.SHADE_TOL = SHADE_TOL
+  p = Setfield.@set p.MATURITY = MATURITY
+  p = Setfield.@set p.PROB_ESTAB_SPP = PROB_ESTAB_SPP
+  p = Setfield.@set p.MIN_REL_BIOMASS = MIN_REL_BIOMASS
+end
 
 # establishment is STOCHASTIC (PROB_ESTAB draws) → run NREP reseeded replicates and average.
 const NREP = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 10

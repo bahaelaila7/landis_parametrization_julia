@@ -2843,10 +2843,10 @@ function parametrize_MOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, s
   rep_val_loss = Inf
   if have_val
     try
-      _vr0 = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species,
+      _var0 = _agg_reps(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species,
         eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params;
         debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds))
-      rep_val_loss = _mo_val_loss(_vr0, eco_species_ids)
+      rep_val_loss = _mo_val_loss((_var0[1], nothing, _var0[2]), eco_species_ids)
     catch e; @warn "initial val-loss init failed" exception = (e, catch_backtrace()); end
   end
   # Track the best-VAL candidate separately from the best-TRAIN representative, and export its params on any
@@ -2859,6 +2859,33 @@ function parametrize_MOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, s
       PU.save_json(joinpath(output_dir, "best_val_params@0.json"), search_state.representative.x)
       JLD2.save_object(joinpath(output_dir, "best_val_params@0.jld2"), search_state.representative.x)
     catch e; @warn "initial best_val save failed" exception = (e, catch_backtrace()); end
+  end
+  # VAL REPLAY (ENV VAL_REPLAY=1): recompute val for every saved best_params@N.jld2 in output_dir — recovers
+  # val for runs where it was never computed live (the Sim-A val regression). Reuses the val setup above; NO
+  # search, does not touch losses.duckdb. Writes val_replay.csv (iteration,val_loss) and returns.
+  if have_val && get(ENV, "VAL_REPLAY", "") == "1"
+    ckpts = filter(f -> occursin(r"^best_params@\d+\.jld2$", f), readdir(output_dir))
+    sort!(ckpts, by = f -> parse(Int, match(r"@(\d+)", f).captures[1]))
+    @info "VAL_REPLAY: recomputing val for $(length(ckpts)) checkpoints in $output_dir"
+    open(joinpath(output_dir, "val_replay.csv"), "w") do io
+      println(io, "iteration,val_loss")
+      for f in ckpts
+        it = parse(Int, match(r"@(\d+)", f).captures[1])
+        try
+          p = JLD2.load_object(joinpath(output_dir, f))
+          _vr = _agg_reps(fit_params(val_ref_soa, p, max_sim_year, n_species, eco_species_ids,
+            val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params;
+            debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val,
+            dual_b=val_dual_b, seeds=fixed_seeds))
+          vl = _mo_val_loss((_vr[1], nothing, _vr[2]), eco_species_ids)
+          println(io, "$it,$vl"); flush(io); @info "val-replay @ $it = $vl"
+        catch e
+          @warn "val-replay failed @ $it" exception = (e, catch_backtrace())
+        end
+      end
+    end
+    @info "VAL_REPLAY done → $(joinpath(output_dir, "val_replay.csv"))"
+    return nothing
   end
 
   caused_by_interrupt(e) =
@@ -2924,12 +2951,14 @@ function parametrize_MOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, s
         end
         if have_val
           try
-            # Score val the SAME way as train: n_reps mean-over-reps (fixed_seeds → _mor), NOT a single noisy
-            # rep. A single rep sits above the 5-rep mean (Jensen + variance), which was inflating val and
-            # masquerading as overfitting.
-            val_result = only(fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species,
+            # Score val the SAME way as train: n_reps via _agg_reps (best-of-perturbation for Sim A, mean-over-
+            # reps collapsed to 1 for Sim-B b_only), NOT a single noisy rep. `only()` broke here for Sim A (tier-3
+            # returns n_reps results); _agg_reps aggregates like train. Reshape to the (run, cached, eco) tuple.
+            _vreps = fit_params(val_ref_soa, search_state.representative.x, max_sim_year, n_species,
               eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params;
-              debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds))
+              debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds)
+            _var = _agg_reps(_vreps)
+            val_result = (_var[1], _vreps[_var[3]][2], _var[2])
             rep_val_loss = _mo_val_loss(val_result, eco_species_ids); @info "Val loss @ gen $iter | loss=$rep_val_loss"
             # Export on VAL improvement too (best_val_params@N), independent of the train-best export below.
             if rep_val_loss < rep_val_best
