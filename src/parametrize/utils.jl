@@ -157,6 +157,9 @@ function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG
     cur_val = get_field_val(param.applier, field, idx)
     r = cur_val
     min_, max_ = param.bounds
+    if (bf = BMAX_FLOOR[]) !== nothing && param.name === :B_MAX_SPP   # per-(eco,species) data floor (LBSA/SA path)
+      min_ = FloatType(get(bf, idx, 12000.0))
+    end
     while r == cur_val
       r = if _mutation_mode == GaussianMutation
         sigma = param.sigma
@@ -229,6 +232,7 @@ end
 Base.@kwdef struct SPDFRecord
   sp_agb_sum::FloatType
   sp_age_cdf::Vector{FloatType}
+  sp_age_agb::Vector{FloatType}   # binned ABSOLUTE observed biomass per age bin — the per-cohort AGB reference
 end
 Base.@kwdef struct SPDFGroundTruth
   keys::BitVector
@@ -334,6 +338,16 @@ end
 const W_P = Ref{FloatType}(FloatType(1.0))
 @inline _w_pow(x::FloatType)::FloatType = W_P[] == FloatType(2) ? x * x : (W_P[] == one(FloatType) ? x : x^W_P[])
 
+# W "benefit of the doubt" (Sim A only): BEFORE the age CDF, forgive each sim cohort's binned biomass TOWARD
+# the observed by up to _w_hinge_thresh(obs_i) g/m² — i.e. sim_i -= clamp(sim_i − obs_i, −t_i, +t_i), so inside
+# the band sim_i := obs_i and small per-cohort biomass errors don't perturb the age SHAPE. Threshold has the
+# same pct/min/max form as the AGB hinge. W_HINGE off ⇒ plain CDF (unchanged).
+const W_HINGE = Ref{Bool}(false)
+const W_HINGE_PCT = Ref{FloatType}(FloatType(0.01))       # default 1% of obs cohort biomass
+const W_HINGE_PCT_MIN = Ref{FloatType}(FloatType(2.0))    # floored at 2 g/m²
+const W_HINGE_PCT_MAX = Ref{FloatType}(FloatType(5.0))    # capped at 5 g/m²
+@inline _w_hinge_thresh(obs::FloatType)::FloatType = clamp(obs * W_HINGE_PCT[], W_HINGE_PCT_MIN[], W_HINGE_PCT_MAX[])
+
 # PER-CELL (eco×lu×sp) normalization. When on, the per-site/per-cell loss stores the RAW shape/level
 # error (softplus-W and hinge-AGB kept — they smooth per observation — but NOT the global ÷scale or the
 # power); the per-cell ÷scale, the power, and a rank rescale are applied at aggregation (_mo_objectives).
@@ -353,6 +367,9 @@ const W_SCALE_FACTOR = Ref{FloatType}(FloatType(1.0))                # multiplie
 const W_SCALE_B   = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # Sim B (tier-4 ref)
 const AGB_SCALE_B = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))
 const RANKW       = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # 1/log(rank+1), Σ=1, rank by AGB
+const RANKW_MODE  = Ref{Symbol}(:rank)                               # :rank (1/√ln(rank) by AGB) or :cbal_pct (percentile-floored class-balanced by cohort count)
+const RANKW_BETA  = Ref{Float64}(0.999)                              # β for :cbal_pct RANKW (effective-number temper)
+const CELL_NCOH   = Ref{Matrix{Int}}(zeros(Int, 0, 0))               # per-(species,stratum) TRAIN cohort counts, for :cbal_pct RANKW
 
 # --- COUNT-BALANCE reweight: per-agebin W1 weight ∝ 1/effective-number-of-samples of the cohort COUNT in
 # that bin, to counteract survivorship (old bins are under-REPRESENTED, not under-massed). The count is
@@ -435,6 +452,22 @@ end
 
 end
 
+# W-hinge variant: forgive the (absolute) binned sim biomass TOWARD obs_bin by up to _w_hinge_thresh(obs_i) per
+# bin (sim_i -= clamp(sim_i − obs_i, −t, t)), THEN cumsum + normalize → CDF. obs_bin = rec.sp_age_agb (absolute
+# binned obs). Uses raw (unsmoothed) binning so the ±band stays in absolute g/m² — for smoothing_window_size=1
+# (this config) that equals smoothen_bin_cdf's binning; with age-smoothing on, the forgiveness path stays unsmoothed.
+@inline function smoothen_bin_cdf_forgive(p, obs_bin; age_bins::AgeBins)::Vector{FloatType}
+  pc_bin = bin_ages(p; age_bins=age_bins.bins_idx, last_bin_open=age_bins.last_bin_open)
+  @inbounds for i in eachindex(pc_bin)
+    t = _w_hinge_thresh(obs_bin[i])
+    pc_bin[i] -= clamp(pc_bin[i] - obs_bin[i], -t, t)
+    pc_bin[i] < zero(FloatType) && (pc_bin[i] = zero(FloatType))
+  end
+  pc_bin_cdf = cumsum(pc_bin)
+  pc_bin_cdf[end] > zero(FloatType) && (pc_bin_cdf ./= pc_bin_cdf[end])
+  return pc_bin_cdf
+end
+
 
 
 @inline function smooth_ages(; ages::Vector{FloatType}, smoothing_window::Vector{FloatType})::Vector{FloatType}
@@ -461,13 +494,15 @@ function smoothen_ref_years(df::DataFrame, loss_params::LossParams, max_age::Int
     sim_year = Dates.value.(Dates.Day.(row.measdate - row.start_measdate)) ./ 365.25 .|> round .|> Int
     @assert sim_year >= 0 "negative sim_year $row"
     cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
+    # binned ABSOLUTE observed biomass per age bin (unnormalized) — the per-cohort AGB reference (obs_i)
+    age_agb = bin_ages(ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
     if debug
       smoothed_ages = smooth_ages(; ages=ages, smoothing_window=loss_params.smoothing_weights)
       binned_ages = bin_ages(smoothed_ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
-      (; sim_year=[sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf],
+      (; sim_year=[sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf], data_age_agb=[age_agb],
         ages=[ages], smoothed_ages=[smoothed_ages], binned_ages=[binned_ages])
     else
-      (; sim_year=[sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf])
+      (; sim_year=[sim_year], data_agb_sum=[sum(rows.agb_sum)], data_agbs_cdf=[cdf], data_age_agb=[age_agb])
     end
   end
   return spdf
@@ -589,7 +624,9 @@ end
     for a in @view p[sp_start_idx:sp_end_idx]
       ages[UIntType(site.c_age[a])] += site.c_bio[a]
     end
-    sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
+    sim_age_cdf = W_HINGE[] ?   # ±band "benefit of the doubt": forgive sim toward obs before the CDF (Sim A)
+      smoothen_bin_cdf_forgive(ages, rec.sp_age_agb; age_bins=loss_params.age_bins) :
+      smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
     #@assert !any(isnan.(sim_age_cdf)) "cdf NaN"
     #@assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
     let bw = loss_params.age_bins.bin_widths
@@ -598,11 +635,23 @@ end
       sp_w_loss[gsp] = _w_finish(_w1_sum(rec.sp_age_cdf, sim_age_cdf, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))
     end
     #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
-    # AGB LEVEL term (weighted by loss_params.lambda): softplus-hinge^p with a tolerance band, divided by
-    # the global Σ observed AGB (ratio-of-sums → size-respecting, O(1)). Fallback (hinge off) = sqrt-diff².
-    sp_agb_loss[gsp] = AGB_HINGE[] ?
-      loss_params.lambda * _agb_finish(_hinge_relu(abs(sim_agb_sum - rec.sp_agb_sum) - _agb_hinge_thresh(rec.sp_agb_sum))) :
-      loss_params.lambda * (sqrt(sim_agb_sum) - sqrt(rec.sp_agb_sum))^2
+    # PER-COHORT AGB term (weighted by lambda): for each age bin i, softplus_β(|sim_i − obs_i| − thresh_i)^p,
+    # obs_i = rec.sp_age_agb[i], thresh_i = _agb_hinge_thresh(obs_i); SUMMED over bins so age errors no longer
+    # cancel. Stored raw — the per-species ÷scale, cell-norm rank and exponent apply downstream (for the L1 run
+    # ^p is identity, so the per-bin _agb_pow and the downstream one are both no-ops). Fallback = Σ_i sqrt-diff².
+    sim_agb_bins = bin_ages(ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
+    agb_acc = zero(FloatType)
+    if AGB_HINGE[]
+      @inbounds for i in eachindex(rec.sp_age_agb)
+        agb_acc += _agb_pow(_hinge_relu(abs(sim_agb_bins[i] - rec.sp_age_agb[i]) - _agb_hinge_thresh(rec.sp_age_agb[i])))
+      end
+      sp_agb_loss[gsp] = loss_params.lambda * _agb_finish(agb_acc)
+    else
+      @inbounds for i in eachindex(rec.sp_age_agb)
+        agb_acc += (sqrt(max(sim_agb_bins[i], zero(FloatType))) - sqrt(max(rec.sp_age_agb[i], zero(FloatType))))^2
+      end
+      sp_agb_loss[gsp] = loss_params.lambda * agb_acc
+    end
     site_agb_loss -= rec.sp_agb_sum
     if debug
       println("smoothing_weights $(loss_params.smoothing_weights)")
@@ -708,9 +757,15 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
     let bw = loss_params.age_bins.bin_widths
       sp_w_loss[gsp] = _w_finish(_w1_sum(rec.sp_age_cdf, nothing, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))  # sim absent → |0−ref|=ref
     end
-    sp_agb_loss[gsp] = AGB_HINGE[] ?
-      loss_params.lambda * _agb_finish(_hinge_relu(rec.sp_agb_sum - _agb_hinge_thresh(rec.sp_agb_sum))) :   # sim AGB = 0
-      loss_params.lambda * rec.sp_agb_sum
+    if AGB_HINGE[]   # per-cohort, sim_i = 0 ⇒ |sim_i − obs_i| = obs_i = rec.sp_age_agb[i]
+      agb_acc0 = zero(FloatType)
+      @inbounds for i in eachindex(rec.sp_age_agb)
+        agb_acc0 += _agb_pow(_hinge_relu(rec.sp_age_agb[i] - _agb_hinge_thresh(rec.sp_age_agb[i])))
+      end
+      sp_agb_loss[gsp] = loss_params.lambda * _agb_finish(agb_acc0)
+    else
+      sp_agb_loss[gsp] = loss_params.lambda * rec.sp_agb_sum   # Σ_i (√obs_i)² = Σ_i obs_i = ref total
+    end
     site_agb_loss -= rec.sp_agb_sum
   end
 
@@ -773,9 +828,24 @@ function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,
         push!(slots, (pi, i))
       end
     elseif param.sampler isa EcoSpeciesSampler
-      for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS)
-        for sp_id in eachindex(sp_ids)
-          push!(slots, (pi, (eco_id, sp_id)))
+      ss = get(PARAM_SPLIT_SETS[], param.name, nothing)   # global-species ids kept per-eco; others shared
+      if ss === nothing
+        for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS)
+          for sp_id in eachindex(sp_ids)
+            push!(slots, (pi, (eco_id, sp_id)))
+          end
+        end
+      else
+        pos = Dict{Int,Vector{Tuple{Int,Int}}}()          # global species → all its (eco, sp_local) positions
+        for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS), sp_local in eachindex(sp_ids)
+          push!(get!(pos, Int(sp_ids[sp_local]), Tuple{Int,Int}[]), (eco_id, sp_local))
+        end
+        for gsp in sort!(collect(keys(pos)))
+          if gsp in ss
+            for t in pos[gsp]; push!(slots, (pi, t)); end   # split: one u-dim per (eco, species)
+          else
+            push!(slots, (pi, pos[gsp]))                    # shared: one u-dim broadcast across its ecos
+          end
         end
       end
     end
@@ -784,14 +854,55 @@ function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,
 end
 
 # Map a u-vector in [0,1]^d to a params struct via each prior's quantile, then bounds-clip and
+# Per-(eco_id, sp_local) LOWER bound for :B_MAX_SPP — the data-derived floor (≥12000), set by
+# Pan._build_bmax_floor!. When non-nothing, u_to_params / params_to_u RESCALE the uniform prior onto
+# [floor, upper] for each B_MAX slot (so there is no probability pile-up at the floor) and mutate_params
+# clips to it. nothing = flat [12000,35000] window from the param bounds (feature off).
+const BMAX_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
+
+# Per-(eco_id, sp_local) LOWER bound for the DERIVED ANPP (g/m²/yr), set by Pan._build_anpp_floor!. Since
+# ANPP = B_MAX/ratio under the reparam, this floors it at decode: ANPP = max(B_MAX/ratio, floor). Equivalent
+# to a per-cell UPPER bound on the ratio (r ≤ B_MAX/floor). The params_to_u inverse is unchanged: recovering
+# r = B_MAX/ANPP and re-decoding re-applies the floor (round-trip stable). nothing = no floor (feature off).
+const ANPP_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
+
+# Per-parameter SPLIT SET: for an EcoSpecies param, the set of GLOBAL species ids whose value is fit
+# separately per ecoregion (stratum); species NOT in the set share ONE value across all ecoregions.
+# `param.name ∉ keys` ⇒ every species split per-eco (the default, byte-identical to before). This lets
+# e.g. B_MAX vary by site-tier only for the responsive species while the rest are tied — transparent to
+# the plugin: u_to_params still fills every B_MAX_SPP[eco][sp] slot (shared species get the same value
+# broadcast across their ecos). A shared slot's target is the Vector of all its (eco, sp_local) positions.
+const PARAM_SPLIT_SETS = Ref{Dict{Symbol,Set{Int}}}(Dict{Symbol,Set{Int}}())
+
 # cast to the param's type — identical to the sobol_samples inner mapping. Bounds and discrete
 # priors (DiscreteUniform) are handled automatically by quantile, so any u is representable.
 function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}, template::T)::T where T
   p = template
+  bf = BMAX_FLOOR[]
+  af = ANPP_FLOOR[]
   for (dim, (pi, idx)) in enumerate(slots)
     param = param_dists.params[pi]
-    raw = Dists.quantile(param.dist, clamp(Float64(u[dim]), 1e-10, 1 - 1e-10))
     min_, max_ = param.bounds
+    tgts = idx isa Vector ? idx : (idx,)                 # >1 target ⇒ shared u-dim broadcast across ecos
+    rep = first(tgts)                                    # representative target for floor / B_MAX lookup
+    if param.name === :ANPP_MAX_SPP   # ratio reparam: u → ratio ∈ [20,35]; ANPP_MAX_SPP stores derived ANPP = B_MAX/ratio per eco (B_MAX_SPP decoded first). Shared ⇒ one ratio, ANPP re-derived per eco from that eco's B_MAX.
+      ratio = Dists.quantile(param.dist, clamp(Float64(u[dim]), 1e-10, 1 - 1e-10))
+      f = getproperty(p, :ANPP_MAX_SPP)
+      for t in tgts
+        bmax = Float64(get_field_val(param.applier, getproperty(p, :B_MAX_SPP), t))
+        anpp = bmax / ratio
+        af !== nothing && (anpp = max(anpp, Float64(get(af, t, 0.0))))   # data floor: ANPP ≥ p99(agb/age)
+        f = apply_mutation(param.applier, f, t, param.type(anpp))
+      end
+      p = Setfield.@set p.ANPP_MAX_SPP = f
+      continue
+    end
+    raw = if bf !== nothing && param.name === :B_MAX_SPP
+      lo = Float64(get(bf, rep, 12000.0)); hi = Float64(max_)   # rescale uniform u onto [floor, upper]
+      lo + clamp(Float64(u[dim]), 0.0, 1.0) * (hi - lo)
+    else
+      Dists.quantile(param.dist, clamp(Float64(u[dim]), 1e-10, 1 - 1e-10))
+    end
     val = if !isnothing(min_) && raw < min_
       param.type(min_)
     elseif !isnothing(max_) && raw > max_
@@ -800,8 +911,11 @@ function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slot
       param.type(raw)
     end
     val = _quantize(val, param.quantum, param.type)   # snap to the param's grid (e.g. B_MAX by 100)
-    new_field = apply_mutation(param.applier, getproperty(p, param.name), idx, val)
-    p = Setfield.@set p.$(param.name) = new_field
+    f = getproperty(p, param.name)
+    for t in tgts                                     # single target ⇒ one write (identical to before)
+      f = apply_mutation(param.applier, f, t, val)
+    end
+    p = Setfield.@set p.$(param.name) = f
   end
   return p
 end
@@ -811,10 +925,21 @@ end
 # endpoints so the round-trip through quantile stays inside the bounds.
 function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}})::Vector{Float64} where T
   u = Vector{Float64}(undef, length(slots))
+  bf = BMAX_FLOOR[]
   for (dim, (pi, idx)) in enumerate(slots)
     param = param_dists.params[pi]
-    cur = get_field_val(param.applier, getproperty(params, param.name), idx)
-    u[dim] = clamp(Float64(Dists.cdf(param.dist, Float64(cur))), 1e-6, 1 - 1e-6)
+    rep = idx isa Vector ? idx[1] : idx                 # shared slot ⇒ read the representative eco (all equal)
+    cur = get_field_val(param.applier, getproperty(params, param.name), rep)
+    u[dim] = if param.name === :ANPP_MAX_SPP   # ratio reparam inverse: recover ratio = B_MAX/ANPP, map via the ratio prior. Handles legacy seeds (real ANPP) by clamping their implied ratio into [20,35].
+      anpp = Float64(cur); bmax = Float64(get_field_val(param.applier, getproperty(params, :B_MAX_SPP), rep))
+      ratio = anpp > 0 ? bmax / anpp : Float64(Dists.mean(param.dist))
+      clamp(Float64(Dists.cdf(param.dist, ratio)), 1e-6, 1 - 1e-6)
+    elseif bf !== nothing && param.name === :B_MAX_SPP
+      lo = Float64(get(bf, rep, 12000.0)); hi = Float64(param.bounds[2])   # inverse of the u_to_params rescale
+      clamp((Float64(cur) - lo) / (hi - lo), 1e-6, 1 - 1e-6)
+    else
+      clamp(Float64(Dists.cdf(param.dist, Float64(cur))), 1e-6, 1 - 1e-6)
+    end
   end
   return u
 end

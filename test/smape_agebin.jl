@@ -10,19 +10,31 @@ const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const D
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
 base_outdir = cfg["output_dir"]
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
+TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""   # candidate id in titles
 P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true)); P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
 P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
 P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
 D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false)); D.FIA_CYCLE_MERGE[] = Int(g("fia_cycle_merge", 1))
 P.INIT_PERTURB_FRAC[] = 0.0; no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("seed", 1))))
-val_frac = Float64(g("val_frac", 0.0)); split_rng = val_frac > 0 ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
-splots, eco_list, species_list, eco_species_ids, splots_val = D.prepare_parametrization_data(;
+val_frac = Float64(g("val_frac", 0.0))
+test_frac = Float64(g("test_frac", 0.0))               # 3-way split: reproduce the run's held-out TEST set too
+n_folds = Int(g("n_folds", 1)); fold_index = parse(Int, get(ENV, "PAN_FOLD", string(g("fold_index", 1))))  # PAN_FOLD picks the CV fold
+split_rng = (val_frac > 0 || n_folds > 1 || test_frac > 0) ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
+excl_plots = NTuple{4,Int}[]
+let epc = g("exclude_plots_csv", nothing)
+  if !(epc === nothing || epc == "null")
+    for ln in Iterators.drop(eachline(String(epc)), 1); isempty(strip(ln)) && continue; v = parse.(Int, split(ln, ",")); push!(excl_plots, (v[1], v[2], v[3], v[4])); end
+  end
+end
+splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = D.prepare_parametrization_data(;
   cohorts_db_path=cfg["cohorts_db_path"], eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]),
   output_dir=String(cfg["tablename"]), filter_eco_field=String(g("filter_eco_field", "epa_l4")),
   filter_ecos=String.(get(cfg, "filter_ecos", String[])),
+  n_folds=n_folds, fold_index=fold_index, exclude_plots=excl_plots,
   skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, min_trees=Int(g("min_trees", 100)),
   min_agb_frac=Float64(g("min_agb_frac", 0.05)), single_ecoregion=Bool(g("single_ecoregion", false)),
-  stratify_landuse=Bool(g("stratify_landuse", false)), val_frac=val_frac, split_rng=split_rng,
+  stratify_landuse=Bool(g("stratify_landuse", false)), val_frac=val_frac, split_rng=split_rng, test_frac=test_frac,
+  site_class_strata=Bool(g("site_class_strata", false)), siteclass_hi_max=Int(g("siteclass_hi_max", 4)),
   filter_extent=(haskey(cfg, "filter_extent") ? String(cfg["filter_extent"]) : nothing), RNG=rng)
 n_species = length(species_list)
 bins = Int.(g("bins_idx", [20, 60, 120])); coarse = PU.AgeBins(bins_idx=bins, last_bin_open=true)
@@ -43,7 +55,7 @@ function paired_agebin(sp, label)
   idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)])
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"))
   cached = res[1][2]
   # sim: bin each cohort's AGE into the coarse grid, sum bio per (plot, year, esp, cbin)
   sim = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], cbin=Int[], sim_agb=Float64[])
@@ -91,7 +103,9 @@ end
 
 rows = DF.DataFrame(split=String[], stratum=String[], species=String[], agebin=String[], n=Int[],
   sim_agb=Float64[], obs_agb=Float64[], avg_ref=Float64[], avg_sim=Float64[], sMAPE=Float64[], MAPE=Float64[], forestMAPE=Float64[])
-for (sp, label) in ((splots, "train"), (splots_val, "val"))
+for (sp, label) in ((splots, "train"), (splots_val, "val"), (splots_test, "test"))
+  isnothing(sp) && continue                     # 3-way: held-out test set (nothing unless test_frac>0)
+  label == "test" && get(ENV, "PAN_EVAL_TEST", "0") != "1" && continue   # hold test out unless enabled
   pr = paired_agebin(sp, label); isnothing(pr) && continue
   for e in sort(unique(pr.eco))
     pe = DF.subset(pr, :eco => DF.ByRow(==(e))); econame = replace(eco_list[e], r"[^A-Za-z0-9]" => "_")
@@ -110,11 +124,11 @@ for (sp, label) in ((splots, "train"), (splots_val, "val"))
       push!(rows, (label, eco_list[e], species_list[s], binlabels[b], DF.nrow(d), sum(d.sim_agb), sum(d.obs_agb), aref, asim, sm, mp, fm))
     end
     draw_err!(joinpath(outdir, "smape_agebin_$(label)_$(econame).png"), Ms, sps,
-      "AGB sMAPE by age bin — $label · $(eco_list[e])", "sMAPE %  (green=low, red≥100)"; cmap=GYR, crange=(0.0, 100.0))
+      "$(TAG)AGB sMAPE by age bin — $label · $(eco_list[e])", "sMAPE %  (green=low, red≥100)"; cmap=GYR, crange=(0.0, 100.0))
     draw_err!(joinpath(outdir, "mape_agebin_$(label)_$(econame).png"), Mm, sps,
-      "AGB MAPE by age bin — $label · $(eco_list[e])", "MAPE %  (green=low, red≥100)"; cmap=GYR, crange=(0.0, 100.0))
+      "$(TAG)AGB MAPE by age bin — $label · $(eco_list[e])", "MAPE %  (green=low, red≥100)"; cmap=GYR, crange=(0.0, 100.0))
     draw_err!(joinpath(outdir, "forest_mape_agebin_$(label)_$(econame).png"), Mf, sps,
-      "Forest-level MAPE by age bin — $label · $(eco_list[e])  [100·(avgRef−avgSim)/avgRef]",
+      "$(TAG)Forest-level MAPE by age bin — $label · $(eco_list[e])  [100·(avgRef−avgSim)/avgRef]",
       "signed %  (blue: sim over-predicts | red: sim under-predicts)"; cmap=DIV, crange=(-100.0, 100.0))
     println("$label/$(eco_list[e]): $(length(sps)) species × $nb bins → smape+mape+forestMAPE png")
   end

@@ -24,12 +24,21 @@ const PROB_ESTAB_TABLE = Ref{Union{Nothing,Dict{Tuple{String,String,String},Floa
 # Per-category data-derived MATURITY (SONA age), from the prob_estab_all_species.csv `maturity` column.
 # When set, the initial candidate's MATURITY is SEEDED per species (calibration start); stays in the search.
 const MATURITY_TABLE = Ref{Union{Nothing,Dict{String,Int}}}(nothing)
+# Per-(category, L3, land_use) data-derived B_MAX floor (g/m²): the species' demonstrated biomass ceiling
+# (p99 of species-own biomass over ≥80%-TPA-pure stands, from runs/bmax_floor.csv). When set, B_MAX_SPP gets a
+# per-(eco,species) LOWER bound = max(12000, floor); the search window is [12000, 35000]. nothing = flat window.
+const BMAX_FLOOR_TABLE = Ref{Union{Nothing,Dict{Tuple{String,String,String},Float64}}}(nothing)
+# Per-(category, L3, land_use) data-derived ANPP_MAX floor (g/m²/yr): p99 of the per-cohort linear annualized
+# growth agb/age (or PAI), from runs/anpp_floor_853.csv. Since the realized annual increment is ≤ ANPP_MAX
+# unconditionally (plugin.jl growth eq), agb/age ≤ ANPP_MAX for every cohort → this is a valid LOWER bound on
+# ANPP_MAX. Applied at decode as ANPP = max(B_MAX/ratio, floor) per (eco,species). nothing = no floor.
+const ANPP_FLOOR_TABLE = Ref{Union{Nothing,Dict{Tuple{String,String,String},Float64}}}(nothing)
 
 include("plugin.jl")   # structs, process_plugin!, simulation steps — always needed
 include("params.jl")   # generate_eco_params, generate_biomass_params
 include("export.jl")   # export_landis_params (writes LANDIS-II input files)
 
-export FIXED_LONGEVITY, LONGEVITY_TABLE, LONGEVITY_DEFAULT, SHADE_TOL_TABLE, SHADE_TOL_DEFAULT, PROB_ESTAB_TABLE, MATURITY_TABLE,
+export FIXED_LONGEVITY, LONGEVITY_TABLE, LONGEVITY_DEFAULT, SHADE_TOL_TABLE, SHADE_TOL_DEFAULT, PROB_ESTAB_TABLE, MATURITY_TABLE, BMAX_FLOOR_TABLE, ANPP_FLOOR_TABLE,
        generate_biomass_params, generate_eco_params, spinup_cohorts!, export_landis_params,
        export_initial_communities_csv, export_initial_communities_tif,
        export_ecoregions_txt, export_scenario_file, export_eco_ecocode_mapping

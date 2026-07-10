@@ -13,6 +13,7 @@ MARGINS = length(ARGS) >= 2 ? parse.(Float64, split(ARGS[2], ",")) : [0.2]   # o
 ALPHA = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 0.05
 base_outdir = cfg["output_dir"]
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
+TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""
 P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
 P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
 P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
@@ -21,14 +22,25 @@ D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
 P.INIT_PERTURB_FRAC[] = 0.0
 no_estab = Bool(g("no_establishment", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
-val_frac = Float64(g("val_frac", 0.0)); split_rng = val_frac > 0 ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
-splots, eco_list, species_list, eco_species_ids, splots_val = D.prepare_parametrization_data(;
+val_frac = Float64(g("val_frac", 0.0))
+test_frac = Float64(g("test_frac", 0.0))               # 3-way split: reproduce the run's held-out TEST set too
+n_folds = Int(g("n_folds", 1)); fold_index = parse(Int, get(ENV, "PAN_FOLD", string(g("fold_index", 1))))  # PAN_FOLD picks the CV fold
+split_rng = (val_frac > 0 || n_folds > 1 || test_frac > 0) ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
+excl_plots = NTuple{4,Int}[]
+let epc = g("exclude_plots_csv", nothing)
+  if !(epc === nothing || epc == "null")
+    for ln in Iterators.drop(eachline(String(epc)), 1); isempty(strip(ln)) && continue; v = parse.(Int, split(ln, ",")); push!(excl_plots, (v[1], v[2], v[3], v[4])); end
+  end
+end
+splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = D.prepare_parametrization_data(;
   cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=String(g("filter_eco_field", "epa_l4")),
   eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]), output_dir=String(cfg["tablename"]),
-  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=val_frac, split_rng=split_rng,
+  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=val_frac, split_rng=split_rng, test_frac=test_frac,
+  n_folds=n_folds, fold_index=fold_index, exclude_plots=excl_plots,
   min_trees=Int(g("min_trees", 100)), min_agb_frac=Float64(g("min_agb_frac", 0.05)),
   stratify_eco_mixed=Bool(g("stratify_eco_mixed", false)),
   single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
+  site_class_strata=Bool(g("site_class_strata", false)), siteclass_hi_max=Int(g("siteclass_hi_max", 4)),
   filter_extent=(haskey(cfg, "filter_extent") ? String(cfg["filter_extent"]) : nothing),
   filter_ecos=String.(get(cfg, "filter_ecos", String[])),
   filter_plots=NTuple{4,Int}[NTuple{4,Int}(Int.(p)) for p in get(cfg, "filter_plots", [])], RNG=rng)
@@ -50,7 +62,7 @@ function paired_for(sp, label)
   idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)])
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"))
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
@@ -81,8 +93,9 @@ function tost(d, Δ)
 end
 
 # compute the matched sim/obs pairs ONCE per split (the expensive fit_params step), reuse for every margin
-paired_splits = [(paired_for(sp, label), label) for (sp, label) in ((splots, "train"), (splots_val, "val"))
-                 if !(isnothing(sp) || DF.nrow(sp) == 0)]
+_eval_test = get(ENV, "PAN_EVAL_TEST", "0") == "1"     # hold test out unless explicitly enabled
+paired_splits = [(paired_for(sp, label), label) for (sp, label) in ((splots, "train"), (splots_val, "val"), (splots_test, "test"))
+                 if !(isnothing(sp) || DF.nrow(sp) == 0) && (label != "test" || _eval_test)]
 
 for EQM in MARGINS
   Δ = log1p(EQM); pct = round(Int, 100EQM)
@@ -104,7 +117,7 @@ for EQM in MARGINS
       fig = MK.Figure(size=(760, 90 + 26 * length(res)))
       neq = count(r -> r.equiv, res)
       ax = MK.Axis(fig[1, 1]; xlabel="mean  log1p(sim) − log1p(obs)   (← sim low | sim high →)",
-        title="TOST equivalence — $label · $(eco_list[e]) — ±$(pct)% band, α=$ALPHA — $neq/$(length(res)) equivalent",
+        title="$(TAG)TOST equivalence — $label · $(eco_list[e]) — ±$(pct)% band, α=$ALPHA — $neq/$(length(res)) equivalent",
         yticks=(1:length(res), names_))
       MK.vspan!(ax, -Δ, Δ; color=(:seagreen, 0.10))                       # equivalence band
       MK.vlines!(ax, [-Δ, Δ]; color=:seagreen, linestyle=:dash); MK.vlines!(ax, [0.0]; color=:gray60)

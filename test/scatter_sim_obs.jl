@@ -5,13 +5,14 @@
 # EXCLUDES the first measurement (sim_year 0 = the init state, which is never predicted).
 #   Run:  ./julia_gdal.sh --project=. test/scatter_sim_obs.jl <config.yml>
 using Pan
-import JLD2, YAML, CairoMakie, Statistics, Dates, DataFrames
+import JLD2, YAML, CairoMakie, Statistics, Dates, DataFrames, CSV
 const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames
 
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
 base_outdir = cfg["output_dir"]
 # PAN_PARAMS = a specific params .jld2 to plot (else the run's representative); PAN_OUTSUB = output subfolder.
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
+TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""   # candidate id in titles
 P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
 P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
 P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
@@ -22,14 +23,24 @@ no_estab = Bool(g("no_establishment", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
 
 val_frac = Float64(g("val_frac", 0.0))
-split_rng = val_frac > 0 ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
-splots, eco_list, species_list, eco_species_ids, splots_val = D.prepare_parametrization_data(;
+test_frac = Float64(g("test_frac", 0.0))               # 3-way split: reproduce the run's held-out TEST set too
+n_folds = Int(g("n_folds", 1)); fold_index = parse(Int, get(ENV, "PAN_FOLD", string(g("fold_index", 1))))  # PAN_FOLD picks the CV fold
+split_rng = (val_frac > 0 || n_folds > 1 || test_frac > 0) ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
+excl_plots = NTuple{4,Int}[]                       # honor the run's outlier exclusions so the fold split matches
+let epc = g("exclude_plots_csv", nothing)
+  if !(epc === nothing || epc == "null")
+    for ln in Iterators.drop(eachline(String(epc)), 1); isempty(strip(ln)) && continue; v = parse.(Int, split(ln, ",")); push!(excl_plots, (v[1], v[2], v[3], v[4])); end
+  end
+end
+splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = D.prepare_parametrization_data(;
   cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=String(g("filter_eco_field", "epa_l4")),
   eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]), output_dir=String(cfg["tablename"]),
-  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=val_frac, split_rng=split_rng,
+  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=val_frac, split_rng=split_rng, test_frac=test_frac,
+  n_folds=n_folds, fold_index=fold_index, exclude_plots=excl_plots,
   min_trees=Int(g("min_trees", 100)), min_agb_frac=Float64(g("min_agb_frac", 0.05)),
   stratify_eco_mixed=Bool(g("stratify_eco_mixed", false)),
   single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
+  site_class_strata=Bool(g("site_class_strata", false)), siteclass_hi_max=Int(g("siteclass_hi_max", 4)),
   filter_extent=(haskey(cfg, "filter_extent") ? String(cfg["filter_extent"]) : nothing),
   filter_ecos=String.(get(cfg, "filter_ecos", String[])),
   filter_plots=NTuple{4,Int}[NTuple{4,Int}(Int.(p)) for p in get(cfg, "filter_plots", [])],
@@ -68,7 +79,7 @@ function make_scatter(sp, label)
   iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)])
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"))
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
@@ -93,9 +104,15 @@ function make_scatter(sp, label)
                    for r in eachrow(unique(DF.select(sp, [:eco_id, :eco_species_id, :species_id]))))
   paired.eco = [plot2eco[p] for p in paired.plot_id]
   paired.sp = [especo2sp[(e, esp)] for (e, esp) in zip(paired.eco, paired.esp)]
+  # CACHE the raw matched sim-obs pairs (per plot × species) so aggregated scatters can be re-plotted w/o re-sim
+  CSV.write(joinpath(outdir, "sim_obs_pairs_$(label).csv"),
+    DF.DataFrame(plot_id=paired.plot_id, sim_year=paired.sim_year, stratum=[eco_list[e] for e in paired.eco],
+                 species=[species_list[s] for s in paired.sp], obs_agb=Float64.(paired.obs_agb), sim_agb=Float64.(paired.sim_agb)))
   # 3 fit modes × per-ecoregion figure: linear (OLS, SE-of-line band), log (log-log OLS, slope=exponent),
   # weighted (WLS w=1/AGB, variance∝AGB → band = σ·√AGB fanning out with AGB).
-  for mode in (:linear, :log, :weighted, :weightedlog)
+  fitrows = DF.DataFrame(split=String[], stratum=String[], species=String[], n=Int[], slope=Float64[], R2=Float64[])
+  _modes = haskey(ENV, "PAN_SCATTER_MODES") ? Tuple(Symbol.(strip.(split(ENV["PAN_SCATTER_MODES"], ",")))) : (:linear, :log, :weighted, :weightedlog)
+  for mode in _modes
     for e in sort(unique(paired.eco))
       pe = DF.subset(paired, :eco => DF.ByRow(==(e)))
       econame = replace(eco_list[e], r"[^A-Za-z0-9]" => "_")
@@ -105,15 +122,17 @@ function make_scatter(sp, label)
       println("$label/$econame [$mode]: $(DF.nrow(pe)) pts / $(length(unique(pe.plot_id))) plots / $(length(sps)) species  overall R²=$(round(r2all,digits=3))")
       ncol = min(4, max(1, length(sps))); nr = cld(length(sps), ncol)
       fig = MK.Figure(size=(330 * ncol, 300 * nr + 30))
-      MK.Label(fig[0, 1:ncol], "Sim vs obs AGB [$mode fit] — $(label) · $(eco_list[e]) — overall R²=$(round(r2all,digits=3))"; fontsize=14, font=:bold)
+      MK.Label(fig[0, 1:ncol], "$(TAG)Sim vs obs AGB [$mode fit] — $(label) · $(eco_list[e]) — overall R²=$(round(r2all,digits=3))"; fontsize=14, font=:bold)
       for (i, s) in enumerate(sps)
         d = DF.subset(pe, :sp => DF.ByRow(==(s)))
         r, c = fldmod1(i, ncol)
         draw_panel!(fig[r, c], Float64.(d.obs_agb), Float64.(d.sim_agb), species_list[s], mode)
+        mode == :linear && (fv = linfit(Float64.(d.obs_agb), Float64.(d.sim_agb)); push!(fitrows, (label, eco_list[e], species_list[s], DF.nrow(d), fv[2], fv[3])))
       end
       out = joinpath(outdir, "scatter_sim_obs_$(label)_$(econame)_$(mode).png"); MK.save(out, fig); println("  wrote $out")
     end
   end
+  CSV.write(joinpath(outdir, "scatter_fit_$(label).csv"), fitrows)
 end
 
 # overall R² in the mode's own space
@@ -263,6 +282,7 @@ end
 
 make_scatter(splots, "train")          # Sim A — exact-cohort paired
 make_scatter(splots_val, "val")
+(!isnothing(splots_test) && get(ENV, "PAN_EVAL_TEST", "0") == "1") && make_scatter(splots_test, "test")   # 3-way test: held out unless PAN_EVAL_TEST=1
 let dm = g("dual_mode", "off")          # Sim B — age-bin paired (only for dual runs)
   if dm === true || (dm isa AbstractString && lowercase(dm) in ("joint", "b"))
     make_scatter_B(splots, "train"); make_scatter_B(splots_val, "val")

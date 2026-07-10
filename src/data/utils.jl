@@ -29,7 +29,7 @@ function make_spdf_dict(spdf::DataFrame, eco_species_ids::Vector{Vector{Int}})::
           sp_key.eco_species_id => begin
             nrow(sp_df) > 1 && @warn "more than 1 sp $(sp_df)"
             rec = last(sp_df)
-            SPDFRecord(sp_agb_sum=rec.data_agb_sum, sp_age_cdf=rec.data_agbs_cdf)
+            SPDFRecord(sp_agb_sum=rec.data_agb_sum, sp_age_cdf=rec.data_agbs_cdf, sp_age_agb=rec.data_age_agb)
           end
 
           for (sp_key, sp_df) in pairs(groupby(year_df, :eco_species_id, sort=false))
@@ -133,27 +133,50 @@ end
 # stays close to val_frac WITHIN every ecoregion×land-use, not just globally per species (the
 # per-cell normalization needs each eco×lu×sp cell represented in both halves). Returns (df_train, df_val).
 function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
-  val_frac::Float64, rng::Random.AbstractRNG)
+  val_frac::Float64, rng::Random.AbstractRNG; n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0)
+  three_way = test_frac > 0.0            # train/val/test single split — a SEPARATE mode from K-fold CV
+  three_way && n_folds > 1 && error("test_frac>0 (3-way train/val/test split) is incompatible with n_folds>1 (cross-validation) — pick one")
   site_sp = unique(select(df, vcat(id_cols, [:eco_id, :effective_species])))
   sp_count = Dict(r.effective_species => r.n_sites
                   for r in eachrow(combine(groupby(site_sp, :effective_species), nrow => :n_sites)))
   site_strata = combine(groupby(site_sp, id_cols)) do rows
-    idx = argmin(i -> get(sp_count, rows.effective_species[i], typemax(Int)), 1:nrow(rows))
+    # tie-break rarest species by NAME so the stratum is independent of DB row order (reproducible split)
+    idx = argmin(i -> (get(sp_count, rows.effective_species[i], typemax(Int)), rows.effective_species[i]), 1:nrow(rows))
     (; stratum=(rows.eco_id[1], rows.effective_species[idx]))   # eco×lu × rarest species
   end
-  val_sites = vcat([
+  sort!(site_strata, id_cols)   # canonical site order → the seeded per-stratum shuffle is reproducible regardless of DB row order
+  # Three modes, all shuffling each stratum ONCE with the same rng (reproducible from split_seed):
+  #   • three_way (test_frac>0): val = first val_frac, test = next test_frac, train = rest.
+  #   • n_folds>1: K-fold CV — contiguous chunk `fold_index`/`n_folds` = val, rest = train.
+  #   • n_folds<=1, test_frac=0: single val_frac draw (bit-for-bit the original train/val behaviour).
+  parts = [
     begin
       shuffled = gdf[Random.shuffle(rng, 1:nrow(gdf)), id_cols]
-      n_val = max(1, round(Int, nrow(gdf) * val_frac))
-      shuffled[1:n_val, :]
+      m = nrow(shuffled)
+      if n_folds <= 1
+        n_val = max(1, round(Int, m * val_frac))
+        if three_way
+          n_test = min(m - n_val, max(1, round(Int, m * test_frac)))
+          (shuffled[1:n_val, :], n_test > 0 ? shuffled[n_val+1:n_val+n_test, :] : shuffled[1:0, :])
+        else
+          (shuffled[1:n_val, :], shuffled[1:0, :])   # test part empty in 2-way mode
+        end
+      else
+        lo = div((fold_index - 1) * m, n_folds) + 1   # contiguous K-fold chunk (partitions the stratum)
+        hi = div(fold_index * m, n_folds)
+        (hi >= lo ? shuffled[lo:hi, :] : shuffled[1:0, :], shuffled[1:0, :])
+      end
     end for gdf in groupby(site_strata, :stratum)
-  ]...)
-  n_total = nrow(site_strata)
-  n_val_out = nrow(val_sites)
-  @info "Train/val split" n_train = n_total - n_val_out n_val = n_val_out val_pct = round(100 * n_val_out / n_total, digits=1)
-  df_train = antijoin(df, val_sites, on=id_cols)
+  ]
+  val_sites  = vcat([p[1] for p in parts]...)
+  test_sites = three_way ? vcat([p[2] for p in parts]...) : nothing
+  n_total = nrow(site_strata); n_val_out = nrow(val_sites); n_test_out = three_way ? nrow(test_sites) : 0
+  @info "Split" mode = (three_way ? "train/val/test" : (n_folds > 1 ? "cv" : "train/val")) n_folds fold_index n_train = n_total - n_val_out - n_test_out n_val = n_val_out n_test = n_test_out
   df_val = semijoin(df, val_sites, on=id_cols)
-  return df_train, df_val
+  df_test = three_way ? semijoin(df, test_sites, on=id_cols) : nothing
+  df_train = antijoin(df, val_sites, on=id_cols)
+  three_way && (df_train = antijoin(df_train, test_sites, on=id_cols))
+  return df_train, df_val, df_test
 end
 
 # Tag each plot with :mixed_plot over its entire (loaded) history. true = mixed stand:
@@ -176,7 +199,7 @@ end
 
 function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[],
   by_subplot::Bool=false,
-  val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing,
+  val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0,
   min_trees::Int=100, min_agb_frac::Float64=0.05,
   stratify_eco_mixed::Bool=false,
   single_ecoregion::Bool=false, stratify_landuse::Bool=false,
@@ -252,9 +275,9 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
 
   # Split right here — after mapping, before aggregation — so each half gets its
   # own contiguous plot_ids and is fully self-contained.
-  do_split = val_frac > 0.0 && !isnothing(split_rng)
-  df_train, df_val_raw = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng) :
-                         (df, nothing)
+  do_split = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) && !isnothing(split_rng)
+  df_train, df_val_raw, df_test_raw = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac) :
+                         (df, nothing, nothing)
 
   # Aggregate a raw cohort df into a splots DataFrame with contiguous plot_ids.
   function _agg(df_sub::DataFrame)
@@ -279,7 +302,8 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
 
   splots_train = _agg(df_train)
   splots_val = isnothing(df_val_raw) ? nothing : _agg(df_val_raw)
-  return splots_train, eco_vals, species_symbol_map_vals, ddf.species_ids, splots_val
+  splots_test = isnothing(df_test_raw) ? nothing : _agg(df_test_raw)
+  return splots_train, eco_vals, species_symbol_map_vals, ddf.species_ids, splots_val, splots_test
 end
 
 function build_padded_sim_years(splots_subset::DataFrame, n_plots_total::Int)
@@ -564,7 +588,7 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   return cohorts_df[keep, :]
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
   # In-memory main DB + ATTACH the file READ-ONLY: a killed run can never corrupt the file (a mid-write
   # checkpoint was the corruption cause), yet df registrations (loaded_subplots) still land in the writable
@@ -590,12 +614,37 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
     tuples_str = join(["($(s),$(u),$(c),$(p))" for (s, u, c, p) in filter_plots], ",")
     sql *= " AND (statecd, unitcd, countycd, plot) IN ($(tuples_str))"
   end
+  if length(exclude_plots) > 0
+    tuples_str = join(["($(s),$(u),$(c),$(p))" for (s, u, c, p) in exclude_plots], ",")
+    sql *= " AND (statecd, unitcd, countycd, plot) NOT IN ($(tuples_str))"
+  end
   if filter_planted
     sql *= " AND (statecd, unitcd, countycd, plot, subp) IN (SELECT statecd, unitcd, countycd, plot, subp FROM src.$(tablename) WHERE intro_type = 'planted')"
   end
+  sql *= " ORDER BY ALL"   # total, deterministic row order (all columns) — a parallel scan is otherwise unordered, making the downstream aggregation/split non-reproducible even with a fixed seed
   println(sql)
   cohorts_df = DuckDB.execute(con, sql) |> DataFrame
   println("$(nrow(cohorts_df)) cohort rows loaded.")
+
+  # Site-productivity stratification: replace the `land_use` column with a per-plot site-tier derived from
+  # COND.SITECLCD (dominant forested condition, max CONDPROP_UNADJ), binned hi = SITECLCD ≤ siteclass_hi_max,
+  # lo = above. FIADB stays read-only (computed here, not stored). `stratify_landuse` then appends |lu=<tier>,
+  # so the ecoregion becomes epa_l3 × {hi,lo}. Order-preserving Dict map ⇒ deterministic.
+  if site_class_strata
+    sc = DuckDB.execute(con, """
+      WITH cr AS (SELECT co.STATECD s, co.UNITCD u, co.COUNTYCD c, co.PLOT p, co.SITECLCD sc, SUM(co.CONDPROP_UNADJ) w
+                  FROM src.COND co WHERE co.COND_STATUS_CD = 1 AND co.SITECLCD IS NOT NULL GROUP BY ALL),
+      rk AS (SELECT s, u, c, p, sc, ROW_NUMBER() OVER (PARTITION BY s, u, c, p ORDER BY w DESC, sc) rn FROM cr)
+      SELECT s AS statecd, u AS unitcd, c AS countycd, p AS plot,
+             CASE WHEN sc <= $(siteclass_hi_max) THEN 'hi' ELSE 'lo' END AS site_class
+      FROM rk WHERE rn = 1
+    """) |> DataFrame
+    scmap = Dict((r.statecd, r.unitcd, r.countycd, r.plot) => String(r.site_class) for r in eachrow(sc))
+    cohorts_df.land_use = [get(scmap, (r.statecd, r.unitcd, r.countycd, r.plot), "NA") for r in eachrow(cohorts_df)]
+    nplt(v) = length(unique(zip(cohorts_df.statecd[cohorts_df.land_use.==v], cohorts_df.unitcd[cohorts_df.land_use.==v], cohorts_df.countycd[cohorts_df.land_use.==v], cohorts_df.plot[cohorts_df.land_use.==v])))
+    println("site_class_strata: land_use ← site-tier (hi = SITECLCD ≤ $(siteclass_hi_max), lo = above); plots: " *
+            join(["$v=$(nplt(v))" for v in sort(unique(cohorts_df.land_use))], ", "))
+  end
 
   # Restrict to plots whose location falls inside the supplied shapefile (eco_field still
   # decides each plot's ecoregion). Applied before any other per-plot processing.
@@ -639,19 +688,21 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
     FROM tree_max tm
     JOIN src.REF_SPECIES r ON r.SPCD = tm.spcd
     GROUP BY r.SPECIES_SYMBOL, tm.spgrpcd, r.SFTWD_HRDWD
+    ORDER BY ALL
   """) |> DataFrame
   println("Tree stats: $(nrow(tree_stats)) (species,spgrpcd,sftwd) rows from curated_trees over $(nrow(subplots_df)) subplots.")
 
-  @time splots, eco_list, species_list, eco_species_ids, splots_val =
+  @time splots, eco_list, species_list, eco_species_ids, splots_val, splots_test =
     make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
-      by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng,
+      by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng, n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
       min_trees=min_trees, min_agb_frac=min_agb_frac,
       stratify_eco_mixed=stratify_eco_mixed, single_ecoregion=single_ecoregion, stratify_landuse=stratify_landuse, tree_stats=tree_stats)
   mark_estab_year!(splots)
   isnothing(splots_val) || mark_estab_year!(splots_val)
+  isnothing(splots_test) || mark_estab_year!(splots_test)
 
   n_viol = check_cohort_continuity(splots)
   println("Cohort continuity violations: $n_viol")
 
-  return splots, eco_list, species_list, eco_species_ids, splots_val
+  return splots, eco_list, species_list, eco_species_ids, splots_val, splots_test
 end

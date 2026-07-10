@@ -6,6 +6,8 @@ module Search
     include("search/MOCMAES.jl")
     include("search/IgelMOCMAES.jl")
     include("search/CMAMAE.jl")
+    include("search/NSGA2.jl")
+    include("search/CCIgel.jl")
     include("search/MOSA.jl")
     using .SA
     using .LBSA
@@ -14,5 +16,7 @@ module Search
     using .MOCMAES
     using .IgelMOCMAES
     using .CMAMAE
+    using .NSGA2
+    using .CCIgel
     using .MOSA
 end
