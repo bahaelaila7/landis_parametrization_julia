@@ -42,7 +42,7 @@ sysimage-deps:
 # (CairoMakie/Plots/PythonPlot), UMAP, ImageFiltering or GDAL — which is why the full/deps builds OOM on a 32 GB
 # node. Pan + Makie load from the depot cache on top (training never plots, so no Makie JIT). Produces Pan_deps.so
 # (wrapper auto-detects it). Override the list with FIT_DEPS="..." if you add fitting deps.
-FIT_DEPS ?= DuckDB DataFrames Distributions JLD2 CSV Sobol StatsBase Statistics YAML Setfield JSON3 Format Term DataStructures
+FIT_DEPS ?= DuckDB DataFrames Distributions JLD2 CSV Sobol StatsBase Statistics YAML Setfield JSON3 Term DataStructures
 sysimage-fit:
 	JULIA_PKG_PRECOMPILE_AUTO=0 $(JULIA_CMD) -e 'using Pkg; Pkg.instantiate()'
 	JULIA_NUM_THREADS=$(THREADS) $(JULIA_CMD) --threads=$(THREADS) -e 'using PackageCompiler; create_sysimage(split("$(FIT_DEPS)"); sysimage_path="Pan_deps.so",precompile_execution_file="precompile_exec.jl")'
