@@ -18,9 +18,9 @@
 #SBATCH --partition=batch           # 30-day limit for the full run; use "batch" for short/scaling tests
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64              # Genoa node has 128; START at 64 and scaling-test 32/64/128 — the knee
+#SBATCH --cpus-per-task=32              # Genoa node has 128; START at 64 and scaling-test 32/64/128 — the knee
 # is likely 32–64 (1775 sites, serial fraction, cross-NUMA). Not 128 blind.
-#SBATCH --mem=32G                       # Genoa node has 764 GB; ~3.2 GiB peak RSS + ramdisk-output headroom
+#SBATCH --mem=16G                       # Genoa node has 764 GB; ~3.2 GiB peak RSS + ramdisk-output headroom
 #SBATCH --time=7-00:00:00
 #SBATCH --constraint=Genoa              # ONE arch, matching your pre-warmed depot (pkgimages are CPU-arch tagged)
 #SBATCH --signal=B:TERM@120             # SIGTERM to the batch script 120s before the limit → flush/resume trap runs
