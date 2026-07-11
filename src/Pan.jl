@@ -1496,7 +1496,7 @@ function _set_rankw!(agb::Matrix{FloatType}, eco_species_ids; split_size::Union{
   PU.RANKW[] = R
 end
 
-function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false)
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing)
   _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)   # global ratio-of-sums or per-cell denominators
   # Disturbance exclude-modes derive a (year → site_idx → excluded eco_species) lookup from the
   # injection cohorts with drop>0, so those (site, species) are skipped from the loss at that year.
@@ -1532,10 +1532,10 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
   _mor_hist = _mor ? [[zeros(FloatType, length(eco_species_ids[e]), size(t4_ref[1][1], 2)) for _ in 1:n_cycles] for e in eachindex(eco_species_ids)] : nothing
   _mor_counts = Ref{Any}(nothing)
   resA = map(eachindex(seeds)) do ri
-    soa = copy_and_reseed_soa(ref_soa, seeds[ri])
+    soa = work_soa === nothing ? copy_and_reseed_soa(ref_soa, seeds[ri]) : reset_soa!(work_soa, ref_soa; seed=seeds[ri])
     if init_scales[ri] != one(FloatType)       # perturb the sim-year-0 population (not scored, only propagated)
       sc = init_scales[ri]; cap = INIT_PERTURB_CAP[]
-      for i in 1:soa.n
+      @maybe_threads PARALLEL_SITES[] for i in 1:soa.n     # per-site independent → parallel in SoA mode
         site = getsite(soa, i)
         site.active || continue
         @inbounds for j in 1:Int(site.live)
@@ -1651,7 +1651,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       # injection (stays free regen). Unmatched disturbed cohorts (the model didn't grow them) are not applied.
       if disturbance_dict !== nothing && current_sim_year in disturbance_years
         yd = disturbance_dict[current_sim_year]
-        Threads.@threads :static for i in 1:soa.n
+        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             spd = get(yd, Int(site.mapcode), nothing)
@@ -1684,7 +1684,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
         _inject_observed_cohorts!(soa, injection_dict[current_sim_year]; override=OVERRIDE_INJECTION[], replace=OVERRIDE_INJECTION_REPLACE[], sync=OVERRIDE_INJECTION_SYNC[])
       end
       if search_tier == 1
-        Threads.@threads :static for i in 1:soa.n
+        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             !site.active && continue
@@ -1701,7 +1701,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       elseif search_tier == 2
-        Threads.@threads :static for i in 1:soa.n
+        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             !site.active && continue
@@ -1736,7 +1736,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       elseif search_tier == 4
-        Threads.@threads :static for i in 1:soa.n
+        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             !site.active && continue
@@ -1758,7 +1758,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       elseif search_tier == 5
         # tier 5 = tier 3 (per-measurement per-site loss) + tier 4 (per-cycle bins) in ONE sim pass.
         sites_results = Vector{PU.SiteLoss}(undef, soa.n)
-        Threads.@threads :static for i in 1:soa.n
+        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             !site.active && continue
@@ -1802,7 +1802,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       else
         # tier 3: accumulate each site's per-species (W, AGB) loss straight into the calling thread's per-eco
         # accumulators via calculate_site_loss2_acc! — no per-site SiteLoss, no per-species temporaries.
-        Threads.@threads :static for i in 1:soa.n
+        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
           @inbounds begin
             tid = Threads.threadid()
             site = getsite(soa, i)
@@ -2142,6 +2142,10 @@ const T4_MEAN_OVER_REPS = Ref{Bool}(false)  # yaml simB_rep_mean
 # finalize(io = time BLOCKED handing checkpoints to the writer — a large io means writer backpressure, i.e. the
 # ramdisk-output lever would help). sim is accumulated across the gen's candidate evals in fit_params.
 const PAN_TIMING = Ref(false)
+# Parallelism strategy (env PAN_PARALLEL): :soa = parallelize WITHIN each eval over sites (default; needed for
+# single-eval spatial/raster runs). :candidate = parallelize the search's candidate×rep evals (each single-threaded
+# on a thread-local SoA — NUMA-local, no shared-array contention, scales past one socket). Drives PARALLEL_SITES.
+const PARALLEL_MODE = Ref(:soa)
 const _tm_start  = Ref(UInt64(0))   # ns at parametrize entry — for the STARTUP→first-gen span
 const _tm_sim    = Ref(UInt64(0))   # ns in process_plugin! (sim), accumulated within the current generation
 const _tm_io     = Ref(UInt64(0))   # ns BLOCKED on the writer put! within the current generation
@@ -2244,7 +2248,7 @@ function parametrize_LBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, splo
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
 
   # Validation setup
-  have_val = !isnothing(val_ref_soa)
+  have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
   val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
@@ -2547,7 +2551,7 @@ function parametrize_CMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
 
   # Validation setup
-  have_val = !isnothing(val_ref_soa)
+  have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
   val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
@@ -2863,6 +2867,8 @@ end
 
 const CV_RESELECT = Ref(false)   # when set, parametrize_MOCMAES skips the search and runs _cv_reselect_dump instead
 const STORE_VAL_OBJ = Ref(true)  # when have_val, score EVERY admitted archive candidate on val (train-argmin ≠ val-argmin) → cv_val_cache.csv
+const SKIP_VAL = Ref(false)      # env PAN_SKIP_VAL=1: skip ALL held-out val re-simulation during training (the per-new-best/
+                                 # per-archive-member val fit_params). Speeds the search; leaves best_val_loss blank.
 
 # Post-hoc reselection RANKED ON VALIDATION. Evaluate EVERY archive candidate (deduped by train-objective id
 # across checkpoints) on the held-out val set → val (A_W,A_AGB) with frozen-train normalization. Rank each
@@ -3094,13 +3100,18 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
   save_ckpt && (gio.last_ckpt_sig = _sig)
   archive_changed = save_ckpt
   if gio.have_val && STORE_VAL_OBJ[] && (archive_changed || is_new_best)   # val-score any NEW archive members
-    for c in collect(state.archive)
-      k = _vkey(c)
-      haskey(gio.val_cache, k) || (try
+    _newc = [c for c in collect(state.archive) if !haskey(gio.val_cache, _vkey(c))]
+    _vscore = c -> try
         _r, _c, _el = gio.val_fit(c.x)
         _o = _mo_objectives(_el, gio.eco_species_ids)
-        gio.val_cache[k] = (_twt(c), _tat(c), Float64(sum(@view _o[1:2:end])), Float64(sum(@view _o[2:2:end])))
-      catch e; @warn "val score failed" exception=(e, catch_backtrace()); end)
+        (_vkey(c), (_twt(c), _tat(c), Float64(sum(@view _o[1:2:end])), Float64(sum(@view _o[2:2:end]))))
+      catch e; @warn "val score failed" exception=(e, catch_backtrace()); nothing; end
+    if PARALLEL_MODE[] == :candidate      # score new members concurrently (each val_fit is sites-serial); store after
+      _vout = Vector{Any}(undef, length(_newc))
+      Threads.@threads :static for i in eachindex(_newc); _vout[i] = _vscore(_newc[i]); end
+      for r in _vout; r === nothing || (gio.val_cache[r[1]] = r[2]); end
+    else
+      for c in _newc; r = _vscore(c); r === nothing || (gio.val_cache[r[1]] = r[2]); end
     end
   end
   val_sim_sample = nothing
@@ -3183,7 +3194,7 @@ function parametrize_MOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, s
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
 
-  have_val = !isnothing(val_ref_soa)
+  have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
   val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
@@ -3495,7 +3506,7 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
-  have_val = !isnothing(val_ref_soa)
+  have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
   sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
@@ -3528,7 +3539,16 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
   end
   fixed_seeds = _fixed_seeds(rng, n_reps)
   dual_b = DUAL_MODE[] == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b)
+  # ONE reusable working SoA per reference — candidates/reps run serially, so reset_soa! reuses these
+  # buffers each eval instead of deep-copying the reference (removes the serial per-eval deepcopy + its churn).
+  _work_soa = deepcopy(ref_soa)
+  _work_soa_val = have_val ? deepcopy(val_ref_soa) : nothing
+  # candidate mode: one work SoA PER THREAD (each candidate eval runs single-threaded on its own, NUMA-local)
+  _work_soa_t = PARALLEL_MODE[] == :candidate ? [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
+  _run(p; ws=_work_soa) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, work_soa=ws)
+  # Candidate mode: sites go serial for EVERY eval in this driver (init population, RANKW freeze, gen loop, val),
+  # so each eval is single-threaded/deterministic and the gen loop parallelizes over candidates. Restored in `finally`.
+  PARALLEL_MODE[] == :candidate && (PARALLEL_SITES[] = false)
   function _fitness(rep_results)
     run_result, eco_losses, _ = _agg_reps(rep_results)
     objs = _mo_objectives(eco_losses, eco_species_ids)
@@ -3546,7 +3566,15 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
                   igel_sobol_init ? PU.sobol_samples(param_dists, template, igel_mu) :
                   [BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment) for _ in 1:igel_mu]
     init_us = [PU.params_to_u(p, param_dists, slots) for p in init_params]
-    init_cands = [MOLBSA.MOCandidate(init_params[k], _fitness(_run(init_params[k]))[1]) for k in 1:igel_mu]
+    if PARALLEL_MODE[] == :candidate     # candidate-parallelize the init population (sites already serial here)
+      _init_fx = Vector{Any}(undef, igel_mu)
+      Threads.@threads :static for k in 1:igel_mu
+        _init_fx[k] = _fitness(_run(init_params[k]; ws=_work_soa_t[Threads.threadid()]))[1]
+      end
+      init_cands = [MOLBSA.MOCandidate(init_params[k], _init_fx[k]) for k in 1:igel_mu]
+    else
+      init_cands = [MOLBSA.MOCandidate(init_params[k], _fitness(_run(init_params[k]))[1]) for k in 1:igel_mu]
+    end
     groups = (single_cov ? Vector{Int}[collect(1:length(slots))] : PU.build_groups(param_dists, slots, BSP.BIOMASS_PER_ECO_GROUPS))   # block-diagonal per-individual (1+1)-CMA
     @info "Igel MO-CMA-ES block-diagonal: $(length(groups)) covariance blocks per individual (sizes $(length.(groups)))"
     search_state = IgelMOCMAES.IgelState(init_us, init_cands, rng; sigma0=igel_sigma0, archive_cap=archive_cap, max_iter=typemax(Int), niche_radius=igel_niche_radius, reseed_sigma=igel_reseed_sigma, maturity_period=igel_maturity, blocks=groups)
@@ -3573,8 +3601,11 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
+  # candidate mode: per-thread val buffers so val_fit can run concurrently across archive members (val is sites-serial)
+  _val_work_t = (have_val && PARALLEL_MODE[] == :candidate) ? [deepcopy(val_ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
   val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=nothing, seeds=fixed_seeds)
+      _vws = _val_work_t === nothing ? _work_soa_val : _val_work_t[Threads.threadid()]
+      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=nothing, seeds=fixed_seeds, work_soa=_vws)
       v = _agg_reps(vreps); (v[1], vreps[v[3]][2], v[2])
     end : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
@@ -3603,12 +3634,28 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
       off_params = Vector{typeof(bio_params)}(undef, igel_mu)
       gen_best_agg = Inf; local gb_run, gb_eco, gb_cached, gb_idx
       _te = time_ns()
-      for k in 1:igel_mu                               # SERIAL (fit_params threads internally)
-        p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
-        rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
-        off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
-        if fx_k.aggregate < gen_best_agg
-          gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results)
+      if PARALLEL_MODE[] == :candidate
+        # candidate×rep is the parallel unit: each candidate's sim runs single-threaded on a thread-local SoA
+        # (NUMA-local, no shared-array contention). Sites are already serial (PARALLEL_SITES=false, set above).
+        Threads.@threads :static for k in 1:igel_mu
+          p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
+          off_params[k] = p
+          off_fxs[k] = _fitness(_run(p; ws=_work_soa_t[Threads.threadid()]))[1]
+        end
+        evals_done += igel_mu
+        for k in 1:igel_mu                              # serial best-pick (gen argmin aggregate)
+          off_fxs[k].aggregate < gen_best_agg && (gen_best_agg = off_fxs[k].aggregate; gb_idx = k)
+        end
+        _bb = _run(off_params[gb_idx]; ws=_work_soa_t[1])   # re-run best ONCE for gb_* (deterministic, sites-serial)
+        _, gb_run, gb_eco = _fitness(_bb); gb_cached = _median_rep_cached(_bb)
+      else
+        for k in 1:igel_mu                              # SoA mode: serial candidates, sites parallel (fit_params threads)
+          p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
+          rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
+          off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
+          if fx_k.aggregate < gen_best_agg
+            gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results)
+          end
         end
       end
       _t_eval = time_ns() - _te; _sim = _tm_sim[]
@@ -3625,6 +3672,7 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
   finally
+    PARALLEL_SITES[] = true   # restore site-parallelism (candidate mode set it false for this driver)
     stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
     try
       mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
@@ -3656,7 +3704,7 @@ function parametrize_CCIgel(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
-  have_val = !isnothing(val_ref_soa)
+  have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
   sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
@@ -3876,6 +3924,7 @@ function parametrize_CCIgel(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
   finally
+    PARALLEL_SITES[] = true   # restore site-parallelism (candidate mode set it false for this driver)
     stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
     try
       mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
@@ -3898,7 +3947,7 @@ function parametrize_NSGA2(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
-  have_val = !isnothing(val_ref_soa)
+  have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
   sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
@@ -4008,6 +4057,7 @@ function parametrize_NSGA2(; ref_soa::ActiveSoA, output_dir::AbstractString, spl
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
   finally
+    PARALLEL_SITES[] = true   # restore site-parallelism (candidate mode set it false for this driver)
     stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
     try
       mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
@@ -4036,7 +4086,7 @@ function parametrize_CMAMAE(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
-  have_val = !isnothing(val_ref_soa)
+  have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
   sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
@@ -4486,7 +4536,7 @@ function parametrize_MOLBSA(; ref_soa::ActiveSoA, output_dir::AbstractString, sp
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
 
-  have_val = !isnothing(val_ref_soa)
+  have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
   val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
@@ -5026,6 +5076,8 @@ end
 
 function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}())
   PAN_TIMING[] = get(ENV, "PAN_TIMING", "") in ["1", "true", "yes"]   # per-gen wall-time breakdown to stdout
+  SKIP_VAL[] = get(ENV, "PAN_SKIP_VAL", "") in ["1", "true", "yes"]   # skip held-out val re-sim during training
+  PARALLEL_MODE[] = Symbol(get(ENV, "PAN_PARALLEL", "soa"))           # :soa (site-parallel) | :candidate (candidate-parallel)
   _tm_start[] = time_ns()                                             # startup clock (spans data load → first gen)
   get!(ENV, "PAN_DATA", "runs")          # data dir for ${PAN_DATA}/*.csv|*.duckdb in the yaml; default = repo runs/ (local),
                                          # set PAN_DATA=<dir> on the cluster (e.g. $SCRATCH/runs/data) → one yaml, both layouts

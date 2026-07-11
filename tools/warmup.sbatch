@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# One-time depot warm-up (re-run after any `git pull` that touches src/). Precompiles Pan + deps into the
-# depot ON A MATCHING-ARCH node, so the real training job (JULIA_PKG_PRECOMPILE_AUTO=0) never compiles on the
-# clock. pkgimages are CPU-arch tagged → warm on the SAME CPU family you'll run on.
+# One-time depot warm-up — RE-RUN AFTER ANY `git pull` THAT TOUCHES src/ (Pan's cache key changes, else the first
+# job recompiles on the clock). Precompiles Pan + deps into the depot ON A MATCHING-ARCH node, so the real training
+# job (JULIA_PKG_PRECOMPILE_AUTO=0) never compiles. pkgimages are CPU-arch tagged → warm on the SAME CPU family you
+# run on. Mode-agnostic: this warms the package for BOTH PAN_PARALLEL=soa and =candidate.
 #
 #   sbatch tools/warmup.sbatch                    # fire-and-forget on a Genoa node
 #   # or interactively:  srun --constraint=Genoa --cpus-per-task=8 --mem=16G --time=30 --pty bash tools/warmup.sbatch

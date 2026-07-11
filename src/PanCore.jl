@@ -1,6 +1,25 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes, copy_and_reseed_soa, current_rss_gb, gc_and_trim!
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes, copy_and_reseed_soa, reset_soa!, current_rss_gb, gc_and_trim!, @maybe_threads, PARALLEL_SITES
+
+# Parallelism toggle for the site loops. PARALLEL_SITES[]=true → `@maybe_threads` threads over sites (SoA-level
+# parallelism, needed for single-eval spatial/raster runs). false → serial sites, so an OUTER driver can instead
+# parallelize over candidate×rep evals (better on NUMA; avoids nested threading). `@maybe_threads flag for …`
+# expands to BOTH a threaded and a serial copy of the loop at compile time (body inline — no closure/perf cost),
+# picked by the runtime flag.
+const PARALLEL_SITES = Ref(true)
+macro maybe_threads(flag, loop)
+  # Interpolate the raw for-loop into a literal `@threads :static …` (so @threads sees a real for-loop, not an
+  # escaped node), then escape the whole thing so flag/loop/Threads all resolve in the caller's scope.
+  esc(quote
+    if $flag
+      Threads.@threads :static $loop
+    else
+      $loop
+    end
+  end)
+end
+
 abstract type AbstractPlugin end
 
 include("types.jl")
@@ -34,7 +53,7 @@ function process_plugin!(::AnySoA{P}, ::Type{<:AbstractPlugin}, ::Int; ctx::C) w
 
 function with_thread_sync(f::F) where {F}
   local result
-  Threads.@threads :static for _ in 1:1
+  @maybe_threads PARALLEL_SITES[] for _ in 1:1     # serial in candidate mode → no nesting inside an outer @threads
     result = f()
   end
   return result
@@ -472,6 +491,41 @@ function copy_and_reseed_soa(soa, seed)
     end
   end
   return new_soa
+end
+
+# In-place equivalent of copy_and_reseed_soa: overwrite the REUSED working buffer `dst` with the reference `src`
+# (no allocation — memcpy per array), then reseed. Bit-identical to `copy_and_reseed_soa(src, seed)` but reuses
+# dst's buffers across the many candidate/rep evaluations (which run serially), removing the per-eval deepcopy.
+# All scalar/csr/ref arrays are flat bits-arrays → copyto! (values, no aliasing); the ONLY nested mutable is the
+# per-site rng, which is NEVER copyto!'d (would alias src) — it's reseeded (or state-copied) in dst's own objects.
+function reset_soa!(dst::SiteSoA, src::SiteSoA; seed=nothing)
+  @assert dst.n == src.n "reset_soa!: site-count mismatch"
+  for k in keys(src.refs)
+    copyto!(dst.refs[k], src.refs[k])                       # CSR row pointers (fixed length, bits)
+  end
+  for k in keys(src.scalar)
+    a = src.scalar[k]
+    isbitstype(eltype(a)) && copyto!(dst.scalar[k], a)      # skip :rng (AbstractRNG, non-bits) — handled below
+  end
+  cks = keys(src.csr)
+  for k in cks                                              # sim grew/shrank these → match reference nnz first (cheap, serial)
+    length(dst.csr[k]) == length(src.csr[k]) || resize!(dst.csr[k], length(src.csr[k]))
+  end
+  @maybe_threads PARALLEL_SITES[] for ki in 1:length(cks)   # then overwrite the big per-cohort arrays in parallel (SoA mode)
+    k = cks[ki]; copyto!(dst.csr[k], src.csr[k])
+  end
+  if isnothing(seed)
+    for i in 1:dst.n
+      getsite(dst, i).rng = deepcopy(getsite(src, i).rng)        # no reseed ⇒ independent copy of the reference rng
+    end
+  else
+    rng_type = typeof(getsite(src, 1).rng)
+    local_rng = rng_type(UInt64(seed))
+    for i in 1:dst.n
+      getsite(dst, i).rng = rng_type(rand(local_rng, UInt64))    # EXACTLY copy_and_reseed_soa's per-site reseed
+    end
+  end
+  return dst
 end
 
 

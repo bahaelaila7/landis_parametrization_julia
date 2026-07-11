@@ -45,14 +45,14 @@ PanCore.csr_arrays(::Type{PluginType}, nnz::NamedTuple) =
 
 function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, current_time::Int; ctx::NamedTuple)
   eco_params = ctx.eco_params
-  Threads.@threads :static for i in 1:soa.n
+  PanCore.@maybe_threads PanCore.PARALLEL_SITES[] for i in 1:soa.n
     @inbounds site = getsite(soa, i)
     succession_step!(current_time, site, eco_params[site.eco_id])
     reproduction_check_step!(current_time, site, eco_params[site.eco_id])
     @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
   end
   PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
-  Threads.@threads :static for i in 1:soa.n
+  PanCore.@maybe_threads PanCore.PARALLEL_SITES[] for i in 1:soa.n
     @inbounds site = getsite(soa, i)
     #sprouting_step!(current_time, site, eco_params[site.eco_id])
     reproduction_commit_step!(current_time, site, eco_params[site.eco_id])

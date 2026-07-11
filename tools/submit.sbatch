@@ -18,9 +18,10 @@
 #SBATCH --partition=batch           # 30-day limit for the full run; use "batch" for short/scaling tests
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32              # Genoa node has 128; START at 64 and scaling-test 32/64/128 — the knee
-# is likely 32–64 (1775 sites, serial fraction, cross-NUMA). Not 128 blind.
-#SBATCH --mem=16G                       # Genoa node has 764 GB; ~3.2 GiB peak RSS + ramdisk-output headroom
+#SBATCH --cpus-per-task=64              # candidate mode (PAN_PARALLEL below) is NUMA-local → scales past one socket:
+# try 64 then 128 and pick the best per-gen time. (soa mode is bandwidth/NUMA-bound and typically plateaus ~24–32.)
+#SBATCH --mem=32G                       # node has 764 GB; candidate mode allocates 1 work-SoA per thread (+val) —
+# a few hundred MB at 128 threads on top of ~3.2 GiB peak RSS. Bump if you enable ramdisk-output.
 #SBATCH --time=7-00:00:00
 #SBATCH --constraint=Genoa              # ONE arch, matching your pre-warmed depot (pkgimages are CPU-arch tagged)
 #SBATCH --signal=B:TERM@120             # SIGTERM to the batch script 120s before the limit → flush/resume trap runs
@@ -52,6 +53,12 @@ export JULIA_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 export OPENBLAS_NUM_THREADS=1 # (julia_gdal.sh also pins this) no BLAS oversubscription
 export JULIA_EXCLUSIVE=1      # pin Julia threads 1:1 to cores (helps NUMA locality)
 
+# ---------- parallelism strategy ----------
+# candidate: each candidate×rep eval runs single-threaded on its own thread-local (NUMA-local) SoA — no shared-SoA
+#            cross-socket contention → scales past one socket. Recommended for SEARCH/fit runs (igelmo etc.).
+# soa:       parallelize over sites WITHIN each eval — use for SPATIAL/raster (single-eval) runs.
+export PAN_PARALLEL=candidate
+
 # ---------- precompile: isolated from the run ----------
 export JULIA_PKG_PRECOMPILE_AUTO=0 # never compile on the clock; rely on the pre-warmed depot
 
@@ -63,7 +70,10 @@ elif [ -f "$SLIM_DB" ]; then
 fi # else: leave FIADB unset → the config's cohorts_db_path wins
 
 # ---------- optional levers (uncomment, or pass via --export=ALL,VAR=val) ----------
-export PAN_TIMING=1 # per-gen wall breakdown (startup / ask / eval[sim vs loss] / tell / final[io]) → run.log
+export PAN_TIMING=1 # per-gen wall breakdown → run.log. NOTE: in candidate mode the sim/loss SPLIT is racy (many
+                    # threads share the timer); the per-gen TOTAL is still meaningful. Use soa mode for a clean split.
+# export PAN_SKIP_VAL=1          # BENCH ONLY: skip held-out val re-sim (faster). Don't use for a real run — val objectives
+                                 # (cv_val_cache) are needed to pick the final model. In candidate mode val is parallel anyway.
 # export PAN_RAMDISK=auto        # opt-in ramdisk output ($SLURM_TMPDIR if set, else /dev/shm); default OFF = write to $PAN_OUT
 # export PAN_SYNC_SEC=600        # ramdisk→durable backstop interval
 #module load inotify-tools 2>/dev/null || true        # enables event-driven ramdisk sync when PAN_RAMDISK is set
