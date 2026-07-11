@@ -4930,10 +4930,22 @@ function _apply_frozen_growth!(cand, ref)
   cand
 end
 
+# Expand ${VAR}/$VAR (from ENV) and a leading ~ in a config path string, so yaml paths are portable across
+# machines (e.g. cohorts_db_path: "${FIADB}", output_dir: "${SCRATCH}/out", "~/data.duckdb"). Missing vars →
+# "". Plain/relative paths pass through unchanged. Same treatment the FIADB override gets, applied in-yaml.
+function _expandenv(s::AbstractString)
+  isempty(s) && return String(s)
+  out = replace(String(s), r"\$\{(\w+)\}" => m -> get(ENV, m[3:end-1], ""))   # ${VAR}
+  out = replace(out, r"\$(\w+)" => m -> get(ENV, m[2:end], ""))               # $VAR
+  return expanduser(out)
+end
+
 function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}())
   cfg = YAML.load_file(yaml_path)
   for (k, v) in overrides; cfg[String(k)] = v; end   # runner/CLI overrides (e.g. per-fold fold_index/output_dir)
-  get_cfg(key, default) = get(cfg, key, default)
+  # String config values get ${VAR}/$VAR/~ expanded from the environment (paths like output_dir, *_csv,
+  # cohorts_db_path become portable); non-strings and plain strings pass through unchanged.
+  get_cfg(key, default) = (v = get(cfg, key, default); v isa AbstractString ? _expandenv(v) : v)
 
   seed = get_cfg("seed", 404)
   Random.seed!(seed)
@@ -4979,7 +4991,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   _n_folds > 1 && (_output_dir = joinpath(_output_dir, "fold_$(_fold_index)"))
   isdir(_output_dir) || mkpath(_output_dir)
 
-  # DB path: env FIADB wins (portable across machines — set it instead of editing the yaml), else the yaml value.
+  # DB path: env FIADB wins (portable across machines); else the yaml value (get_cfg already expands ${VAR}/~).
   _db_path = get(ENV, "FIADB", "") != "" ? ENV["FIADB"] : String(get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"))
 
   # Fields shared by parametrize, plot_sample, and plot_sample_sobol

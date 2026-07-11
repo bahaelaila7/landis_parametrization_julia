@@ -1,26 +1,21 @@
 using Pan
+import YAML
 
-# Bake the FITTING/search hot paths into the sysimage so a real run has ~no JIT at startup. A 2-generation run
-# on the actual config traces everything that dominates cold start: DuckDB data load, species tiering, floor
-# loading, make_sites, fit_params, the SoA simulation, IgelMOCMAES (incl. the covariance eigendecomps) and
-# checkpoint IO. Guarded so a missing DB at build time still yields a sysimage (bakes whatever compiled).
-# Honors $FIADB for the DB path; point PAN_PRECOMPILE_CONFIG at any representative fitting yaml.
-try
-  cfg = get(ENV, "PAN_PRECOMPILE_CONFIG", "runs/fl853_igelmo_4cell_shade.yml")
-  Pan.run_from_yaml(cfg; overrides=Dict("trials" => 2, "n_reps" => 1, "output_dir" => mktempdir()))
-catch e
-  @warn "precompile fitting run did not finish — sysimage still bakes whatever compiled before the error" exception = (e, catch_backtrace())
-end
+# Bake the FITTING/search hot paths into the sysimage so a real run has ~no JIT at startup: a 2-generation run
+# traces DuckDB data load, tiering, floor loading, make_sites, fit_params, the SoA sim, IgelMOCMAES (incl. the
+# covariance eigendecomps) and checkpoint IO. This REQUIRES a valid DB at build time — resolve it the same way
+# run_from_yaml does ($FIADB wins, else the config's cohorts_db_path). If it's not found, the build still
+# succeeds but the fitting path is NOT baked — so set FIADB to your DuckDB before `make sysimage`.
+cfg = get(ENV, "PAN_PRECOMPILE_CONFIG", "runs/fl853_igelmo_4cell_shade.yml")
+db  = get(ENV, "FIADB", "")
+isempty(db) && (db = try String(YAML.load_file(cfg)["cohorts_db_path"]) catch; "" end)
 
-# Also bake the spatial-treemap path when its inputs are present (harmless skip otherwise).
-try
-  isdir("../pan_runner/data") && isfile("../pan_runner/data/FL5_22/FL5_22.tif") &&
-    Pan.simulate_spatial_treemap(
-      data_dir="../pan_runner/data", output_dir=mktempdir(),
-      eco_raster="FL5_22/FL5_22_eco_l3.tif", eco_ecocode_mapping="eco_ecocode_l3_mapping.csv",
-      biomass_params_path="FL5_22/FL5_22_eco_l3.jld2", treemap_raster="FL5_22/FL5_22.tif",
-      treemap_db_path="../pan_runner/data_eco_cohorts.duckdb", treemap_version=2022,
-      timehorizon_years=1, output_every_years=1)
-catch e
-  @warn "precompile spatial run skipped/failed" exception = e
+if !isfile(db)
+  @warn "precompile: DB not found → the FITTING path will NOT be baked. Set FIADB to your DuckDB before `make sysimage`." db config = cfg
+else
+  try
+    Pan.run_from_yaml(cfg; overrides = Dict("trials" => 2, "n_reps" => 1, "output_dir" => mktempdir()))
+  catch e
+    @warn "precompile fitting run errored — sysimage bakes whatever compiled before the error" exception = (e, catch_backtrace())
+  end
 end
