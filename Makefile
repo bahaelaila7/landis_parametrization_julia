@@ -24,8 +24,19 @@ debug: prepare
 exec: prepare
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using PackageCompiler;create_app(".", "build";filter_stdlibs=true,precompile_execution_file="src/entry.jl")'
                                      
-sysimage: prepare
+# FULL sysimage (Pan + deps). One compile pass: instantiate WITHOUT auto-precompile (so the depot isn't
+# compiled first and then AGAIN into the image), then create_sysimage. No `prepare` dep → no Pkg.update churn.
+# Assumes deps are downloaded (run `make prepare` once after cloning). Rebuild after any src/ change.
+sysimage:
+	JULIA_PKG_PRECOMPILE_AUTO=0 $(JULIA_CMD) -e 'using Pkg; Pkg.instantiate()'
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using PackageCompiler; create_sysimage(["Pan"]; sysimage_path="Pan.so",precompile_execution_file="precompile_exec.jl")'
+
+# INCREMENTAL sysimage: bake only the (stable, heavy) DEPENDENCIES — not Pan. Pan then recompiles on top via
+# Julia's per-package cache, so editing src/ recompiles only Pan (seconds), not the whole image. Rebuild this
+# one only when the Manifest changes. The wrapper uses Pan.so if present, else Pan_deps.so.
+sysimage-deps:
+	JULIA_PKG_PRECOMPILE_AUTO=0 $(JULIA_CMD) -e 'using Pkg; Pkg.instantiate()'
+	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg, PackageCompiler; create_sysimage(collect(keys(Pkg.project().dependencies)); sysimage_path="Pan_deps.so",precompile_execution_file="precompile_exec.jl")'
 
 spatial: prepare
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.spatial_main()'

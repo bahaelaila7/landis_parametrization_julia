@@ -30,7 +30,9 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 
 SYSIMAGE_ARG=""
 if [[ -f "${PROJECT_PATH}/Pan.so" ]]; then
-    SYSIMAGE_ARG="--sysimage=${PROJECT_PATH}/Pan.so"
+    SYSIMAGE_ARG="--sysimage=${PROJECT_PATH}/Pan.so"          # full image (Pan + deps)
+elif [[ -f "${PROJECT_PATH}/Pan_deps.so" ]]; then
+    SYSIMAGE_ARG="--sysimage=${PROJECT_PATH}/Pan_deps.so"     # deps-only image; Pan recompiles incrementally on top
 fi
 
 exec julia $SYSIMAGE_ARG "$@"
