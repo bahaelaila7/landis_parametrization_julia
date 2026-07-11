@@ -8,7 +8,7 @@ import JLD2, YAML, CairoMakie, Statistics, Dates, DataFrames, CSV
 const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames
 
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
-base_outdir = cfg["output_dir"]
+base_outdir = get(ENV, "PAN_OUT", "") != "" ? joinpath(ENV["PAN_OUT"], basename(String(cfg["output_dir"]))) : String(cfg["output_dir"])  # outputs under $PAN_OUT (scratch) if set
 # PAN_PARAMS = a specific params .jld2 to plot (else the run's representative); PAN_OUTSUB = output subfolder.
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
 TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""   # candidate id in titles

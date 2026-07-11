@@ -7,7 +7,8 @@
 # ONE Pan job at a time (concurrent data-loads exhaust RAM and get reaped). Relaunch each session:
 #   bash tools/resume_master.sh          (or via harness background)
 set -u
-cd /workspace/landis_parametrization_julia
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 STATUS=RESUME_STATUS.txt
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$STATUS"; }
 

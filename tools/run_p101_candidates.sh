@@ -7,7 +7,8 @@
 # priority_csv = comma-separated candidate indices processed FIRST (in order), then the remainder ascending
 # (used to do the 5 designated front positions first, for early assessment). Honors PAN_SCATTER_MODES.
 set -u
-cd /workspace/landis_parametrization_julia
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 CFG="$1"; OUT="$2"; NCAND="$3"; THREADS="${4:-4}"; PRIORITY="${5:-}"
 J="./julia_gdal.sh --project=. --threads=$THREADS"
 # build processing order: priority indices first (in given order), then the rest ascending

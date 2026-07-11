@@ -5,8 +5,10 @@
 # Use the saved params.jld2 with a scatter/eval script via PAN_PARAMS.
 #   tools/extract_candidates.sh <output_dir> <gen>
 set -euo pipefail
-cd "$(dirname "$0")/.."
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 O="$1"; G="$2"
+[ -n "${PAN_OUT:-}" ] && O="$PAN_OUT/$(basename "$O")"   # find checkpoints under $PAN_OUT (scratch) if set
 CK="$O/search_state@$G.jld2"
 [ -f "$CK" ] || { echo "no checkpoint: $CK"; echo "available: $(ls "$O"/search_state@*.jld2 2>/dev/null | sed -E 's/.*@([0-9]+)\.jld2/\1/' | sort -n | tr '\n' ' ')"; exit 1; }
 ./julia_gdal.sh --project=. --threads=1 -e "

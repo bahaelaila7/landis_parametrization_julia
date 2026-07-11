@@ -2,7 +2,8 @@
 # Priority: 8.5.3 igelmo+cbalpct training (fresh), then resume the paused NSGA-II p101 diagnostics (idempotent).
 # One Pan job at a time. Relaunch this script to resume if reaped (8.5.3 training resumes from latest ckpt).
 set -u
-cd /workspace/landis_parametrization_julia
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 O=runs/fl853_igelmo_cbalpct_simA_l1_8020_stdorg_outputs
 CFG=runs/fl853_igelmo_cbalpct_simA_l1_8020_stdorg.yml
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a RESUME_STATUS.txt; }

@@ -3,7 +3,8 @@
 # candidates and run scatter(linear) for each (train+val; TEST held out — PAN_EVAL_TEST unset). Low threads.
 #   tools/sanity_scatter_sc.sh <gen>
 set -u
-cd /workspace/landis_parametrization_julia
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 CB=runs/fl853_igelmo_siteclass_anpp_3way_outputs
 CFG=runs/fl853_igelmo_siteclass_anpp_3way.yml
 GEN="${1:-611}"

@@ -6,7 +6,8 @@
 # Runs a single Pan job at a time (data-loads OOM the box if two run concurrently — DO NOT parallelize).
 #   tools/p101_pipeline.sh <config.yml> <output_dir> [threads]
 set -u
-cd /workspace/landis_parametrization_julia
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 CFG="$1"; OUT="$2"; TH="${3:-8}"; J="./julia_gdal.sh --project=. --threads=$TH"
 C="$OUT/p101_candidates"
 export PAN_SCATTER_MODES=linear         # candidate scatters: linear only (per request)

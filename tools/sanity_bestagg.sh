@@ -2,7 +2,8 @@
 # Sanity check on a MID-training archive: extract the best-aggregate candidate from the latest
 # search_state@N.jld2 and run scatter (linear) + TOST. Low threads (runs alongside training).
 set -u
-cd /workspace/landis_parametrization_julia
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 CB=runs/fl853_igelmo_cbalpct_simA_l1_8020_stdorg_outputs
 CFG=runs/fl853_igelmo_cbalpct_simA_l1_8020_stdorg.yml
 SUB=sanity_bestagg; D="$CB/$SUB"; mkdir -p "$D"

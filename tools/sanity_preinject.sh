@@ -2,7 +2,8 @@
 # Re-run scatter+TOST for the already-extracted sanity candidates with PRE-INJECTION cache
 # (injected recruits + disturbance-overrides excluded) → honest sim↔obs. Writes sanity_<role>_pred.
 set -u
-cd /workspace/landis_parametrization_julia
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 CB=runs/fl853_igelmo_cbalpct_simA_l1_8020_stdorg_outputs
 CFG=runs/fl853_igelmo_cbalpct_simA_l1_8020_stdorg.yml
 export PAN_PREINJECT=1 PAN_SCATTER_MODES=linear

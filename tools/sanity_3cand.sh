@@ -2,7 +2,8 @@
 # Sanity check on the CURRENT latest archive: extract best-W, best-AGB, best-agg candidates and run
 # scatter(linear) + TOST for each. Low threads (runs alongside training).
 set -u
-cd /workspace/landis_parametrization_julia
+ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+cd "$ROOT"
 CB=runs/fl853_igelmo_cbalpct_simA_l1_8020_stdorg_outputs
 CFG=runs/fl853_igelmo_cbalpct_simA_l1_8020_stdorg.yml
 CK=$(ls "$CB"/search_state@*.jld2 | sed -E 's/.*@([0-9]+)\.jld2/\1 &/' | sort -n | tail -1 | cut -d' ' -f2-)

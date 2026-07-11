@@ -11,7 +11,7 @@ const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const D
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
 MARGINS = length(ARGS) >= 2 ? parse.(Float64, split(ARGS[2], ",")) : [0.2]   # one or more equivalence margins
 ALPHA = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 0.05
-base_outdir = cfg["output_dir"]
+base_outdir = get(ENV, "PAN_OUT", "") != "" ? joinpath(ENV["PAN_OUT"], basename(String(cfg["output_dir"]))) : String(cfg["output_dir"])  # outputs under $PAN_OUT (scratch) if set
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
 TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""
 P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
