@@ -1638,7 +1638,13 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     end
     for current_sim_year in starting_sim_year:max_sim_year
       #println("\ttimestep $(t)")
-      PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
+      if PAN_TIMING[]
+        _ts = time_ns()
+        PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
+        _tm_sim[] += time_ns() - _ts
+      else
+        PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
+      end
       # Sim B (free) disturbance: apply the observed exogenous biomass drop to the free sim — reduce a free-sim
       # cohort's biomass by the observed drop fraction ONLY IF it matches the disturbed cohort in SPECIES AND
       # AGE (per (plot,year,species,age)). The model responds to disturbance but does not predict it; no cohort
@@ -2129,6 +2135,17 @@ const SIMB_DISTURB_ONLY = Ref{Bool}(false)
 # histogram (loss-of-mean, the model's EXPECTED distribution) instead of picking a median rep.
 const T4_PER_PLOT_MEAN = Ref{Bool}(false)   # yaml simB_per_plot_mean
 const T4_MEAN_OVER_REPS = Ref{Bool}(false)  # yaml simB_rep_mean
+
+# ── Optional wall-time instrumentation (env PAN_TIMING=1). Zero cost when off: every probe is behind a single
+# PAN_TIMING[] Ref read, and the only always-on work is a handful of time_ns() per GENERATION (not per site).
+# Prints, per generation, where the wall goes: startup→first-gen, then ask / eval(sim vs loss+other) / tell /
+# finalize(io = time BLOCKED handing checkpoints to the writer — a large io means writer backpressure, i.e. the
+# ramdisk-output lever would help). sim is accumulated across the gen's candidate evals in fit_params.
+const PAN_TIMING = Ref(false)
+const _tm_start  = Ref(UInt64(0))   # ns at parametrize entry — for the STARTUP→first-gen span
+const _tm_sim    = Ref(UInt64(0))   # ns in process_plugin! (sim), accumulated within the current generation
+const _tm_io     = Ref(UInt64(0))   # ns BLOCKED on the writer put! within the current generation
+_tsec(ns) = round(Int64(ns) / 1e9, digits=3)
 # Per-(eco,cycle) distinct-plot counts for the tier-4 ref, computed once in _build_dual_b. Read by BOTH
 # the AGB scale (_set_cell_scales!) and the loss (calculate_t4_loss) so per-plot-mean stays consistent.
 const T4_CELL_PLOTS = Ref{Union{Nothing,Vector{Vector{Int}}}}(nothing)
@@ -3126,14 +3143,16 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
   # OFFLOAD to the async writer: metrics line (every gen) + BATCHED losses insert (one transaction, new-best only).
   # No fsync on the search's critical path; drained/flushed on normal exit AND interrupt by stop_writer's finally.
   _mline = string(state.i, ",", Float64(state.representative.fx.aggregate), ",", isfinite(gio.rep_val_loss) ? gio.rep_val_loss : "", ",", pop_size, ",", length(state.archive))
-  put!(gio.writer_ch, MOLossesJob(gio.losses_db, gio.metrics_io, _mline, _losses_payload))
+  _lossjob = MOLossesJob(gio.losses_db, gio.metrics_io, _mline, _losses_payload)
+  if PAN_TIMING[]; _tio = time_ns(); put!(gio.writer_ch, _lossjob); _tm_io[] += time_ns() - _tio; else; put!(gio.writer_ch, _lossjob); end
   cached_sites_state_df = DataFrame(gb_cached, [:plot_id, :sim_year, :species_id, :age, :agb])
   sim_sample = (is_new_best && gio.n_output_plots > 0) ? _filter_cached_to_df(gb_cached, gio.sampled_ids) : nothing
   # The async writer above persists search_state@N + best_params@N whenever save_ckpt is set, and
   # save_ckpt == archive_changed, so EVERY archive-changed state is already saved by the writer. (A former
   # synchronous save for the changed-but-not-improved case was redundant and raced the writer on the same
   # path — removed.)
-  put!(gio.writer_ch, WriterJob(save_ckpt, deepcopy(state), gio.splots, cached_sites_state_df, gio.emp_sample, sim_sample, is_new_best ? gio.emp_sample_val : nothing, val_sim_sample))
+  _ckptjob = WriterJob(save_ckpt, deepcopy(state), gio.splots, cached_sites_state_df, gio.emp_sample, sim_sample, is_new_best ? gio.emp_sample_val : nothing, val_sim_sample)  # deepcopy (CPU) built before the timed put! so io = channel BLOCK only
+  if PAN_TIMING[]; _tio = time_ns(); put!(gio.writer_ch, _ckptjob); _tm_io[] += time_ns() - _tio; else; put!(gio.writer_ch, _ckptjob); end
   (gio.have_val && STORE_VAL_OBJ[] && (is_new_best || archive_changed)) && _persist_val_cache!(gio)
   return save_ckpt
 end
@@ -3570,12 +3589,20 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
   evals_done = search_state.n_evals
   est_gens = max(1, cld(TRIALS - evals_done, igel_mu))
   try
+    _first_gen = true
     TProgress.@track for _gen in 1:est_gens
       evals_done >= TRIALS && break
+      if PAN_TIMING[]
+        _first_gen && (println("[timing] startup→first gen: $(_tsec(time_ns()-_tm_start[]))s"); _first_gen = false)
+        _tm_sim[] = 0; _tm_io[] = 0
+      end
+      _tg = time_ns()
       offs = IgelMOCMAES.ask(search_state)
+      _t_ask = time_ns() - _tg
       off_fxs = Vector{MOLBSA.MOFitness}(undef, igel_mu)
       off_params = Vector{typeof(bio_params)}(undef, igel_mu)
       gen_best_agg = Inf; local gb_run, gb_eco, gb_cached, gb_idx
+      _te = time_ns()
       for k in 1:igel_mu                               # SERIAL (fit_params threads internally)
         p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
         rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
@@ -3584,9 +3611,16 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
           gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results)
         end
       end
+      _t_eval = time_ns() - _te; _sim = _tm_sim[]
+      _tt = time_ns()
       is_new_best = IgelMOCMAES.tell!(search_state, off_fxs, off_params)
+      _t_tell = time_ns() - _tt
       search_state.n_evals = evals_done
+      _tf = time_ns()
       mo_gen_finalize!(gio, search_state, igel_mu, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
+      if PAN_TIMING[]
+        println("[timing] gen $_gen: $(_tsec(time_ns()-_tg))s | ask=$(_tsec(_t_ask)) eval=$(_tsec(_t_eval))(sim=$(_tsec(_sim)) loss+oth=$(_tsec(_t_eval-_sim))) tell=$(_tsec(_t_tell)) final=$(_tsec(time_ns()-_tf))(io=$(_tsec(_tm_io[])))")
+      end
     end
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
@@ -4991,6 +5025,8 @@ function _expandenv(s::AbstractString)
 end
 
 function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}())
+  PAN_TIMING[] = get(ENV, "PAN_TIMING", "") in ["1", "true", "yes"]   # per-gen wall-time breakdown to stdout
+  _tm_start[] = time_ns()                                             # startup clock (spans data load → first gen)
   cfg = YAML.load_file(yaml_path)
   for (k, v) in overrides; cfg[String(k)] = v; end   # runner/CLI overrides (e.g. per-fold fold_index/output_dir)
   # String config values get ${VAR}/$VAR/~ expanded from the environment (paths like output_dir, *_csv,
