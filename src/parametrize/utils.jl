@@ -361,6 +361,10 @@ const CELL_NORM   = Ref{Bool}(false)
 # ratio-of-sums, so train/val share a scale anyway), but the rank is frozen from TRAIN so train and val
 # weight the same eco×lu×sp cells the same way (val is otherwise free to re-rank on its thinner split).
 const CELL_NORM_FREEZE = Ref{Bool}(false)
+# When true, fit_params SKIPS its per-eval _set_loss_scales! (the caller has set the reference-derived loss scales
+# once, serially). Candidate-parallel batches set this so concurrent evals don't race on the W_SCALE/AGB_SCALE/
+# RANKW globals (those scales are candidate-independent, so one serial computation before the batch is correct).
+const SCALES_LOCKED = Ref{Bool}(false)
 const W_SCALE_A   = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # Sim A: Σ per-ref-max W1
 const AGB_SCALE_A = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # Sim A: Σ observed AGB
 const W_SCALE_FACTOR = Ref{FloatType}(FloatType(1.0))                # multiplies W_SCALE_{A,B} (yaml w_scale_factor); <1 shrinks the divisor → amplifies the ΣW objective (rebalance vs AGB)

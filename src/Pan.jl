@@ -1497,7 +1497,7 @@ function _set_rankw!(agb::Matrix{FloatType}, eco_species_ids; split_size::Union{
 end
 
 function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing)
-  _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)   # global ratio-of-sums or per-cell denominators
+  PU.SCALES_LOCKED[] || _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)   # global ratio-of-sums or per-cell denominators (skipped inside a candidate-parallel batch — set once serially by the caller)
   # Disturbance exclude-modes derive a (year → site_idx → excluded eco_species) lookup from the
   # injection cohorts with drop>0, so those (site, species) are skipped from the loss at that year.
   exclusion_dict = nothing
@@ -1638,7 +1638,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     end
     for current_sim_year in starting_sim_year:max_sim_year
       #println("\ttimestep $(t)")
-      if PAN_TIMING[]
+      if PAN_TIMING[] && PARALLEL_SITES[]   # only in soa mode: candidate mode runs fit_params on many threads → racy _tm_sim
         _ts = time_ns()
         PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
         _tm_sim[] += time_ns() - _ts
@@ -2149,7 +2149,7 @@ const PARALLEL_MODE = Ref(:soa)
 const _tm_start  = Ref(UInt64(0))   # ns at parametrize entry — for the STARTUP→first-gen span
 const _tm_sim    = Ref(UInt64(0))   # ns in process_plugin! (sim), accumulated within the current generation
 const _tm_io     = Ref(UInt64(0))   # ns BLOCKED on the writer put! within the current generation
-_tsec(ns) = round(Int64(ns) / 1e9, digits=3)
+_tsec(ns) = round(max(0, signed(UInt64(ns))) / 1e9, digits=3)   # signed+clamp: never throws on an underflowed diff
 # Per-(eco,cycle) distinct-plot counts for the tier-4 ref, computed once in _build_dual_b. Read by BOTH
 # the AGB scale (_set_cell_scales!) and the loss (calculate_t4_loss) so per-plot-mean stays consistent.
 const T4_CELL_PLOTS = Ref{Union{Nothing,Vector{Vector{Int}}}}(nothing)
@@ -3108,7 +3108,13 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
       catch e; @warn "val score failed" exception=(e, catch_backtrace()); nothing; end
     if PARALLEL_MODE[] == :candidate      # score new members concurrently (each val_fit is sites-serial); store after
       _vout = Vector{Any}(undef, length(_newc))
-      Threads.@threads :static for i in eachindex(_newc); _vout[i] = _vscore(_newc[i]); end
+      if !isempty(_newc)
+        _vout[1] = _vscore(_newc[1])      # SERIAL first: sets VAL scales (val_fit → _set_loss_scales!) before the batch
+        PU.SCALES_LOCKED[] = true
+        try
+          Threads.@threads :static for i in 2:length(_newc); _vout[i] = _vscore(_newc[i]); end
+        finally; PU.SCALES_LOCKED[] = false; end
+      end
       for r in _vout; r === nothing || (gio.val_cache[r[1]] = r[2]); end
     else
       for c in _newc; r = _vscore(c); r === nothing || (gio.val_cache[r[1]] = r[2]); end
@@ -3567,10 +3573,14 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
                   [BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment) for _ in 1:igel_mu]
     init_us = [PU.params_to_u(p, param_dists, slots) for p in init_params]
     if PARALLEL_MODE[] == :candidate     # candidate-parallelize the init population (sites already serial here)
+      _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)  # SERIAL: freeze RANKW + set scales before the parallel batch (no race on the scale/RANKW globals)
+      PU.SCALES_LOCKED[] = true
       _init_fx = Vector{Any}(undef, igel_mu)
-      Threads.@threads :static for k in 1:igel_mu
-        _init_fx[k] = _fitness(_run(init_params[k]; ws=_work_soa_t[Threads.threadid()]))[1]
-      end
+      try
+        Threads.@threads :static for k in 1:igel_mu
+          _init_fx[k] = _fitness(_run(init_params[k]; ws=_work_soa_t[Threads.threadid()]))[1]
+        end
+      finally; PU.SCALES_LOCKED[] = false; end
       init_cands = [MOLBSA.MOCandidate(init_params[k], _init_fx[k]) for k in 1:igel_mu]
     else
       init_cands = [MOLBSA.MOCandidate(init_params[k], _fitness(_run(init_params[k]))[1]) for k in 1:igel_mu]
@@ -3637,11 +3647,15 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
       if PARALLEL_MODE[] == :candidate
         # candidate×rep is the parallel unit: each candidate's sim runs single-threaded on a thread-local SoA
         # (NUMA-local, no shared-array contention). Sites are already serial (PARALLEL_SITES=false, set above).
-        Threads.@threads :static for k in 1:igel_mu
-          p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
-          off_params[k] = p
-          off_fxs[k] = _fitness(_run(p; ws=_work_soa_t[Threads.threadid()]))[1]
-        end
+        _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)  # SERIAL: set TRAIN scales before the batch (no race on scale globals)
+        PU.SCALES_LOCKED[] = true
+        try
+          Threads.@threads :static for k in 1:igel_mu
+            p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
+            off_params[k] = p
+            off_fxs[k] = _fitness(_run(p; ws=_work_soa_t[Threads.threadid()]))[1]
+          end
+        finally; PU.SCALES_LOCKED[] = false; end
         evals_done += igel_mu
         for k in 1:igel_mu                              # serial best-pick (gen argmin aggregate)
           off_fxs[k].aggregate < gen_best_agg && (gen_best_agg = off_fxs[k].aggregate; gb_idx = k)
