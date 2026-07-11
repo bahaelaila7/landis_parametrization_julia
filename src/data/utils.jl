@@ -588,7 +588,7 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   return cohorts_df[keep, :]
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
   # In-memory main DB + ATTACH the file READ-ONLY: a killed run can never corrupt the file (a mid-write
   # checkpoint was the corruption cause), yet df registrations (loaded_subplots) still land in the writable
@@ -631,18 +631,23 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   # lo = above. FIADB stays read-only (computed here, not stored). `stratify_landuse` then appends |lu=<tier>,
   # so the ecoregion becomes epa_l3 × {hi,lo}. Order-preserving Dict map ⇒ deterministic.
   if site_class_strata
+    # 2way: hi = SITECLCD ≤ siteclass_hi_max, lo = above.  4cell: A=1-3, B=4, C=5, D=6-7 (per-species tiering).
+    bin_expr = siteclass_scheme == "4cell" ?
+      "CASE WHEN sc<=3 THEN 'A' WHEN sc=4 THEN 'B' WHEN sc=5 THEN 'C' ELSE 'D' END" :
+      "CASE WHEN sc <= $(siteclass_hi_max) THEN 'hi' ELSE 'lo' END"
     sc = DuckDB.execute(con, """
       WITH cr AS (SELECT co.STATECD s, co.UNITCD u, co.COUNTYCD c, co.PLOT p, co.SITECLCD sc, SUM(co.CONDPROP_UNADJ) w
                   FROM src.COND co WHERE co.COND_STATUS_CD = 1 AND co.SITECLCD IS NOT NULL GROUP BY ALL),
       rk AS (SELECT s, u, c, p, sc, ROW_NUMBER() OVER (PARTITION BY s, u, c, p ORDER BY w DESC, sc) rn FROM cr)
       SELECT s AS statecd, u AS unitcd, c AS countycd, p AS plot,
-             CASE WHEN sc <= $(siteclass_hi_max) THEN 'hi' ELSE 'lo' END AS site_class
+             $(bin_expr) AS site_class
       FROM rk WHERE rn = 1
     """) |> DataFrame
     scmap = Dict((r.statecd, r.unitcd, r.countycd, r.plot) => String(r.site_class) for r in eachrow(sc))
     cohorts_df.land_use = [get(scmap, (r.statecd, r.unitcd, r.countycd, r.plot), "NA") for r in eachrow(cohorts_df)]
     nplt(v) = length(unique(zip(cohorts_df.statecd[cohorts_df.land_use.==v], cohorts_df.unitcd[cohorts_df.land_use.==v], cohorts_df.countycd[cohorts_df.land_use.==v], cohorts_df.plot[cohorts_df.land_use.==v])))
-    println("site_class_strata: land_use ← site-tier (hi = SITECLCD ≤ $(siteclass_hi_max), lo = above); plots: " *
+    scheme_desc = siteclass_scheme == "4cell" ? "4cell A=1-3,B=4,C=5,D=6-7" : "2way hi≤$(siteclass_hi_max),lo=above"
+    println("site_class_strata: land_use ← site-tier ($(scheme_desc)); plots: " *
             join(["$v=$(nplt(v))" for v in sort(unique(cohorts_df.land_use))], ", "))
   end
 

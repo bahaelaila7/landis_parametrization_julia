@@ -806,6 +806,7 @@ function parametrize(; cohorts_db_path::String,
   rankw_mode::String="rank",            # per-(species,stratum) objective weight: "rank" (1/√ln(rank) by AGB) or "cbal_pct" (percentile-floored class-balanced by cohort count)
   rankw_beta::Float64=0.999,            # β for rankw_mode=cbal_pct
   param_split_species::AbstractDict=Dict{String,Vector{String}}(),  # {param_name => [species]} fit per-eco; others tied across ecos
+  param_tier_merge::AbstractDict=Dict{String,Any}(),  # {param_name => {species => {cell => group}}} tie split site-cells per species
   spinup::Bool=true,
   search_mode::String="lbsa",
   tier::Int=3,
@@ -834,6 +835,7 @@ function parametrize(; cohorts_db_path::String,
   stratify_landuse::Bool=false,
   site_class_strata::Bool=false,        # replace land_use with a per-plot site-productivity tier (from COND.SITECLCD)
   siteclass_hi_max::Int=4,              # hi = SITECLCD ≤ this, lo = above (2-way default)
+  siteclass_scheme::String="2way",      # "2way" (hi/lo) or "4cell" (A=1-3,B=4,C=5,D=6-7) site-tier label
   filter_extent::Union{Nothing,String}=nothing,
   loss_lambda::Float64=1.0,
   loss_alpha::Float64=1.0,
@@ -965,6 +967,7 @@ function parametrize(; cohorts_db_path::String,
       stratify_landuse=stratify_landuse,
       site_class_strata=site_class_strata,
       siteclass_hi_max=siteclass_hi_max,
+      siteclass_scheme=siteclass_scheme,
       filter_extent=filter_extent,
       filter_eco_field=filter_eco_field,
       filter_ecos=filter_ecos,
@@ -1009,6 +1012,19 @@ function parametrize(; cohorts_db_path::String,
   end
   isempty(PU.PARAM_SPLIT_SETS[]) ||
     @info "Param split sets (species fit per-eco; others tied across ecos)" splits=Dict(string(k) => [species_list[i] for i in sort(collect(v))] for (k, v) in PU.PARAM_SPLIT_SETS[])
+  # per-species site-cell merges: {param => {species => {cell => group_label}}} — split cells sharing a label are tied
+  PU.PARAM_TIER_MERGE[] = Dict{Symbol,Dict{Int,Dict{String,String}}}()
+  for (pname, spmap) in param_tier_merge
+    m = Dict{Int,Dict{String,String}}()
+    for (sym, cellmap) in spmap
+      i = findfirst(==(String(sym)), species_list)
+      i === nothing ? (@warn "tier-merge species not in tiering — skipped" param=pname species=sym) :
+        (m[i] = Dict{String,String}(String(c) => String(g) for (c, g) in cellmap))
+    end
+    isempty(m) || (PU.PARAM_TIER_MERGE[][Symbol(pname)] = m)
+  end
+  isempty(PU.PARAM_TIER_MERGE[]) ||
+    @info "Param tier merges (split cells tied per species)" merges=Dict(string(k) => Dict(species_list[i] => cm for (i, cm) in v) for (k, v) in PU.PARAM_TIER_MERGE[])
   println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
   # Which species drive DOMINANCE (MO Pareto / CMA-MAE measure / breadth axis). Default exact (SPCD only).
   DOMINANCE_GSP[] = lowercase(dominance_species) == "all" ? Set{Int}() :
@@ -4977,6 +4993,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     stratify_landuse=Bool(get_cfg("stratify_landuse", false)),
     site_class_strata=Bool(get_cfg("site_class_strata", false)),
     siteclass_hi_max=Int(get_cfg("siteclass_hi_max", 4)),
+    siteclass_scheme=String(get_cfg("siteclass_scheme", "2way")),
     filter_extent=filter_extent,
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
@@ -5070,6 +5087,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     rankw_mode=String(get_cfg("rankw_mode", "rank")),
     rankw_beta=Float64(get_cfg("rankw_beta", 0.999)),
     param_split_species=Dict{String,Vector{String}}(String(k) => String.(v) for (k, v) in get_cfg("param_split_species", Dict())),
+    param_tier_merge=Dict{String,Any}(String(k) => Dict{String,Any}(String(sp) => Dict{String,String}(String(c) => String(g) for (c, g) in cm) for (sp, cm) in v) for (k, v) in get_cfg("param_tier_merge", Dict())),
     TRIALS=get_cfg("trials", 1000000),
     resume_from=resume_from,
     start_from=start_from,

@@ -814,6 +814,8 @@ end
 # target_idx is nothing (Global), an Int (Species/Eco), or an (eco,sp) tuple (EcoSpecies).
 # `template` provides ECO_SPECIES_IDS, SPECIES_LIST, ECO_LIST. `length(build_slots(...))`
 # is the search-space dimensionality `d` shared by sobol_samples and the CMA-ES bridge.
+_eco_lu(s) = (p = split(String(s), "|lu="); length(p) == 2 ? String(p[2]) : "")  # eco "l3|lu=CELL" → "CELL"
+
 function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,Any}} where T
   slots = Tuple{Int,Any}[]
   for (pi, param) in enumerate(param_dists.params)
@@ -840,9 +842,23 @@ function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,
         for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS), sp_local in eachindex(sp_ids)
           push!(get!(pos, Int(sp_ids[sp_local]), Tuple{Int,Int}[]), (eco_id, sp_local))
         end
+        mp = get(PARAM_TIER_MERGE[], param.name, nothing)
         for gsp in sort!(collect(keys(pos)))
           if gsp in ss
-            for t in pos[gsp]; push!(slots, (pi, t)); end   # split: one u-dim per (eco, species)
+            mg = mp === nothing ? nothing : get(mp, gsp, nothing)
+            if mg === nothing
+              for t in pos[gsp]; push!(slots, (pi, t)); end   # split: one u-dim per (eco, species)
+            else
+              groups = Dict{String,Vector{Tuple{Int,Int}}}()  # merge the site-cells that share a label
+              for t in pos[gsp]
+                cell = _eco_lu(template.ECO_LIST[t[1]])
+                push!(get!(groups, get(mg, cell, cell), Tuple{Int,Int}[]), t)
+              end
+              for lbl in sort!(collect(keys(groups)))
+                g = groups[lbl]
+                push!(slots, (pi, length(g) == 1 ? g[1] : g))  # merged cells → one broadcast u-dim
+              end
+            end
           else
             push!(slots, (pi, pos[gsp]))                    # shared: one u-dim broadcast across its ecos
           end
@@ -873,6 +889,12 @@ const ANPP_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
 # the plugin: u_to_params still fills every B_MAX_SPP[eco][sp] slot (shared species get the same value
 # broadcast across their ecos). A shared slot's target is the Vector of all its (eco, sp_local) positions.
 const PARAM_SPLIT_SETS = Ref{Dict{Symbol,Set{Int}}}(Dict{Symbol,Set{Int}}())
+
+# Per-parameter, per-species SITE-CELL MERGE map for a split (stratified) species: gsp → (cell → group label).
+# A split species' per-eco slots are grouped by their site-cell's label, so cells sharing a label share ONE
+# fit value (e.g. PIEL {A,B}→"AB" ties SITECLCD 1-3 and 4). Absent species/param ⇒ every cell its own group
+# (plain per-eco split). Lets different species use different site-productivity partitions off one plot label.
+const PARAM_TIER_MERGE = Ref{Dict{Symbol,Dict{Int,Dict{String,String}}}}(Dict{Symbol,Dict{Int,Dict{String,String}}}())
 
 # cast to the param's type — identical to the sobol_samples inner mapping. Bounds and discrete
 # priors (DiscreteUniform) are handled automatically by quantile, so any u is representable.
