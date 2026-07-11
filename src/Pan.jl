@@ -5027,6 +5027,10 @@ end
 function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}())
   PAN_TIMING[] = get(ENV, "PAN_TIMING", "") in ["1", "true", "yes"]   # per-gen wall-time breakdown to stdout
   _tm_start[] = time_ns()                                             # startup clock (spans data load → first gen)
+  get!(ENV, "PAN_DATA", "runs")          # data dir for ${PAN_DATA}/*.csv|*.duckdb in the yaml; default = repo runs/ (local),
+                                         # set PAN_DATA=<dir> on the cluster (e.g. $SCRATCH/runs/data) → one yaml, both layouts
+  get!(ENV, "PAN_OUT", "runs/outputs")   # output root for a ${PAN_OUT}/... output_dir in the yaml; default local, set on cluster.
+                                         # (When launched via train_resumable.sh, output_dir is overridden anyway — this is the bare-run fallback.)
   cfg = YAML.load_file(yaml_path)
   for (k, v) in overrides; cfg[String(k)] = v; end   # runner/CLI overrides (e.g. per-fold fold_index/output_dir)
   # String config values get ${VAR}/$VAR/~ expanded from the environment (paths like output_dir, *_csv,

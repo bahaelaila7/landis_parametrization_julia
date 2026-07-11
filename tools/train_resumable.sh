@@ -6,8 +6,10 @@
 # ONE Pan job at a time.  tools/train_resumable.sh <config.yml> <output_dir> [threads]
 set -u
 ROOT="${PAN_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}}"
+# Resolve the config to an ABSOLUTE path BEFORE cd'ing into the repo — on the cluster the yaml lives outside
+# the checkout (e.g. $SCRATCH/runs/yml/), so a path relative to the submit dir must be pinned first.
+CFG="$(readlink -f "$1" 2>/dev/null || echo "$1")"; O="$2"; TH="${3:-8}"
 cd "$ROOT"
-CFG="$1"; O="$2"; TH="${3:-8}"
 # Outputs live under $PAN_OUT (e.g. scratch) so the project stays clean; unset ⇒ the path as passed (local default).
 # $O is authoritative: it drives checkpoint scan/log/.train_done AND is passed as the run's output_dir override.
 [ -n "${PAN_OUT:-}" ] && O="$PAN_OUT/$(basename "$O")"
