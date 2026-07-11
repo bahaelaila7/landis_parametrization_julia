@@ -32,6 +32,10 @@ set -uo pipefail
 
 # ---------- args ----------
 CONFIG="${1:?usage: sbatch tools/submit.sbatch <config.yml> [run_name]}"
+# Make a RELATIVE config absolute against the SUBMIT dir NOW — before we cd into the repo below. The cluster yaml
+# lives outside the checkout (e.g. $SCRATCH/runs/yml/), so a bare "yml/foo.yml" would otherwise be looked up in the repo.
+case "$CONFIG" in /*) ;; *) CONFIG="$(readlink -f "${SLURM_SUBMIT_DIR:-$PWD}/$CONFIG" 2>/dev/null || echo "${SLURM_SUBMIT_DIR:-$PWD}/$CONFIG")" ;; esac
+[ -f "$CONFIG" ] || { echo "config not found: $CONFIG"; exit 2; }
 RUN_NAME="${2:-$(basename "${CONFIG%.*}")}" # output subdir; default = config basename without extension
 
 # ---------- paths (EDIT $PAN_OUT / $JULIA_DEPOT_PATH for your account) ----------
