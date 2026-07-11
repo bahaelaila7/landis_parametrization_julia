@@ -2146,6 +2146,8 @@ const PAN_TIMING = Ref(false)
 # single-eval spatial/raster runs). :candidate = parallelize the search's candidate×rep evals (each single-threaded
 # on a thread-local SoA — NUMA-local, no shared-array contention, scales past one socket). Drives PARALLEL_SITES.
 const PARALLEL_MODE = Ref(:soa)
+const NEWBEST_STATS = Ref(false)    # env PAN_NEWBEST_STATS=1: run the diagnostic simulate_and_test(train) "Train stats"
+                                    # print on each new best. Default OFF — it's a whole extra train sim per new best.
 const _tm_start  = Ref(UInt64(0))   # ns at parametrize entry — for the STARTUP→first-gen span
 const _tm_sim    = Ref(UInt64(0))   # ns in process_plugin! (sim), accumulated within the current generation
 const _tm_io     = Ref(UInt64(0))   # ns BLOCKED on the writer put! within the current generation
@@ -3126,17 +3128,29 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
     iter = state.best_iteration
     total = Float64(state.representative.fx.aggregate)
     @info "New best @ gen $iter | agg=$total | archive=$(length(state.archive))"
-    try
-      test_df = simulate_and_test(; splots=gio.splots, bio_params=state.representative.x, eco_list=gio.eco_list,
-        species_list=gio.species_list, eco_species_ids=gio.eco_species_ids, loss_params=gio.loss_params,
-        site_sim_years=gio.site_sim_years, M=gio.n_reps, no_establishment=gio.no_establishment, rng=gio.rng)
-      println("Train stats:"); show(test_df; allrows=true, allcols=true); println()
-    catch e; @warn "simulate_and_test (train) failed" exception=(e, catch_backtrace()); end
+    if NEWBEST_STATS[]   # opt-in diagnostic only (PAN_NEWBEST_STATS=1) — otherwise skip this whole extra train sim
+      try
+        test_df = simulate_and_test(; splots=gio.splots, bio_params=state.representative.x, eco_list=gio.eco_list,
+          species_list=gio.species_list, eco_species_ids=gio.eco_species_ids, loss_params=gio.loss_params,
+          site_sim_years=gio.site_sim_years, M=gio.n_reps, no_establishment=gio.no_establishment, rng=gio.rng)
+        println("Train stats:"); show(test_df; allrows=true, allcols=true); println()
+      catch e; @warn "simulate_and_test (train) failed" exception=(e, catch_backtrace()); end
+    end
     if gio.have_val && gio.val_fit !== nothing
       try
-        _r, _c, _el = gio.val_fit(state.representative.x)
-        gio.rep_val_loss = _mo_val_loss((_r, nothing, _el), gio.eco_species_ids)
-        @info "Val loss @ gen $iter | loss=$(gio.rep_val_loss)"
+        # The representative is an archive member, so STORE_VAL_OBJ already val-scored it into val_cache. Under
+        # cell-norm the aggregate is Σobjs = val_W + val_AGB, so reuse the cached score and SKIP the redundant sim —
+        # unless we need the val plot sample (n_output_plots>0) or can't reconstruct (non-cell-norm): then re-sim.
+        _rk = _vkey(state.representative)
+        if PU.CELL_NORM[] && gio.n_output_plots == 0 && haskey(gio.val_cache, _rk)
+          _cv = gio.val_cache[_rk]; gio.rep_val_loss = _cv[3] + _cv[4]
+          @info "Val loss @ gen $iter | loss=$(gio.rep_val_loss) (cached)"
+        else
+          _r, _c, _el = gio.val_fit(state.representative.x)
+          gio.rep_val_loss = _mo_val_loss((_r, nothing, _el), gio.eco_species_ids)
+          @info "Val loss @ gen $iter | loss=$(gio.rep_val_loss)"
+          val_sim_sample = gio.n_output_plots > 0 ? _filter_cached_to_df(_c, gio.sampled_ids_val) : nothing
+        end
         if gio.rep_val_loss < gio.rep_val_best
           gio.rep_val_best = gio.rep_val_loss
           try
@@ -3146,7 +3160,6 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
             @info "New best VAL @ gen $(state.i) | val=$(gio.rep_val_loss) train=$total → best_val_params@$(state.i)"
           catch e; @warn "best_val checkpoint failed" exception=(e, catch_backtrace()); end
         end
-        val_sim_sample = gio.n_output_plots > 0 ? _filter_cached_to_df(_c, gio.sampled_ids_val) : nothing
       catch e; @warn "val fit_params failed" exception=(e, catch_backtrace()); end
     end
     # snapshot the losses as plain values on the MAIN thread; the batched DB write runs on the writer thread
@@ -5092,6 +5105,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   PAN_TIMING[] = get(ENV, "PAN_TIMING", "") in ["1", "true", "yes"]   # per-gen wall-time breakdown to stdout
   SKIP_VAL[] = get(ENV, "PAN_SKIP_VAL", "") in ["1", "true", "yes"]   # skip held-out val re-sim during training
   PARALLEL_MODE[] = Symbol(get(ENV, "PAN_PARALLEL", "soa"))           # :soa (site-parallel) | :candidate (candidate-parallel)
+  NEWBEST_STATS[] = get(ENV, "PAN_NEWBEST_STATS", "") in ["1", "true", "yes"]   # opt-in diagnostic train-stats sim on new best
   _tm_start[] = time_ns()                                             # startup clock (spans data load → first gen)
   get!(ENV, "PAN_DATA", "runs")          # data dir for ${PAN_DATA}/*.csv|*.duckdb in the yaml; default = repo runs/ (local),
                                          # set PAN_DATA=<dir> on the cluster (e.g. $SCRATCH/runs/data) → one yaml, both layouts
