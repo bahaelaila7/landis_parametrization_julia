@@ -61,10 +61,17 @@ function mark_estab_year!(df::DataFrame)
   #df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- last)) ./ 365.25 .|> round .|> Int
   df.year_deficit .= Dates.value.(Dates.Day.(year_estab .- df.start_measdate)) ./ 365.25 .|> round .|> Int
 end
+# shade_tier (species_symbol → "LST"/"HST") splits the GROUPING key from (spgrpcd | sftwd) to
+# (spgrpcd | sftwd) × tier, so `_GRP_<g>` → `_GRP_<g>_<tier>` and `_H`/`_S` → `_<sftwd>_<tier>`;
+# the same size thresholds re-apply to the finer key (species shift down to the catch-all when a
+# per-tier group is too small). nothing ⇒ old single-key behaviour. Exact species are unaffected.
 function assign_tiered_species!(df::DataFrame;
   max_exact::Int=12, max_group::Int=4,
   min_trees::Int=100, min_agb_frac::Float64=0.05,
-  tree_stats::Union{Nothing,DataFrame}=nothing)
+  tree_stats::Union{Nothing,DataFrame}=nothing,
+  shade_tier::Union{Nothing,Dict{String,String}}=nothing)
+  tierof(sp) = shade_tier === nothing ? "" : get(shade_tier, uppercase(strip(String(sp))), "NA")
+  suffix(t) = isempty(t) ? "" : "_" * t
   if isnothing(tree_stats)
     sp_stats = combine(groupby(df, [:species_symbol, :spgrpcd, :sftwd_hrdwd]),
       nrow => :n_rows,
@@ -91,10 +98,11 @@ function assign_tiered_species!(df::DataFrame;
     push!(exact_set, row.species_symbol)
   end
 
-  grp_set = Set{Int}()
+  grp_set = Set{Tuple{Int,String}}()             # qualifying (spgrpcd, tier) groups
   remaining = filter(row -> row.species_symbol ∉ exact_set, sp_stats)
   if nrow(remaining) > 0
-    grp_stats = combine(groupby(remaining, :spgrpcd),
+    remaining.tier = [tierof(s) for s in remaining.species_symbol]
+    grp_stats = combine(groupby(remaining, [:spgrpcd, :tier]),
       :n_rows => sum => :grp_n,
       :sp_agb => sum => :grp_agb)
     grp_stats.grp_agb_frac = grp_stats.grp_agb ./ max(total_agb, 1e-9)
@@ -102,19 +110,19 @@ function assign_tiered_species!(df::DataFrame;
     for row in eachrow(grp_stats)
       length(grp_set) >= max_group && break
       row.grp_n >= min_trees && row.grp_agb_frac >= min_agb_frac || continue
-      push!(grp_set, row.spgrpcd)
+      push!(grp_set, (row.spgrpcd, row.tier))
     end
   end
 
   sp_map = Dict{String,String}()
   for row in eachrow(sp_stats)
-    sp = row.species_symbol
+    sp = row.species_symbol; t = tierof(sp)
     sp_map[sp] = if sp in exact_set
       sp
-    elseif row.spgrpcd in grp_set
-      "_GRP_$(row.spgrpcd)"
+    elseif (row.spgrpcd, t) in grp_set
+      "_GRP_$(row.spgrpcd)$(suffix(t))"
     else
-      "_" * coalesce(row.sftwd_hrdwd, "H")
+      "_" * coalesce(row.sftwd_hrdwd, "H") * suffix(t)
     end
   end
 
@@ -122,10 +130,8 @@ function assign_tiered_species!(df::DataFrame;
 
   # Summary
   exact_list = sort([k for (k, v) in sp_map if v == k])
-  group_list = sort(unique([v for (_, v) in sp_map if startswith(v, "_GRP_")]))
-  n_H = count(v == "_H" for v in values(sp_map))
-  n_S = count(v == "_S" for v in values(sp_map))
-  @info "Species tiers  ($(length(sp_map)) total → $(length(exact_list)) exact / $(length(group_list)) groups / H=$n_H S=$n_S)  [min_trees=$min_trees, min_agb_frac=$min_agb_frac]" exact = join(exact_list, ", ") groups = join(group_list, ", ")
+  group_list = sort(unique([v for (_, v) in sp_map if startswith(v, "_")]))   # _GRP_* and _H/_S catch-alls (± tier)
+  @info "Species tiers  ($(length(sp_map)) total → $(length(exact_list)) exact / $(length(group_list)) groups$(shade_tier === nothing ? "" : " × shade-tier"))  [min_trees=$min_trees, min_agb_frac=$min_agb_frac]" exact = join(exact_list, ", ") groups = join(group_list, ", ")
 end
 
 # Split raw cohort-level df by site (plot or subplot), stratified by eco×lu × species.
@@ -203,7 +209,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   min_trees::Int=100, min_agb_frac::Float64=0.05,
   stratify_eco_mixed::Bool=false,
   single_ecoregion::Bool=false, stratify_landuse::Bool=false,
-  tree_stats::Union{Nothing,DataFrame}=nothing)
+  tree_stats::Union{Nothing,DataFrame}=nothing, shade_tier::Union{Nothing,Dict{String,String}}=nothing)
   # eco_field can be any column of the loaded cohorts (epa_l4/epa_l3/ecosubcd, or a curated
   # stratifier like land_use). Falls back to ecosubcd only for the legacy unspecified case.
   eco_field = if eco in ("epa_l4", "epa_l3", "ecosubcd", "land_use")
@@ -215,7 +221,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   end
   hasproperty(df, eco_field) || error("make_splots: eco_field :$eco_field is not a column of the cohorts table")
 
-  assign_tiered_species!(df; min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats)
+  assign_tiered_species!(df; min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats, shade_tier=shade_tier)
   if !isempty(filter_species)
     fs = Set(filter_species)
     filter!(row -> row.effective_species in fs, df)
@@ -588,7 +594,7 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   return cohorts_df[keep, :]
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", shade_tier_csv::Union{Nothing,String}=nothing, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
   # In-memory main DB + ATTACH the file READ-ONLY: a killed run can never corrupt the file (a mid-write
   # checkpoint was the corruption cause), yet df registrations (loaded_subplots) still land in the writable
@@ -697,11 +703,19 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   """) |> DataFrame
   println("Tree stats: $(nrow(tree_stats)) (species,spgrpcd,sftwd) rows from curated_trees over $(nrow(subplots_df)) subplots.")
 
+  # optional shade-tolerance tier (species → LST[1-3]/HST[4-5]) to split the species grouping key
+  shade_tier = nothing
+  if shade_tier_csv !== nothing
+    st = DuckDB.execute(con, "SELECT UPPER(TRIM(sym)) sym, shade_class FROM read_csv_auto('$(shade_tier_csv)')") |> DataFrame
+    shade_tier = Dict(String(r.sym) => (Int(r.shade_class) <= 3 ? "LST" : "HST") for r in eachrow(st))
+    println("shade_tier: $(length(shade_tier)) species → LST/HST from $(basename(shade_tier_csv))")
+  end
+
   @time splots, eco_list, species_list, eco_species_ids, splots_val, splots_test =
     make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
       by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng, n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
       min_trees=min_trees, min_agb_frac=min_agb_frac,
-      stratify_eco_mixed=stratify_eco_mixed, single_ecoregion=single_ecoregion, stratify_landuse=stratify_landuse, tree_stats=tree_stats)
+      stratify_eco_mixed=stratify_eco_mixed, single_ecoregion=single_ecoregion, stratify_landuse=stratify_landuse, tree_stats=tree_stats, shade_tier=shade_tier)
   mark_estab_year!(splots)
   isnothing(splots_val) || mark_estab_year!(splots_val)
   isnothing(splots_test) || mark_estab_year!(splots_test)

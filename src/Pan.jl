@@ -836,6 +836,7 @@ function parametrize(; cohorts_db_path::String,
   site_class_strata::Bool=false,        # replace land_use with a per-plot site-productivity tier (from COND.SITECLCD)
   siteclass_hi_max::Int=4,              # hi = SITECLCD ≤ this, lo = above (2-way default)
   siteclass_scheme::String="2way",      # "2way" (hi/lo) or "4cell" (A=1-3,B=4,C=5,D=6-7) site-tier label
+  shade_tier_csv::Union{Nothing,String}=nothing,  # species→shade_class CSV; splits grouping key by LST(1-3)/HST(4-5)
   filter_extent::Union{Nothing,String}=nothing,
   loss_lambda::Float64=1.0,
   loss_alpha::Float64=1.0,
@@ -968,6 +969,7 @@ function parametrize(; cohorts_db_path::String,
       site_class_strata=site_class_strata,
       siteclass_hi_max=siteclass_hi_max,
       siteclass_scheme=siteclass_scheme,
+      shade_tier_csv=shade_tier_csv,
       filter_extent=filter_extent,
       filter_eco_field=filter_eco_field,
       filter_ecos=filter_ecos,
@@ -4994,6 +4996,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     site_class_strata=Bool(get_cfg("site_class_strata", false)),
     siteclass_hi_max=Int(get_cfg("siteclass_hi_max", 4)),
     siteclass_scheme=String(get_cfg("siteclass_scheme", "2way")),
+    shade_tier_csv=(haskey(cfg, "shade_tier_csv") ? String(get_cfg("shade_tier_csv", "")) : nothing),
     filter_extent=filter_extent,
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )

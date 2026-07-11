@@ -40,6 +40,8 @@ splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = D.pre
   stratify_eco_mixed=Bool(g("stratify_eco_mixed", false)),
   single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
   site_class_strata=Bool(g("site_class_strata", false)), siteclass_hi_max=Int(g("siteclass_hi_max", 4)),
+  siteclass_scheme=String(g("siteclass_scheme", "2way")),
+  shade_tier_csv=(haskey(cfg, "shade_tier_csv") ? String(cfg["shade_tier_csv"]) : nothing),
   filter_extent=(haskey(cfg, "filter_extent") ? String(cfg["filter_extent"]) : nothing),
   filter_ecos=String.(get(cfg, "filter_ecos", String[])),
   filter_plots=NTuple{4,Int}[NTuple{4,Int}(Int.(p)) for p in get(cfg, "filter_plots", [])],
@@ -57,6 +59,10 @@ end
 _eco_cell(e) = (p = split(String(eco_list[e]), "|lu="); length(p) == 2 ? String(p[2]) : "")   # eco → site-cell
 _is_tiered(s) = uppercase(species_list[s]) in _tiered_set
 _panel_grp(s, e) = _is_tiered(s) ? get(get(_merge_map, uppercase(species_list[s]), Dict{String,String}()), _eco_cell(e), _eco_cell(e)) : "pooled"
+# species abundance = distinct plots over all splits → rank panels by it
+_allsp = DF.DataFrame(plot_id=Int[], species_id=Int[])
+for s in (splots, splots_val, splots_test); isnothing(s) && continue; append!(_allsp, DF.DataFrame(plot_id=Int.(s.plot_id), species_id=Int.(s.species_id))); end
+spabund = Dict{Int,Int}(); for gdf in DF.groupby(unique(_allsp), :species_id); spabund[Int(gdf.species_id[1])] = DF.nrow(gdf); end
 bins = Int.(g("bins_idx", [20, 60, 120]))
 loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true),
   smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))
@@ -90,24 +96,25 @@ function make_scatter(sp, label)
   iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"))
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true)  # pre-inject = pure model state (REQUIRED for the cohort match below)
   cached = res[1][2]
-  simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
-  for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
-  sim_agg = DF.combine(DF.groupby(simdf, [:plot_id, :sim_year, :esp]), :agb => sum => :sim_agb)
-  obs = DF.combine(DF.groupby(DF.subset(sp, :sim_year => DF.ByRow(>(0))),
-      [:plot_id, :sim_year, :eco_id, :eco_species_id]), :agb_sum => sum => :obs_agb)
-  DF.rename!(obs, :eco_species_id => :esp)
-  paired = DF.innerjoin(obs, sim_agg, on=[:plot_id, :sim_year, :esp])
-  # In :exclude_overwrite the disturbed (drop>0) cohorts are OVERWRITTEN with the observed biomass
-  # (supplied, not predicted) and excluded from the loss — strip those (plot, year, species) points
-  # too, exactly like the first measurement, so the scatter only shows genuine predictions.
-  if P.OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && !isnothing(inj)
-    excl = Set((Int(r.plot_id), Int(r.sim_year), Int(r.eco_species_id)) for r in eachrow(inj) if r.disturbance_drop_pct > 0)
-    n0 = DF.nrow(paired)
-    paired = DF.filter(row -> !((row.plot_id, row.sim_year, row.esp) in excl), paired)
-    println("  $label: stripped $(n0 - DF.nrow(paired)) supplied/overwritten points (exclude_overwrite)")
-  end
+  # ONLY genuinely-simulated biomass ends up in the scatter. Match the pre-inject model cohorts to the
+  # OBSERVED injection set by (plot, year, species, AGE) — exactly the sync survivor rule. This drops
+  # (a) INJECTED cohorts (observed-only, never grown by the model) and (b) SYNC-REMOVED cohorts (sim-only,
+  # absent from the data), then drops disturbance-OVERWRITTEN cohorts (drop>0: biomass supplied, not predicted).
+  isnothing(inj) && error("$label: scatter needs injection cohorts (override_injection) to separate simulated vs injected biomass")
+  simc = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], age=Int[], sim_agb=Float64[])
+  for (pid, sy, esp, age, bio) in cached; push!(simc, (Int(pid), Int(sy), Int(esp), Int(age), Float64(bio))); end
+  simc = DF.combine(DF.groupby(DF.subset(simc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]), :sim_agb => sum => :sim_agb)
+  injc = DF.DataFrame(plot_id=Int.(inj.plot_id), sim_year=Int.(inj.sim_year), esp=Int.(inj.eco_species_id),
+                      age=Int.(inj.age_calc), obs_agb=Float64.(inj.agb_sum), drop=Float64.(inj.disturbance_drop_pct))
+  injc = DF.combine(DF.groupby(DF.subset(injc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]),
+                    :obs_agb => sum => :obs_agb, :drop => maximum => :drop)
+  matched = DF.innerjoin(simc, injc, on=[:plot_id, :sim_year, :esp, :age])   # sync survivors: simulated ∩ observed, same (species,age)
+  n_sim = DF.nrow(simc)
+  P.OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && (matched = DF.filter(r -> r.drop <= 0.0, matched))
+  paired = DF.combine(DF.groupby(matched, [:plot_id, :sim_year, :esp]), :sim_agb => sum => :sim_agb, :obs_agb => sum => :obs_agb)
+  println("  $label: $(DF.nrow(paired)) (plot,yr,sp) points from $(DF.nrow(matched))/$(n_sim) simulated cohorts matched to observed (dropped sync-removed + injected + disturbance-overwritten)")
   # eco_species_id is LOCAL to each eco, so eco must come from the PLOT (each plot → one eco);
   # species is then (eco_id, local esp) → global species_id.
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DF.select(sp, [:plot_id, :eco_id]))))
@@ -126,7 +133,7 @@ function make_scatter(sp, label)
   paired.pgrp = [_panel_grp(s, e) for (s, e) in zip(paired.sp, paired.eco)]
   panel_of(s, gp) = DF.subset(paired, [:sp, :pgrp] => DF.ByRow((a, b) -> a == s && b == gp))
   panels = sort([k for k in unique([(r.sp, r.pgrp) for r in eachrow(paired)]) if DF.nrow(panel_of(k...)) >= 3];
-                by = k -> (_is_tiered(k[1]) ? 0 : 1, k[1], k[2]))   # tiered species first, then pooled
+                by = k -> (-get(spabund, k[1], 0), k[1], k[2]))   # rank species by abundance (#plots); tiered cells together
   for mode in _modes
     isempty(panels) && continue
     r2all = overall_r2(Float64.(paired.obs_agb), Float64.(paired.sim_agb), mode)
@@ -135,7 +142,7 @@ function make_scatter(sp, label)
     MK.Label(fig[0, 1:ncol], "$(TAG)Sim vs obs AGB [$mode fit] — $(label) — overall R²=$(round(r2all,digits=3))"; fontsize=14, font=:bold)
     for (i, (s, gp)) in enumerate(panels)
       d = panel_of(s, gp); r, c = fldmod1(i, ncol)
-      ttl = _is_tiered(s) ? "$(species_list[s]) · $(gp)" : "$(species_list[s]) (pooled)"
+      ttl = (_is_tiered(s) ? "$(species_list[s]) · $(gp)" : "$(species_list[s]) (pooled)") * "  [$(get(spabund, s, 0))p]"
       draw_panel!(fig[r, c], Float64.(d.obs_agb), Float64.(d.sim_agb), ttl, mode)
       mode == :linear && (fv = linfit(Float64.(d.obs_agb), Float64.(d.sim_agb)); push!(fitrows, (label, gp, species_list[s], DF.nrow(d), fv[2], fv[3])))
     end

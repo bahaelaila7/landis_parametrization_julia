@@ -41,10 +41,26 @@ splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = D.pre
   stratify_eco_mixed=Bool(g("stratify_eco_mixed", false)),
   single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
   site_class_strata=Bool(g("site_class_strata", false)), siteclass_hi_max=Int(g("siteclass_hi_max", 4)),
+  siteclass_scheme=String(g("siteclass_scheme", "2way")),
+  shade_tier_csv=(haskey(cfg, "shade_tier_csv") ? String(cfg["shade_tier_csv"]) : nothing),
   filter_extent=(haskey(cfg, "filter_extent") ? String(cfg["filter_extent"]) : nothing),
   filter_ecos=String.(get(cfg, "filter_ecos", String[])),
   filter_plots=NTuple{4,Int}[NTuple{4,Int}(Int.(p)) for p in get(cfg, "filter_plots", [])], RNG=rng)
 n_species = length(species_list)
+# species-tier grouping (mirror the scatter): tiered species get one row per site-cell, pooled species one row;
+# productivity is NOT a separate facet. Species ranked by abundance = distinct plots over all splits.
+_tiered_set = Set{String}()
+for (_, syms) in get(cfg, "param_split_species", Dict()), s in syms; push!(_tiered_set, uppercase(strip(String(s)))); end
+_merge_map = Dict{String,Dict{String,String}}()
+for (_, spmap) in get(cfg, "param_tier_merge", Dict()), (sp_, cm) in spmap
+  d = get!(_merge_map, uppercase(strip(String(sp_))), Dict{String,String}()); for (c, gp) in cm; d[String(c)] = String(gp); end
+end
+_eco_cell(e) = (p = split(String(eco_list[e]), "|lu="); length(p) == 2 ? String(p[2]) : "")
+_is_tiered(s) = uppercase(species_list[s]) in _tiered_set
+_panel_grp(s, e) = _is_tiered(s) ? get(get(_merge_map, uppercase(species_list[s]), Dict{String,String}()), _eco_cell(e), _eco_cell(e)) : "pooled"
+_allsp = DF.DataFrame(plot_id=Int[], species_id=Int[])
+for s in (splots, splots_val, splots_test); isnothing(s) && continue; append!(_allsp, DF.DataFrame(plot_id=Int.(s.plot_id), species_id=Int.(s.species_id))); end
+spabund = Dict{Int,Int}(); for gdf in DF.groupby(unique(_allsp), :species_id); spabund[Int(gdf.species_id[1])] = DF.nrow(gdf); end
 bins = Int.(g("bins_idx", [20, 60, 120]))
 loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))
 best = if haskey(ENV, "PAN_PARAMS")
@@ -62,18 +78,22 @@ function paired_for(sp, label)
   idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"))
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true)
   cached = res[1][2]
-  simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
-  for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
-  sim_agg = DF.combine(DF.groupby(simdf, [:plot_id, :sim_year, :esp]), :agb => sum => :sim_agb)
-  obs = DF.combine(DF.groupby(DF.subset(sp, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :eco_id, :eco_species_id]), :agb_sum => sum => :obs_agb)
-  DF.rename!(obs, :eco_species_id => :esp)
-  paired = DF.innerjoin(obs, sim_agg, on=[:plot_id, :sim_year, :esp])
-  if P.OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && !isnothing(inj)
-    excl = Set((Int(r.plot_id), Int(r.sim_year), Int(r.eco_species_id)) for r in eachrow(inj) if r.disturbance_drop_pct > 0)
-    paired = DF.filter(row -> !((row.plot_id, row.sim_year, row.esp) in excl), paired)
-  end
+  # ONLY genuinely-simulated biomass: match pre-inject model cohorts to the OBSERVED injection set by
+  # (plot, year, species, AGE) = sync survivor rule; drop injected (obs-only), sync-removed (sim-only) and
+  # disturbance-overwritten (drop>0) cohorts. Otherwise injection/overwrite inflate the equivalence test.
+  isnothing(inj) && error("tost needs injection cohorts (override_injection) to separate simulated vs injected biomass")
+  simc = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], age=Int[], sim_agb=Float64[])
+  for (pid, sy, esp, age, bio) in cached; push!(simc, (Int(pid), Int(sy), Int(esp), Int(age), Float64(bio))); end
+  simc = DF.combine(DF.groupby(DF.subset(simc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]), :sim_agb => sum => :sim_agb)
+  injc = DF.DataFrame(plot_id=Int.(inj.plot_id), sim_year=Int.(inj.sim_year), esp=Int.(inj.eco_species_id),
+                      age=Int.(inj.age_calc), obs_agb=Float64.(inj.agb_sum), drop=Float64.(inj.disturbance_drop_pct))
+  injc = DF.combine(DF.groupby(DF.subset(injc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]),
+                    :obs_agb => sum => :obs_agb, :drop => maximum => :drop)
+  matched = DF.innerjoin(simc, injc, on=[:plot_id, :sim_year, :esp, :age])
+  P.OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && (matched = DF.filter(r -> r.drop <= 0.0, matched))
+  paired = DF.combine(DF.groupby(matched, [:plot_id, :sim_year, :esp]), :sim_agb => sum => :sim_agb, :obs_agb => sum => :obs_agb)
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DF.select(sp, [:plot_id, :eco_id]))))
   especo2sp = Dict((Int(r.eco_id), Int(r.eco_species_id)) => Int(r.species_id) for r in eachrow(unique(DF.select(sp, [:eco_id, :eco_species_id, :species_id]))))
   paired.eco = [plot2eco[p] for p in paired.plot_id]; paired.sp = [especo2sp[(e, esp)] for (e, esp) in zip(paired.eco, paired.esp)]
@@ -99,45 +119,47 @@ paired_splits = [(paired_for(sp, label), label) for (sp, label) in ((splots, "tr
 
 for EQM in MARGINS
   Δ = log1p(EQM); pct = round(Int, 100EQM)
-  rows = DF.DataFrame(split=String[], eco=String[], species=String[], n=Int[], mean_logdiff=Float64[],
+  rows = DF.DataFrame(split=String[], group=String[], species=String[], nplots=Int[], n=Int[], mean_logdiff=Float64[],
     ci_lo=Float64[], ci_hi=Float64[], pct_bias=Float64[], p_tost=Float64[], equivalent=Bool[])
   for (pr, label) in paired_splits
-    for e in sort(unique(pr.eco))
-      pe = DF.subset(pr, :eco => DF.ByRow(==(e))); econame = replace(eco_list[e], r"[^A-Za-z0-9]" => "_")
-      res = NamedTuple[]; names_ = String[]
-      for s in sort(unique(pe.sp))
-        d = DF.subset(pe, :sp => DF.ByRow(==(s)))
-        length(d.obs_agb) < 3 && continue
-        dd = log1p.(Float64.(d.sim_agb)) .- log1p.(Float64.(d.obs_agb))
-        t = tost(dd, Δ); push!(res, t); push!(names_, "$(species_list[s])  (n=$(t.n))")
-        push!(rows, (label, eco_list[e], species_list[s], t.n, t.mean, t.lo, t.hi, expm1(t.mean) * 100, t.p, t.equiv))
-      end
-      isempty(res) && continue
-      # forest plot: species rows, mean log-diff ± CI, ±Δ equivalence band
-      fig = MK.Figure(size=(760, 90 + 26 * length(res)))
-      neq = count(r -> r.equiv, res)
-      ax = MK.Axis(fig[1, 1]; xlabel="mean  log1p(sim) − log1p(obs)   (← sim low | sim high →)",
-        title="$(TAG)TOST equivalence — $label · $(eco_list[e]) — ±$(pct)% band, α=$ALPHA — $neq/$(length(res)) equivalent",
-        yticks=(1:length(res), names_))
-      MK.vspan!(ax, -Δ, Δ; color=(:seagreen, 0.10))                       # equivalence band
-      MK.vlines!(ax, [-Δ, Δ]; color=:seagreen, linestyle=:dash); MK.vlines!(ax, [0.0]; color=:gray60)
-      for (i, r) in enumerate(res)
-        col = r.equiv ? :seagreen : :firebrick
-        isnan(r.lo) || MK.lines!(ax, [r.lo, r.hi], [i, i]; color=col, linewidth=2)
-        MK.scatter!(ax, [r.mean], [i]; color=col, markersize=11)
-        MK.text!(ax, Δ * 1.05, i; text=Printf.@sprintf("%+.0f%%  p=%.3f", expm1(r.mean) * 100, r.p), align=(:left, :center), fontsize=9, color=col)
-      end
-      MK.xlims!(ax, min(-2Δ, minimum(r -> isnan(r.lo) ? r.mean : r.lo, res) * 1.1), max(3Δ, maximum(r -> isnan(r.hi) ? r.mean : r.hi, res) * 1.3))
-      out = joinpath(outdir, "tost_$(pct)pct_$(label)_$(econame).png"); MK.save(out, fig)
-      println("$label/$econame: ±$(pct)% → $neq/$(length(res)) species equivalent → $out")
+    pr.pgrp = [_panel_grp(s, e) for (s, e) in zip(pr.sp, pr.eco)]
+    grpkeys = sort(unique([(r.sp, r.pgrp) for r in eachrow(pr)]);
+                   by = k -> (-get(spabund, k[1], 0), k[1], k[2]))         # rank species by #plots; tiered cells together
+    res = NamedTuple[]; names_ = String[]
+    for (s, gp) in grpkeys
+      d = DF.subset(pr, [:sp, :pgrp] => DF.ByRow((a, b) -> a == s && b == gp))
+      length(d.obs_agb) < 3 && continue
+      dd = log1p.(Float64.(d.sim_agb)) .- log1p.(Float64.(d.obs_agb))
+      t = tost(dd, Δ); push!(res, t)
+      lbl = _is_tiered(s) ? "$(species_list[s])·$(gp)" : species_list[s]
+      push!(names_, "$(lbl)  (n=$(t.n), $(get(spabund, s, 0))p)")
+      push!(rows, (label, lbl, species_list[s], get(spabund, s, 0), t.n, t.mean, t.lo, t.hi, expm1(t.mean) * 100, t.p, t.equiv))
     end
+    isempty(res) && continue
+    # ONE forest plot per split: rows = species×tier-group (all productivities together), ranked by abundance
+    fig = MK.Figure(size=(780, 90 + 24 * length(res)))
+    neq = count(r -> r.equiv, res)
+    ax = MK.Axis(fig[1, 1]; xlabel="mean  log1p(sim) − log1p(obs)   (← sim low | sim high →)",
+      title="$(TAG)TOST equivalence — $label — ±$(pct)% band, α=$ALPHA — $neq/$(length(res)) equivalent  (species ranked by #plots)",
+      yticks=(1:length(res), names_))
+    MK.vspan!(ax, -Δ, Δ; color=(:seagreen, 0.10))                       # equivalence band
+    MK.vlines!(ax, [-Δ, Δ]; color=:seagreen, linestyle=:dash); MK.vlines!(ax, [0.0]; color=:gray60)
+    for (i, r) in enumerate(res)
+      col = r.equiv ? :seagreen : :firebrick
+      isnan(r.lo) || MK.lines!(ax, [r.lo, r.hi], [i, i]; color=col, linewidth=2)
+      MK.scatter!(ax, [r.mean], [i]; color=col, markersize=11)
+      MK.text!(ax, Δ * 1.05, i; text=Printf.@sprintf("%+.0f%%  p=%.3f", expm1(r.mean) * 100, r.p), align=(:left, :center), fontsize=9, color=col)
+    end
+    MK.xlims!(ax, min(-2Δ, minimum(r -> isnan(r.lo) ? r.mean : r.lo, res) * 1.1), max(3Δ, maximum(r -> isnan(r.hi) ? r.mean : r.hi, res) * 1.3))
+    out = joinpath(outdir, "tost_$(pct)pct_$(label).png"); MK.save(out, fig)
+    println("$label: ±$(pct)% → $neq/$(length(res)) groups equivalent → $out")
   end
-  DF.sort!(rows, [:split, :eco, :species])
+  DF.sort!(rows, [:split, DF.order(:nplots, rev=true), :group])
   csv = joinpath(outdir, "tost_sim_obs_$(pct)pct.csv")
   open(csv, "w") do io
-    println(io, "split,eco,species,n,mean_logdiff,ci_lo,ci_hi,pct_bias,p_tost,equivalent")
+    println(io, "split,group,species,nplots,n,mean_logdiff,ci_lo,ci_hi,pct_bias,p_tost,equivalent")
     for r in eachrow(rows)
-      println(io, join([r.split, r.eco, r.species, r.n, round(r.mean_logdiff, digits=4), round(r.ci_lo, digits=4),
+      println(io, join([r.split, r.group, r.species, r.nplots, r.n, round(r.mean_logdiff, digits=4), round(r.ci_lo, digits=4),
         round(r.ci_hi, digits=4), round(r.pct_bias, digits=1), round(r.p_tost, digits=4), r.equivalent], ","))
     end
   end
