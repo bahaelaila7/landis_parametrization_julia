@@ -29,14 +29,23 @@ exec: prepare
 # Assumes deps are downloaded (run `make prepare` once after cloning). Rebuild after any src/ change.
 sysimage:
 	JULIA_PKG_PRECOMPILE_AUTO=0 $(JULIA_CMD) -e 'using Pkg; Pkg.instantiate()'
-	$(JULIA_CMD) --threads=$(THREADS) -e 'using PackageCompiler; create_sysimage(["Pan"]; sysimage_path="Pan.so",precompile_execution_file="precompile_exec.jl")'
+	JULIA_NUM_THREADS=$(THREADS) $(JULIA_CMD) --threads=$(THREADS) -e 'using PackageCompiler; create_sysimage(["Pan"]; sysimage_path="Pan.so",precompile_execution_file="precompile_exec.jl")'
 
 # INCREMENTAL sysimage: bake only the (stable, heavy) DEPENDENCIES — not Pan. Pan then recompiles on top via
 # Julia's per-package cache, so editing src/ recompiles only Pan (seconds), not the whole image. Rebuild this
 # one only when the Manifest changes. The wrapper uses Pan.so if present, else Pan_deps.so.
 sysimage-deps:
 	JULIA_PKG_PRECOMPILE_AUTO=0 $(JULIA_CMD) -e 'using Pkg; Pkg.instantiate()'
-	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg, PackageCompiler; create_sysimage(collect(keys(Pkg.project().dependencies)); sysimage_path="Pan_deps.so",precompile_execution_file="precompile_exec.jl")'
+	JULIA_NUM_THREADS=$(THREADS) $(JULIA_CMD) --threads=$(THREADS) -e 'using Pkg, PackageCompiler; create_sysimage(collect(keys(Pkg.project().dependencies)); sysimage_path="Pan_deps.so",precompile_execution_file="precompile_exec.jl")'
+
+# LEAN sysimage for TRAINING (low build memory). Bakes only the fitting-critical deps — NOT the plotting stacks
+# (CairoMakie/Plots/PythonPlot), UMAP, ImageFiltering or GDAL — which is why the full/deps builds OOM on a 32 GB
+# node. Pan + Makie load from the depot cache on top (training never plots, so no Makie JIT). Produces Pan_deps.so
+# (wrapper auto-detects it). Override the list with FIT_DEPS="..." if you add fitting deps.
+FIT_DEPS ?= DuckDB DataFrames Distributions JLD2 CSV Sobol StatsBase Statistics YAML Setfield JSON3 Format Term DataStructures
+sysimage-fit:
+	JULIA_PKG_PRECOMPILE_AUTO=0 $(JULIA_CMD) -e 'using Pkg; Pkg.instantiate()'
+	JULIA_NUM_THREADS=$(THREADS) $(JULIA_CMD) --threads=$(THREADS) -e 'using PackageCompiler; create_sysimage(split("$(FIT_DEPS)"); sysimage_path="Pan_deps.so",precompile_execution_file="precompile_exec.jl")'
 
 spatial: prepare
 	$(JULIA_CMD) --threads=$(THREADS) -e 'using Pan; Pan.spatial_main()'
