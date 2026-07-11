@@ -23,6 +23,11 @@ fi
 
 export GDAL_DRIVER_PATH=$(cat "$CACHE_FILE")
 
+# Pin OpenBLAS to 1 thread: the only linalg is tiny per-offspring CMA-ES covariance eigendecomps (a few params
+# each). Multi-threaded BLAS spawns all cores per call → catastrophic oversubscription with many Julia threads.
+# Single-thread BLAS is far faster for these small matrices. Override by exporting OPENBLAS_NUM_THREADS yourself.
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+
 SYSIMAGE_ARG=""
 if [[ -f "${PROJECT_PATH}/Pan.so" ]]; then
     SYSIMAGE_ARG="--sysimage=${PROJECT_PATH}/Pan.so"

@@ -19,6 +19,7 @@ using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCI
 import .Data as Data
 import .Spatial
 import Dates
+import LinearAlgebra
 import CSV
 
 import Random
@@ -906,6 +907,10 @@ function parametrize(; cohorts_db_path::String,
   dominance_species::String="exact",
   rng::Random.AbstractRNG)
 
+  # Pin BLAS to 1 thread: the search does hundreds of tiny per-offspring covariance eigendecomps per gen —
+  # multi-threaded OpenBLAS spawns all cores per call and oversubscribes catastrophically at high --threads.
+  LinearAlgebra.BLAS.set_num_threads(1)
+  @info "search starting" julia_threads=Threads.nthreads() blas_threads=LinearAlgebra.BLAS.get_num_threads()
   mkpath(output_dir)
   # [5, 10, 20, 40, 60, 80]
   #bins_idx = vcat(5:5:30, 40:10:80, 100:20:160)
@@ -4974,9 +4979,12 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   _n_folds > 1 && (_output_dir = joinpath(_output_dir, "fold_$(_fold_index)"))
   isdir(_output_dir) || mkpath(_output_dir)
 
+  # DB path: env FIADB wins (portable across machines — set it instead of editing the yaml), else the yaml value.
+  _db_path = get(ENV, "FIADB", "") != "" ? ENV["FIADB"] : String(get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"))
+
   # Fields shared by parametrize, plot_sample, and plot_sample_sobol
   common_kw = (
-    cohorts_db_path=get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"),
+    cohorts_db_path=_db_path,
     filter_eco_field=get_cfg("filter_eco_field", "epa_l3"),
     eco_field=get_cfg("eco_field", "epa_l3"),
     tablename=get_cfg("tablename", "data_eco_cohorts"),
@@ -5032,7 +5040,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   MOCMAES.USE_NDS[] && @info "MO-CMA-ES offspring ranking: TRUE NSGA-II non-dominated sorting (Pareto fronts + crowding)"
   BiomassSuccessionPlugin.FIXED_LONGEVITY[] = (let v = get_cfg("fix_longevity", nothing); isnothing(v) ? nothing : Float64(v) end)
   BiomassSuccessionPlugin.LONGEVITY_TABLE[] = Bool(get_cfg("longevity_from_data", false)) ?
-    _load_longevity_table(String(get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"))) : nothing
+    _load_longevity_table(_db_path) : nothing
   # Per-species LONGEVITY overrides from yaml (`longevity_overrides: {PIEL: 275}`) — applied on top of the
   # data table so hand corrections don't require rewriting the read-only species_longevity_ref DB table.
   let ov = get_cfg("longevity_overrides", nothing)
