@@ -1617,6 +1617,25 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       eco3_site_agb = zeros(FloatType, length(eco_species_ids))
       eco3_obs = zeros(Int, length(eco_species_ids))
     end
+    if search_tier == 3
+      # Allocation-free tier-3 loss path: per-thread per-eco accumulators (merged once after the year loop) +
+      # per-thread scratch, so calculate_site_loss2_acc! allocates nothing per site/species (kills GC pressure at
+      # high thread counts). Tier 5 keeps the per-site SiteLoss path above; only tier 3 uses these.
+      nt = Threads.maxthreadid()
+      eco3_w_t = [[zeros(FloatType, n_species) for _ in eachindex(eco_species_ids)] for _ in 1:nt]
+      eco3_agb_t = [[zeros(FloatType, n_species) for _ in eachindex(eco_species_ids)] for _ in 1:nt]
+      eco3_site_agb_t = [zeros(FloatType, length(eco_species_ids)) for _ in 1:nt]
+      eco3_obs_t = [zeros(Int, length(eco_species_ids)) for _ in 1:nt]
+      max_cohorts_scratch3 = Int(maximum(soa.refs.cohort[i+1] - soa.refs.cohort[i] for i in 1:soa.n))
+      max_age_scratch3 = max_sim_year + max(1, length(loss_params.smoothing_weights) >> 1) + 5
+      max_eco_nsp3 = maximum(length(e) for e in eco_species_ids)
+      nbins3 = length(loss_params.age_bins.bins_idx) + (loss_params.age_bins.last_bin_open ? 1 : 0)
+      perm_t3 = [Vector{Int}(undef, max_cohorts_scratch3) for _ in 1:nt]
+      ages_t3 = [Vector{FloatType}(undef, max_age_scratch3) for _ in 1:nt]
+      insite_t3 = [Vector{Bool}(undef, max_eco_nsp3) for _ in 1:nt]
+      cdf_t3 = [Vector{FloatType}(undef, nbins3) for _ in 1:nt]
+      agb_bins_t3 = [Vector{FloatType}(undef, nbins3) for _ in 1:nt]
+    end
     for current_sim_year in starting_sim_year:max_sim_year
       #println("\ttimestep $(t)")
       PanCore.process_plugin!(soa, BiomassSuccessionPlugin.BiomassSuccession, current_sim_year; ctx=ctx.BiomassSuccession)
@@ -1775,9 +1794,11 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           eco3_obs[eco_id] += 1
         end
       else
-        sites_results = Vector{PU.SiteLoss}(undef, soa.n)
+        # tier 3: accumulate each site's per-species (W, AGB) loss straight into the calling thread's per-eco
+        # accumulators via calculate_site_loss2_acc! — no per-site SiteLoss, no per-species temporaries.
         Threads.@threads :static for i in 1:soa.n
           @inbounds begin
+            tid = Threads.threadid()
             site = getsite(soa, i)
             !site.active && continue
             spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
@@ -1788,8 +1809,12 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
                 yd = get(exclusion_dict, current_sim_year, nothing)
                 yd === nothing || (excluded = get(yd, i, nothing))
               end
-              sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug, excluded=excluded)
-              sites_results[i] = sloss
+              eco_id = Int(site.eco_id)
+              sag = PU.calculate_site_loss2_acc!(eco3_w_t[tid][eco_id], eco3_agb_t[tid][eco_id], current_sim_year, site,
+                      n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params,
+                      perm_t3[tid], ages_t3[tid], insite_t3[tid], cdf_t3[tid], agb_bins_t3[tid]; excluded=excluded)
+              eco3_site_agb_t[tid][eco_id] += sag
+              eco3_obs_t[tid][eco_id] += 1
               for j in 1:site.live
                 push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
               end
@@ -1798,19 +1823,6 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
               site.active = false
             end
           end
-        end
-        year_results_no_missing = PU.skipundef(sites_results)
-        if length(year_results_no_missing) > 0
-          years_results[current_sim_year+1] = sum(year_results_no_missing)
-        end
-        for i in 1:soa.n
-          isassigned(sites_results, i) || continue
-          eco_id = Int(getsite(soa, i).eco_id)
-          sl = sites_results[i]
-          eco3_w[eco_id] .+= sl.sp_w_loss
-          eco3_agb[eco_id] .+= sl.sp_agb_loss
-          eco3_site_agb[eco_id] += sl.site_agb_loss
-          eco3_obs[eco_id] += 1
         end
       end
     end
@@ -1855,9 +1867,16 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       run_result = sum(PU.skipundef(years_results)) + sum(eco_losses_4)
       eco_losses = vcat(eco_losses_3, eco_losses_4)
     else
-      # Per-ecoregion breakdown (num_sites mirrors num_obs here, as in the scalar tier-3 sum).
+      # tier 3: merge per-thread per-eco accumulators, then build the per-eco breakdown. run_result is the sum
+      # of the per-eco SiteLosses (= the same total the old per-year `sum(years_results)` produced, regrouped).
+      for tid in 1:Threads.maxthreadid(), e in eachindex(eco_species_ids)
+        eco3_w[e] .+= eco3_w_t[tid][e]
+        eco3_agb[e] .+= eco3_agb_t[tid][e]
+        eco3_site_agb[e] += eco3_site_agb_t[tid][e]
+        eco3_obs[e] += eco3_obs_t[tid][e]
+      end
       eco_losses = [PU.SiteLoss(sp_w_loss=eco3_w[e], sp_agb_loss=eco3_agb[e], site_agb_loss=eco3_site_agb[e], num_sites=eco3_obs[e], num_obs=eco3_obs[e]) for e in eachindex(eco_species_ids)]
-      run_result = sum(PU.skipundef(years_results))
+      run_result = sum(eco_losses)
     end
     #@assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
     cached_sites_state = [cohort for cohorts in (cache_preinject ? preinject_data : sites_data) for cohort in cohorts]
@@ -3068,6 +3087,7 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
     end
   end
   val_sim_sample = nothing
+  _losses_payload = nothing            # snapshot of per-new-best losses; the DB write is offloaded to the writer
   if is_new_best
     iter = state.best_iteration
     total = Float64(state.representative.fx.aggregate)
@@ -3095,21 +3115,18 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
         val_sim_sample = gio.n_output_plots > 0 ? _filter_cached_to_df(_c, gio.sampled_ids_val) : nothing
       catch e; @warn "val fit_params failed" exception=(e, catch_backtrace()); end
     end
-    let buf = IOBuffer()
-      Serialization.serialize(buf, state.representative.x)
-      DuckDB.execute(gio.losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?, ?)", [iter, gb_run.num_sites, gb_run.num_obs, total, length(state.archive), take!(buf)])
-    end
-    for (eco_id, eco_loss) in enumerate(gb_eco)
-      eco_name = _eco_name(gio.eco_list, eco_id)
-      DuckDB.execute(gio.losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, convert(Float64, PU.get_total_loss(eco_loss))])
-      n = max(1, eco_loss.num_sites)
-      for gsp in 1:gio.n_species
-        eco_loss.sp_w_loss[gsp] == 0f0 && continue
-        DuckDB.execute(gio.losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, gio.species_list[gsp], eco_loss.sp_w_loss[gsp]/n, eco_loss.sp_agb_loss[gsp]/n])
-      end
-    end
+    # snapshot the losses as plain values on the MAIN thread; the batched DB write runs on the writer thread
+    _blob = let buf = IOBuffer(); Serialization.serialize(buf, state.representative.x); take!(buf) end
+    _losses_payload = (iter=iter, ns=gb_run.num_sites, no=gb_run.num_obs, total=total, arch=length(state.archive), blob=_blob,
+      eco=[(name=_eco_name(gio.eco_list, eco_id), ns=el.num_sites, no=el.num_obs, tot=convert(Float64, PU.get_total_loss(el)),
+            sp=[(s=gio.species_list[gsp], w=el.sp_w_loss[gsp]/max(1, el.num_sites), a=el.sp_agb_loss[gsp]/max(1, el.num_sites))
+                for gsp in 1:gio.n_species if el.sp_w_loss[gsp] != 0f0])
+           for (eco_id, el) in enumerate(gb_eco)])
   end
-  println(gio.metrics_io, string(state.i, ",", Float64(state.representative.fx.aggregate), ",", isfinite(gio.rep_val_loss) ? gio.rep_val_loss : "", ",", pop_size, ",", length(state.archive))); flush(gio.metrics_io)
+  # OFFLOAD to the async writer: metrics line (every gen) + BATCHED losses insert (one transaction, new-best only).
+  # No fsync on the search's critical path; drained/flushed on normal exit AND interrupt by stop_writer's finally.
+  _mline = string(state.i, ",", Float64(state.representative.fx.aggregate), ",", isfinite(gio.rep_val_loss) ? gio.rep_val_loss : "", ",", pop_size, ",", length(state.archive))
+  put!(gio.writer_ch, MOLossesJob(gio.losses_db, gio.metrics_io, _mline, _losses_payload))
   cached_sites_state_df = DataFrame(gb_cached, [:plot_id, :sim_year, :species_id, :age, :agb])
   sim_sample = (is_new_best && gio.n_output_plots > 0) ? _filter_cached_to_df(gb_cached, gio.sampled_ids) : nothing
   # The async writer above persists search_state@N + best_params@N whenever save_ckpt is set, and
@@ -4336,15 +4353,48 @@ end
 @inline _mo_val_loss(val_result, eco_species_ids)::Float64 =
   _mo_aggregate(_mo_objectives(val_result[3], eco_species_ids), val_result[1])
 
+# Per-generation losses/metrics write, OFFLOADED to the writer thread so the search never blocks on I/O.
+# `payload` (a NamedTuple, only on a new best) is inserted into losses.duckdb in ONE transaction — a single
+# fsync instead of ~1+n_eco+n_eco·n_species autocommits (the cluster-vs-laptop slowdown). `metrics_line` is
+# written every generation. Drained/flushed on normal exit AND interrupt via stop_writer's finally.
+struct MOLossesJob
+  db::Any
+  io::IO
+  metrics_line::String
+  payload::Any            # NamedTuple(iter, ns, no, total, arch, blob, eco[...]) on new-best; else nothing
+end
+
+function _mo_write_losses!(job::MOLossesJob)
+  p = job.payload
+  if p !== nothing
+    try
+      DuckDB.execute(job.db, "BEGIN TRANSACTION")
+      DuckDB.execute(job.db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?, ?)", [p.iter, p.ns, p.no, p.total, p.arch, p.blob])
+      for er in p.eco
+        DuckDB.execute(job.db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [p.iter, er.name, er.ns, er.no, er.tot])
+        for sr in er.sp
+          DuckDB.execute(job.db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [p.iter, er.name, sr.s, sr.w, sr.a])
+        end
+      end
+      DuckDB.execute(job.db, "COMMIT")
+    catch e
+      try; DuckDB.execute(job.db, "ROLLBACK"); catch; end
+      @error "mo_writer: losses insert failed" exception = (e, catch_backtrace())
+    end
+  end
+  try; println(job.io, job.metrics_line); flush(job.io); catch e; @error "mo_writer: metrics write failed" exception = (e, catch_backtrace()); end
+end
+
 # Background writer for MOLBSA: checkpoints the full state (archive included) and
 # the representative params, and generates plots, off the search thread. Mirrors
 # start_writer but reads `state.representative` instead of `state.best`.
 function start_mo_writer(::Type{State}, output_dir::AbstractString; buffer_size::Int=8) where {State}
-  ch = Channel{Union{WriterJob{State},Symbol}}(buffer_size)
+  ch = Channel{Union{WriterJob{State},MOLossesJob,Symbol}}(buffer_size)
   task = Threads.@spawn begin
     try
       for job in ch
         job === STOP && break
+        job isa MOLossesJob && (_mo_write_losses!(job); continue)   # batched losses + metrics, off the search thread
         state = job.state
         if job.save_ckpt
           try
