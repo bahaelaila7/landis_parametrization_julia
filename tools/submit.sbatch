@@ -20,7 +20,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=72              # candidate mode (PAN_PARALLEL below) is NUMA-local → scales past one socket:
 # try 64 then 128 and pick the best per-gen time. (soa mode is bandwidth/NUMA-bound and typically plateaus ~24–32.)
-#SBATCH --mem=32G                       # node has 764 GB; candidate mode allocates 1 work-SoA per thread (+val) —
+#SBATCH --mem=24G                       # node has 764 GB; candidate mode allocates 1 work-SoA per thread (+val) —
 # a few hundred MB at 128 threads on top of ~3.2 GiB peak RSS. Bump if you enable ramdisk-output.
 #SBATCH --time=7-00:00:00
 #SBATCH --constraint=Genoa              # ONE arch, matching your pre-warmed depot (pkgimages are CPU-arch tagged)
