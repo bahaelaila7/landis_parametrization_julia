@@ -3033,6 +3033,9 @@ _mo_archive_sig(state) = hash(sort!([collect(c.fx.objectives) for c in state.arc
 _vkey(c) = Tuple(round.(Float64.(collect(c.fx.objectives)), digits=10))          # dedup archive members by train objectives
 _twt(c) = Float64(sum(@view c.fx.objectives[1:2:end]))                            # train W-half (Σ Wasserstein objectives)
 _tat(c) = Float64(sum(@view c.fx.objectives[2:2:end]))                            # train AGB-half (Σ AGB objectives)
+# val_cache key = the (Σ train-W, Σ train-AGB) pair — which IS what's persisted (cv_val_cache's first two columns)
+# and what analyze_run matches on, so the cache round-trips through the CSV and can be reloaded on resume.
+_rkey(c) = (round(_twt(c), digits=10), round(_tat(c), digits=10))
 
 mutable struct MOGenIO
   output_dir::String
@@ -3068,6 +3071,21 @@ _persist_val_cache!(gio::MOGenIO) = try
     DataFrame(A_W_train=[v[1] for v in vs], A_AGB_train=[v[2] for v in vs], A_W=[v[3] for v in vs], A_AGB=[v[4] for v in vs]))
 catch e; @warn "persist val cache failed" exception=(e, catch_backtrace()); end
 
+# Reload a persisted cv_val_cache.csv into the in-memory cache on RESUME (else _persist_val_cache!'s overwrite would
+# drop every pre-resume entry → the val curve would only start at the resume generation). Keyed like _rkey.
+function _load_val_cache(output_dir)
+  d = Dict{Any,NTuple{4,Float64}}(); f = joinpath(output_dir, "cv_val_cache.csv")
+  isfile(f) || return d
+  try
+    for r in CSV.File(f)
+      d[(round(Float64(r.A_W_train), digits=10), round(Float64(r.A_AGB_train), digits=10))] =
+        (Float64(r.A_W_train), Float64(r.A_AGB_train), Float64(r.A_W), Float64(r.A_AGB))
+    end
+    @info "Loaded $(length(d)) val-cache entries from cv_val_cache.csv (resume)"
+  catch e; @warn "load val cache failed" exception=(e, catch_backtrace()); end
+  d
+end
+
 # Open metrics.csv (append on resume), seed rep val-loss + best_val_params@0 from the initial representative,
 # and stamp the initial archive signature. `state` is the fully-built search_state; `val_fit` may be nothing.
 function mo_gen_open(state; output_dir, writer_ch, losses_db, resuming::Bool, splots, eco_list, species_list,
@@ -3078,7 +3096,7 @@ function mo_gen_open(state; output_dir, writer_ch, losses_db, resuming::Bool, sp
   gio = MOGenIO(output_dir, writer_ch, losses_db, metrics_io, splots, eco_list, species_list, eco_species_ids,
     n_species, site_sim_years, loss_params, no_establishment, n_reps, rng, have_val, n_output_plots,
     sampled_ids, sampled_ids_val, emp_sample, emp_sample_val, val_fit, _mo_archive_sig(state),
-    Dict{Any,NTuple{4,Float64}}(), Inf, Inf)
+    resuming ? _load_val_cache(output_dir) : Dict{Any,NTuple{4,Float64}}(), Inf, Inf)   # RESUME: keep the pre-resume val cache
   if have_val && val_fit !== nothing
     try
       _r, _c, _el = val_fit(state.representative.x)
@@ -3102,11 +3120,11 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
   save_ckpt && (gio.last_ckpt_sig = _sig)
   archive_changed = save_ckpt
   if gio.have_val && STORE_VAL_OBJ[] && (archive_changed || is_new_best)   # val-score any NEW archive members
-    _newc = [c for c in collect(state.archive) if !haskey(gio.val_cache, _vkey(c))]
+    _newc = [c for c in collect(state.archive) if !haskey(gio.val_cache, _rkey(c))]
     _vscore = c -> try
         _r, _c, _el = gio.val_fit(c.x)
         _o = _mo_objectives(_el, gio.eco_species_ids)
-        (_vkey(c), (_twt(c), _tat(c), Float64(sum(@view _o[1:2:end])), Float64(sum(@view _o[2:2:end]))))
+        (_rkey(c), (_twt(c), _tat(c), Float64(sum(@view _o[1:2:end])), Float64(sum(@view _o[2:2:end]))))
       catch e; @warn "val score failed" exception=(e, catch_backtrace()); nothing; end
     if PARALLEL_MODE[] == :candidate      # score new members concurrently (each val_fit is sites-serial); store after
       _vout = Vector{Any}(undef, length(_newc))
@@ -3141,7 +3159,7 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
         # The representative is an archive member, so STORE_VAL_OBJ already val-scored it into val_cache. Under
         # cell-norm the aggregate is Σobjs = val_W + val_AGB, so reuse the cached score and SKIP the redundant sim —
         # unless we need the val plot sample (n_output_plots>0) or can't reconstruct (non-cell-norm): then re-sim.
-        _rk = _vkey(state.representative)
+        _rk = _rkey(state.representative)
         if PU.CELL_NORM[] && gio.n_output_plots == 0 && haskey(gio.val_cache, _rk)
           _cv = gio.val_cache[_rk]; gio.rep_val_loss = _cv[3] + _cv[4]
           @info "Val loss @ gen $iter | loss=$(gio.rep_val_loss) (cached)"

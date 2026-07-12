@@ -7,7 +7,7 @@
 #     (2) convergence   — best-aggregate & area-under-front vs generation                 → convergence_{train,val}.png/.csv
 #     (3) front sweep    — p25/p50/p75/p100 (by front quality) + last-gen + p101 union     → sweep_fronts_{train,val}.png + sweep_summary_{train,val}.csv
 #     (4) p101 positions — extreme-W, extreme-AGB, knee, median, best-aggregate            → positions_{train,val}.csv
-#     (7) param tables   — candidate×(species,tier-cell)×param + wide (species,cell)×<param>_mean/_std over p101 → params_{train,val}.csv + param_summary_{train,val}.csv
+#     (7) param tables   — candidate×(species,tier-cell)×param + wide (species,cell)×<param>_mean/_cv over p101 → params_{train,val}.csv + param_summary_{train,val}.csv
 #   Phase 2 (later, simulation): items 5,6 (scatter/sMAPE/TOST for positions; p101 TOST front) + optional --test.
 #
 #   Run:  ./julia_gdal.sh --project=. tools/analyze_run.jl <run_dir> [config.yml] [--warmup N] [--sim] [--all] [--outsub DIR]
@@ -269,14 +269,16 @@ function write_param_tables(split, cands, cand_id, pf)
   end
   df = DF.sort(DF.DataFrame(rows), [:candidate, :species, :cell])
   CSV.write(joinpath(outdir, "params_$split.csv"), df)
-  # summary — same (species, cell) row layout as params_$split, wide <param>_mean/<param>_std over the p101 candidates
+  # summary — same (species, cell) row layout as params_$split, wide <param>_mean/<param>_cv over the p101 candidates
+  # (cv = coefficient of variation = std/|mean|·100%; 0 when mean is 0 or <2 candidates)
   srows = NamedTuple[]
   for gdf in DF.groupby(df, [:species, :cell])
     nt = (species=gdf.species[1], cell=gdf.cell[1], n_candidates=DF.nrow(gdf))
     for pr in PARAMS
       v = filter(!isnan, Float64.(gdf[!, pr]))
       m = isempty(v) ? NaN : ST.mean(v); s = length(v) > 1 ? ST.std(v) : 0.0
-      nt = merge(nt, NamedTuple{(Symbol(pr * "_mean"), Symbol(pr * "_std"))}((m, s)))
+      cv = (isnan(m) || m == 0) ? 0.0 : 100.0 * s / abs(m)
+      nt = merge(nt, NamedTuple{(Symbol(pr * "_mean"), Symbol(pr * "_cv"))}((m, cv)))
     end
     push!(srows, nt)
   end
@@ -372,6 +374,13 @@ if do_sim
     gid_of = Dict(ckey(R.p101[i][1]) => get(key2gid, ckey(R.p101[i][1]), 0) for i in 1:length(R.p101))
     evi = [i for i in 1:length(R.p101) if get(gid_of, ckey(R.p101[i][1]), 0) != 0 && haskey(gid_params, gid_of[ckey(R.p101[i][1])])]
     isempty(evi) && (println("  [$split] no evaluated candidates for tost_front"); return)
+    # per-point label = candidate number (folder cand<gid>) + its designated position(s)
+    _abbr = Dict("extreme_w"=>"eW", "extreme_agb"=>"eAGB", "knee"=>"knee", "median"=>"med", "best_aggregate"=>"best")
+    pos_of = Dict{Int,String}()
+    for r in DF.eachrow(R.positions)
+      a = get(_abbr, r.position, r.position); pos_of[r.p101_id] = haskey(pos_of, r.p101_id) ? pos_of[r.p101_id] * "+" * a : a
+    end
+    lbl_of = Dict(i => "c$(gid_of[ckey(R.p101[i][1])])" * (haskey(pos_of, i) ? " " * pos_of[i] : "") for i in evi)
     ntot = 0; countpass = Dict{Tuple{Int,Int},Int}()   # (p101_idx, pct) → #species equivalent
     for i in evi
       gid = gid_of[ckey(R.p101[i][1])]
@@ -391,6 +400,9 @@ if do_sim
       MK.lines!(ax, xs[o], ys[o]; color=(:gray, 0.35), linewidth=1)            # full p101 front (context)
       ex = [xs[i] for i in evi]; ey = [ys[i] for i in evi]; cs = [get(countpass, (i, pct), 0) for i in evi]
       sc = MK.scatter!(ax, ex, ey; color=cs, colormap=:viridis, colorrange=(0, ntot), markersize=15, strokecolor=:black, strokewidth=0.5)
+      MK.text!(ax, ex, ey; text=[lbl_of[i] for i in evi], fontsize=9, align=(:left, :bottom), offset=(6, 4), color=:black)
+      xr = maximum(xs) - minimum(xs); xr = xr > 0 ? xr : 1.0                 # right padding so the rightmost label isn't clipped
+      MK.xlims!(ax, minimum(xs) - 0.05xr, maximum(xs) + 0.22xr)
     end
     sc !== nothing && MK.Colorbar(fig[1:2, 3], sc; label="# species passing ±band TOST ($split)")
     MK.save(joinpath(outdir, "tost_front_$split.png"), fig)
