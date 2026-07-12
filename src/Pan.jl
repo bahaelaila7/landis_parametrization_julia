@@ -3175,7 +3175,9 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
   _mline = string(state.i, ",", Float64(state.representative.fx.aggregate), ",", isfinite(gio.rep_val_loss) ? gio.rep_val_loss : "", ",", pop_size, ",", length(state.archive))
   _lossjob = MOLossesJob(gio.losses_db, gio.metrics_io, _mline, _losses_payload)
   if PAN_TIMING[]; _tio = time_ns(); put!(gio.writer_ch, _lossjob); _tm_io[] += time_ns() - _tio; else; put!(gio.writer_ch, _lossjob); end
-  cached_sites_state_df = DataFrame(gb_cached, [:plot_id, :sim_year, :species_id, :age, :agb])
+  cached_sites_state_df = gb_cached === nothing ?    # nothing when n_output_plots==0 (candidate mode skips the best re-sim); the MO writer never reads this field anyway
+    DataFrame(plot_id=Int[], sim_year=Int[], species_id=Int[], age=Int[], agb=Float64[]) :
+    DataFrame(gb_cached, [:plot_id, :sim_year, :species_id, :age, :agb])
   sim_sample = (is_new_best && gio.n_output_plots > 0) ? _filter_cached_to_df(gb_cached, gio.sampled_ids) : nothing
   # The async writer above persists search_state@N + best_params@N whenever save_ckpt is set, and
   # save_ckpt == archive_changed, so EVERY archive-changed state is already saved by the writer. (A former
@@ -3655,6 +3657,7 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
       _t_ask = time_ns() - _tg
       off_fxs = Vector{MOLBSA.MOFitness}(undef, igel_mu)
       off_params = Vector{typeof(bio_params)}(undef, igel_mu)
+      off_run = Vector{Any}(undef, igel_mu); off_eco = Vector{Any}(undef, igel_mu)   # retained per-candidate loss/eco (cheap) → gen-best needs no serial re-sim
       gen_best_agg = Inf; local gb_run, gb_eco, gb_cached, gb_idx
       _te = time_ns()
       if PARALLEL_MODE[] == :candidate
@@ -3666,15 +3669,16 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
           Threads.@threads :static for k in 1:igel_mu
             p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
             off_params[k] = p
-            off_fxs[k] = _fitness(_run(p; ws=_work_soa_t[Threads.threadid()]))[1]
+            fx_k, run_k, eco_k = _fitness(_run(p; ws=_work_soa_t[Threads.threadid()]))
+            off_fxs[k] = fx_k; off_run[k] = run_k; off_eco[k] = eco_k   # keep the batch's run/eco (self-contained loss structs; no SoA aliasing)
           end
         finally; PU.SCALES_LOCKED[] = false; end
         evals_done += igel_mu
         for k in 1:igel_mu                              # serial best-pick (gen argmin aggregate)
           off_fxs[k].aggregate < gen_best_agg && (gen_best_agg = off_fxs[k].aggregate; gb_idx = k)
         end
-        _bb = _run(off_params[gb_idx]; ws=_work_soa_t[1])   # re-run best ONCE for gb_* (deterministic, sites-serial)
-        _, gb_run, gb_eco = _fitness(_bb); gb_cached = _median_rep_cached(_bb)
+        gb_run = off_run[gb_idx]; gb_eco = off_eco[gb_idx]  # already computed in the parallel batch (identical to a re-sim: fixed seeds) — no serial full-sim
+        gb_cached = n_output_plots > 0 ? _median_rep_cached(_run(off_params[gb_idx]; ws=_work_soa_t[1])) : nothing  # cohort cache only feeds output plots; unused otherwise
       else
         for k in 1:igel_mu                              # SoA mode: serial candidates, sites parallel (fit_params threads)
           p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
