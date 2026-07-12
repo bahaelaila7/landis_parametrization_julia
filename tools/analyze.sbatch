@@ -23,6 +23,8 @@
 #SBATCH --constraint=Genoa              # match the pre-warmed depot arch (pkgimages are CPU-arch tagged)
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
+#SBATCH --mail-user=bma09868@uga.edu    # Where to send mail
+#SBATCH --mail-type=FAIL                 # Mail events (BEGIN, END, FAIL, ALL)
 
 set -uo pipefail
 

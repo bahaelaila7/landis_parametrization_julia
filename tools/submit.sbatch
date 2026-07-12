@@ -28,6 +28,8 @@
 #SBATCH --requeue                       # auto-resume after preemption (runner continues from the latest checkpoint)
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
+#SBATCH --mail-user=bma09868@uga.edu    # Where to send mail
+#SBATCH --mail-type=END,FAIL                 # Mail events (BEGIN, END, FAIL, ALL)
 
 set -uo pipefail
 
