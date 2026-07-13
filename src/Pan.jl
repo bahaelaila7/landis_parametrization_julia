@@ -3662,9 +3662,12 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
 
   evals_done = search_state.n_evals
   est_gens = max(1, cld(TRIALS - evals_done, igel_mu))
+  done_gens = isnothing(resume_from) ? 0 : search_state.i    # gens already completed (search_state.i == checkpoint/metrics counter)
+  total_gens = done_gens + est_gens                          # size the bar to the WHOLE run so resume continues the counter/bar
   try
     _first_gen = true
-    TProgress.@track for _gen in 1:est_gens
+    TProgress.@track for _gen in 1:total_gens                # _gen = ABSOLUTE generation number
+      _gen <= done_gens && continue                          # RESUME: fast-skip completed gens (bar jumps to the resumed position, then continues)
       evals_done >= TRIALS && break
       if PAN_TIMING[]
         _first_gen && (println("[timing] startup→first gen: $(_tsec(time_ns()-_tm_start[]))s"); _first_gen = false)
