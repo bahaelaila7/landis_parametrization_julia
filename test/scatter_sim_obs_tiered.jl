@@ -297,9 +297,10 @@ function make_scatter_B(sp, label)
   end
 end
 
-make_scatter(splots, "train")          # Sim A — exact-cohort paired
-make_scatter(splots_val, "val")
-(!isnothing(splots_test) && get(ENV, "PAN_EVAL_TEST", "0") == "1") && make_scatter(splots_test, "test")   # 3-way test: held out unless PAN_EVAL_TEST=1
+_only_test = get(ENV, "PAN_ONLY_TEST", "0") == "1"     # --test mode: skip train/val, evaluate ONLY the held-out test split
+_only_test || make_scatter(splots, "train")          # Sim A — exact-cohort paired
+_only_test || make_scatter(splots_val, "val")
+(!isnothing(splots_test) && (_only_test || get(ENV, "PAN_EVAL_TEST", "0") == "1")) && make_scatter(splots_test, "test")   # 3-way test: held out unless PAN_EVAL_TEST/PAN_ONLY_TEST
 let dm = g("dual_mode", "off")          # Sim B — age-bin paired (only for dual runs)
   if dm === true || (dm isa AbstractString && lowercase(dm) in ("joint", "b"))
     make_scatter_B(splots, "train"); make_scatter_B(splots_val, "val")

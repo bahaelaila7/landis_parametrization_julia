@@ -889,6 +889,8 @@ function parametrize(; cohorts_db_path::String,
   igel_niche_radius::Float64=0.0,
   igel_reseed_sigma::Float64=0.0,
   igel_maturity::Int=0,
+  igel_seed_maturity::Bool=false,   # igelmo phase-1: shield the μ seeds for `igel_maturity` gens before they compete
+  igel_freeze_seed_growth::Bool=false,   # igelmo: each seed lineage keeps its own frozen {D,S,B_MAX,ANPP_MAX} (needs fix_growth + seeds)
   cc_group_size::Int=2,
   cc_spec_gens::Int=20,
   cc_integ_gens::Int=20,
@@ -1144,7 +1146,7 @@ function parametrize(; cohorts_db_path::String,
   cmaes_kw = search_mode == "molbsa" ? (archive_cap=cmaes_archive_cap, seed_archive_from=seed_archive_from) :
              search_mode == "cmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, ipop=ipop, ipop_stagnation=ipop_stagnation, ipop_max_barren_restarts=ipop_max_barren_restarts, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
              search_mode == "mocmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmaes_warmstart_seeds=cmaes_warmstart_seeds, ipop=ipop, ipop_stagnation=ipop_stagnation, ipop_max_barren_restarts=ipop_max_barren_restarts, archive_cap=cmaes_archive_cap, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov, seed_archive_from=seed_archive_from) :
-             search_mode == "igelmo" ? (archive_cap=cmaes_archive_cap, igel_mu=igel_mu, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity, single_cov=cmaes_single_cov) :
+             search_mode == "igelmo" ? (archive_cap=cmaes_archive_cap, igel_mu=igel_mu, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity, igel_seed_maturity=igel_seed_maturity, igel_freeze_seed_growth=igel_freeze_seed_growth, single_cov=cmaes_single_cov) :
              search_mode == "ccigel" ? (archive_cap=cmaes_archive_cap, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity, single_cov=cmaes_single_cov, cc_group_size=cc_group_size, cc_spec_gens=cc_spec_gens, cc_integ_gens=cc_integ_gens, cc_cycles=cc_cycles, cc_fix_others=cc_fix_others) :
              search_mode == "nsga2" ? (archive_cap=cmaes_archive_cap, nsga2_pop=nsga2_pop, nsga2_offspring=nsga2_offspring, nsga2_eta_c=nsga2_eta_c, nsga2_eta_m=nsga2_eta_m, nsga2_pc=nsga2_pc, nsga2_pm=nsga2_pm, sobol_init=nsga2_sobol_init) :
              search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed, balanced_quality=balanced_quality, cmame_mo_rank=cmame_mo_rank, archive_by_sp=archive_by_sp, bounds_by_sobol=bounds_by_sobol, top_seeds=top_seeds, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
@@ -3073,16 +3075,26 @@ catch e; @warn "persist val cache failed" exception=(e, catch_backtrace()); end
 
 # Reload a persisted cv_val_cache.csv into the in-memory cache on RESUME (else _persist_val_cache!'s overwrite would
 # drop every pre-resume entry → the val curve would only start at the resume generation). Keyed like _rkey.
-function _load_val_cache(output_dir)
+function _load_val_cache(output_dir, losses_db=nothing)
   d = Dict{Any,NTuple{4,Float64}}(); f = joinpath(output_dir, "cv_val_cache.csv")
-  isfile(f) || return d
-  try
-    for r in CSV.File(f)
-      d[(round(Float64(r.A_W_train), digits=10), round(Float64(r.A_AGB_train), digits=10))] =
-        (Float64(r.A_W_train), Float64(r.A_AGB_train), Float64(r.A_W), Float64(r.A_AGB))
-    end
-    @info "Loaded $(length(d)) val-cache entries from cv_val_cache.csv (resume)"
-  catch e; @warn "load val cache failed" exception=(e, catch_backtrace()); end
+  if isfile(f)
+    try
+      for r in CSV.File(f)
+        d[(round(Float64(r.A_W_train), digits=10), round(Float64(r.A_AGB_train), digits=10))] =
+          (Float64(r.A_W_train), Float64(r.A_AGB_train), Float64(r.A_W), Float64(r.A_AGB))
+      end
+      @info "Loaded $(length(d)) val-cache entries from cv_val_cache.csv (resume)"
+    catch e; @warn "load val cache failed" exception=(e, catch_backtrace()); end
+  end
+  if isempty(d) && losses_db !== nothing       # CSV missing/empty → recover from the losses.duckdb mirror
+    try
+      for r in DuckDB.execute(losses_db, "SELECT A_W_train, A_AGB_train, A_W, A_AGB FROM val_cache")
+        d[(round(Float64(r.A_W_train), digits=10), round(Float64(r.A_AGB_train), digits=10))] =
+          (Float64(r.A_W_train), Float64(r.A_AGB_train), Float64(r.A_W), Float64(r.A_AGB))
+      end
+      isempty(d) || @info "Recovered $(length(d)) val-cache entries from losses.duckdb (cv_val_cache.csv absent)"
+    catch e; @warn "val_cache DB recover failed (table may not exist yet)" exception=(e, catch_backtrace()); end
+  end
   d
 end
 
@@ -3096,7 +3108,7 @@ function mo_gen_open(state; output_dir, writer_ch, losses_db, resuming::Bool, sp
   gio = MOGenIO(output_dir, writer_ch, losses_db, metrics_io, splots, eco_list, species_list, eco_species_ids,
     n_species, site_sim_years, loss_params, no_establishment, n_reps, rng, have_val, n_output_plots,
     sampled_ids, sampled_ids_val, emp_sample, emp_sample_val, val_fit, _mo_archive_sig(state),
-    resuming ? _load_val_cache(output_dir) : Dict{Any,NTuple{4,Float64}}(), Inf, Inf)   # RESUME: keep the pre-resume val cache
+    resuming ? _load_val_cache(output_dir, losses_db) : Dict{Any,NTuple{4,Float64}}(), Inf, Inf)   # RESUME: keep the pre-resume val cache (CSV, or losses.duckdb mirror if the CSV is gone)
   if have_val && val_fit !== nothing
     try
       _r, _c, _el = val_fit(state.representative.x)
@@ -3119,6 +3131,7 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
   save_ckpt = _sig != gio.last_ckpt_sig               # ANY archive change (add/drop/swap); improved ⟹ changed
   save_ckpt && (gio.last_ckpt_sig = _sig)
   archive_changed = save_ckpt
+  _newvals = NTuple{4,Float64}[]         # val entries scored THIS gen → the writer mirrors them into losses.duckdb.val_cache
   if gio.have_val && STORE_VAL_OBJ[] && (archive_changed || is_new_best)   # val-score any NEW archive members
     _newc = [c for c in collect(state.archive) if !haskey(gio.val_cache, _rkey(c))]
     _vscore = c -> try
@@ -3135,9 +3148,9 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
           Threads.@threads :static for i in 2:length(_newc); _vout[i] = _vscore(_newc[i]); end
         finally; PU.SCALES_LOCKED[] = false; end
       end
-      for r in _vout; r === nothing || (gio.val_cache[r[1]] = r[2]); end
+      for r in _vout; r === nothing || (gio.val_cache[r[1]] = r[2]; push!(_newvals, r[2])); end
     else
-      for c in _newc; r = _vscore(c); r === nothing || (gio.val_cache[r[1]] = r[2]); end
+      for c in _newc; r = _vscore(c); r === nothing || (gio.val_cache[r[1]] = r[2]; push!(_newvals, r[2])); end
     end
   end
   val_sim_sample = nothing
@@ -3191,7 +3204,7 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
   # OFFLOAD to the async writer: metrics line (every gen) + BATCHED losses insert (one transaction, new-best only).
   # No fsync on the search's critical path; drained/flushed on normal exit AND interrupt by stop_writer's finally.
   _mline = string(state.i, ",", Float64(state.representative.fx.aggregate), ",", isfinite(gio.rep_val_loss) ? gio.rep_val_loss : "", ",", pop_size, ",", length(state.archive))
-  _lossjob = MOLossesJob(gio.losses_db, gio.metrics_io, _mline, _losses_payload)
+  _lossjob = MOLossesJob(gio.losses_db, gio.metrics_io, _mline, _losses_payload, _newvals)
   if PAN_TIMING[]; _tio = time_ns(); put!(gio.writer_ch, _lossjob); _tm_io[] += time_ns() - _tio; else; put!(gio.writer_ch, _lossjob); end
   cached_sites_state_df = gb_cached === nothing ?    # nothing when n_output_plots==0 (candidate mode skips the best re-sim); the MO writer never reads this field anyway
     DataFrame(plot_id=Int[], sim_year=Int[], species_id=Int[], age=Int[], agb=Float64[]) :
@@ -3534,7 +3547,7 @@ end
 # writer as parametrize_MOCMAES, but the engine is a population of μ (1+1)-CMA-ES individuals
 # (IgelMOCMAES) rather than one distribution — better front spread/extreme coverage. μ candidates
 # are evaluated per generation (serially); the initial population is a Sobol design.
-function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, single_cov::Bool=false)
+function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, igel_seed_maturity::Bool=false, igel_freeze_seed_growth::Bool=false, single_cov::Bool=false)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -3620,9 +3633,21 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
     end
     groups = (single_cov ? Vector{Int}[collect(1:length(slots))] : PU.build_groups(param_dists, slots, BSP.BIOMASS_PER_ECO_GROUPS))   # block-diagonal per-individual (1+1)-CMA
     @info "Igel MO-CMA-ES block-diagonal: $(length(groups)) covariance blocks per individual (sizes $(length.(groups)))"
-    search_state = IgelMOCMAES.IgelState(init_us, init_cands, rng; sigma0=igel_sigma0, archive_cap=archive_cap, max_iter=typemax(Int), niche_radius=igel_niche_radius, reseed_sigma=igel_reseed_sigma, maturity_period=igel_maturity, blocks=groups)
+    search_state = IgelMOCMAES.IgelState(init_us, init_cands, rng; sigma0=igel_sigma0, archive_cap=archive_cap, max_iter=typemax(Int), niche_radius=igel_niche_radius, reseed_sigma=igel_reseed_sigma, maturity_period=igel_maturity, init_mature=igel_seed_maturity, blocks=groups)
+    igel_seed_maturity && igel_maturity > 0 && @info "igelmo phase-1: $igel_mu seeds shielded for $igel_maturity gens, then (μ+μ) competition"
     search_state.n_evals = igel_mu
     bio_params = template
+    # PER-LINEAGE FROZEN GROWTH: each seed keeps its OWN {D,S,B_MAX,ANPP_MAX} (fix_growth removes them from the
+    # slots ⇒ they come from the per-lineage `base` handed to u_to_params). `bases[k]` tracks lineage k's seed;
+    # aligned to search_state.pop[k] here (pop is built from init_us in order) and re-aligned by object identity
+    # after every tell! (below). Sidecar-persisted for resume.
+    bases = igel_freeze_seed_growth ? copy(init_params) : nothing
+    if igel_freeze_seed_growth
+      BSP.FIX_GROWTH[] || @warn "igel_freeze_seed_growth is on but fix_growth is OFF → growth is in the search slots and will NOT stay frozen"
+      # _sobol_cands is already drained into init_params by here, so check the seed SOURCE instead.
+      (isnothing(sobol_candidates_db) && isnothing(start_from)) && @warn "igel_freeze_seed_growth is on but no seed source (sobol_candidates_db/start_from) → freezing RANDOM growth"
+      @info "igelmo per-lineage frozen growth: $igel_mu lineages each keep their seed's {D,S,B_MAX,ANPP_MAX}"
+    end
   else
     @info "Resuming from $resume_from"
     search_state = JLD2.load_object(resume_from)
@@ -3633,6 +3658,15 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
     # on the VAL reference and freezes RANKW on val's plot counts → a different per-cell weighting than the
     # original run → identical offspring evaluate differently → the Pareto front collapses on resume.
     PU.CELL_NORM_FREEZE[] || (_run(search_state.representative.x); @info "RANKW frozen on TRAIN reference (resume)")
+    if igel_freeze_seed_growth
+      _bpath = joinpath(output_dir, "igel_bases@$(search_state.i).jld2")
+      isfile(_bpath) || error("igel_freeze_seed_growth resume: missing sidecar $_bpath (per-lineage frozen growth cannot be reconstructed from the checkpoint alone)")
+      bases = JLD2.load_object(_bpath)
+      length(bases) == length(search_state.pop) || error("igel_bases sidecar has $(length(bases)) entries but pop has $(length(search_state.pop))")
+      @info "igelmo per-lineage frozen growth: reloaded $(length(bases)) lineage bases from $(basename(_bpath))"
+    else
+      bases = nothing
+    end
   end
   if TRIALS < 1 || search_state.n_evals >= TRIALS
     return search_state
@@ -3688,7 +3722,7 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
         PU.SCALES_LOCKED[] = true
         try
           Threads.@threads :static for k in 1:igel_mu
-            p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
+            p = PU.u_to_params(offs[k], param_dists, slots, bases === nothing ? bio_params : bases[k])
             off_params[k] = p
             fx_k, run_k, eco_k = _fitness(_run(p; ws=_work_soa_t[Threads.threadid()]))
             off_fxs[k] = fx_k; off_run[k] = run_k; off_eco[k] = eco_k   # keep the batch's run/eco (self-contained loss structs; no SoA aliasing)
@@ -3702,7 +3736,7 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
         gb_cached = n_output_plots > 0 ? _median_rep_cached(_run(off_params[gb_idx]; ws=_work_soa_t[1])) : nothing  # cohort cache only feeds output plots; unused otherwise
       else
         for k in 1:igel_mu                              # SoA mode: serial candidates, sites parallel (fit_params threads)
-          p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
+          p = PU.u_to_params(offs[k], param_dists, slots, bases === nothing ? bio_params : bases[k])
           rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
           off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
           if fx_k.aggregate < gen_best_agg
@@ -3712,11 +3746,23 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
       end
       _t_eval = time_ns() - _te; _sim = _tm_sim[]
       _tt = time_ns()
+      # capture the parent Individual objects BEFORE tell! reorders the population; offspring k descends from
+      # parent k, so both carry lineage k's frozen growth (bases[k]). After selection the same objects survive
+      # by reference, so we realign bases by object identity — no change to IgelMOCMAES needed.
+      _pre_pop = bases === nothing ? nothing : copy(search_state.pop)
       is_new_best = IgelMOCMAES.tell!(search_state, off_fxs, off_params)
+      if bases !== nothing
+        objbase = IdDict{Any,Any}()
+        for k in 1:igel_mu; objbase[_pre_pop[k]] = bases[k]; objbase[search_state._off[k]] = bases[k]; end
+        bases = Any[objbase[ind] for ind in search_state.pop]   # survivors → their lineage's frozen growth
+      end
       _t_tell = time_ns() - _tt
       search_state.n_evals = evals_done
       _tf = time_ns()
-      mo_gen_finalize!(gio, search_state, igel_mu, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
+      _save_ckpt = mo_gen_finalize!(gio, search_state, igel_mu, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
+      # sidecar the per-lineage bases WHENEVER a checkpoint is saved, tagged with the same gen so resume loads
+      # the exact pop↔bases alignment (search_state.pop is not mutated between here and the next ask).
+      bases !== nothing && _save_ckpt && try; JLD2.save_object(joinpath(output_dir, "igel_bases@$(search_state.i).jld2"), bases); catch e; @warn "igel_bases sidecar save failed" exception=e; end
       if PAN_TIMING[]
         println("[timing] gen $_gen: $(_tsec(time_ns()-_tg))s | ask=$(_tsec(_t_ask)) eval=$(_tsec(_t_eval))(sim=$(_tsec(_sim)) loss+oth=$(_tsec(_t_eval-_sim))) tell=$(_tsec(_t_tell)) final=$(_tsec(time_ns()-_tf))(io=$(_tsec(_tm_io[])))")
       end
@@ -3729,6 +3775,7 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
     try
       mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
       JLD2.save_object(joinpath(output_dir, fname), search_state)
+      bases !== nothing && JLD2.save_object(joinpath(output_dir, "igel_bases@$(search_state.i).jld2"), bases)   # keep the sidecar aligned with the exit checkpoint
       link_path = joinpath(output_dir, "search_state_latest.jld2"); islink(link_path) && rm(link_path); symlink(fname, link_path)
       @info "Search state saved @ $(search_state.i)"
     catch e; @error "Failed to save search state on exit" exception = (e, catch_backtrace()); end
@@ -4498,6 +4545,7 @@ struct MOLossesJob
   io::IO
   metrics_line::String
   payload::Any            # NamedTuple(iter, ns, no, total, arch, blob, eco[...]) on new-best; else nothing
+  val_rows::Vector{NTuple{4,Float64}}   # (A_W_train,A_AGB_train,A_W,A_AGB) scored this gen → mirrored into losses.duckdb.val_cache
 end
 
 function _mo_write_losses!(job::MOLossesJob)
@@ -4516,6 +4564,19 @@ function _mo_write_losses!(job::MOLossesJob)
     catch e
       try; DuckDB.execute(job.db, "ROLLBACK"); catch; end
       @error "mo_writer: losses insert failed" exception = (e, catch_backtrace())
+    end
+  end
+  if !isempty(job.val_rows)              # durable mirror of cv_val_cache into losses.duckdb (survives resumes / a lost CSV)
+    try
+      DuckDB.execute(job.db, "CREATE TABLE IF NOT EXISTS val_cache (A_W_train DOUBLE, A_AGB_train DOUBLE, A_W DOUBLE, A_AGB DOUBLE, PRIMARY KEY (A_W_train, A_AGB_train))")
+      DuckDB.execute(job.db, "BEGIN TRANSACTION")
+      for v in job.val_rows
+        DuckDB.execute(job.db, "INSERT INTO val_cache VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", [v[1], v[2], v[3], v[4]])
+      end
+      DuckDB.execute(job.db, "COMMIT")
+    catch e
+      try; DuckDB.execute(job.db, "ROLLBACK"); catch; end
+      @error "mo_writer: val_cache insert failed" exception = (e, catch_backtrace())
     end
   end
   try; println(job.io, job.metrics_line); flush(job.io); catch e; @error "mo_writer: metrics write failed" exception = (e, catch_backtrace()); end
@@ -5376,6 +5437,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     igel_niche_radius=Float64(get_cfg("igel_niche_radius", 0.0)),
     igel_reseed_sigma=Float64(get_cfg("igel_reseed_sigma", 0.0)),
     igel_maturity=Int(get_cfg("igel_maturity", 0)),
+    igel_seed_maturity=Bool(get_cfg("igel_seed_maturity", false)),
+    igel_freeze_seed_growth=Bool(get_cfg("igel_freeze_seed_growth", false)),
     cc_group_size=Int(get_cfg("cc_group_size", 2)),
     cc_spec_gens=Int(get_cfg("cc_spec_gens", 20)),
     cc_integ_gens=Int(get_cfg("cc_integ_gens", 20)),

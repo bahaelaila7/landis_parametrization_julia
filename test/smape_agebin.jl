@@ -117,9 +117,11 @@ end
 
 rows = DF.DataFrame(split=String[], group=String[], species=String[], nplots=Int[], agebin=String[], n=Int[],
   sim_agb=Float64[], obs_agb=Float64[], avg_ref=Float64[], avg_sim=Float64[], sMAPE=Float64[], MAPE=Float64[], forestMAPE=Float64[])
+_only_test = get(ENV, "PAN_ONLY_TEST", "0") == "1"     # --test mode: only the held-out test split
 for (sp, label) in ((splots, "train"), (splots_val, "val"), (splots_test, "test"))
   isnothing(sp) && continue                     # 3-way: held-out test set (nothing unless test_frac>0)
-  label == "test" && get(ENV, "PAN_EVAL_TEST", "0") != "1" && continue   # hold test out unless enabled
+  _only_test && label != "test" && continue     # --test: skip train/val
+  label == "test" && !(_only_test || get(ENV, "PAN_EVAL_TEST", "0") == "1") && continue   # hold test out unless enabled
   pr = paired_agebin(sp, label); isnothing(pr) && continue
   # ONE heatmap per split: y-axis = species×tier-group (all productivities together), ranked by abundance
   pr.pgrp = [_panel_grp(s, e) for (s, e) in zip(pr.sp, pr.eco)]

@@ -66,6 +66,7 @@ end
 # init_us: μ starting u-vectors; init_cands: their evaluated MOCandidates (params + MOFitness)
 function IgelState(init_us::Vector{Vector{Float64}}, init_cands::Vector{MOCandidate{Tx}}, rng::TRNG;
                    sigma0::Float64=0.3, archive_cap::Int=200, max_iter::Int=1_000_000, niche_radius::Float64=0.0, reseed_sigma::Float64=0.0, maturity_period::Int=0,
+                   init_mature::Bool=false,   # true ⇒ the μ seeds start shielded for `maturity_period` gens (phase 1: mature independently; phase 2: compete)
                    blocks::Union{Nothing,Vector{Vector{Int}}}=nothing) where {Tx,TRNG<:Random.AbstractRNG}
   μ = length(init_us); n = length(init_us[1])
   blk = isnothing(blocks) ? [collect(1:n)] : blocks
@@ -75,7 +76,8 @@ function IgelState(init_us::Vector{Vector{Float64}}, init_cands::Vector{MOCandid
   p_thresh = 0.44
   c_c = 2 / (n + 2)
   c_cov = 2 / (n^2 + 6)
-  pop = [Individual(copy(init_us[k]), sigma0, p_target, Matrix{Float64}(LA.I, n, n), zeros(n), init_cands[k].fx, 0) for k in 1:μ]
+  m0 = init_mature ? maturity_period : 0   # phase-1 shield window for the seeds (0 ⇒ canonical: seeds compete immediately)
+  pop = [Individual(copy(init_us[k]), sigma0, p_target, Matrix{Float64}(LA.I, n, n), zeros(n), init_cands[k].fx, m0) for k in 1:μ]
   rep = init_cands[argmin(c.fx.aggregate for c in init_cands)]
   sob = Sobol.SobolSeq(n); for _ in 1:μ; Sobol.next!(sob); end   # skip past the init points so re-seeds explore new regions
   st = IgelState{Tx,TRNG}(pop, rep, rep, MOCandidate{Tx}[], archive_cap, rng,

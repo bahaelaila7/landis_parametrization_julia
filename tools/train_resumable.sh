@@ -59,6 +59,9 @@ if [ -n "$CK" ]; then
   # the resumed run APPENDS gen N+ to the existing curve). Archives (search_state@N.jld2) were always safe.
   OVR="$OVR,\"resume_from\"=>\"$CK\""; log "resume $(basename "$O") from $(basename "$CK") — losses.duckdb preserved (appending)"
 else log "fresh $(basename "$O")"; fi
+# Extra run_from_yaml overrides injected by a caller (e.g. submit_simB_freeze.sbatch pins sobol_candidates_db +
+# igel_mu to the actual seed count). Must be Julia Pair syntax, e.g.  "igel_mu"=>25,"sobol_candidates_db"=>"/x.duckdb"
+[ -n "${PAN_EXTRA_OVERRIDES:-}" ] && { OVR="$OVR,$PAN_EXTRA_OVERRIDES"; log "extra overrides: $PAN_EXTRA_OVERRIDES"; }
 if ./julia_gdal.sh --project=. --threads=$TH -e "using Pan; Pan.run_from_yaml(\"$CFG\"; overrides=Dict($OVR))" >> "$O/run.log" 2>&1; then
   touch "$O/.train_done"; log "TRAIN complete $(basename "$O") ($(ls "$W"/search_state@*.jld2 2>/dev/null|wc -l) ckpts) — flushing ramdisk on exit"
 else log "TRAIN interrupted $(basename "$O") — relaunch to resume"; exit 1; fi

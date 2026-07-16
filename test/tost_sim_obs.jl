@@ -113,9 +113,10 @@ function tost(d, Δ)
 end
 
 # compute the matched sim/obs pairs ONCE per split (the expensive fit_params step), reuse for every margin
-_eval_test = get(ENV, "PAN_EVAL_TEST", "0") == "1"     # hold test out unless explicitly enabled
+_only_test = get(ENV, "PAN_ONLY_TEST", "0") == "1"     # --test mode: only the held-out test split
+_eval_test = _only_test || get(ENV, "PAN_EVAL_TEST", "0") == "1"     # hold test out unless explicitly enabled
 paired_splits = [(paired_for(sp, label), label) for (sp, label) in ((splots, "train"), (splots_val, "val"), (splots_test, "test"))
-                 if !(isnothing(sp) || DF.nrow(sp) == 0) && (label != "test" || _eval_test)]
+                 if !(isnothing(sp) || DF.nrow(sp) == 0) && (label != "test" || _eval_test) && !(_only_test && label != "test")]
 
 for EQM in MARGINS
   Δ = log1p(EQM); pct = round(Int, 100EQM)

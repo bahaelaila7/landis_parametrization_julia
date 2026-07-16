@@ -22,7 +22,7 @@ import JLD2, CSV, DataFrames, Statistics, CairoMakie, YAML
 const MK = CairoMakie; const DF = DataFrames; const ST = Statistics; const P = Pan   # P._expandenv for temp-config path expansion
 
 # ─────────────────────────────── args ───────────────────────────────
-length(ARGS) >= 1 || error("usage: analyze_run.jl <run_dir> [config.yml] [--warmup N] [--sim] [--all] [--outsub DIR]")
+length(ARGS) >= 1 || error("usage: analyze_run.jl <run_dir> [config.yml] [--warmup N] [--sim] [--all] [--test <param.jld2>] [--outsub DIR]")
 run_dir = ARGS[1]
 isdir(run_dir) || error("run_dir not found: $run_dir")
 config_path = (length(ARGS) >= 2 && !startswith(ARGS[2], "--")) ? ARGS[2] : nothing   # optional 2nd positional
@@ -34,6 +34,33 @@ eval_all = _hasflag("--all")                       # Phase 2 evaluates all p101 
 outsub  = _argval("--outsub", "analysis")
 outdir  = joinpath(run_dir, outsub); mkpath(outdir)
 println("analyze_run: run_dir=$run_dir  warmup=$warmup  → $outdir")
+
+# ─────────── --test <param.jld2>: evaluate ONE params set on the HELD-OUT TEST split (standalone) ───────────
+# Drives the styled scripts test-only (PAN_ONLY_TEST=1) → linear scatter + sMAPE + TOST on the test set for the
+# given params. Needs only the params file + config (not the run's checkpoints). Output → <outdir>/test_<name>/.
+let test_param = _argval("--test", "")
+  if test_param != ""
+    config_path === nothing && error("--test needs the run's config.yml as the 2nd positional arg")
+    isfile(test_param) || error("--test params file not found: $test_param")
+    println("── --test: evaluating $(basename(test_param)) on the HELD-OUT TEST split ──")
+    cfg = YAML.load_file(config_path)                                    # expanded temp config, output_dir → run_dir
+    for (k, v) in cfg; v isa AbstractString && (cfg[k] = P._expandenv(v)); end
+    cfg["output_dir"] = abspath(run_dir)
+    tmpcfg = joinpath(outdir, "_tmp_test_config.yml"); open(io -> YAML.write(io, cfg), tmpcfg, "w")
+    sub = joinpath(outsub, "test_" * replace(basename(test_param), r"\.jld2$" => ""))
+    mkpath(joinpath(run_dir, sub))
+    nthr = parse(Int, get(ENV, "PAN_ANALYSIS_CPUS", string(Sys.CPU_THREADS)))
+    for (scr, extra) in (("scatter_sim_obs_tiered.jl", String[]), ("smape_agebin.jl", String[]), ("tost_sim_obs.jl", ["0.05,0.10,0.15,0.20"]))
+      cmd = addenv(`./julia_gdal.sh --project=. --threads=$nthr test/$scr $tmpcfg $extra`,
+                   "PAN_PARAMS" => abspath(test_param), "PAN_OUTSUB" => sub, "PAN_ONLY_TEST" => "1", "PAN_EVAL_TEST" => "1", "PAN_OUT" => "")
+      logf = joinpath(run_dir, sub, replace(scr, ".jl" => "") * ".log")
+      try; run(pipeline(cmd; stdout=logf, stderr=logf)); println("  ✓ $scr"); catch e; println("  ✗ $scr FAILED (see $logf): $e"); end
+    end
+    rm(tmpcfg; force=true)
+    println("=== --test DONE → $(joinpath(run_dir, sub))  (scatter_sim_obs_test_*, smape_agebin_test, tost_*pct_test) ===")
+    exit()
+  end
+end
 
 # ─────────────────────── load checkpoints + val cache ───────────────────────
 # checkpoint files: search_state@<gen>.jld2 → IgelState with .archive (Vector of candidates x,fx) + .representative
