@@ -2213,6 +2213,58 @@ function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params
     disturbance_dict=(isempty(ddict) ? nothing : ddict), disturbance_years=Set(keys(ddict)))
 end
 
+# ANALYSIS helper: re-simulate ONE params set through the FREE Sim-B path (dual_mode:b) EXACTLY as the run
+# does — set the Sim-B dynamics globals from the config, build the tier-4 ref + dual_b (disturbance-scale /
+# year-0 vs spinup / establishment ON / per-lineage frozen growth already baked into `params`), run
+# fit_params(b_only), then bin the simulated cohorts AND the observed cohorts into the tier-4 age-bins and
+# pair them. Returns a DataFrame(cyc, eco, esp, bin, sp, obs_agb, sim_agb) — the common input for the Sim-B
+# scatter / sMAPE / TOST plots (so all three reflect the actual free-regen sim, not the Sim-A tier-3 path).
+function resim_simB_paired(cfg, params, sp, spdf_plts, site_sim_years, spinup_cohorts, loss_params,
+                           eco_list, species_list, eco_species_ids, rng)
+  g(k, d) = get(cfg, k, d)
+  DUAL_MODE[] = :b
+  SIMB_DISTURB_ONLY[] = Bool(g("simB_disturb_only", false))
+  SIMB_SPINUP[] = Bool(g("simB_spinup", true))
+  TIER_B[] = Int(g("tier_b", 4))
+  T4_PER_PLOT_MEAN[] = Bool(g("simB_per_plot_mean", false))
+  T4_MEAN_OVER_REPS[] = Bool(g("simB_rep_mean", false))
+  n_species = length(species_list)
+  inj = (SIMB_DISTURB_ONLY[] || OVERRIDE_INJECTION[]) ? Data.get_injection_cohorts(sp; all_cohorts=true) : nothing
+  cycle_map, n_cycles = Data.build_cycle_map(sp; cycle_years=Float64(g("cycle_years", 8)))
+  n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
+  t4_ref = [[zeros(FloatType, length(eco_species_ids[e]), n_bins) for _ in 1:n_cycles] for e in eachindex(eco_list)]
+  for ((pid, eid), yd) in spdf_plts, (sy, gt) in yd
+    cyc = get(cycle_map, (Int(pid), Int(sy)), 0); cyc == 0 && continue
+    for (spe, rec) in gt.records; t4_ref[eid][cyc][spe, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
+  end
+  dual_b = _build_dual_b(sp, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, inj, spinup_cohorts, rng, false; b_only=true)
+  msy = maximum(maximum.(filter(!isempty, site_sim_years.sim_years)))
+  res = fit_params(dual_b.ref_soa, params, msy, n_species, eco_species_ids, spdf_plts, site_sim_years, false, spinup_cohorts, loss_params;
+    debug=false, search_tier=3, dual_b=dual_b, seeds=[rand(rng, UInt64)])
+  cached = res[1][2]; ab = loss_params.age_bins
+  plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DataFrames.select(sp, [:plot_id, :eco_id]))))
+  simdf = DataFrames.DataFrame(cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
+  for (pid, sy, esp, age, bio) in cached
+    haskey(plot2eco, Int(pid)) || continue
+    cyc = get(cycle_map, (Int(pid), Int(sy)), 0); cyc == 0 && continue
+    b = PU.find_age_bin(Int(ceil(Float64(age))), ab); b == 0 && continue
+    push!(simdf, (cyc, plot2eco[Int(pid)], Int(esp), Int(b), Float64(bio)))
+  end
+  sim_agg = DataFrames.combine(DataFrames.groupby(simdf, [:cyc, :eco, :esp, :bin]), :agb => sum => :sim_agb)
+  obsdf = DataFrames.DataFrame(cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
+  for r in eachrow(DataFrames.subset(sp, :sim_year => DataFrames.ByRow(>(0))))
+    cyc = get(cycle_map, (Int(r.plot_id), Int(r.sim_year)), 0); cyc == 0 && continue
+    b = PU.find_age_bin(Int(ceil(Float64(r.age_calc))), ab); b == 0 && continue
+    push!(obsdf, (cyc, Int(r.eco_id), Int(r.eco_species_id), Int(b), Float64(r.agb_sum)))
+  end
+  obs_agg = DataFrames.combine(DataFrames.groupby(obsdf, [:cyc, :eco, :esp, :bin]), :agb => sum => :obs_agb)
+  paired = DataFrames.outerjoin(obs_agg, sim_agg, on=[:cyc, :eco, :esp, :bin])
+  paired.obs_agb = coalesce.(paired.obs_agb, 0.0); paired.sim_agb = coalesce.(paired.sim_agb, 0.0)
+  especo2sp = Dict((Int(r.eco_id), Int(r.eco_species_id)) => Int(r.species_id) for r in eachrow(unique(DataFrames.select(sp, [:eco_id, :eco_species_id, :species_id]))))
+  paired.sp = [especo2sp[(e, esp)] for (e, esp) in zip(paired.eco, paired.esp)]
+  return paired, cycle_map, n_cycles
+end
+
 # Build Sim B for the VALIDATION split, so held-out loss measures the SAME A⊕B objective as training
 # (otherwise val = Sim A only, which is not comparable to a dual train loss). Builds val tier-4 refs +
 # cycle map, then the dual_b. Returns nothing when dual mode is off.
@@ -3689,11 +3741,16 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
+  # Held-out val must measure the SAME objective as train: Sim B (dual_b) when dual_mode≠off, else Sim A.
+  # (val_dual_b = nothing when DUAL_MODE==:off ⇒ val_fit falls back to the tier-3 Sim-A path.) Previously this
+  # driver hardcoded dual_b=nothing here, so a dual_mode:b run measured VAL on Sim A — inconsistent with the
+  # Sim-B train loss (and sensitive to init_perturb via the Sim-A rep-combination). Fixed to use val_dual_b.
+  val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
   # candidate mode: per-thread val buffers so val_fit can run concurrently across archive members (val is sites-serial)
   _val_work_t = (have_val && PARALLEL_MODE[] == :candidate) ? [deepcopy(val_ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
   val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
       _vws = _val_work_t === nothing ? _work_soa_val : _val_work_t[Threads.threadid()]
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=nothing, seeds=fixed_seeds, work_soa=_vws)
+      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, work_soa=_vws)
       v = _agg_reps(vreps); (v[1], vreps[v[3]][2], v[2])
     end : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,

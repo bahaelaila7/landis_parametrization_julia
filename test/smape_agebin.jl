@@ -62,10 +62,16 @@ best = haskey(ENV, "PAN_PARAMS") ? JLD2.load_object(ENV["PAN_PARAMS"]) :
   (let st = JLD2.load_object(joinpath(base_outdir, "search_state_latest.jld2")); hasproperty(st, :representative) ? st.representative.x : st.best.x end)
 
 # age-resolved matched pairs per (plot, sim_year, eco_species, coarse-bin): sim_agb vs obs_agb
+_dm = (let d = g("dual_mode", "off"); d === true ? "joint" : lowercase(string(d)); end)   # "off"/"joint"/"b"
 function paired_agebin(sp, label)
   (isnothing(sp) || DF.nrow(sp) == 0) && return nothing
   max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
+  if _dm == "b"   # Sim-B free-regen: age-bin paired via the shared helper (coarse bins from THIS script's loss_params)
+    paired, _, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng)
+    paired.cbin = paired.bin
+    return DF.subset(paired, :sp => DF.ByRow(>(0)))
+  end
   inj = (no_estab || P.OVERRIDE_INJECTION[]) ? D.get_injection_cohorts(sp; all_cohorts=P.OVERRIDE_INJECTION[]) : nothing
   rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
   idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))

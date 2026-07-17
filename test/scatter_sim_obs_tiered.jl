@@ -238,40 +238,9 @@ function make_scatter_B(sp, label)
   max_age = Int(maximum(sp.age_calc))
   spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
-  art = Set(e for e in eachindex(eco_list) if occursin("artificial", lowercase(eco_list[e])))
-  plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DF.select(sp, [:plot_id, :eco_id]))))
-  art_plots = Set(p for (p, e) in plot2eco if e in art)
-  inj_all = D.get_injection_cohorts(sp; all_cohorts=true)
-  inj_b = DF.filter(r -> Int(r.plot_id) in art_plots, inj_all)
-  rs_b = P.make_sites(sp, eco_species_ids; rng=rng, spinup=true, no_establishment=false)
-  idict_b = DF.nrow(inj_b) == 0 ? nothing : P._build_injection_dict(inj_b, rs_b)
-  iyears_b = DF.nrow(inj_b) == 0 ? Set{Int}() : Set(Int.(inj_b.sim_year))
-  msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
-  res = P.fit_params(rs_b, best, msy, n_species, eco_species_ids, spdf_plts, ssy, true, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict_b, injection_years=iyears_b, seeds=[rand(rng, UInt64)])
-  cached = res[1][2]; ab = loss_params.age_bins
-  # FOREST age-distribution, exactly as Sim B's tier-4 objective: aggregate AGB by
-  # (cycle × eco/land-use × species × age-bin) across all plots — sim age-bins vs obs age-bins.
-  cyc_map, _ = D.build_cycle_map(sp; cycle_years=Float64(g("cycle_years", 8)))
-  simdf = DF.DataFrame(cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
-  for (pid, sy, esp, age, bio) in cached
-    haskey(plot2eco, Int(pid)) || continue
-    cyc = get(cyc_map, (Int(pid), Int(sy)), 0); cyc == 0 && continue
-    b = PU.find_age_bin(Int(ceil(Float64(age))), ab); b == 0 && continue
-    push!(simdf, (cyc, plot2eco[Int(pid)], Int(esp), Int(b), Float64(bio)))
-  end
-  sim_agg = DF.combine(DF.groupby(simdf, [:cyc, :eco, :esp, :bin]), :agb => sum => :sim_agb)
-  obsdf = DF.DataFrame(cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
-  for r in eachrow(DF.subset(sp, :sim_year => DF.ByRow(>(0))))
-    cyc = get(cyc_map, (Int(r.plot_id), Int(r.sim_year)), 0); cyc == 0 && continue
-    b = PU.find_age_bin(Int(ceil(Float64(r.age_calc))), ab); b == 0 && continue
-    push!(obsdf, (cyc, Int(r.eco_id), Int(r.eco_species_id), Int(b), Float64(r.agb_sum)))
-  end
-  obs_agg = DF.combine(DF.groupby(obsdf, [:cyc, :eco, :esp, :bin]), :agb => sum => :obs_agb)
-  paired = DF.outerjoin(obs_agg, sim_agg, on=[:cyc, :eco, :esp, :bin])   # keep bins present in either (missing→0)
-  paired.obs_agb = coalesce.(paired.obs_agb, 0.0); paired.sim_agb = coalesce.(paired.sim_agb, 0.0)
-  especo2sp = Dict((Int(r.eco_id), Int(r.eco_species_id)) => Int(r.species_id) for r in eachrow(unique(DF.select(sp, [:eco_id, :eco_species_id, :species_id]))))
-  paired.sp = [especo2sp[(e, esp)] for (e, esp) in zip(paired.eco, paired.esp)]
+  # Re-simulate the FREE Sim-B path EXACTLY as the run (disturb-only / year-0-vs-spinup / establishment ON;
+  # frozen growth is baked into `best`), then pair sim vs obs by tier-4 age-bins. Shared with sMAPE/TOST.
+  paired, _cyc_map, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng)
   # SPLIT BY CYCLE: one figure per (cycle × eco × mode); species panels; points = age bins (colour = bin).
   for mode in (:linear, :log, :weighted, :weightedlog), cy in sort(unique(paired.cyc)), e in sort(unique(paired.eco))
     pe = DF.subset(paired, :cyc => DF.ByRow(==(cy)), :eco => DF.ByRow(==(e)))
@@ -298,11 +267,16 @@ function make_scatter_B(sp, label)
 end
 
 _only_test = get(ENV, "PAN_ONLY_TEST", "0") == "1"     # --test mode: skip train/val, evaluate ONLY the held-out test split
-_only_test || make_scatter(splots, "train")          # Sim A — exact-cohort paired
-_only_test || make_scatter(splots_val, "val")
-(!isnothing(splots_test) && (_only_test || get(ENV, "PAN_EVAL_TEST", "0") == "1")) && make_scatter(splots_test, "test")   # 3-way test: held out unless PAN_EVAL_TEST/PAN_ONLY_TEST
-let dm = g("dual_mode", "off")          # Sim B — age-bin paired (only for dual runs)
-  if dm === true || (dm isa AbstractString && lowercase(dm) in ("joint", "b"))
-    make_scatter_B(splots, "train"); make_scatter_B(splots_val, "val")
-  end
+_want_test = !isnothing(splots_test) && (_only_test || get(ENV, "PAN_EVAL_TEST", "0") == "1")
+_dm = (let d = g("dual_mode", "off"); d === true ? "joint" : lowercase(string(d)); end)
+_b_only = _dm == "b"                                  # Sim-B-only run → no Sim A; skip the (meaningless) Sim-A scatter
+if !_b_only                                           # Sim A — exact-cohort paired
+  _only_test || make_scatter(splots, "train")
+  _only_test || make_scatter(splots_val, "val")
+  _want_test && make_scatter(splots_test, "test")
+end
+if _dm in ("joint", "b")                              # Sim B — age-bin paired (dual runs)
+  _only_test || make_scatter_B(splots, "train")
+  _only_test || make_scatter_B(splots_val, "val")
+  _want_test && make_scatter_B(splots_test, "test")
 end
