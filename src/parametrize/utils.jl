@@ -1046,6 +1046,12 @@ const BMAX_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
 # r = B_MAX/ANPP and re-decoding re-applies the floor (round-trip stable). nothing = no floor (feature off).
 const ANPP_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
 
+# Per-(eco_id, sp_local) LOWER bound for PROB_ESTAB, set by Pan._build_prob_estab_floor! from the data table.
+# When non-nothing, u_to_params / params_to_u RESCALE the uniform prior onto [floor, 1.0] for each PROB_ESTAB
+# slot — so the search can never drive establishment BELOW the empirically-observed rate (it may go higher).
+# Cells absent from the dict fall back to the param's own lower bound. nothing = flat window (feature off).
+const PROB_ESTAB_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
+
 # Per-parameter SPLIT SET: for an EcoSpecies param, the set of GLOBAL species ids whose value is fit
 # separately per ecoregion (stratum); species NOT in the set share ONE value across all ecoregions.
 # `param.name ∉ keys` ⇒ every species split per-eco (the default, byte-identical to before). This lets
@@ -1066,6 +1072,7 @@ function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slot
   p = template
   bf = BMAX_FLOOR[]
   af = ANPP_FLOOR[]
+  pef = PROB_ESTAB_FLOOR[]
   for (dim, (pi, idx)) in enumerate(slots)
     param = param_dists.params[pi]
     min_, max_ = param.bounds
@@ -1083,14 +1090,18 @@ function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slot
       p = Setfield.@set p.ANPP_MAX_SPP = f
       continue
     end
+    lo_eff = min_   # effective lower bound for the clamp (raised to a per-cell data floor for B_MAX / PROB_ESTAB)
     raw = if bf !== nothing && param.name === :B_MAX_SPP
-      lo = Float64(get(bf, rep, 12000.0)); hi = Float64(max_)   # rescale uniform u onto [floor, upper]
+      lo = Float64(get(bf, rep, 12000.0)); lo_eff = lo; hi = Float64(max_)   # rescale uniform u onto [floor, upper]
+      lo + clamp(Float64(u[dim]), 0.0, 1.0) * (hi - lo)
+    elseif pef !== nothing && param.name === :PROB_ESTAB_SPP
+      lo = Float64(get(pef, rep, Float64(min_))); lo_eff = lo; hi = Float64(max_)   # data lower bound → [floor, 1.0]
       lo + clamp(Float64(u[dim]), 0.0, 1.0) * (hi - lo)
     else
       Dists.quantile(param.dist, clamp(Float64(u[dim]), 1e-10, 1 - 1e-10))
     end
-    val = if !isnothing(min_) && raw < min_
-      param.type(min_)
+    val = if !isnothing(lo_eff) && raw < lo_eff
+      param.type(lo_eff)
     elseif !isnothing(max_) && raw > max_
       param.type(max_)
     else
@@ -1112,6 +1123,7 @@ end
 function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}})::Vector{Float64} where T
   u = Vector{Float64}(undef, length(slots))
   bf = BMAX_FLOOR[]
+  pef = PROB_ESTAB_FLOOR[]
   for (dim, (pi, idx)) in enumerate(slots)
     param = param_dists.params[pi]
     rep = idx isa Vector ? idx[1] : idx                 # shared slot ⇒ read the representative eco (all equal)
@@ -1122,6 +1134,9 @@ function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{
       clamp(Float64(Dists.cdf(param.dist, ratio)), 1e-6, 1 - 1e-6)
     elseif bf !== nothing && param.name === :B_MAX_SPP
       lo = Float64(get(bf, rep, 12000.0)); hi = Float64(param.bounds[2])   # inverse of the u_to_params rescale
+      clamp((Float64(cur) - lo) / (hi - lo), 1e-6, 1 - 1e-6)
+    elseif pef !== nothing && param.name === :PROB_ESTAB_SPP
+      lo = Float64(get(pef, rep, Float64(param.bounds[1]))); hi = Float64(param.bounds[2])   # inverse of the [floor,1] rescale
       clamp((Float64(cur) - lo) / (hi - lo), 1e-6, 1 - 1e-6)
     else
       clamp(Float64(Dists.cdf(param.dist, Float64(cur))), 1e-6, 1 - 1e-6)

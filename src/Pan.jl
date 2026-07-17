@@ -1135,6 +1135,7 @@ function parametrize(; cohorts_db_path::String,
   end
   _build_bmax_floor!(eco_list, species_list, eco_species_ids)   # per-(eco,species) B_MAX data floor → PU.BMAX_FLOOR (nothing if off)
   _build_anpp_floor!(eco_list, species_list, eco_species_ids)   # per-(eco,species) ANPP data floor → PU.ANPP_FLOOR (nothing if off)
+  _build_prob_estab_floor!(eco_list, species_list, eco_species_ids)   # per-(eco,species) PROB_ESTAB data LOWER bound → PU.PROB_ESTAB_FLOOR (nothing if off)
   driver = search_mode == "molbsa" ? parametrize_MOLBSA :
            search_mode == "cmaes" ? parametrize_CMAES :
            search_mode == "mocmaes" ? parametrize_MOCMAES :
@@ -5153,6 +5154,33 @@ function _floor_bmax_seed!(params)
   params
 end
 
+# yaml `prob_estab_lower_bound`: use the per-species data PROB_ESTAB as a LOWER bound on the search (search
+# window [data, 1.0]) instead of only seeding it — so the optimizer can't suppress establishment below the
+# empirically-observed rate (it may only go higher). Requires prob_estab_from_data (the table).
+const PROB_ESTAB_LOWER_BOUND = Ref{Bool}(false)
+const PROB_ESTAB_LOWER_MULT  = Ref{Float64}(1.0)   # yaml `prob_estab_lower_bound_mult`: floor = mult × data (e.g. 0.8)
+# Per-(eco_id, sp_local) PROB_ESTAB lower bound = mult × data value → PU.PROB_ESTAB_FLOOR (read by
+# u_to_params/params_to_u). Cells with no table entry keep the param's own lower bound. nothing when off.
+function _build_prob_estab_floor!(eco_list, species_list, eco_species_ids)
+  tbl = BiomassSuccessionPlugin.PROB_ESTAB_TABLE[]
+  if !PROB_ESTAB_LOWER_BOUND[] || isnothing(tbl)
+    PU.PROB_ESTAB_FLOOR[] = nothing; return nothing
+  end
+  mult = PROB_ESTAB_LOWER_MULT[]
+  d = Dict{Tuple{Int,Int},FloatType}()
+  for (eco_id, sp_ids) in enumerate(eco_species_ids)
+    l3, lu = _parse_eco_lu(eco_list[eco_id])
+    lu in ("natural", "artificial") || (lu = "natural")   # site_class_strata puts a site-tier in |lu= ⇒ use natural
+    for (j, gsp) in enumerate(sp_ids)
+      v = get(tbl, (uppercase(species_list[gsp]), l3, lu), nothing)
+      v === nothing || (d[(eco_id, j)] = FloatType(clamp(mult * Float64(v), 0.0, 1.0)))
+    end
+  end
+  PU.PROB_ESTAB_FLOOR[] = isempty(d) ? nothing : d
+  @info "prob_estab_lower_bound: PROB_ESTAB search floored at $(mult)×data for $(length(d)) eco×species cells (window [floor,1.0])"
+  nothing
+end
+
 # ANPP_MAX data floor — parallel to _load_bmax_floor_table. CSV cols: category,l3,lu,anpp_floor (+ extras
 # ignored). anpp_floor = p99 of per-cohort agb/age (a valid lower bound on ANPP_MAX; see plugin growth eq).
 function _load_anpp_floor_table(csv_path::String)
@@ -5402,6 +5430,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   BSP.FIX_GROWTH[] = Bool(get_cfg("fix_growth", false))     # stage-B: fix {D,S,ANPP_MAX,B_MAX}, fit establishment only
   BSP.FIX_MATURITY[] = Bool(get_cfg("fix_maturity", false)) # pin MATURITY out of the search (at MATURITY_TABLE/SONA)
   BSP.FIX_MIN_REL[] = Bool(get_cfg("fix_min_rel", false))   # pin MIN_REL_BIOMASS out of the search (at MIN_REL_PINNED)
+  PROB_ESTAB_LOWER_BOUND[] = Bool(get_cfg("prob_estab_lower_bound", false))   # PROB_ESTAB data value as a search LOWER bound (needs prob_estab_from_data)
+  PROB_ESTAB_LOWER_MULT[] = Float64(get_cfg("prob_estab_lower_bound_mult", 1.0))   # floor = mult × data (e.g. 0.8)
 
   if search_mode == "plot_only"
     params_path = String(get_cfg("params_path", ""))
