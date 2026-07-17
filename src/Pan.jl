@@ -886,6 +886,8 @@ function parametrize(; cohorts_db_path::String,
   igel_mu::Int=20,
   igel_sigma0::Float64=0.3,
   igel_sobol_init::Bool=true,
+  igel_sobol_pool_k::Int=1,
+  igel_sobol_raw_mult::Int=2,
   igel_niche_radius::Float64=0.0,
   igel_reseed_sigma::Float64=0.0,
   igel_maturity::Int=0,
@@ -1147,7 +1149,7 @@ function parametrize(; cohorts_db_path::String,
   cmaes_kw = search_mode == "molbsa" ? (archive_cap=cmaes_archive_cap, seed_archive_from=seed_archive_from) :
              search_mode == "cmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, ipop=ipop, ipop_stagnation=ipop_stagnation, ipop_max_barren_restarts=ipop_max_barren_restarts, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
              search_mode == "mocmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmaes_warmstart_seeds=cmaes_warmstart_seeds, ipop=ipop, ipop_stagnation=ipop_stagnation, ipop_max_barren_restarts=ipop_max_barren_restarts, archive_cap=cmaes_archive_cap, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov, seed_archive_from=seed_archive_from) :
-             search_mode == "igelmo" ? (archive_cap=cmaes_archive_cap, igel_mu=igel_mu, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity, igel_seed_maturity=igel_seed_maturity, igel_freeze_seed_growth=igel_freeze_seed_growth, single_cov=cmaes_single_cov) :
+             search_mode == "igelmo" ? (archive_cap=cmaes_archive_cap, igel_mu=igel_mu, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_sobol_pool_k=igel_sobol_pool_k, igel_sobol_raw_mult=igel_sobol_raw_mult, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity, igel_seed_maturity=igel_seed_maturity, igel_freeze_seed_growth=igel_freeze_seed_growth, single_cov=cmaes_single_cov) :
              search_mode == "ccigel" ? (archive_cap=cmaes_archive_cap, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity, single_cov=cmaes_single_cov, cc_group_size=cc_group_size, cc_spec_gens=cc_spec_gens, cc_integ_gens=cc_integ_gens, cc_cycles=cc_cycles, cc_fix_others=cc_fix_others) :
              search_mode == "nsga2" ? (archive_cap=cmaes_archive_cap, nsga2_pop=nsga2_pop, nsga2_offspring=nsga2_offspring, nsga2_eta_c=nsga2_eta_c, nsga2_eta_m=nsga2_eta_m, nsga2_pc=nsga2_pc, nsga2_pm=nsga2_pm, sobol_init=nsga2_sobol_init) :
              search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed, balanced_quality=balanced_quality, cmame_mo_rank=cmame_mo_rank, archive_by_sp=archive_by_sp, bounds_by_sobol=bounds_by_sobol, top_seeds=top_seeds, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
@@ -3600,7 +3602,7 @@ end
 # writer as parametrize_MOCMAES, but the engine is a population of μ (1+1)-CMA-ES individuals
 # (IgelMOCMAES) rather than one distribution — better front spread/extreme coverage. μ candidates
 # are evaluated per generation (serially); the initial population is a Sobol design.
-function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, igel_seed_maturity::Bool=false, igel_freeze_seed_growth::Bool=false, single_cov::Bool=false)
+function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_sobol_pool_k::Int=1, igel_sobol_raw_mult::Int=2, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, igel_seed_maturity::Bool=false, igel_freeze_seed_growth::Bool=false, single_cov::Bool=false)
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -3659,47 +3661,70 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
     objs = _mo_objectives(eco_losses, eco_species_ids)
     MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result)), run_result, eco_losses
   end
-  next_param() = !isempty(_sobol_cands) && length(_sobol_cands) >= 1 ? popfirst!(_sobol_cands) :
-                 BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
-
   if isnothing(resume_from)
     template = !isnothing(start_from) ? _load_params_from_path(start_from) : BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     slots = PU.build_slots(param_dists, template)
-    # initial population: Sobol candidate DB if given, else a Sobol space-filling design (igel_sobol_init),
-    # else random generated params. Sobol spreads the μ individuals across the space → better coverage.
-    init_params = !isempty(_sobol_cands) ? [next_param() for _ in 1:igel_mu] :
-                  igel_sobol_init ? PU.sobol_samples(param_dists, template, igel_mu) :
-                  [BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment) for _ in 1:igel_mu]
+    # initial population — three sources, all feeding the same "best μ·pool_k by dominance → RANDOM μ" thinning
+    # (pool_k>1) that gives a good-but-spread start instead of seeding all μ at the single best spot (→ collapse):
+    #   • sobol_candidates_db → params PRE-evaluated + dominance-sorted best-first by load_sobol_candidates
+    #     (generated offline by search_mode="sobol", which runs the SAME fit_params simulator + _mo_objectives as
+    #     this run). Cut uses the stored ranking — NO re-eval of the whole pool; only the selected μ are evaluated.
+    #   • igel_sobol_init     → a fresh Sobol design generated here; OVERSAMPLED to (μ·pool_k)·raw_mult, all
+    #     evaluated, then dominance-cut + random-thinned below (inline_cut).
+    #   • else                → random generated params (no pooling).
+    do_pool = igel_sobol_pool_k > 1
+    elite_n = igel_mu * igel_sobol_pool_k
+    inline_cut = false
+    pool_params =
+      if !isempty(_sobol_cands)
+        best = _sobol_cands[1:min(elite_n, length(_sobol_cands))]                      # already dominance-sorted best-first
+        do_pool ? Random.shuffle(rng, best)[1:min(igel_mu, length(best))] : _sobol_cands[1:min(igel_mu, length(_sobol_cands))]
+      elseif igel_sobol_init
+        inline_cut = do_pool
+        PU.sobol_samples(param_dists, template, do_pool ? elite_n * igel_sobol_raw_mult : igel_mu)
+      else
+        [BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment) for _ in 1:igel_mu]
+      end
     # Seed the ESTABLISHMENT params from the data tables (prob_estab_from_data / maturity_from_data) and pin
-    # MIN_REL (fix_min_rel) — mirroring parametrize_MOCMAES. The igelmo path was MISSING this, so those flags
-    # were silently inert here and frozen seeds ran with Sim-A's no_establishment values (PROB_ESTAB=0, MATURITY=0).
-    # Applied to the template AND every seed BEFORE params_to_u, so the encoded u and the frozen `bases` carry the
-    # seeded/pinned values. Growth ({D,S,B_MAX,ANPP_MAX}) is untouched (stays frozen). Each fn is a no-op unless its
-    # flag/table is set. (Logs the counts once per params — informative at startup.)
-    for _p in Iterators.flatten(((template,), init_params))
+    # MIN_REL (fix_min_rel) — mirroring parametrize_MOCMAES. Applied to the template AND every pool member BEFORE
+    # eval/params_to_u, so the encoded u and the frozen `bases` carry the seeded/pinned values. Growth
+    # ({D,S,B_MAX,ANPP_MAX}) is untouched. Each fn is a no-op unless its flag/table is set.
+    for _p in Iterators.flatten(((template,), pool_params))
       _seed_prob_estab!(_p, eco_list, species_list, eco_species_ids)
       _seed_maturity!(_p, species_list)
       _seed_min_rel!(_p, eco_list)
     end
-    init_us = [PU.params_to_u(p, param_dists, slots) for p in init_params]
-    if PARALLEL_MODE[] == :candidate     # candidate-parallelize the init population (sites already serial here)
+    # evaluate under THIS run's exact loss config: the raw pool if inline_cut, else the already-selected μ.
+    np = length(pool_params); pool_fx = Vector{Any}(undef, np)
+    if PARALLEL_MODE[] == :candidate     # candidate-parallelize the eval (sites already serial here)
       _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)  # SERIAL: freeze RANKW + set scales before the parallel batch (no race on the scale/RANKW globals)
       PU.SCALES_LOCKED[] = true
-      _init_fx = Vector{Any}(undef, igel_mu)
       try
-        Threads.@threads :static for k in 1:igel_mu
-          _init_fx[k] = _fitness(_run(init_params[k]; ws=_work_soa_t[Threads.threadid()]))[1]
+        Threads.@threads :static for k in 1:np
+          pool_fx[k] = _fitness(_run(pool_params[k]; ws=_work_soa_t[Threads.threadid()]))[1]
         end
       finally; PU.SCALES_LOCKED[] = false; end
-      init_cands = [MOLBSA.MOCandidate(init_params[k], _init_fx[k]) for k in 1:igel_mu]
     else
-      init_cands = [MOLBSA.MOCandidate(init_params[k], _fitness(_run(init_params[k]))[1]) for k in 1:igel_mu]
+      for k in 1:np; pool_fx[k] = _fitness(_run(pool_params[k]))[1]; end
     end
+    # inline Sobol only: cut the freshly-evaluated raw pool to best μ·pool_k by dominance, then UNIFORM-RANDOM μ.
+    # (DB / random / non-pool sources already hold exactly the μ starting individuals.)
+    sel = if inline_cut
+      elite = NSGA2._select(Vector{FloatType}[fx.objectives for fx in pool_fx], min(elite_n, np))
+      chosen = Random.shuffle(rng, elite)[1:min(igel_mu, length(elite))]
+      @info "igelmo Sobol-pool init: evaluated $np → kept best $(length(elite)) by dominance → random-selected $(length(chosen)) starting individuals"
+      chosen
+    else
+      collect(1:np)
+    end
+    init_params = pool_params[sel]
+    init_us = [PU.params_to_u(p, param_dists, slots) for p in init_params]
+    init_cands = [MOLBSA.MOCandidate(init_params[k], pool_fx[sel[k]]) for k in eachindex(sel)]
     groups = (single_cov ? Vector{Int}[collect(1:length(slots))] : PU.build_groups(param_dists, slots, BSP.BIOMASS_PER_ECO_GROUPS))   # block-diagonal per-individual (1+1)-CMA
     @info "Igel MO-CMA-ES block-diagonal: $(length(groups)) covariance blocks per individual (sizes $(length.(groups)))"
     search_state = IgelMOCMAES.IgelState(init_us, init_cands, rng; sigma0=igel_sigma0, archive_cap=archive_cap, max_iter=typemax(Int), niche_radius=igel_niche_radius, reseed_sigma=igel_reseed_sigma, maturity_period=igel_maturity, init_mature=igel_seed_maturity, blocks=groups)
     igel_seed_maturity && igel_maturity > 0 && @info "igelmo phase-1: $igel_mu seeds shielded for $igel_maturity gens, then (μ+μ) competition"
-    search_state.n_evals = igel_mu
+    search_state.n_evals = np
     bio_params = template
     # PER-LINEAGE FROZEN GROWTH: each seed keeps its OWN {D,S,B_MAX,ANPP_MAX} (fix_growth removes them from the
     # slots ⇒ they come from the per-lineage `base` handed to u_to_params). `bases[k]` tracks lineage k's seed;
@@ -5533,6 +5558,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     igel_mu=Int(get_cfg("igel_mu", 20)),
     igel_sigma0=Float64(get_cfg("igel_sigma0", 0.3)),
     igel_sobol_init=get_cfg("igel_sobol_init", true),
+    igel_sobol_pool_k=Int(get_cfg("igel_sobol_pool_k", 1)),        # >1 ⇒ oversample: keep best μ·k by dominance, random-pick μ
+    igel_sobol_raw_mult=Int(get_cfg("igel_sobol_raw_mult", 2)),    # raw Sobol pool = (μ·pool_k)·raw_mult candidates evaluated
     igel_niche_radius=Float64(get_cfg("igel_niche_radius", 0.0)),
     igel_reseed_sigma=Float64(get_cfg("igel_reseed_sigma", 0.0)),
     igel_maturity=Int(get_cfg("igel_maturity", 0)),

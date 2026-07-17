@@ -64,5 +64,33 @@ export PAN_ANALYSIS_CPUS="$SLURM_CPUS_PER_TASK" # cap Phase-2 nested-job concurr
 
 cd "$PAN_ROOT"
 echo "analyze: run_dir=$RUN_DIR  config=${CONFIG:-<none, Phase 1 only>}  flags=[$*]  cpus=$SLURM_CPUS_PER_TASK  data=$PAN_DATA"
+
+# ---------- snapshot: run against a FROZEN copy so a live search can keep going untouched ----------
+# Each search_state@<gen>.jld2 is written once and never mutated, so we HARD-LINK them into an isolated
+# snapshot dir: instant, zero extra disk (crucial — n1000 archive checkpoints are large), and a fixed file
+# SET for the whole (possibly long, --sim) analysis. We skip files younger than 20s so we never link one
+# that's still being written (torn read), and we real-COPY cv_val_cache.csv since the search rewrites it
+# in place. The live output_dir is only ever read, never touched. Snapshot lives under <run_dir>/analysis/
+# (same filesystem → hard links work) and is removed at the end.
+OUTSUB="analysis"; prev=""
+for a in "$@"; do [ "$prev" = "--outsub" ] && OUTSUB="$a"; prev="$a"; done
+SNAP="$RUN_DIR/analysis/_snap_${SLURM_JOB_ID:-manual}"
+rm -rf "$SNAP"; mkdir -p "$SNAP"
+find "$RUN_DIR" -maxdepth 1 -name 'search_state@*.jld2' ! -newermt '-20 seconds' -exec cp -l {} "$SNAP/" \; 2>/dev/null \
+  || find "$RUN_DIR" -maxdepth 1 -name 'search_state@*.jld2' ! -newermt '-20 seconds' -exec cp -p {} "$SNAP/" \;   # fall back to real copy if not same FS
+cp -p "$RUN_DIR"/cv_val_cache*.csv "$SNAP/" 2>/dev/null || true
+NCK=$(find "$SNAP" -maxdepth 1 -name 'search_state@*.jld2' | wc -l)
+echo "snapshot: $NCK checkpoints frozen at $SNAP (live search in $RUN_DIR left running)"
+
 # The main process is I/O-bound (it orchestrates nested Julia jobs via asyncmap) → 1 thread is enough.
-exec ./julia_gdal.sh --project=. --threads=1 tools/analyze_run.jl "$RUN_DIR" ${CONFIG:+"$CONFIG"} "$@"
+./julia_gdal.sh --project=. --threads=1 tools/analyze_run.jl "$SNAP" ${CONFIG:+"$CONFIG"} "$@"
+rc=$?
+
+# deliver results back into the real run dir, then drop the snapshot (hard links → nothing real is deleted)
+if [ -d "$SNAP/$OUTSUB" ]; then
+  mkdir -p "$RUN_DIR/$OUTSUB"
+  cp -a "$SNAP/$OUTSUB/." "$RUN_DIR/$OUTSUB/"
+  echo "analysis results → $RUN_DIR/$OUTSUB"
+fi
+rm -rf "$SNAP"
+exit $rc
