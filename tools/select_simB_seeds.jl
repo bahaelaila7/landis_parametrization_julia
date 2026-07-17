@@ -31,13 +31,31 @@ rng     = Random.MersenneTwister(parse(Int, _argval("--seed", "1")))
 mu > 5 || error("--mu must be > 5 (5 positions + K crowding picks)")
 K = mu - 5
 split = use_val ? "val" : "train"
+stride   = parse(Int, _argval("--stride", "1"))     # load every Nth checkpoint (1 = all)
+maxckpts = parse(Int, _argval("--max-ckpts", "0"))  # 0 = no cap; else keep only the last K (the final archive already accumulates the non-dominated set, so a cap loses little)
 
 # ─────────────── load checkpoints (each has .archive of MOCandidates: c.x=params, c.fx=MOFitness) ───────────────
 ckpt_files = filter(f -> occursin(r"^search_state@\d+\.jld2$", f), readdir(run_dir))
 isempty(ckpt_files) && error("no search_state@<gen>.jld2 checkpoints in $run_dir")
 gen_of(f) = parse(Int, match(r"@(\d+)\.jld2$", f).captures[1])
 ckpt_files = sort(ckpt_files, by=gen_of)
-gens = [(gen_of(f), JLD2.load_object(joinpath(run_dir, f)).archive) for f in ckpt_files]
+ntotal = length(ckpt_files)
+# SAFETY: the archive is cumulative, so the final checkpoint already holds the non-dominated front. Loading
+# thousands of large archives blows past memory (e.g. 10k ckpts × 1k candidates ≈ 150+ GB). If the caller
+# set no stride/cap and there are many checkpoints, default to the FINAL archive only (override with the flags).
+if stride == 1 && maxckpts == 0 && ntotal > 1500
+    println("NOTE: $ntotal checkpoints — loading only the FINAL archive (it already accumulates the non-dominated front).")
+    println("      Override with --max-ckpts K (last K) or --stride N to widen the pool."); flush(stdout)
+    maxckpts = 1
+end
+stride > 1 && (ckpt_files = ckpt_files[1:stride:end])
+maxckpts > 0 && length(ckpt_files) > maxckpts && (ckpt_files = ckpt_files[end-maxckpts+1:end])
+println("loading $(length(ckpt_files))/$ntotal checkpoints (stride=$stride, max-ckpts=$(maxckpts == 0 ? "all" : maxckpts)) …"); flush(stdout)
+gens = Vector{Tuple{Int,Any}}(undef, length(ckpt_files))
+for (i, f) in enumerate(ckpt_files)
+    gens[i] = (gen_of(f), JLD2.load_object(joinpath(run_dir, f)).archive)
+    (i % 100 == 0 || i == length(ckpt_files)) && (println("  loaded $i/$(length(ckpt_files)) checkpoints"); flush(stdout))
+end
 println("loaded $(length(gens)) checkpoints: gens $(gen_of(ckpt_files[1]))..$(gen_of(ckpt_files[end]))")
 
 train_pt(c) = (Float64(sum(@view c.fx.objectives[1:2:end])), Float64(sum(@view c.fx.objectives[2:2:end])))

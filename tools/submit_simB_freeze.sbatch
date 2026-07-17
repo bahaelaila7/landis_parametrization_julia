@@ -78,22 +78,27 @@ fi
 cd "$PAN_ROOT"
 
 # ---------- STEP 1: select seeds from the Sim-A p101 front (idempotent) ----------
+# Levers: SIMB_STRIDE (load every Nth checkpoint) / SIMB_MAX_CKPTS (load only the last K) keep the selector
+# from churning through thousands of checkpoints — the final archive already accumulates the non-dominated set.
 SIMB_MU="${SIMB_MU:-25}"; SIMB_WARMUP="${SIMB_WARMUP:-10}"; SIMB_SEED="${SIMB_SEED:-1}"
 mkdir -p "$PAN_DATA"
 SEED_DB="${SIMB_SEED_DB:-$PAN_DATA/simB_seeds_${RUN_NAME}.duckdb}"
-CNT_FILE="$SEED_DB.count"
+CNT_FILE="$SEED_DB.count"; SEL_LOG="$SEED_DB.select.log"
 VALFLAG=""; [ "${SIMB_VAL:-0}" = "1" ] && VALFLAG="--val"
+STRIDEFLAG=""; [ -n "${SIMB_STRIDE:-}" ] && STRIDEFLAG="--stride $SIMB_STRIDE"
+MAXCKPTFLAG=""; [ -n "${SIMB_MAX_CKPTS:-}" ] && MAXCKPTFLAG="--max-ckpts $SIMB_MAX_CKPTS"
 
 if [ -f "$SEED_DB" ] && [ -f "$CNT_FILE" ] && [ "${PAN_RESELECT:-0}" != "1" ]; then
   N_SEEDS="$(cat "$CNT_FILE")"
   echo "seeds: reusing $SEED_DB ($N_SEEDS seeds) — set PAN_RESELECT=1 to rebuild"
 else
-  echo "seeds: selecting from $SIMA_RUN (mu=$SIMB_MU warmup=$SIMB_WARMUP seed=$SIMB_SEED ${VALFLAG:-train})"
-  SEL_OUT="$(./julia_gdal.sh --project=. tools/select_simB_seeds.jl \
-              "$SIMA_RUN" "$SEED_DB" --mu "$SIMB_MU" --warmup "$SIMB_WARMUP" --seed "$SIMB_SEED" $VALFLAG 2>&1)"
-  echo "$SEL_OUT"
-  N_SEEDS="$(printf '%s\n' "$SEL_OUT" | sed -n 's/^SEEDS=//p' | tail -1)"
-  [ -n "$N_SEEDS" ] && [ -f "$SEED_DB" ] || { echo "seed selection FAILED (no SEEDS= line / no DB written)"; exit 3; }
+  echo "seeds: selecting from $SIMA_RUN (mu=$SIMB_MU warmup=$SIMB_WARMUP seed=$SIMB_SEED ${VALFLAG:-train} ${STRIDEFLAG} ${MAXCKPTFLAG})"
+  # STREAM the selector's stdout to the SLURM .out AND a log file (tee) so progress is visible live —
+  # pipefail (set at top) propagates a selector failure through the pipe.
+  ./julia_gdal.sh --project=. tools/select_simB_seeds.jl \
+      "$SIMA_RUN" "$SEED_DB" --mu "$SIMB_MU" --warmup "$SIMB_WARMUP" --seed "$SIMB_SEED" $VALFLAG $STRIDEFLAG $MAXCKPTFLAG 2>&1 | tee "$SEL_LOG"
+  N_SEEDS="$(sed -n 's/^SEEDS=//p' "$SEL_LOG" | tail -1)"
+  [ -n "$N_SEEDS" ] && [ -f "$SEED_DB" ] || { echo "seed selection FAILED (no SEEDS= line / no DB written; see $SEL_LOG)"; exit 3; }
   echo "$N_SEEDS" > "$CNT_FILE"
 fi
 [ "$N_SEEDS" -ge 5 ] 2>/dev/null || { echo "only $N_SEEDS seeds — front too small; pick a run with a larger p101 or lower SIMB_MU"; exit 3; }

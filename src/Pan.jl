@@ -3617,6 +3617,17 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
     init_params = !isempty(_sobol_cands) ? [next_param() for _ in 1:igel_mu] :
                   igel_sobol_init ? PU.sobol_samples(param_dists, template, igel_mu) :
                   [BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment) for _ in 1:igel_mu]
+    # Seed the ESTABLISHMENT params from the data tables (prob_estab_from_data / maturity_from_data) and pin
+    # MIN_REL (fix_min_rel) — mirroring parametrize_MOCMAES. The igelmo path was MISSING this, so those flags
+    # were silently inert here and frozen seeds ran with Sim-A's no_establishment values (PROB_ESTAB=0, MATURITY=0).
+    # Applied to the template AND every seed BEFORE params_to_u, so the encoded u and the frozen `bases` carry the
+    # seeded/pinned values. Growth ({D,S,B_MAX,ANPP_MAX}) is untouched (stays frozen). Each fn is a no-op unless its
+    # flag/table is set. (Logs the counts once per params — informative at startup.)
+    for _p in Iterators.flatten(((template,), init_params))
+      _seed_prob_estab!(_p, eco_list, species_list, eco_species_ids)
+      _seed_maturity!(_p, species_list)
+      _seed_min_rel!(_p, eco_list)
+    end
     init_us = [PU.params_to_u(p, param_dists, slots) for p in init_params]
     if PARALLEL_MODE[] == :candidate     # candidate-parallelize the init population (sites already serial here)
       _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)  # SERIAL: freeze RANKW + set scales before the parallel batch (no race on the scale/RANKW globals)
@@ -5026,6 +5037,7 @@ function _seed_prob_estab!(params, eco_list, species_list, eco_species_ids)
   n = 0
   for (eco_id, sp_ids) in enumerate(eco_species_ids)
     l3, lu = _parse_eco_lu(eco_list[eco_id])
+    lu in ("natural", "artificial") || (lu = "natural")   # site_class_strata puts a site-tier (A/B/C/D) in |lu=; establishment prob is site-tier-independent → use the natural model input
     for (j, gsp) in enumerate(sp_ids)
       v = get(tbl, (uppercase(species_list[gsp]), l3, lu), nothing)
       v === nothing && continue
