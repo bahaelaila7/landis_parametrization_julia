@@ -14,6 +14,12 @@ import ..MOLBSA: MOFitness, MOCandidate, dominates
 
 export IgelState, ask, tell!, is_search_over
 
+# Fraction of reseeds (see `ask`) drawn UNIFORM-RANDOM in u-space instead of from the shared Sobol sequence.
+# A module-level Ref (NOT an IgelState field) so it can be flipped on a stop→resume WITHOUT changing the
+# serialized state layout (old checkpoints still deserialize). 0.0 ⇒ all-Sobol (backward-compatible: the
+# guard short-circuits, so no extra RNG draw). Set from `igel_reseed_random_frac` at launch.
+const RESEED_RANDOM_FRAC = Ref{Float64}(0.0)
+
 # one (1+1)-CMA-ES individual (search point + self-adaptive strategy parameters), in u-space.
 # `mature_at` is the generation at which the individual becomes subject to normal selection; until
 # then (a freshly re-seeded individual) it is protected from removal so it can descend to its basin.
@@ -97,7 +103,10 @@ function ask(st::IgelState)::Vector{Vector{Float64}}
   for k in 1:st.mu
     ind = st.pop[k]
     if st.reseed_sigma > 0 && ind.sigma < st.reseed_sigma
-      xo = clamp.(Sobol.next!(st._sobol), 0.0, 1.0)
+      # re-explore from a fresh point: RESEED_RANDOM_FRAC of the time uniform-random in the box, else the
+      # shared low-discrepancy Sobol point. Guard short-circuits when frac==0 → no RNG draw, Sobol as before.
+      xo = (RESEED_RANDOM_FRAC[] > 0 && rand(st.rng) < RESEED_RANDOM_FRAC[]) ?
+             rand(st.rng, n) : clamp.(Sobol.next!(st._sobol), 0.0, 1.0)
       offs[k] = xo
       st._off[k] = Individual(xo, st.sigma0, st.p_target, Matrix{Float64}(LA.I, n, n), zeros(n), ind.fx, 0)  # fresh strategy
       st._reseed[k] = true
