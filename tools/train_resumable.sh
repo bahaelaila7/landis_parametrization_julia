@@ -53,11 +53,42 @@ if [ -n "$RAM_BASE" ] && [ -d "$RAM_BASE" ] && [ -w "$RAM_BASE" ]; then
   trap 'exit 143' TERM; trap 'exit 130' INT
 fi
 
-CK=$(latest "$W"); OVR="\"output_dir\"=>\"$W\""
+# Pick the resume checkpoint. PAN_RESUME_FROM overrides the default "latest" so you can ROLL BACK to a known-good
+# gen (e.g. before a risky change corrupted the run): unset|latest ⇒ highest gen; a bare NUMBER ⇒ that gen;
+# an absolute /path ⇒ that file; none|fresh|scratch|0 ⇒ start over. Earlier checkpoints are never overwritten, so
+# any past gen is a valid rollback target; resuming from N re-writes gens N+1… (replacing the bad branch in place).
+case "${PAN_RESUME_FROM:-}" in
+  ""|latest)             CK=$(latest "$W") ;;
+  none|fresh|scratch|0)  CK="" ;;
+  /*)                    CK="$PAN_RESUME_FROM" ;;
+  *[!0-9]*)              log "PAN_RESUME_FROM='$PAN_RESUME_FROM' not a gen number / path"; exit 2 ;;
+  *)                     CK="$W/search_state@${PAN_RESUME_FROM}.jld2" ;;
+esac
+[ -n "$CK" ] && [ ! -f "$CK" ] && { log "resume checkpoint not found: $CK"; exit 2; }
+
+OVR="\"output_dir\"=>\"$W\""
 if [ -n "$CK" ]; then
+  RGEN=$(basename "$CK" | sed -E 's/.*search_state@([0-9]+)\.jld2/\1/')
+  # If any gen-based CSV has rows BEYOND the resume gen (i.e. this is a rollback, not a plain latest-resume),
+  # BACK IT UP then truncate to iteration<=RGEN so the resumed run appends cleanly (no duplicate/out-of-order gens).
+  # A normal latest-resume finds nothing ahead → no-op. losses.duckdb/cv_val_cache are copied (not truncated) for safety.
+  BK=""
+  for f in metrics.csv reseed_trace.csv; do
+    [ -f "$W/$f" ] || continue
+    ahead=$(awk -F, -v g="$RGEN" 'NR>1 && ($1+0)>g{c++} END{print c+0}' "$W/$f")
+    [ "${ahead:-0}" -gt 0 ] || continue
+    [ -z "$BK" ] && { BK="$W/rollback_backup@$(date +%Y%m%d-%H%M%S)_gen${RGEN}"; mkdir -p "$BK"; }
+    cp -p "$W/$f" "$BK/$f"
+    awk -F, -v g="$RGEN" 'NR==1 || ($1+0)<=g' "$BK/$f" > "$W/$f"
+    log "rollback: $f had $ahead rows > gen $RGEN → backed up + truncated to <=$RGEN"
+  done
+  if [ -n "$BK" ]; then
+    for f in losses.duckdb cv_val_cache.csv; do [ -f "$W/$f" ] && cp -p "$W/$f" "$BK/$f"; done
+    log "rollback backup (full pre-rollback copies) → $BK"
+  fi
   # PRESERVE losses.duckdb across resumes (deterministic split ⇒ identical loss scale; CREATE TABLE IF NOT EXISTS ⇒
   # the resumed run APPENDS gen N+ to the existing curve). Archives (search_state@N.jld2) were always safe.
-  OVR="$OVR,\"resume_from\"=>\"$CK\""; log "resume $(basename "$O") from $(basename "$CK") — losses.duckdb preserved (appending)"
+  OVR="$OVR,\"resume_from\"=>\"$CK\""; log "resume $(basename "$O") from gen $RGEN — losses.duckdb preserved (appending)"
 else log "fresh $(basename "$O")"; fi
 # Extra run_from_yaml overrides injected by a caller (e.g. submit_simB_freeze.sbatch pins sobol_candidates_db +
 # igel_mu to the actual seed count). Must be Julia Pair syntax, e.g.  "igel_mu"=>25,"sobol_candidates_db"=>"/x.duckdb"

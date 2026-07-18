@@ -29,3 +29,5 @@ docs/site/
 LocalPreferences.toml
 JuliaLocalPreferences.toml
 runs/*.duckdb
+.julia_depot/
+.gdal_driver_path_cache

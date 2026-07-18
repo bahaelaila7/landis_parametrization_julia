@@ -79,6 +79,9 @@ export PAN_TIMING=1 # per-gen wall breakdown → run.log. NOTE: in candidate mod
 # threads share the timer); the per-gen TOTAL is still meaningful. Use soa mode for a clean split.
 # export PAN_SKIP_VAL=1          # BENCH ONLY: skip held-out val re-sim (faster). Don't use for a real run — val objectives
 # (cv_val_cache) are needed to pick the final model. In candidate mode val is parallel anyway.
+# export PAN_RESUME_FROM=1500    # ROLL BACK: resume from search_state@1500.jld2 instead of the latest checkpoint
+#                                # (e.g. a risky change corrupted later gens). Also: latest|none|/abs/path.jld2.
+#                                # Gen-based CSVs (metrics.csv, reseed_trace.csv) are backed up + truncated to <=1500.
 # export PAN_RAMDISK=auto        # opt-in ramdisk output ($SLURM_TMPDIR if set, else /dev/shm); default OFF = write to $PAN_OUT
 # export PAN_SYNC_SEC=600        # ramdisk→durable backstop interval
 #module load inotify-tools 2>/dev/null || true        # enables event-driven ramdisk sync when PAN_RAMDISK is set

@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# Persistent, project-local Julia depot: survives sandbox restarts (unlike ~/.julia, which lives in $HOME and
+# gets wiped). Only used when the caller hasn't ALREADY set JULIA_DEPOT_PATH — on the cluster, submit.sbatch
+# exports the pre-warmed $SCRATCH/.julia depot, which must win. Trailing ':' appends the default depots so the
+# bundled stdlibs/artifacts stay reachable. Populate it once with:  make prepare  (Pkg.instantiate lands here).
+if [[ -z "${JULIA_DEPOT_PATH:-}" ]]; then
+    _PAN_DEPOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.julia_depot"
+    [[ -d "$_PAN_DEPOT" ]] && export JULIA_DEPOT_PATH="${_PAN_DEPOT}:"
+fi
+
 # Extract --project from args
 PROJECT_PATH=""
 for arg in "$@"; do

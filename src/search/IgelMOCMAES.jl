@@ -20,6 +20,33 @@ export IgelState, ask, tell!, is_search_over
 # guard short-circuits, so no extra RNG draw). Set from `igel_reseed_random_frac` at launch.
 const RESEED_RANDOM_FRAC = Ref{Float64}(0.0)
 
+# Sampling square-root of the covariance block. false (default) => eigendecomposition V*sqrt(Lambda) (as before).
+# true => Cholesky factor L (C = L*L') — SAME C-based algorithm and SAME N(0,C) sampling distribution, but the
+# factorization is ~n^3/3 flops vs a symmetric eigendecomposition's much larger constant, so `ask()` is cheaper
+# for large blocks (esp. cmaes_single_cov). A module Ref (not a state field) so it's toggleable on resume; C is
+# still what's stored, so checkpoints are unchanged. Set from `igel_cholesky` at launch.
+const USE_CHOLESKY = Ref{Bool}(false)
+
+# y ~ N(0, Cb): return the transform applied to a fresh standard-normal draw. Cholesky path falls back to a
+# jittered retry then eigen if Cb has drifted numerically non-PD (the C update is a PSD combination, but Float
+# round-off can nudge it), so it always returns a valid square-root.
+@inline function _sample_transform(Cb::AbstractMatrix, rng, m::Int)
+  z = randn(rng, m)
+  if USE_CHOLESKY[]
+    F = LA.cholesky(LA.Symmetric(Cb); check=false)
+    LA.issuccess(F) && return F.L * z
+    jit = 1e-10 * (sum(LA.diag(Cb)) / m + 1e-30)
+    for _ in 1:6
+      F = LA.cholesky(LA.Symmetric(Cb + jit * LA.I); check=false)
+      LA.issuccess(F) && return F.L * z
+      jit *= 10
+    end
+    # still not PD => fall through to the eigen square-root
+  end
+  E = LA.eigen(LA.Symmetric(Cb))
+  return (E.vectors * LA.Diagonal(sqrt.(max.(E.values, 1e-30)))) * z
+end
+
 # one (1+1)-CMA-ES individual (search point + self-adaptive strategy parameters), in u-space.
 # `mature_at` is the generation at which the individual becomes subject to normal selection; until
 # then (a freshly re-seeded individual) it is protected from removal so it can descend to its basin.
@@ -113,9 +140,7 @@ function ask(st::IgelState)::Vector{Vector{Float64}}
     else
       xo = copy(ind.x)                              # per-block: y_b ~ N(0, C[b,b]), assembled into xo
       for idx in st.blocks
-        Cb = ind.C[idx, idx]
-        F = LA.eigen(LA.Symmetric(Cb)); Ab = F.vectors * LA.Diagonal(sqrt.(max.(F.values, 1e-30)))
-        yb = Ab * randn(st.rng, length(idx))
+        yb = _sample_transform(ind.C[idx, idx], st.rng, length(idx))   # eigen (default) or Cholesky sqrt (USE_CHOLESKY)
         @inbounds for (j, gi) in enumerate(idx); xo[gi] = ind.x[gi] + ind.sigma * yb[j]; end
       end
       xo = clamp.(xo, 0.0, 1.0)
