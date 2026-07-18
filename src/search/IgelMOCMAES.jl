@@ -20,6 +20,15 @@ export IgelState, ask, tell!, is_search_over
 # guard short-circuits, so no extra RNG draw). Set from `igel_reseed_random_frac` at launch.
 const RESEED_RANDOM_FRAC = Ref{Float64}(0.0)
 
+# Live overrides for the two RESEED knobs that are otherwise SERIALIZED IgelState fields (so a resume would
+# restore the checkpoint's value and ignore the config). >=0 ⇒ use this instead of the struct field; the sentinel
+# <0 ⇒ fall back to the struct field (default: normal resume unchanged). Set from igel_{reseed_sigma,maturity}_override
+# at launch, so you can RETUNE reseed rate / maturity shield on a stop→resume without a fresh run.
+const RESEED_SIGMA_OVERRIDE = Ref{Float64}(-1.0)
+const MATURITY_OVERRIDE     = Ref{Int}(-1)
+@inline _reseed_sigma(st) = RESEED_SIGMA_OVERRIDE[] >= 0 ? RESEED_SIGMA_OVERRIDE[] : st.reseed_sigma
+@inline _maturity(st)     = MATURITY_OVERRIDE[]     >= 0 ? MATURITY_OVERRIDE[]     : st.maturity_period
+
 # Sampling square-root of the covariance block. false (default) => eigendecomposition V*sqrt(Lambda) (as before).
 # true => Cholesky factor L (C = L*L') — SAME C-based algorithm and SAME N(0,C) sampling distribution, but the
 # factorization is ~n^3/3 flops vs a symmetric eigendecomposition's much larger constant, so `ask()` is cheaper
@@ -127,9 +136,10 @@ end
 # fresh (1+1) strategy — re-exploration that gives the fixed population IPOP-like cumulative coverage.
 function ask(st::IgelState)::Vector{Vector{Float64}}
   n = st.n; offs = Vector{Vector{Float64}}(undef, st.mu); st._off = Vector{Individual}(undef, st.mu); st._reseed = falses(st.mu)
+  rs = _reseed_sigma(st)                              # live-overridable reseed threshold (else the struct field)
   for k in 1:st.mu
     ind = st.pop[k]
-    if st.reseed_sigma > 0 && ind.sigma < st.reseed_sigma
+    if rs > 0 && ind.sigma < rs
       # re-explore from a fresh point: RESEED_RANDOM_FRAC of the time uniform-random in the box, else the
       # shared low-discrepancy Sobol point. Guard short-circuits when frac==0 → no RNG draw, Sobol as before.
       xo = (RESEED_RANDOM_FRAC[] > 0 && rand(st.rng) < RESEED_RANDOM_FRAC[]) ?
@@ -263,7 +273,7 @@ function tell!(st::IgelState, off_fxs::Vector{MOFitness}, off_params::Vector)::B
   new_pop = Individual[]
   for k in prot
     if resd[k]
-      ind = st._off[k]; ind.mature_at = g + st.maturity_period
+      ind = st._off[k]; ind.mature_at = g + _maturity(st)   # live-overridable shield length (else the struct field)
     else
       ind = keys[μ+k] <= keys[k] ? st._off[k] : st.pop[k]   # (1+1) winner, maturity preserved
       ind.mature_at = st.pop[k].mature_at

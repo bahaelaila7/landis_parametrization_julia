@@ -5466,6 +5466,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   BiomassSuccessionPlugin.ANPP_FLOOR_TABLE[] = Bool(get_cfg("anpp_floor_from_data", false)) ?
     _load_anpp_floor_table(String(get_cfg("anpp_floor_csv", "./runs/anpp_floor_853.csv"))) : nothing
   IgelMOCMAES.USE_CHOLESKY[] = Bool(get_cfg("igel_cholesky", false))   # igelmo sampling sqrt: Cholesky (cheaper) vs eigen; Ref → resume-safe
+  IgelMOCMAES.RESEED_SIGMA_OVERRIDE[] = Float64(get_cfg("igel_reseed_sigma_override", -1.0))   # >=0 retunes reseed threshold on RESUME (else struct field)
+  IgelMOCMAES.MATURITY_OVERRIDE[]     = Int(get_cfg("igel_maturity_override", -1))             # >=0 retunes maturity shield on RESUME (else struct field)
   BSP.FIX_GROWTH[] = Bool(get_cfg("fix_growth", false))     # stage-B: fix {D,S,ANPP_MAX,B_MAX}, fit establishment only
   BSP.FIX_MATURITY[] = Bool(get_cfg("fix_maturity", false)) # pin MATURITY out of the search (at MATURITY_TABLE/SONA)
   BSP.FIX_MIN_REL[] = Bool(get_cfg("fix_min_rel", false))   # pin MIN_REL_BIOMASS out of the search (at MIN_REL_PINNED)
