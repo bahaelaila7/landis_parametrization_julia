@@ -45,13 +45,17 @@ case "$CONFIG" in /*) ;; *) CONFIG="$(readlink -f "${SLURM_SUBMIT_DIR:-$PWD}/$CO
 RUN_NAME="${2:-$(basename "${CONFIG%.*}")}" # output subdir; default = config basename without extension
 
 # ---------- paths (EDIT $PAN_OUT / $JULIA_DEPOT_PATH for your account) ----------
-export SCRATCH="/scratch/$USER"
-export RUNSDIR="$SCRATCH/runs"
-export PAN_ROOT="$SCRATCH/landis_parametrization_julia" # the repo checkout you submitted from
-export PAN_OUT="$RUNSDIR/outputs"                       # DURABLE output root (persistent) — outputs land here, not in the repo
-export PAN_DATA="$RUNSDIR/data"                         # resolves ${PAN_DATA}/*.csv|*.duckdb in the yaml (CSVs + slim DB live here)
-export JULIA_DEPOT_PATH="$SCRATCH/.julia"               # must be pre-warmed (see header) and readable on the compute node
-SLIM_DB="${PAN_SLIM_DB:-$PAN_DATA/slim_853.duckdb}"     # slim DB to node-stage; override per-config with PAN_SLIM_DB
+# All honor a PRE-SET value (:= default) so a SECOND, ISOLATED environment (e.g. a git-worktree checkout of another
+# branch with a struct change) can point PAN_ROOT + JULIA_DEPOT_PATH elsewhere WITHOUT disturbing the running jobs'
+# checkout/depot — a preempted+requeued old job keeps using its own code+depot. Pass via --export=ALL,PAN_ROOT=...,
+# JULIA_DEPOT_PATH=... (or export them before sbatch). PAN_OUT/PAN_DATA can stay shared (per-run output_dir subdirs).
+export SCRATCH="${SCRATCH:-/scratch/$USER}"
+export RUNSDIR="${RUNSDIR:-$SCRATCH/runs}"
+export PAN_ROOT="${PAN_ROOT:-$SCRATCH/landis_parametrization_julia}"   # the repo checkout you submitted from
+export PAN_OUT="${PAN_OUT:-$RUNSDIR/outputs}"                          # DURABLE output root (persistent) — outputs land here, not in the repo
+export PAN_DATA="${PAN_DATA:-$RUNSDIR/data}"                           # resolves ${PAN_DATA}/*.csv|*.duckdb in the yaml (CSVs + slim DB live here)
+export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-$SCRATCH/.julia}"         # must be pre-warmed (see header); layer as "$SCRATCH/.julia_split:$SCRATCH/.julia" for an isolated writable depot that reuses shared artifacts
+SLIM_DB="${PAN_SLIM_DB:-$PAN_DATA/slim_853.duckdb}"                    # slim DB to node-stage; override per-config with PAN_SLIM_DB
 
 # ---------- threads / BLAS ----------
 export JULIA_NUM_THREADS="$SLURM_CPUS_PER_TASK"

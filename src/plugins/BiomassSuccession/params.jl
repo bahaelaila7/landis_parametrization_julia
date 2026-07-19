@@ -4,7 +4,7 @@ function generate_eco_params(params::BiomassSuccessionParams)::Vector{BiomassSuc
     BiomassSuccessionEcoParams(
       SPINUP_MORTALITY_FRACTION=params.SPINUP_MORTALITY_FRACTION,
       SUFFICIENT_LIGHT=params.SUFFICIENT_LIGHT, D=(@dimslice params.D species),
-      S=(@dimslice params.S species),
+      S=params.S[eco_id],                      # eco-dependent now (like ANPP_MAX_SPP/B_MAX_SPP) → per-eco local vector
       LONGEVITY=(@dimslice params.LONGEVITY species),
       MATURITY=(@dimslice params.MATURITY species),
       SHADE_TOL=(@dimslice params.SHADE_TOL species),
@@ -31,9 +31,10 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   SPINUP_MORTALITY_FRACTION = 0.0f0 # was 0.15f0 (uncalibrated; added extra age-mortality during spinup only) — disabled per request
   #println(typeof(SPINUP_MORTALITY_FRACTION))
 
-  # S (growth-curve shape) is GLOBAL per-species (one value shared across ecoregions, like D): keeping S
-  # shared forces the per-eco ANPP_MAX/B_MAX to acclimate to a single S that works across all ecoregions.
-  S = rand(rng, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), n_species) .|> FloatType
+  # S (growth-curve shape) is now PER-(eco,species) (like ANPP_MAX_SPP): the split (productive) species get a
+  # per-site-class shape; pooled species carry one value broadcast across ecos by the param_split machinery.
+  S = [rand(rng, Dists.truncated(Dists.Normal(0.5, 1.0), 0.01, 1.0), length(eco_species)) .|> FloatType
+       for eco_species in eco_species_ids]
   D = rand(rng, Dists.truncated(Dists.Normal(15, 10), 5, 25), n_species) .|> FloatType
   #println(typeof(D))
   #LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200, 100), 100, 300), n_species) .|> FloatType

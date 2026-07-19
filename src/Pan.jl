@@ -804,8 +804,10 @@ function parametrize(; cohorts_db_path::String,
   w_count_balance::Bool=false,          # count-balance reweight of the W1 term (survivorship under-representation fix)
   w_count_balance_mode::String="both",  # which sim(s) get reweighted: "a" / "b" / "both"
   w_count_beta::Float64=0.99,           # effective-number-of-samples temper (→1 ≈ 1/n, →0 ≈ uniform)
+  w_count_pct_floor::Float64=0.10,      # floor on the per-bin count-share → effective #cohorts (neff=pct·tot); lower ⇒ rare bins get MORE weight
   rankw_mode::String="rank",            # per-(species,stratum) objective weight: "rank" (1/√ln(rank) by AGB) or "cbal_pct" (percentile-floored class-balanced by cohort count)
   rankw_beta::Float64=0.999,            # β for rankw_mode=cbal_pct
+  rankw_pct_floor::Float64=0.10,        # cohort-count-share floor+grid for rankw_mode=cbal_pct (species×strata; twin of w_count_pct_floor)
   param_split_species::AbstractDict=Dict{String,Vector{String}}(),  # {param_name => [species]} fit per-eco; others tied across ecos
   param_tier_merge::AbstractDict=Dict{String,Any}(),  # {param_name => {species => {cell => group}}} tie split site-cells per species
   spinup::Bool=true,
@@ -995,7 +997,7 @@ function parametrize(; cohorts_db_path::String,
   # age_idx bins; Sim A (per-year) looks them up via CBAL_COARSE. Applied in calculate_species_loss!.
   # RANKW mode: :rank (default, 1/√ln(rank) by AGB) or :cbal_pct (percentile-floored class-balanced by cohort
   # count — species play the role of age-bins in _set_cbal_weights!; 10% floor caps rare/empty cells).
-  PU.RANKW_MODE[] = Symbol(lowercase(rankw_mode)); PU.RANKW_BETA[] = rankw_beta
+  PU.RANKW_MODE[] = Symbol(lowercase(rankw_mode)); PU.RANKW_BETA[] = rankw_beta; PU.RANKW_PCT_FLOOR[] = rankw_pct_floor
   if PU.RANKW_MODE[] === :cbal_pct
     _nc = zeros(Int, n_species, length(eco_species_ids))
     for r in eachrow(splots)
@@ -1008,8 +1010,8 @@ function parametrize(; cohorts_db_path::String,
   PU.CBAL_MODE[] = Symbol(lowercase(w_count_balance_mode))
   PU.CBAL_BETA[] = w_count_beta
   if w_count_balance
-    PU._set_cbal_weights!(splots, PU.AgeBins(bins_idx=bins_idx .|> Int, last_bin_open=true), loss_params.age_bins, eco_species_ids, n_species; beta=w_count_beta)
-    @info "Count-balance reweight ON (mode=$(PU.CBAL_MODE[]) β=$(w_count_beta)); coarse=$(length(bins_idx)) bins+open, Sim-A W bins=$(length(loss_params.age_bins.bin_widths))"
+    PU._set_cbal_weights!(splots, PU.AgeBins(bins_idx=bins_idx .|> Int, last_bin_open=true), loss_params.age_bins, eco_species_ids, n_species; beta=w_count_beta, pct_floor=w_count_pct_floor)
+    @info "Count-balance reweight ON (mode=$(PU.CBAL_MODE[]) β=$(w_count_beta) pct_floor=$(w_count_pct_floor)); coarse=$(length(bins_idx)) bins+open, Sim-A W bins=$(length(loss_params.age_bins.bin_widths))"
   end
   # per-(param, species) SPLIT SETS: named params are fit per-eco (split) only for the listed species;
   # every other species shares one value across all ecoregions (tied). Empty ⇒ everything split (default).
@@ -1482,8 +1484,9 @@ function _set_rankw!(agb::Matrix{FloatType}, eco_species_ids; split_size::Union{
     isempty(ids) && continue
     if cbal
       β = PU.RANKW_BETA[]; nc = PU.CELL_NCOH[]; tot = sum(nc[gsp, e] for gsp in ids); totw = 0.0
+      qf = round(Int, 1 / PU.RANKW_PCT_FLOOR[])                              # grid steps (10/20/50 for 0.10/0.05/0.02); mirrors _set_cbal_weights!
       for gsp in ids
-        pct = tot > 0 ? max(round(10 * nc[gsp, e] / tot) / 10, 0.10) : 0.10  # count-share → nearest 10%, floored at 10% (caps rare/empty cells; mirrors _set_cbal_weights!)
+        pct = tot > 0 ? max(round(qf * nc[gsp, e] / tot) / qf, 1 / qf) : 1 / qf  # count-share on a 1/qf grid, floored at 1/qf (=rankw_pct_floor); qf=10 ≡ old round(10·share)/10 ⌊0.10⌋
         w = (1 - β) / (1 - β^(pct * tot)); R[gsp, e] = FloatType(w); totw += w
       end
       totw > 0 && (@views R[:, e] ./= totw)
@@ -5503,8 +5506,10 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     w_count_balance=Bool(get_cfg("w_count_balance", false)),
     w_count_balance_mode=String(get_cfg("w_count_balance_mode", "both")),
     w_count_beta=Float64(get_cfg("w_count_beta", 0.99)),
+    w_count_pct_floor=Float64(get_cfg("w_count_pct_floor", 0.10)),
     rankw_mode=String(get_cfg("rankw_mode", "rank")),
     rankw_beta=Float64(get_cfg("rankw_beta", 0.999)),
+    rankw_pct_floor=Float64(get_cfg("rankw_pct_floor", 0.10)),
     param_split_species=Dict{String,Vector{String}}(String(k) => String.(v) for (k, v) in get_cfg("param_split_species", Dict())),
     param_tier_merge=Dict{String,Any}(String(k) => Dict{String,Any}(String(sp) => Dict{String,String}(String(c) => String(g) for (c, g) in cm) for (sp, cm) in v) for (k, v) in get_cfg("param_tier_merge", Dict())),
     TRIALS=get_cfg("trials", 1000000),

@@ -34,13 +34,13 @@ case "$CONFIG" in /*) ;; *) CONFIG="$(readlink -f "${SLURM_SUBMIT_DIR:-$PWD}/$CO
 [ -f "$CONFIG" ] || { echo "config not found: $CONFIG"; exit 2; }
 RUN_NAME="${2:-$(basename "${CONFIG%.*}")}"    # output subdir under $PAN_OUT; default = config basename
 
-# ---------- paths (mirror tools/submit.sbatch; EDIT for your account) ----------
-export SCRATCH="/scratch/$USER"
-export RUNSDIR="$SCRATCH/runs"
-export PAN_ROOT="$SCRATCH/landis_parametrization_julia"
-export PAN_OUT="$RUNSDIR/outputs"
-export PAN_DATA="$RUNSDIR/data"
-export JULIA_DEPOT_PATH="$SCRATCH/.julia"
+# ---------- paths (mirror tools/submit.sbatch; all honor a pre-set value for an ISOLATED env) ----------
+export SCRATCH="${SCRATCH:-/scratch/$USER}"
+export RUNSDIR="${RUNSDIR:-$SCRATCH/runs}"
+export PAN_ROOT="${PAN_ROOT:-$SCRATCH/landis_parametrization_julia}"
+export PAN_OUT="${PAN_OUT:-$RUNSDIR/outputs}"
+export PAN_DATA="${PAN_DATA:-$RUNSDIR/data}"
+export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-$SCRATCH/.julia}"
 SLIM_DB="${PAN_SLIM_DB:-$PAN_DATA/slim_853.duckdb}"
 
 # ---------- threads / BLAS / parallelism ----------

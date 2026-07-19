@@ -196,8 +196,10 @@ function export_landis_params(params::BiomassSuccessionParams;
   # ---- SpeciesData.csv ----------------------------------------------------
   open(joinpath(output_dir, "SpeciesData.csv"), "w") do io
     println(io, "SpeciesCode,LeafLongevity,WoodDecayRate,MortalityCurve,GrowthCurve,LeafLignin,ShadeTolerance,FireTolerance")
+    # S is now per-(eco,species); LANDIS SpeciesData has ONE GrowthCurve per species → export the mean over ecos.
+    _meanS(g) = (v = Float64[]; for e in eachindex(params.ECO_SPECIES_IDS); k = findfirst(==(g), params.ECO_SPECIES_IDS[e]); k === nothing || push!(v, Float64(params.S[e][k])); end; isempty(v) ? 0.0 : sum(v) / length(v))
     for i in 1:n_sp
-      println(io, "$(sp_list[i]),1.0,0.1,$(params.D[i]),$(params.S[i]),0.1,$(params.SHADE_TOL[i]),1")
+      println(io, "$(sp_list[i]),1.0,0.1,$(params.D[i]),$(_meanS(i)),0.1,$(params.SHADE_TOL[i]),1")
     end
   end
 

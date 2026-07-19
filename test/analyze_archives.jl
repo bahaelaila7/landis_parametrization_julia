@@ -35,7 +35,7 @@ function feat(p)
   end
   for eco_id in eachindex(p.ECO_LIST), sp_local in eachindex(p.ECO_SPECIES_IDS[eco_id])
     gsp = Int(p.ECO_SPECIES_IDS[eco_id][sp_local])     # S is global per-species now
-    push!(v, Float64(p.S[gsp]), Float64(p.ANPP_MAX_SPP[eco_id][sp_local]),
+    push!(v, Float64(p.S[eco_id][sp_local]), Float64(p.ANPP_MAX_SPP[eco_id][sp_local]),
             Float64(p.B_MAX_SPP[eco_id][sp_local]), Float64(p.PROB_MORT_SPP[eco_id][sp_local]),
             Float64(length(p.PROB_ESTAB_SPP) >= eco_id ? p.PROB_ESTAB_SPP[eco_id][sp_local] : 0))
   end
@@ -52,7 +52,7 @@ function candidate_rows!(io, ci, tr, vl, p)
     println(io, join([ci, round(tr, digits=3), vl === missing ? "" : round(vl, digits=3),
       p.ECO_LIST[eco_id], p.SPECIES_LIST[gsp],
       round(Float64(p.D[gsp]), digits=3), round(Float64(p.LONGEVITY[gsp]), digits=1), mat, Int(p.SHADE_TOL[gsp]),
-      round(Float64(p.S[gsp]), digits=4), round(Float64(p.ANPP_MAX_SPP[eco_id][sp_local]), digits=1),
+      round(Float64(p.S[eco_id][sp_local]), digits=4), round(Float64(p.ANPP_MAX_SPP[eco_id][sp_local]), digits=1),
       round(Float64(p.B_MAX_SPP[eco_id][sp_local]), digits=1), round(Float64(p.PROB_MORT_SPP[eco_id][sp_local]), digits=5),
       pes, round(Float64(p.MIN_REL_BIOMASS[eco_id][1]), digits=4)], ","))
   end

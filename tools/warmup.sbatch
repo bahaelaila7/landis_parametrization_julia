@@ -19,9 +19,13 @@
 #SBATCH --error=%x-%j.err
 
 set -euo pipefail
-export SCRATCH="/scratch/$USER"
-export PAN_ROOT="$SCRATCH/landis_parametrization_julia"
-export JULIA_DEPOT_PATH="$SCRATCH/.julia" # MUST match the training job's depot
+# PAN_ROOT/JULIA_DEPOT_PATH honor a pre-set value so you can warm an ISOLATED env (a worktree checkout of a
+# struct-changing branch) into its OWN depot: e.g. PAN_ROOT=$SCRATCH/landis_split
+# JULIA_DEPOT_PATH=$SCRATCH/.julia_split:$SCRATCH/.julia sbatch tools/warmup.sbatch  (layered: writes new to
+# .julia_split, reuses shared deps/artifacts from .julia read-only → never touches the running jobs' cache).
+export SCRATCH="${SCRATCH:-/scratch/$USER}"
+export PAN_ROOT="${PAN_ROOT:-$SCRATCH/landis_parametrization_julia}"
+export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-$SCRATCH/.julia}" # MUST match the training job's depot
 export JULIA_PKG_PRECOMPILE_AUTO=1        # force precompilation now (opposite of the training job)
 
 cd "$PAN_ROOT"

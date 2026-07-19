@@ -97,14 +97,16 @@ Base.@kwdef struct BiomassSuccessionParams
 
   # Species Specific
   D::Vector{FloatType}
-  S::Vector{FloatType}           # GLOBAL per-species growth-curve shape (1 value across ecoregions; per-eco ANPP/B_MAX acclimate to it)
   LONGEVITY::Vector{FloatType}
   SHADE_TOL::Vector{UIntType}
   MATURITY::Vector{FloatType}
   PROB_RESPROUT::Vector{FloatType}
 
 
-  # ecoregion x species 
+  # ecoregion x species
+  S::Vector{Vector{FloatType}}   # PER-(eco,species) growth-curve shape. Was GLOBAL per-species; now eco-dependent so the
+  #   productive species (param_split_species) can take a different growth shape per site-class cell. Pooled species get
+  #   one value broadcast across ecos (same param_split machinery as B_MAX_SPP/ANPP_MAX_SPP). Resolved per-eco in generate_eco_params.
   B_MAX_SPP::Vector{Vector{FloatType}}
   ANPP_MAX_SPP::Vector{Vector{FloatType}}
   PROB_MORT_SPP::Vector{Vector{FloatType}}

@@ -16,7 +16,7 @@ function feat(p)
   end
   for eco_id in eachindex(p.ECO_LIST), sp_local in eachindex(p.ECO_SPECIES_IDS[eco_id])
     gsp = Int(p.ECO_SPECIES_IDS[eco_id][sp_local])
-    push!(v, Float64(p.S[gsp]), Float64(p.ANPP_MAX_SPP[eco_id][sp_local]), Float64(p.B_MAX_SPP[eco_id][sp_local]),
+    push!(v, Float64(p.S[eco_id][sp_local]), Float64(p.ANPP_MAX_SPP[eco_id][sp_local]), Float64(p.B_MAX_SPP[eco_id][sp_local]),
       Float64(p.PROB_MORT_SPP[eco_id][sp_local]), Float64(length(p.PROB_ESTAB_SPP) >= eco_id ? p.PROB_ESTAB_SPP[eco_id][sp_local] : 0))
   end
   for eco_id in eachindex(p.ECO_LIST); push!(v, Float64(p.MIN_REL_BIOMASS[eco_id][1])); end

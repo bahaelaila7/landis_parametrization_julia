@@ -13,9 +13,11 @@ nobj = length(arch[1].fx.objectives)
 objnames = nobj == 4 ? ["A_W", "A_AGB", "B_W", "B_AGB"] : nobj == 2 ? ["A_W", "A_AGB"] : ["obj$(j)" for j in 1:nobj]
 println("archive front-1: ", length(arch), " candidates; objectives/candidate = ", nobj, " ", objnames)
 
+# S is now per-(eco,species); collapse to a per-species mean over the ecos that contain the species for this flat export.
+_meanS(p, g) = (v = Float64[]; for e in eachindex(p.ECO_SPECIES_IDS); k = findfirst(==(g), p.ECO_SPECIES_IDS[e]); k === nothing || push!(v, Float64(p.S[e][k])); end; isempty(v) ? 0.0 : sum(v) / length(v))
 function flat!(d, p)
   for g in eachindex(sl)
-    d["S_$(sl[g])"] = Float64(p.S[g]); d["D_$(sl[g])"] = Float64(p.D[g]); d["LONGEVITY_$(sl[g])"] = Float64(p.LONGEVITY[g])
+    d["S_$(sl[g])"] = _meanS(p, g); d["D_$(sl[g])"] = Float64(p.D[g]); d["LONGEVITY_$(sl[g])"] = Float64(p.LONGEVITY[g])
     length(p.MATURITY) >= g && (d["MATURITY_$(sl[g])"] = Float64(p.MATURITY[g]))
     d["SHADE_$(sl[g])"] = Float64(p.SHADE_TOL[g])
   end

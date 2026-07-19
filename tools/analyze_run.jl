@@ -283,7 +283,7 @@ function param_rows!(rows, ci, tr, vl, p)
       mat = length(p.MATURITY) >= gsp ? Float64(p.MATURITY[gsp]) : NaN
       push!(rows, (candidate=ci, train_agg=tr, val_agg=vl, species=p.SPECIES_LIST[gsp], cell=cell,
         D=Float64(p.D[gsp]), LONGEVITY=Float64(p.LONGEVITY[gsp]), MATURITY=mat, SHADE_TOL=Float64(p.SHADE_TOL[gsp]),
-        S=Float64(p.S[gsp]), ANPP_MAX=Float64(p.ANPP_MAX_SPP[eco][sl]), B_MAX=Float64(p.B_MAX_SPP[eco][sl]),
+        S=Float64(p.S[eco][sl]), ANPP_MAX=Float64(p.ANPP_MAX_SPP[eco][sl]), B_MAX=Float64(p.B_MAX_SPP[eco][sl]),
         PROB_MORT=Float64(p.PROB_MORT_SPP[eco][sl]), PROB_ESTAB=_pe(eco, sl), MIN_REL_BIOMASS=Float64(p.MIN_REL_BIOMASS[eco][1])))
     end
   end

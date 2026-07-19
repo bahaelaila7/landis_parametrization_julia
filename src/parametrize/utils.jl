@@ -373,6 +373,7 @@ const AGB_SCALE_B = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))
 const RANKW       = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # 1/log(rank+1), Σ=1, rank by AGB
 const RANKW_MODE  = Ref{Symbol}(:rank)                               # :rank (1/√ln(rank) by AGB) or :cbal_pct (percentile-floored class-balanced by cohort count)
 const RANKW_BETA  = Ref{Float64}(0.999)                              # β for :cbal_pct RANKW (effective-number temper)
+const RANKW_PCT_FLOOR = Ref{Float64}(0.10)                           # cohort-count-share floor+grid for :cbal_pct RANKW (yaml rankw_pct_floor); species×strata twin of w_count_pct_floor
 const CELL_NCOH   = Ref{Matrix{Int}}(zeros(Int, 0, 0))               # per-(species,stratum) TRAIN cohort counts, for :cbal_pct RANKW
 
 # --- COUNT-BALANCE reweight: per-agebin W1 weight ∝ 1/effective-number-of-samples of the cohort COUNT in
@@ -583,7 +584,7 @@ end
 
 # Build CBAL_W (per gsp×eco weight over COARSE age_idx bins) + CBAL_COARSE (per-year→coarse map) from the
 # TRAIN reference cohort records. Frozen after this call (call once at setup, like RANKW).
-function _set_cbal_weights!(splots, coarse_bins::AgeBins, per_year_bins::AgeBins, eco_species_ids, n_species::Int; beta::Float64)
+function _set_cbal_weights!(splots, coarse_bins::AgeBins, per_year_bins::AgeBins, eco_species_ids, n_species::Int; beta::Float64, pct_floor::Float64=0.10)
   ne = length(eco_species_ids)
   nb = length(coarse_bins.bins_idx) + (coarse_bins.last_bin_open ? 1 : 0)
   counts = [zeros(Int, nb) for _ in 1:n_species, _ in 1:ne]
@@ -600,7 +601,9 @@ function _set_cbal_weights!(splots, coarse_bins::AgeBins, per_year_bins::AgeBins
       occ = Int[]
       for b in 1:nb
         if c[b] > 0
-          pct = max(round(10 * c[b] / tot) / 10, 0.10)            # count-share → nearest 10%, floored at 10%
+          q = round(Int, 1 / pct_floor)                          # integer grid steps: 10 / 20 / 50 for floor 0.10 / 0.05 / 0.02
+          pct = max(round(q * c[b] / tot) / q, 1 / q)            # count-share on a 1/q grid, floored at 1/q(=pct_floor). q=10 is EXACTLY the old round(10·share)/10 ⌊0.10⌋
+          #   grid step and floor move together (no gap); using integer q (not share/pct_floor) avoids the 0.1-not-representable rounding drift. yaml w_count_pct_floor.
           neff = pct * tot                                        # effective #cohorts = percentile × total (caps rare-bin weight)
           w[b] = FloatType((1 - beta) / (1 - beta^neff)); push!(occ, b)
         end
