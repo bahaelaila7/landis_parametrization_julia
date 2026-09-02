@@ -36,6 +36,36 @@ const MATURITY_OVERRIDE     = Ref{Int}(-1)
 # still what's stored, so checkpoints are unchanged. Set from `igel_cholesky` at launch.
 const USE_CHOLESKY = Ref{Bool}(false)
 
+# --- parameter-space niching, measured in NATIVE units / semantic quanta ---
+# Launch-set module Refs (NOT serialized IgelState fields → checkpoint layout unchanged), mirroring the
+# knobs above. NICHE_Q: length-d per-slot native quantum (empty ⇒ niching helpers inactive). U_TO_NVEC:
+# u-vector (population) → native value vector; PARAMS_TO_NVEC: decoded params struct (archive) → same.
+# Niche distance is quantum-scaled L∞: max_j |a_j-b_j|/q_j ("worst param, in quanta"), so `igel_niche_radius`
+# is a native-quantum count (r=1 ⇒ same niche iff every searched param is within one quantum).
+const NICHE_Q        = Ref{Vector{Float64}}(Float64[])
+const U_TO_NVEC      = Ref{Any}(identity)
+const PARAMS_TO_NVEC = Ref{Any}(identity)
+
+@inline function _ndist(a::AbstractVector, b::AbstractVector)::Float64   # quantum-scaled L∞
+  q = NICHE_Q[]; m = 0.0
+  @inbounds for j in eachindex(a); d = abs(a[j] - b[j]) / q[j]; d > m && (m = d); end
+  return m
+end
+
+# per-point isolation = nearest-neighbour quantum-L∞ distance (higher ⇒ more isolated; <2 pts ⇒ Inf).
+# Parameter-space analogue of _crowding, for the niching tiebreak / most-redundant eviction.
+function _niso(V::Vector{<:AbstractVector})::Vector{Float64}
+  m = length(V); m <= 1 && return fill(Inf, m)
+  iso = fill(Inf, m)
+  @inbounds for i in 1:m, j in 1:m
+    i == j && continue
+    d = _ndist(V[i], V[j]); d < iso[i] && (iso[i] = d)
+  end
+  return iso
+end
+
+@inline _niching(st) = st.niche_radius > 0 && !isempty(NICHE_Q[])
+
 # y ~ N(0, Cb): return the transform applied to a fresh standard-normal draw. Cholesky path falls back to a
 # jittered retry then eigen if Cb has drifted numerically non-PD (the C update is a PSD combination, but Float
 # round-off can nudge it), so it always returns a valid square-root.
@@ -177,12 +207,12 @@ end
 # fast non-dominated sort → front rank (1 = best). With niche_radius>0, two individuals only COMPETE
 # (can dominate one another) when within `r` in decision space — so explorers descending toward a
 # different optimum aren't killed by an individual already converged at another basin.
-function _fronts(Q::Vector{Individual}, r::Float64)::Vector{Int}
-  m = length(Q); objs = [ind.fx.objectives for ind in Q]; r2 = r*r
+function _fronts(Q::Vector{Individual}, nv::Vector{<:AbstractVector}, r::Float64)::Vector{Int}
+  m = length(Q); objs = [ind.fx.objectives for ind in Q]
   S = [Int[] for _ in 1:m]; ndom = zeros(Int, m); rank = zeros(Int, m)
   for p in 1:m, q in 1:m
     p == q && continue
-    (r > 0 && sum((Q[p].x .- Q[q].x).^2) >= r2) && continue   # only compete within the niche
+    (!isempty(nv) && _ndist(nv[p], nv[q]) >= r) && continue   # niching: only compete within the quantum-L∞ radius
     if dominates(objs[p], objs[q]); push!(S[p], q)
     elseif dominates(objs[q], objs[p]); ndom[p] += 1; end
   end
@@ -198,11 +228,11 @@ end
 
 # total preorder key over the combined set: (front rank, −crowding-within-front). Crowding is taken
 # in DECISION space when niching (to spread across basins), else in objective space (standard Igel).
-function _keys(Q::Vector{Individual}, r::Float64)
-  rank = _fronts(Q, r); cd = zeros(Float64, length(Q))
+function _keys(Q::Vector{Individual}, nv::Vector{<:AbstractVector}, r::Float64)
+  rank = _fronts(Q, nv, r); cd = zeros(Float64, length(Q))
   for rr in 1:maximum(rank)
     idx = findall(==(rr), rank)
-    cd[idx] .= r > 0 ? _crowding([Q[i].x for i in idx]) : _crowding([Q[i].fx.objectives for i in idx])
+    cd[idx] .= !isempty(nv) ? _niso([nv[i] for i in idx]) : _crowding([Q[i].fx.objectives for i in idx])
   end
   return [(rank[i], -cd[i]) for i in eachindex(Q)]
 end
@@ -234,11 +264,20 @@ function _archive!(st::IgelState, cand::MOCandidate)::Bool
   objs = cand.fx.objectives
   for m in st.archive; dominates(m.fx.objectives, objs) && return false; end
   filter!(m -> !dominates(objs, m.fx.objectives), st.archive)
-  push!(st.archive, cand)
-  if length(st.archive) > st.archive_cap
-    st.archive = st.archive[1:end]               # ensure concrete
-    cds = _crowding([m.fx.objectives for m in st.archive])
-    deleteat!(st.archive, argmin(cds))
+  if _niching(st)
+    cu = PARAMS_TO_NVEC[](cand.x)
+    same = findall(m -> _ndist(cu, PARAMS_TO_NVEC[](m.x)) < st.niche_radius, st.archive)   # same-niche members
+    any(i -> st.archive[i].fx.aggregate <= cand.fx.aggregate, same) && return false        # a ≥-good rep exists ⇒ cull cand
+    isempty(same) || deleteat!(st.archive, same)                                            # else drop the worse same-niche members
+    push!(st.archive, cand)
+    length(st.archive) > st.archive_cap &&
+      deleteat!(st.archive, argmin(_niso([PARAMS_TO_NVEC[](m.x) for m in st.archive])))     # cap: drop the most redundant
+  else
+    push!(st.archive, cand)
+    if length(st.archive) > st.archive_cap
+      cds = _crowding([m.fx.objectives for m in st.archive])
+      deleteat!(st.archive, argmin(cds))
+    end
   end
   improved = cand.fx.aggregate < st.representative.fx.aggregate
   if improved
@@ -255,7 +294,8 @@ function tell!(st::IgelState, off_fxs::Vector{MOFitness}, off_params::Vector)::B
   for k in 1:μ; st._off[k].fx = off_fxs[k]; end
   resd = st._reseed
   Q = vcat(st.pop, st._off)                        # 2μ; rank everything together (consistent keys)
-  keys = _keys(Q, st.niche_radius)
+  nv = _niching(st) ? [U_TO_NVEC[](ind.x) for ind in Q] : Vector{Float64}[]   # native decision vecs for niching
+  keys = _keys(Q, nv, st.niche_radius)
   # (1+1) success-based σ/C updates for non-reseed lineages (re-seeds start fresh, no update)
   for k in 1:μ
     resd[k] && continue

@@ -1148,6 +1148,25 @@ function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{
   return u
 end
 
+# native parameter VALUE per slot — same layout as `params_to_u`, but WITHOUT the prior-CDF transform.
+# Used by parameter-space niching so decision distances are measured in native units (and thus in the
+# per-parameter `quantum`s), not in the CDF-warped u-space. Reads only slot dims, so it is identical
+# regardless of the `template`/`base` used to decode (frozen-growth-safe).
+function params_to_nativevec(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}})::Vector{Float64} where T
+  v = Vector{Float64}(undef, length(slots))
+  for (dim, (pi, idx)) in enumerate(slots)
+    param = param_dists.params[pi]
+    rep = idx isa Vector ? idx[1] : idx                 # shared slot ⇒ representative target (all equal)
+    v[dim] = Float64(get_field_val(param.applier, getproperty(params, param.name), rep))
+  end
+  return v
+end
+
+# per-slot semantic quantum in NATIVE units: the parameter's `quantum` if set, else its Gaussian `sigma`
+# (quantum-first, sigma-fallback). The scale below which a difference is deemed semantically irrelevant.
+slot_quanta(param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}) where T =
+  Float64[(p = param_dists.params[pi]; Float64(p.quantum > zero(FloatType) ? p.quantum : p.sigma)) for (pi, _) in slots]
+
 # Hansen-style mixed-integer handling: a per-u-coordinate lower bound on the CMA-ES sampling
 # std-dev, so discrete coordinates keep flipping integers even as σ shrinks (otherwise a coarse
 # discrete like SHADE_TOL freezes once σ·√C_ii drops below its plateau width and all offspring

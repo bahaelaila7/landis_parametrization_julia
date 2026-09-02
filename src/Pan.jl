@@ -3761,6 +3761,17 @@ function parametrize_IgelMOCMAES(; ref_soa::ActiveSoA, output_dir::AbstractStrin
       bases = nothing
     end
   end
+
+  # Parameter-space niching (native units / semantic quanta): wire the launch-set Refs when igel_niche_radius>0.
+  # bio_params is the u_to_params decode template on both fresh & resume (only slot dims are read ⇒ template
+  # is immaterial, frozen-growth-safe). Left unset ⇒ NICHE_Q empty ⇒ _niching false ⇒ standard Igel (r=0).
+  if igel_niche_radius > 0
+    IgelMOCMAES.NICHE_Q[]        = PU.slot_quanta(param_dists, slots)
+    IgelMOCMAES.U_TO_NVEC[]      = u -> PU.params_to_nativevec(PU.u_to_params(u, param_dists, slots, bio_params), param_dists, slots)
+    IgelMOCMAES.PARAMS_TO_NVEC[] = p -> PU.params_to_nativevec(p, param_dists, slots)
+    @info "igelmo parameter-space niching ON: radius=$(igel_niche_radius) native-quanta (L∞) over $(length(slots)) slots"
+  end
+
   if TRIALS < 1 || search_state.n_evals >= TRIALS
     return search_state
   end
