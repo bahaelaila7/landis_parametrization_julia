@@ -51,11 +51,15 @@ esac fi
 }
 
 # ---------- paths (mirror tools/submit.sbatch; EDIT for your account) ----------
-export SCRATCH="/scratch/$USER"
-export RUNSDIR="$SCRATCH/runs"
-export PAN_ROOT="$SCRATCH/landis_parametrization_julia"
-export PAN_DATA="$RUNSDIR/data"           # ${PAN_DATA}/*.duckdb|*.csv in the config expand from here (needed by --sim)
-export JULIA_DEPOT_PATH="$SCRATCH/.julia" # pre-warmed, matching-arch depot
+export SCRATCH="${SCRATCH:-/scratch/$USER}"
+export RUNSDIR="${RUNSDIR:-$SCRATCH/runs}"
+# Honor a PRE-SET value (like submit.sbatch/warmup.sbatch) so analysis of a struct-changing branch's run can point
+# at that branch's worktree + isolated depot — REQUIRED because analyze_run.jl deserializes the run's checkpoints/
+# params (branch structs), so it must load the SAME branch code + precompiled depot. Pass via --export=ALL,PAN_ROOT=
+# $SCRATCH/landis_split,JULIA_DEPOT_PATH=$SCRATCH/.julia_split:$SCRATCH/.julia (or export them before sbatch).
+export PAN_ROOT="${PAN_ROOT:-$SCRATCH/landis_parametrization_julia}"
+export PAN_DATA="${PAN_DATA:-$RUNSDIR/data}"           # ${PAN_DATA}/*.duckdb|*.csv in the config expand from here (needed by --sim)
+export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-$SCRATCH/.julia}" # pre-warmed, matching-arch depot; layer $SCRATCH/.julia_split:$SCRATCH/.julia for the isolated branch env
 
 # ---------- precompile off + concurrency cap ----------
 export JULIA_PKG_PRECOMPILE_AUTO=0 # never compile on the clock
