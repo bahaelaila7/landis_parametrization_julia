@@ -45,15 +45,15 @@ cmaes_single_cov: false
 cmaes_blocks: "l3"          # one block per (param group, L3) + tail; A/B vs single_cov on the smoke before production
 igel_cholesky: true
 train_cap: "auto"
-train_cap_k: 1.5
+train_cap_k: 4.0         # softer all-species leveling (user choice 2026-10-12): cap ≈ 4× median stratum per eco cell
 train_cap_min: 20
 param_pooling:
-  min_plots: 40
+  min_plots: 150            # (L3,species) needs ≥150 TRAIN plots for its own B_MAX/ANPP dim (budget ≈ 550 dims total)
   floor_pooled: max
   params:
     B_MAX_SPP:    {level: l3, fallback: [l2, region], cell_split: [PITA, PIEL]}
-    ANPP_MAX_SPP: {level: l3, fallback: [l2, region], cell_split: [PITA, PIEL]}
-    S:            {level: l3, fallback: [l2, region], cell_split: [PITA, PIEL]}
+    ANPP_MAX_SPP: {level: l2, fallback: [region], cell_split: [PITA, PIEL]}   # B_MAX/ANPP ratio: per L2
+    S:            {level: l2, fallback: [region], cell_split: [PITA, PIEL]}   # curve shape: per L2, not per L3
   cell_merge: {PIEL: {A: AB, B: AB}}
 rankw_mode: "cbal_pct"
 rankw_beta: 0.999
