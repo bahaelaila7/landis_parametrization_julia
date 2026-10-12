@@ -37,13 +37,19 @@ MutableParam(name::Symbol, dist::Dists.Distribution, bounds::Tuple, sigma::T, ty
 # where ECO_L3[eco_id] gives the cell's L3 index — pooled slots spanning several L3s go to a tail block (-1).
 const CMAES_BLOCKS = Ref(:eco)
 const ECO_L3 = Ref{Vector{Int}}(Int[])
+const ECO_L2 = Ref{Vector{Int}}(Int[])   # eco_id → L2 index; pooled slots spanning several L3s of ONE L2 get an L2 block
 function _block_eco(target)
   if CMAES_BLOCKS[] === :l3 && !isempty(ECO_L3[])
     target isa Tuple && return ECO_L3[][Int(target[1])]
     target isa Integer && return ECO_L3[][Int(target)]
     if target isa AbstractVector && !isempty(target)
       ls = unique(ECO_L3[][Int(t[1])] for t in target)
-      return length(ls) == 1 ? ls[1] : -1
+      length(ls) == 1 && return ls[1]
+      if !isempty(ECO_L2[])
+        l2 = unique(ECO_L2[][Int(t[1])] for t in target)
+        length(l2) == 1 && return 10_000 + l2[1]   # L2 block (offset keeps it apart from L3 indices)
+      end
+      return -1                                   # spans several L2s → region tail block
     end
     return 0
   end

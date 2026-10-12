@@ -1109,6 +1109,7 @@ function parametrize(; cohorts_db_path::String,
   end
   PU.CMAES_BLOCKS[] = Symbol(lowercase(cmaes_blocks))
   PU.ECO_L3[] = PU.CMAES_BLOCKS[] === :l3 ? (let l3 = [_l3_of(e) for e in eco_list], u = unique(l3); [findfirst(==(x), u) for x in l3] end) : Int[]
+  PU.ECO_L2[] = PU.CMAES_BLOCKS[] === :l3 ? (let l2 = [_l2_of(_l3_of(e)) for e in eco_list], u = unique(l2); [findfirst(==(x), u) for x in l2] end) : Int[]
   PU.CMAES_BLOCKS[] === :l3 && @info "CMA-ES blocks per L3: $(length(unique(PU.ECO_L3[]))) L3s (+ tail block for multi-L3 pooled dims)"
   println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
   # Which species drive DOMINANCE (MO Pareto / CMA-MAE measure / breadth axis). Default exact (SPCD only).
