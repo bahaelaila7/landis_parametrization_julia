@@ -861,6 +861,8 @@ function _write_split_plots(output_dir::AbstractString, eco_list, splots, sv, st
   out = dd === nothing ? out : leftjoin(out, select(dd, vcat(ids, [:dom])), on=ids)
   sort!(out, vcat([:set], ids))
   CSV.write(joinpath(output_dir, "split_plots.csv"), out)
+  sm = Data.LAST_SPECIES_MAP[]
+  sm === nothing || CSV.write(joinpath(output_dir, "species_map.csv"), sm)   # symbol → category (for floor builders)
   @info "split_plots.csv: $(nrow(out)) plots → $(output_dir)"
 end
 
@@ -925,6 +927,7 @@ function parametrize(; cohorts_db_path::String,
   max_exact::Int=12, max_group::Int=4,     # species tiering caps (own-param species / pooled groups)
   train_cap::Union{Nothing,Int,String}=nothing,  # species-balanced TRAIN: cap plots per (eco cell × dominant species); Int | "auto"; surplus → val/test
   train_cap_k::Float64=1.5, train_cap_min::Int=20, # "auto" cap = max(train_cap_min, ceil(k × median stratum size per eco cell))
+  split_only::Bool=false,                  # write split_plots.csv + species_map.csv (+ pool_map.csv) and stop (floor-building pass)
   loss_lambda::Float64=1.0,
   loss_alpha::Float64=1.0,
   agb_hinge::Bool=false,
@@ -1127,6 +1130,10 @@ function parametrize(; cohorts_db_path::String,
   isempty(PU.PARAM_TIER_MERGE[]) ||
     @info "Param tier merges (split cells tied per species)" merges=Dict(string(k) => Dict(species_list[i] => cm for (i, cm) in v) for (k, v) in PU.PARAM_TIER_MERGE[])
   _build_pool_map!(param_pooling, splots, eco_list, species_list, eco_species_ids, output_dir)
+  if split_only
+    @info "split_only: wrote split_plots.csv / species_map.csv / pool_map.csv to $(output_dir) — stopping before search"
+    return nothing
+  end
   PU.CMAES_BLOCKS[] = Symbol(lowercase(cmaes_blocks))
   PU.ECO_L3[] = PU.CMAES_BLOCKS[] === :l3 ? (let l3 = [_l3_of(e) for e in eco_list], u = unique(l3); [findfirst(==(x), u) for x in l3] end) : Int[]
   PU.CMAES_BLOCKS[] === :l3 && @info "CMA-ES blocks per L3: $(length(unique(PU.ECO_L3[]))) L3s (+ tail block for multi-L3 pooled dims)"
@@ -5530,6 +5537,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     max_exact=Int(get_cfg("max_exact", 12)), max_group=Int(get_cfg("max_group", 4)),
     train_cap=(c = get_cfg("train_cap", nothing); (c === nothing || c == "null") ? nothing : (c isa Integer ? Int(c) : String(c))),
     train_cap_k=Float64(get_cfg("train_cap_k", 1.5)), train_cap_min=Int(get_cfg("train_cap_min", 20)),
+    split_only=Bool(get_cfg("split_only", false)),
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
   n_output_plots = get_cfg("n_output_plots", 0)

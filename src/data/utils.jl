@@ -145,7 +145,8 @@ end
 # RNG draws, no spatial bias toward low FIPS). cap: Int, or "auto" = max(train_cap_min, ceil(train_cap_k × median
 # stratum size in that eco cell)). Returns (surplus_val_sites, surplus_test_sites).
 _median(v) = (w = sort(v); n = length(w); isodd(n) ? Float64(w[(n+1)÷2]) : (w[n÷2] + w[n÷2+1]) / 2)
-const LAST_SPLIT_DOM = Ref{Union{Nothing,DataFrame}}(nothing)   # id_cols + eco_id + dom + set (for split_plots.csv)
+const LAST_SPLIT_DOM = Ref{Union{Nothing,DataFrame}}(nothing)
+const LAST_SPECIES_MAP = Ref{Union{Nothing,DataFrame}}(nothing)   # species_symbol → effective_species (this run's tiering)   # id_cols + eco_id + dom + set (for split_plots.csv)
 function _cap_train_sites(df::DataFrame, id_cols::Vector{Symbol}, parts, three_way::Bool;
   train_cap::Union{Int,String}, train_cap_k::Float64, train_cap_min::Int)
   tr = vcat([let t = p[3], n = nrow(p[3])
@@ -281,6 +282,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   hasproperty(df, eco_field) || error("make_splots: eco_field :$eco_field is not a column of the cohorts table")
 
   assign_tiered_species!(df; max_exact=max_exact, max_group=max_group, min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats, shade_tier=shade_tier)
+  LAST_SPECIES_MAP[] = sort!(unique(select(df, [:species_symbol, :effective_species])), :species_symbol)
   if !isempty(filter_species)
     fs = Set(filter_species)
     filter!(row -> row.effective_species in fs, df)
