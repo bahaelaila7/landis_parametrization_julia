@@ -787,6 +787,62 @@ function plot_biomass_bin_deltas(splots::DataFrame, loss_params::PU.LossParams; 
   println("Saved diagnostic: $fname")
 end
 
+# eco string "8.3.5|lu=X" → L3 "8.3.5"; L3 "8.3.5" → L2 "8.3" ("15.4.1" → "15.4")
+_l3_of(eco::AbstractString) = String(first(split(String(eco), "|lu=")))
+_l2_of(l3::AbstractString) = (p = split(String(l3), "."); length(p) >= 2 ? join(p[1:2], ".") : String(l3))
+
+# param_pooling: per (param, eco cell, species) pooling label from TRAIN plot counts (no val/test leakage).
+#   min_plots: an (level-group, species) needs ≥ this many train plots to own a dim, else fall back a level.
+#   params: {P: {level: l3, fallback: [l2, region], cell_split: [PITA, PIEL]}}  levels: cell | l3 | l2 | region
+#     cell_split species keep per-site-cell dims (merged by cell_merge) wherever the eco has real cells.
+#   overrides: {P: {"8.4.4|QURU": region}}  force a level.   floor_pooled: max (default) | first.
+# Deterministic given the split ⇒ resume-safe; written to output_dir/pool_map.csv for inspection.
+function _build_pool_map!(pool_cfg::AbstractDict, splots, eco_list, species_list, eco_species_ids, output_dir::AbstractString)
+  PU.POOL_LABEL[] = Dict{Symbol,Dict{Tuple{Int,Int},String}}()
+  PU.FLOOR_POOLED_MAX[] = false
+  isempty(pool_cfg) && return
+  min_plots = Int(get(pool_cfg, "min_plots", 40))
+  PU.FLOOR_POOLED_MAX[] = String(get(pool_cfg, "floor_pooled", "max")) == "max"
+  cnt = Dict{Tuple{Int,Int},Int}()                       # (eco_id, gsp) → # distinct TRAIN plots carrying gsp
+  for g in groupby(unique(select(splots, [:plot_id, :eco_id, :species_id])), [:eco_id, :species_id])
+    cnt[(Int(g.eco_id[1]), Int(g.species_id[1]))] = nrow(g)
+  end
+  l3s = [_l3_of(e) for e in eco_list]
+  keyof(lv, e) = lv == "cell" ? String(eco_list[e]) : lv == "l3" ? l3s[e] : lv == "l2" ? _l2_of(l3s[e]) :
+                 lv in ("region", "reg") ? "R" : error("param_pooling: unknown level '$lv' (cell|l3|l2|region)")
+  count_at(lv, key, gsp) = sum((get(cnt, (e, gsp), 0) for e in eachindex(eco_list) if keyof(lv, e) == key); init=0)
+  cell_merge = get(pool_cfg, "cell_merge", Dict())
+  overrides = get(pool_cfg, "overrides", Dict())
+  rows = NamedTuple[]
+  for (pname, spec) in get(pool_cfg, "params", Dict())
+    levels = vcat([String(spec["level"])], String.(get(spec, "fallback", String[])))
+    csplit = Set(String.(get(spec, "cell_split", String[])))
+    ov = get(overrides, String(pname), Dict())
+    lab = Dict{Tuple{Int,Int},String}()
+    for (e, sp_ids) in enumerate(eco_species_ids), sl in eachindex(sp_ids)
+      gsp = Int(sp_ids[sl]); sp = species_list[gsp]; cell = PU._eco_lu(eco_list[e])
+      l = if sp in csplit && !(cell in ("", "X"))
+        "cell:$(l3s[e])|$(get(get(cell_merge, sp, Dict()), cell, cell))"
+      else
+        lv = get(ov, "$(l3s[e])|$sp", nothing)
+        if lv === nothing
+          i = findfirst(x -> count_at(x, keyof(x, e), gsp) >= min_plots, levels)
+          lv = i === nothing ? last(levels) : levels[i]
+        end
+        "$(lv):$(keyof(String(lv), e))"
+      end
+      lab[(e, sl)] = "$l|$sp"
+      push!(rows, (param=String(pname), eco=String(eco_list[e]), species=sp, n_train_plots=get(cnt, (e, gsp), 0), label=lab[(e, sl)]))
+    end
+    PU.POOL_LABEL[][Symbol(pname)] = lab
+    lvc = Dict{String,Int}()
+    for l in unique(values(lab)); k = first(split(l, ":")); lvc[k] = get(lvc, k, 0) + 1; end
+    @info "param_pooling $(pname): $(length(unique(values(lab)))) dims over $(length(lab)) (eco,species) targets" by_level=lvc
+  end
+  mkpath(output_dir)
+  CSV.write(joinpath(output_dir, "pool_map.csv"), DataFrame(rows))
+end
+
 # Persist the exact train/val/test plot assignment (+ eco cell, + dominant species when train_cap ran) so floor
 # builders / analysis scripts reuse the run's split instead of re-deriving it (scripts drift from training kwargs).
 function _write_split_plots(output_dir::AbstractString, eco_list, splots, sv, st)
@@ -831,6 +887,8 @@ function parametrize(; cohorts_db_path::String,
   rankw_pct_floor::Float64=0.10,        # cohort-count-share floor+grid for rankw_mode=cbal_pct (species×strata; twin of w_count_pct_floor)
   param_split_species::AbstractDict=Dict{String,Vector{String}}(),  # {param_name => [species]} fit per-eco; others tied across ecos
   param_tier_merge::AbstractDict=Dict{String,Any}(),  # {param_name => {species => {cell => group}}} tie split site-cells per species
+  param_pooling::AbstractDict=Dict{String,Any}(),     # region runs: L3→L2→region pooling of EcoSpecies params (see _build_pool_map!)
+  cmaes_blocks::String="eco",                          # CMA-ES covariance blocks: "eco" (per cell, legacy) | "l3" (per L3 + tail)
   spinup::Bool=true,
   search_mode::String="lbsa",
   tier::Int=3,
@@ -1068,6 +1126,10 @@ function parametrize(; cohorts_db_path::String,
   end
   isempty(PU.PARAM_TIER_MERGE[]) ||
     @info "Param tier merges (split cells tied per species)" merges=Dict(string(k) => Dict(species_list[i] => cm for (i, cm) in v) for (k, v) in PU.PARAM_TIER_MERGE[])
+  _build_pool_map!(param_pooling, splots, eco_list, species_list, eco_species_ids, output_dir)
+  PU.CMAES_BLOCKS[] = Symbol(lowercase(cmaes_blocks))
+  PU.ECO_L3[] = PU.CMAES_BLOCKS[] === :l3 ? (let l3 = [_l3_of(e) for e in eco_list], u = unique(l3); [findfirst(==(x), u) for x in l3] end) : Int[]
+  PU.CMAES_BLOCKS[] === :l3 && @info "CMA-ES blocks per L3: $(length(unique(PU.ECO_L3[]))) L3s (+ tail block for multi-L3 pooled dims)"
   println("Plots:$n_plots, Ecos:$n_ecoregions, Species:$n_species, Measurements: $(size(splots))")
   # Which species drive DOMINANCE (MO Pareto / CMA-MAE measure / breadth axis). Default exact (SPCD only).
   DOMINANCE_GSP[] = lowercase(dominance_species) == "all" ? Set{Int}() :
@@ -5567,6 +5629,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     rankw_beta=Float64(get_cfg("rankw_beta", 0.999)),
     rankw_pct_floor=Float64(get_cfg("rankw_pct_floor", 0.10)),
     param_split_species=Dict{String,Vector{String}}(String(k) => String.(v) for (k, v) in get_cfg("param_split_species", Dict())),
+    param_pooling=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("param_pooling", Dict())),
+    cmaes_blocks=String(get_cfg("cmaes_blocks", "eco")),
     param_tier_merge=Dict{String,Any}(String(k) => Dict{String,Any}(String(sp) => Dict{String,String}(String(c) => String(g) for (c, g) in cm) for (sp, cm) in v) for (k, v) in get_cfg("param_tier_merge", Dict())),
     TRIALS=get_cfg("trials", 1000000),
     resume_from=resume_from,

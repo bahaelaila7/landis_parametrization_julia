@@ -33,12 +33,28 @@ MutableParam(name::Symbol, dist::Dists.Distribution, bounds::Tuple, sigma::T, ty
 # separate block per eco) — so eco-scoped params (Eco/EcoSpecies) yield one block per ecoregion, giving
 # the "2 global + #ecoregion matrices" layout. Returns a Vector of u-index vectors (a partition of 1:d),
 # in first-seen order. A single group (the default) ⇒ one block = plain CMA-ES.
+# Covariance blocking mode. :eco (legacy) = one block per (group, eco cell); :l3 = one block per (group, L3)
+# where ECO_L3[eco_id] gives the cell's L3 index — pooled slots spanning several L3s go to a tail block (-1).
+const CMAES_BLOCKS = Ref(:eco)
+const ECO_L3 = Ref{Vector{Int}}(Int[])
+function _block_eco(target)
+  if CMAES_BLOCKS[] === :l3 && !isempty(ECO_L3[])
+    target isa Tuple && return ECO_L3[][Int(target[1])]
+    target isa Integer && return ECO_L3[][Int(target)]
+    if target isa AbstractVector && !isempty(target)
+      ls = unique(ECO_L3[][Int(t[1])] for t in target)
+      return length(ls) == 1 ? ls[1] : -1
+    end
+    return 0
+  end
+  target isa Tuple ? Int(target[1]) : (target isa Integer ? Int(target) : 0)
+end
 function build_groups(param_dists, slots::Vector{Tuple{Int,Any}}, per_eco_groups)
   keyed = Dict{Tuple{Symbol,Int},Vector{Int}}()
   order = Tuple{Symbol,Int}[]
   for (dim, (pi, target)) in enumerate(slots)
     g = param_dists.params[pi].group
-    eco = (g in per_eco_groups) ? (target isa Tuple ? Int(target[1]) : (target isa Integer ? Int(target) : 0)) : 0
+    eco = (g in per_eco_groups) ? _block_eco(target) : 0
     key = (g, eco)
     if !haskey(keyed, key)
       keyed[key] = Int[]; push!(order, key)
@@ -997,8 +1013,18 @@ function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,
         push!(slots, (pi, i))
       end
     elseif param.sampler isa EcoSpeciesSampler
+      pl = get(POOL_LABEL[], param.name, nothing)          # param_pooling: one u-dim per pooling label
       ss = get(PARAM_SPLIT_SETS[], param.name, nothing)   # global-species ids kept per-eco; others shared
-      if ss === nothing
+      if pl !== nothing
+        groups = Dict{String,Vector{Tuple{Int,Int}}}()
+        for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS), sp_local in eachindex(sp_ids)
+          push!(get!(groups, pl[(eco_id, sp_local)], Tuple{Int,Int}[]), (eco_id, sp_local))
+        end
+        for lbl in sort!(collect(keys(groups)))
+          g = groups[lbl]
+          push!(slots, (pi, length(g) == 1 ? g[1] : g))
+        end
+      elseif ss === nothing
         for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS)
           for sp_id in eachindex(sp_ids)
             push!(slots, (pi, (eco_id, sp_id)))
@@ -1069,6 +1095,14 @@ const PARAM_SPLIT_SETS = Ref{Dict{Symbol,Set{Int}}}(Dict{Symbol,Set{Int}}())
 # (plain per-eco split). Lets different species use different site-productivity partitions off one plot label.
 const PARAM_TIER_MERGE = Ref{Dict{Symbol,Dict{Int,Dict{String,String}}}}(Dict{Symbol,Dict{Int,Dict{String,String}}}())
 
+# param_pooling (region runs): param → (eco_id, sp_local) → pooling label ("cell:8.5.3|AB|PIEL", "l3:8.3.4|QURU",
+# "l2:8.4|OXAR", "reg:R|_H_HST"). Takes precedence over PARAM_SPLIT_SETS/TIER_MERGE for that param in build_slots:
+# targets sharing a label share ONE u-dim. Empty ⇒ legacy. FLOOR_POOLED_MAX: a pooled slot's B_MAX/PROB_ESTAB data
+# floor is the MAX over its members (else the first member's — legacy; harmless when members share one floor).
+const POOL_LABEL = Ref{Dict{Symbol,Dict{Tuple{Int,Int},String}}}(Dict{Symbol,Dict{Tuple{Int,Int},String}}())
+const FLOOR_POOLED_MAX = Ref(false)
+_slot_floor(fl, tgts, dflt) = FLOOR_POOLED_MAX[] ? maximum(Float64(get(fl, t, dflt)) for t in tgts) : Float64(get(fl, first(tgts), dflt))
+
 # cast to the param's type — identical to the sobol_samples inner mapping. Bounds and discrete
 # priors (DiscreteUniform) are handled automatically by quantile, so any u is representable.
 function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}, template::T)::T where T
@@ -1095,10 +1129,10 @@ function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slot
     end
     lo_eff = min_   # effective lower bound for the clamp (raised to a per-cell data floor for B_MAX / PROB_ESTAB)
     raw = if bf !== nothing && param.name === :B_MAX_SPP
-      lo = Float64(get(bf, rep, 12000.0)); lo_eff = lo; hi = Float64(max_)   # rescale uniform u onto [floor, upper]
+      lo = _slot_floor(bf, tgts, 12000.0); lo_eff = lo; hi = Float64(max_)   # rescale uniform u onto [floor, upper]
       lo + clamp(Float64(u[dim]), 0.0, 1.0) * (hi - lo)
     elseif pef !== nothing && param.name === :PROB_ESTAB_SPP
-      lo = Float64(get(pef, rep, Float64(min_))); lo_eff = lo; hi = Float64(max_)   # data lower bound → [floor, 1.0]
+      lo = _slot_floor(pef, tgts, Float64(min_)); lo_eff = lo; hi = Float64(max_)   # data lower bound → [floor, 1.0]
       lo + clamp(Float64(u[dim]), 0.0, 1.0) * (hi - lo)
     else
       Dists.quantile(param.dist, clamp(Float64(u[dim]), 1e-10, 1 - 1e-10))
@@ -1130,16 +1164,17 @@ function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{
   for (dim, (pi, idx)) in enumerate(slots)
     param = param_dists.params[pi]
     rep = idx isa Vector ? idx[1] : idx                 # shared slot ⇒ read the representative eco (all equal)
+    tgts = idx isa Vector ? idx : (idx,)
     cur = get_field_val(param.applier, getproperty(params, param.name), rep)
     u[dim] = if param.name === :ANPP_MAX_SPP   # ratio reparam inverse: recover ratio = B_MAX/ANPP, map via the ratio prior. Handles legacy seeds (real ANPP) by clamping their implied ratio into [20,35].
       anpp = Float64(cur); bmax = Float64(get_field_val(param.applier, getproperty(params, :B_MAX_SPP), rep))
       ratio = anpp > 0 ? bmax / anpp : Float64(Dists.mean(param.dist))
       clamp(Float64(Dists.cdf(param.dist, ratio)), 1e-6, 1 - 1e-6)
     elseif bf !== nothing && param.name === :B_MAX_SPP
-      lo = Float64(get(bf, rep, 12000.0)); hi = Float64(param.bounds[2])   # inverse of the u_to_params rescale
+      lo = _slot_floor(bf, tgts, 12000.0); hi = Float64(param.bounds[2])   # inverse of the u_to_params rescale
       clamp((Float64(cur) - lo) / (hi - lo), 1e-6, 1 - 1e-6)
     elseif pef !== nothing && param.name === :PROB_ESTAB_SPP
-      lo = Float64(get(pef, rep, Float64(param.bounds[1]))); hi = Float64(param.bounds[2])   # inverse of the [floor,1] rescale
+      lo = _slot_floor(pef, tgts, Float64(param.bounds[1])); hi = Float64(param.bounds[2])   # inverse of the [floor,1] rescale
       clamp((Float64(cur) - lo) / (hi - lo), 1e-6, 1 - 1e-6)
     else
       clamp(Float64(Dists.cdf(param.dist, Float64(cur))), 1e-6, 1 - 1e-6)
