@@ -12,9 +12,10 @@ include("Spatial.jl")
 #end
 #include("plugins/BiomassSuccessionPlugin.jl")
 using .PanCore
-using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin
+using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin, PnETPlugin
 import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
+import .Parametrization.PnETParametrization as PNP
 using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel
 import .Data as Data
 import .Spatial
@@ -42,7 +43,51 @@ const ActivePlugins = (BaseSitePlugin.BaseSite, BiomassSuccessionPlugin.BiomassS
 const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 include("succession_api.jl")
 
-function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, spinup::Bool=true, no_establishment::Bool=false)
+succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "biomasssuccession", "bs") ? _BS :
+                                                lowercase(name) in ("pnet", "pnet-succession") ? _PN :
+                                                error("unknown succession_plugin '$name' (biomass | pnet)")
+
+# Optional diagnostic hook: called with the prepared training data right after the search driver returns (used by test/pnet_smoke_diag.jl).
+const POST_SEARCH_HOOK = Ref{Any}(nothing)
+
+# SoA type for a given succession plugin P (BaseSite + P). For BiomassSuccession this is exactly `ActiveSoA`.
+soa_type(::Type{P}) where {P} = SiteSoA{Tuple{BaseSitePlugin.BaseSite,P}}
+
+# Plugin-specific per-site initialisation inside make_sites (BiomassSuccession: the statements previously inlined there, same order).
+function _init_site_plugin!(::Type{_BS}, site, no_establishment::Bool)
+  site.B = zero(FloatType)
+  site.AGNPP = zero(FloatType)
+  site.harvestCapacityReduction = zero(FloatType)
+  site.growthReduction = zero(FloatType)
+  site.prevYearMortality = zero(FloatType)
+  site.shade_class = one(UIntType)
+  site.c_species .= zero(UIntType)
+  site.c_age .= zero(FloatType)
+  site.c_bio .= zero(FloatType)
+  site.c_m_tot .= zero(FloatType)
+  site.c_comp .= zero(FloatType)
+  site.no_establish = no_establishment
+  site.sp_mature .= false
+  site.sp_sprout .= false
+  site.sp_seed .= false
+  site.sp_serotiny .= false
+  site.sp_plant .= false
+  return nothing
+end
+function _init_site_plugin!(::Type{_PN}, site, no_establishment::Bool)
+  site.B = zero(FloatType)
+  site.c_species .= zero(UIntType)
+  site.c_age .= zero(FloatType)
+  site.c_bio .= zero(FloatType)
+  site.c_tbio .= zero(FloatType)
+  site.sp_mature .= false
+  return nothing
+end
+
+make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; plugin::Type=_BS, kw...) = _make_sites(plugin, splots, eco_species_ids; kw...)
+
+function _make_sites(::Type{P}, splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, spinup::Bool=true, no_establishment::Bool=false,
+                     site_attrs=nothing) where {P}
   #eco_ids = unique(select(splots, [:eco_id]))
   #n_species = maximum(splots.species_id)
   #plot_ids = unique(select(splots, [:plot_id]))
@@ -63,7 +108,7 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
   if spinup
     cohort_counts = fill(Int32(2), n)
     @debug cohort_counts
-    soa = ActiveSoA((cohort=cohort_counts, species=species_counts))
+    soa = soa_type(P)((cohort=cohort_counts, species=species_counts))
     base_seed = rand(rng, UInt64)   # per-site RNG = RNGType(hash((base_seed, i))) below → thread-count-invariant & reproducible (was seeded from per-thread RNGs, which made results depend on --threads)
     Threads.@threads :static for i in 1:nrow(df)
       @inbounds begin
@@ -76,25 +121,10 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         site.ref_cn = UIntType(df.plot_id[i])
         site.old = zero(UIntType)
         site.live = zero(UIntType)
-        site.B = zero(FloatType)
-        site.AGNPP = zero(FloatType)
-        site.harvestCapacityReduction = zero(FloatType)
-        site.growthReduction = zero(FloatType)
-        site.prevYearMortality = zero(FloatType)
-        site.shade_class = one(UIntType)
-        site.c_species .= zero(UIntType)
-        site.c_age .= zero(FloatType)
-        site.c_bio .= zero(FloatType)
-        site.c_m_tot .= zero(FloatType)
-        site.c_comp .= zero(FloatType)
-        site.no_establish = no_establishment
-        site.sp_mature .= false
-        site.sp_sprout .= false
-        site.sp_seed .= false
-        site.sp_serotiny .= false
-        site.sp_plant .= false
+        _init_site_plugin!(P, site, no_establishment)
       end
     end
+    init_sites!(P, soa, site_attrs)
     return soa
   else
     splots_dict = Dict(
@@ -108,7 +138,7 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
     df_keys = sort!(collect(keys(splots_dict)))
 
     cohort_counts = [Int32(nrow(splots_dict[key])) for key in df_keys]
-    soa = ActiveSoA((cohort=cohort_counts, species=species_counts))
+    soa = soa_type(P)((cohort=cohort_counts, species=species_counts))
     base_seed = rand(rng, UInt64)   # per-site RNG = RNGType(hash((base_seed, i))) below → thread-count-invariant & reproducible (was seeded from per-thread RNGs, which made results depend on --threads)
     Threads.@threads :static for i in 1:length(df_keys)
       @inbounds begin
@@ -127,28 +157,13 @@ function make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng
         site.ref_cn = plot_id
         site.old = zero(UIntType)
         site.live = zero(UIntType)
-        site.B = zero(FloatType)
-        site.AGNPP = zero(FloatType)
-        site.harvestCapacityReduction = zero(FloatType)
-        site.growthReduction = zero(FloatType)
-        site.prevYearMortality = zero(FloatType)
-        site.shade_class = one(UIntType)
-        site.c_species .= zero(UIntType)
-        site.c_age .= zero(FloatType)
-        site.c_bio .= zero(FloatType)
-        site.c_m_tot .= zero(FloatType)
-        site.c_comp .= zero(FloatType)
-        site.no_establish = no_establishment
-        site.sp_mature .= false
-        site.sp_sprout .= false
-        site.sp_seed .= false
-        site.sp_serotiny .= false
-        site.sp_plant .= false
+        _init_site_plugin!(P, site, no_establishment)
         for row in eachrow(initial_cohorts)
           add_cohort!(succession_plugin_of(soa), site, UIntType(row.eco_species_id), FloatType(row.age_calc), FloatType(row.agb_sum))
         end
       end
     end
+    init_sites!(P, soa, site_attrs)
     return soa
   end
 end
@@ -237,7 +252,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
       for (sp, age, bio, _drop) in cohorts
         b = noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
         add_cohort!(SP, site, sp, age, b)
-        cbio[Int(site.live)] = b   # overwrite add_cohort!'s trunc with the raw value
+        set_cohort_bio!(SP, site, Int(site.live), b)   # overwrite add_cohort!'s trunc with the raw value
         site.B += b
       end
     end
@@ -285,7 +300,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
               if csp[j] == sp && cage[j] == age
                 newb = dmode === :scale ? cbio[j] * (one(FloatType) - drop) : bio
                 site.B += newb - cbio[j]
-                cbio[j] = newb
+                set_cohort_bio!(SP, site, j, newb)
                 break
               end
             end
@@ -334,7 +349,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
         if !matched
           b = noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
           add_cohort!(SP, site, sp, age, b)
-          cbio[Int(site.live)] = b
+          set_cohort_bio!(SP, site, Int(site.live), b)
           site.B += b
         end
       end
@@ -388,14 +403,14 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
       for j in 1:orig_live
         if csp[j] == sp && cage[j] == age
           site.B += b - cbio[j]
-          cbio[j] = b
+          set_cohort_bio!(SP, site, j, b)
           matched = true
           break
         end
       end
       if !matched
         add_cohort!(SP, site, sp, age, b)
-        cbio[Int(site.live)] = b   # overwrite add_cohort!'s trunc with the raw value
+        set_cohort_bio!(SP, site, Int(site.live), b)   # overwrite add_cohort!'s trunc with the raw value
         site.B += b
       end
     end
@@ -890,6 +905,11 @@ function parametrize(; cohorts_db_path::String,
   param_split_species::AbstractDict=Dict{String,Vector{String}}(),  # {param_name => [species]} fit per-eco; others tied across ecos
   param_tier_merge::AbstractDict=Dict{String,Any}(),  # {param_name => {species => {cell => group}}} tie split site-cells per species
   param_pooling::AbstractDict=Dict{String,Any}(),     # region runs: L3→L2→region pooling of EcoSpecies params (see _build_pool_map!)
+  succession_plugin::String="biomass",                # "biomass" (BiomassSuccession, default) | "pnet" (PnET ecophysiology)
+  pnet_climate_cache::String="",                       # pnet: PRISM L4 monthly cache (JLD2)
+  pnet_co2_csv::String="",                             # pnet: annual CO2 csv (year,co2_ppm)
+  pnet_generic::AbstractDict=Dict{String,Any}(),       # pnet: PnETConst field overrides
+  pnet_soil_texture::AbstractDict=Dict{String,Any}(),  # pnet: {L3 => Saxton-Rawls texture code}; default LOAM
   cmaes_blocks::String="eco",                          # CMA-ES covariance blocks: "eco" (per cell, legacy) | "l3" (per L3 + tail)
   spinup::Bool=true,
   search_mode::String="lbsa",
@@ -1056,6 +1076,18 @@ function parametrize(; cohorts_db_path::String,
       filter_extent, filter_states, siteclass_l3s, max_exact, max_group, train_cap, train_cap_k, train_cap_min, rng, drop_phantom)...)
   _write_split_plots(output_dir, eco_list, splots, splots_val_raw, splots_test_raw)
   n_species = length(species_list)
+  # --- succession plugin selection (static type; everything downstream dispatches on succession_plugin_of(soa)) ---
+  SUCC = succession_plugin_type(succession_plugin)
+  if SUCC === PnETPlugin.PnET
+    spinup && error("succession_plugin=pnet requires spinup: false (cohorts start from the observed state)")
+    DUAL_MODE[] === :off || error("succession_plugin=pnet does not support dual_mode yet (Sim B needs establishment)")
+    (isempty(pnet_climate_cache) || isempty(pnet_co2_csv)) && error("succession_plugin=pnet requires pnet_climate_cache and pnet_co2_csv")
+    PnETPlugin.configure!(; climate_cache=pnet_climate_cache, co2_csv=pnet_co2_csv, generic=pnet_generic, db_path=cohorts_db_path)
+    @info "PnET succession: climate cache $(basename(pnet_climate_cache)) ($(length(PnETPlugin.CLIMATE[].ids)) L4s, $(PnETPlugin.CLIMATE[].y1)-$(PnETPlugin.CLIMATE[].y2)); fixed constants" PnETPlugin.FIXED[]
+  end
+  _site_attrs(sp) = SUCC === PnETPlugin.PnET ?
+    PnETPlugin.build_site_attrs(cohorts_db_path, tablename, sp, eco_list; soil_map=Dict{String,String}(String(k) => String(v) for (k, v) in pnet_soil_texture)) : nothing
+  n_species = length(species_list)
   n_ecoregions = length(eco_list)
   n_plots = maximum(splots.plot_id)
   # count-balance reweight: build per-agebin W1 weights ONCE from the TRAIN reference (frozen), on the COARSE
@@ -1139,7 +1171,7 @@ function parametrize(; cohorts_db_path::String,
     val_site_sim_years = Data.get_site_sim_years(val_spdf)
     val_spinup_cohorts = Data.get_spinup_cohorts(splots_val_raw)   # needed for the val Sim-B spinup (dual val)
     val_injection_cohorts = (no_establishment || OVERRIDE_INJECTION[] || SIMB_DISTURB_ONLY[]) ? Data.get_injection_cohorts(splots_val_raw; all_cohorts=(OVERRIDE_INJECTION[] || SIMB_DISTURB_ONLY[])) : nothing
-    val_ref_soa = make_sites(splots_val_raw, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment)
+    val_ref_soa = make_sites(splots_val_raw, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment, plugin=SUCC, site_attrs=_site_attrs(splots_val_raw))
     val_splots = splots_val_raw
     println("Val: $(length(unique(splots_val_raw.plot_id))) plots, $(nrow(splots_val_raw)) rows")
   end
@@ -1188,7 +1220,7 @@ function parametrize(; cohorts_db_path::String,
   # drops cover the whole stand), even with no_establishment=false + override_injection=false — it never injects.
   injection_cohorts = (no_establishment || OVERRIDE_INJECTION[] || SIMB_DISTURB_ONLY[]) ?
     Data.get_injection_cohorts(splots; all_cohorts=(OVERRIDE_INJECTION[] || SIMB_DISTURB_ONLY[])) : nothing
-  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment)
+  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment, plugin=SUCC, site_attrs=_site_attrs(splots))
   if search_mode == "sobol"
     return parametrize_sobol(; ref_soa=ref_soa,
       output_dir=output_dir,
@@ -1231,7 +1263,7 @@ function parametrize(; cohorts_db_path::String,
              search_mode == "nsga2" ? (archive_cap=cmaes_archive_cap, nsga2_pop=nsga2_pop, nsga2_offspring=nsga2_offspring, nsga2_eta_c=nsga2_eta_c, nsga2_eta_m=nsga2_eta_m, nsga2_pc=nsga2_pc, nsga2_pm=nsga2_pm, sobol_init=nsga2_sobol_init) :
              search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed, balanced_quality=balanced_quality, cmame_mo_rank=cmame_mo_rank, archive_by_sp=archive_by_sp, bounds_by_sobol=bounds_by_sobol, top_seeds=top_seeds, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
              NamedTuple()
-  driver(; ref_soa=ref_soa,
+  _driver_result = driver(; ref_soa=ref_soa,
     output_dir=output_dir,
     splots=splots,
     spdf_plts=spdf_plts,
@@ -1263,6 +1295,8 @@ function parametrize(; cohorts_db_path::String,
     rng=rng,
     debug=debug,
     cmaes_kw...)
+  POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, injection_cohorts, spinup_cohorts, output_dir, n_species, tier))
+  return _driver_result
 end
 function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params::PU.LossParams, scratch_perm::Vector{Int}, scratch_ages::Vector{FloatType})
   site.live == 0 && return
@@ -1617,7 +1651,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
   resA = map(eachindex(seeds)) do ri
     soa = work_soa === nothing ? copy_and_reseed_soa(ref_soa, seeds[ri]) : reset_soa!(work_soa, ref_soa; seed=seeds[ri])
     if init_scales[ri] != one(FloatType)       # perturb the sim-year-0 population (not scored, only propagated)
-      sc = init_scales[ri]; cap = INIT_PERTURB_CAP[]
+      sc = init_scales[ri]; cap = INIT_PERTURB_CAP[]; SPp = succession_plugin_of(soa)
       @maybe_threads PARALLEL_SITES[] for i in 1:soa.n     # per-site independent → parallel in SoA mode
         site = getsite(soa, i)
         site.active || continue
@@ -1625,7 +1659,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           b = site.c_bio[j]
           # perturbed = max(2, bio + sign(pct)·min(bio·|pct|, max_perturb)) ≡ max(2, bio + clamp(bio·pct, ±cap));
           # max_perturb (cap) bounds the DEVIATION, 2-floor hardcoded, sc = 1+pct.
-          site.c_bio[j] = max(FloatType(2), b + clamp(b * (sc - one(FloatType)), -cap, cap))
+          set_cohort_bio!(SPp, site, j, max(FloatType(2), b + clamp(b * (sc - one(FloatType)), -cap, cap)))
         end
       end
     end
@@ -1744,7 +1778,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
               d = get(spd, (site.c_species[j], UIntType(round(site.c_age[j]))), zero(FloatType))
               if d > zero(FloatType)
                 drop = site.c_bio[j] * d
-                site.c_bio[j] -= drop
+                set_cohort_bio!(SP, site, j, site.c_bio[j] - drop)
                 site.B -= drop
               end
             end
@@ -5757,6 +5791,11 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     rankw_pct_floor=Float64(get_cfg("rankw_pct_floor", 0.10)),
     param_split_species=Dict{String,Vector{String}}(String(k) => String.(v) for (k, v) in get_cfg("param_split_species", Dict())),
     param_pooling=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("param_pooling", Dict())),
+    succession_plugin=String(get_cfg("succession_plugin", "biomass")),
+    pnet_climate_cache=String(get_cfg("pnet_climate_cache", "")),
+    pnet_co2_csv=String(get_cfg("pnet_co2_csv", "")),
+    pnet_generic=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("pnet_generic", Dict())),
+    pnet_soil_texture=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("pnet_soil_texture", Dict())),
     cmaes_blocks=String(get_cfg("cmaes_blocks", "eco")),
     param_tier_merge=Dict{String,Any}(String(k) => Dict{String,Any}(String(sp) => Dict{String,String}(String(c) => String(g) for (c, g) in cm) for (sp, cm) in v) for (k, v) in get_cfg("param_tier_merge", Dict())),
     TRIALS=get_cfg("trials", 1000000),
