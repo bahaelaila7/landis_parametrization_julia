@@ -1,6 +1,6 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes, copy_and_reseed_soa, reset_soa!, current_rss_gb, gc_and_trim!, @maybe_threads, PARALLEL_SITES
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, swap_cohort!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes, copy_and_reseed_soa, reset_soa!, current_rss_gb, gc_and_trim!, @maybe_threads, PARALLEL_SITES
 
 # Parallelism toggle for the site loops. PARALLEL_SITES[]=true → `@maybe_threads` threads over sites (SoA-level
 # parallelism, needed for single-eval spatial/raster runs). false → serial sites, so an OUTER driver can instead
@@ -184,6 +184,22 @@ end
     soa = getfield(sv, :soa)
     i = getfield(sv, :i)
     $expr
+  end
+end
+
+"""
+    swap_cohort!(site, i, j)
+
+Copy cohort `j` over cohort `i` for EVERY per-cohort CSR field (count key `:cohort`) of every plugin in the SoA
+(swap-remove helper). Unrolled at compile time from `csr_fields`, so any future per-cohort array is moved too.
+"""
+@generated function swap_cohort!(site::SiteView{S}, i::Integer, j::Integer) where {S}
+  plugin_types = S.parameters[1].parameters
+  names = sort!([f for (f, k) in _field_to_key_map(plugin_types) if k === :cohort])
+  stmts = [:(let v = getproperty(site, $(QuoteNode(f))); v[i] = v[j]; end) for f in names]
+  quote
+    $(stmts...)
+    nothing
   end
 end
 

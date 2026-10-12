@@ -597,11 +597,7 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
       i += 1
     else
       if i != last
-        site.c_age[i] = site.c_age[last]
-        site.c_bio[i] = site.c_bio[last]
-        site.c_species[i] = site.c_species[last]
-        site.c_comp[i] = site.c_comp[last]
-        site.c_m_tot[i] = site.c_m_tot[last]
+        PanCore.swap_cohort!(site, i, last)   # moves every per-cohort CSR field
       end
       last -= 1
     end
