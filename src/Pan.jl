@@ -1046,39 +1046,12 @@ function parametrize(; cohorts_db_path::String,
     PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins_idx .|> Int, last_bin_open=true),
       smoothing_weights=smoothing_window, lambda=FloatType(loss_lambda))
   unbinned_w && @info "Sim-A W = UNBINNED per-year EMD (bins 1:400, no age-smoothing); softplus β + cell W_SCALE recompute on this grid"
-  split_rng = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) ? RNGType(UInt64(split_seed)) : nothing   # seeded from split_seed only ⇒ all folds share the shuffle
   splots, eco_list, species_list, eco_species_ids, splots_val_raw, splots_test_raw =
-    Data.prepare_parametrization_data(; cohorts_db_path=cohorts_db_path,
-      eco_field=eco_field,
-      tablename=tablename,
-      output_dir=tablename,
-      skip_disturbances=skip_disturbances,
-      spinup=spinup,
-      by_subplot=by_subplot,
-      val_frac=val_frac,
-      split_rng=split_rng,
-      n_folds=n_folds,
-      fold_index=fold_index,
-      test_frac=test_frac,
-      min_trees=min_trees,
-      min_agb_frac=min_agb_frac,
-      stratify_eco_mixed=stratify_eco_mixed,
-      single_ecoregion=single_ecoregion,
-      stratify_landuse=stratify_landuse,
-      site_class_strata=site_class_strata,
-      siteclass_hi_max=siteclass_hi_max,
-      siteclass_scheme=siteclass_scheme,
-      shade_tier_csv=shade_tier_csv,
-      filter_extent=filter_extent,
-      filter_states=filter_states, siteclass_l3s=siteclass_l3s, max_exact=max_exact, max_group=max_group,
-      train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min,
-      filter_eco_field=filter_eco_field,
-      filter_ecos=filter_ecos,
-      filter_plots=filter_plots,
-      exclude_plots=exclude_plots,
-      filter_species=filter_species,
-      filter_planted=filter_planted,
-      RNG=rng)
+    Data.prepare_parametrization_data(; _prep_kwargs(; cohorts_db_path, eco_field, tablename, filter_eco_field, filter_ecos,
+      filter_plots, exclude_plots, filter_species, filter_planted, skip_disturbances, spinup, by_subplot,
+      val_frac, split_seed, n_folds, fold_index, test_frac, min_trees, min_agb_frac, stratify_eco_mixed,
+      single_ecoregion, stratify_landuse, site_class_strata, siteclass_hi_max, siteclass_scheme, shade_tier_csv,
+      filter_extent, filter_states, siteclass_l3s, max_exact, max_group, train_cap, train_cap_k, train_cap_min, rng)...)
   _write_split_plots(output_dir, eco_list, splots, splots_val_raw, splots_test_raw)
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
@@ -5445,6 +5418,149 @@ function _expandenv(s::AbstractString)
   return expanduser(out)
 end
 
+# ---------------------------------------------------------------------------------------------------------------
+# Single source of truth for the DATA-PREP keyword arguments (train/val/test split, region filters, site-class
+# tiers, species tiering, outlier exclusions, ...). Used by `run_from_yaml` (training) AND by the analysis scripts
+# (`prepare_from_cfg`), so a script re-derives EXACTLY the plots/split the run trained on.
+# ---------------------------------------------------------------------------------------------------------------
+
+# cfg getter: String values get ${VAR}/$VAR/~ expanded; everything else passes through.
+_cfg_getter(cfg::AbstractDict) = (key, default) -> (v = get(cfg, key, default); v isa AbstractString ? _expandenv(v) : v)
+
+# Parse the data-prep inputs from a (YAML-loaded) config into a NamedTuple whose names match `parametrize`'s kwargs.
+function _cfg_data_inputs(cfg::AbstractDict)
+  get_cfg = _cfg_getter(cfg)
+  filter_plots = NTuple{4,Int}[
+    NTuple{4,Int}([x isa AbstractString ? parse(Int, x) : Int(x) for x in p])
+    for p in get_cfg("filter_plots", [])
+  ]
+  # Plots to DROP from the loaded set (outlier exclusion). Accepts an inline `exclude_plots:` list of
+  # [statecd,unitcd,countycd,plot] and/or an `exclude_plots_csv:` file with those four columns; merged.
+  exclude_plots = NTuple{4,Int}[
+    NTuple{4,Int}([x isa AbstractString ? parse(Int, x) : Int(x) for x in p])
+    for p in get_cfg("exclude_plots", [])
+  ]
+  let epc = get_cfg("exclude_plots_csv", nothing)
+    if !(epc === nothing || epc == "null")
+      for r in eachrow(CSV.read(String(epc), DataFrame))
+        push!(exclude_plots, (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)))
+      end
+    end
+  end
+  filter_extent = get_cfg("filter_extent", nothing)
+  filter_extent = (filter_extent === nothing || filter_extent == "null") ? nothing : String(filter_extent)
+  # DB path: env FIADB wins (portable across machines); else the yaml value (get_cfg already expands ${VAR}/~).
+  db_path = get(ENV, "FIADB", "") != "" ? ENV["FIADB"] : String(get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"))
+  return (
+    cohorts_db_path=db_path,
+    filter_eco_field=get_cfg("filter_eco_field", "epa_l3"),
+    eco_field=get_cfg("eco_field", "epa_l3"),
+    tablename=get_cfg("tablename", "data_eco_cohorts"),
+    filter_ecos=String.(get_cfg("filter_ecos", String[])),
+    filter_plots=filter_plots,
+    exclude_plots=exclude_plots,
+    filter_species=String.(get_cfg("filter_species", String[])),
+    skip_disturbances=get_cfg("skip_disturbances", true),
+    spinup=get_cfg("spinup", false),
+    by_subplot=get_cfg("by_subplot", false),
+    val_frac=Float64(get_cfg("val_frac", 0.0)),
+    split_seed=Int(get_cfg("split_seed", 42)),
+    n_folds=Int(get_cfg("n_folds", 1)),
+    fold_index=Int(get_cfg("fold_index", 1)),
+    test_frac=Float64(get_cfg("test_frac", 0.0)),
+    min_trees=Int(get_cfg("min_trees", 100)),
+    min_agb_frac=Float64(get_cfg("min_agb_frac", 0.05)),
+    stratify_eco_mixed=Bool(get_cfg("stratify_eco_mixed", false)),
+    single_ecoregion=Bool(get_cfg("single_ecoregion", false)),
+    stratify_landuse=Bool(get_cfg("stratify_landuse", false)),
+    site_class_strata=Bool(get_cfg("site_class_strata", false)),
+    siteclass_hi_max=Int(get_cfg("siteclass_hi_max", 4)),
+    siteclass_scheme=String(get_cfg("siteclass_scheme", "2way")),
+    shade_tier_csv=(haskey(cfg, "shade_tier_csv") ? String(get_cfg("shade_tier_csv", "")) : nothing),
+    filter_extent=filter_extent,
+    filter_states=Int.(get_cfg("filter_states", Int[])),
+    siteclass_l3s=String.(string.(get_cfg("siteclass_l3s", String[]))),
+    max_exact=Int(get_cfg("max_exact", 12)), max_group=Int(get_cfg("max_group", 4)),
+    train_cap=(c = get_cfg("train_cap", nothing); (c === nothing || c == "null") ? nothing : (c isa Integer ? Int(c) : String(c))),
+    train_cap_k=Float64(get_cfg("train_cap_k", 1.5)), train_cap_min=Int(get_cfg("train_cap_min", 20)),
+  )
+end
+
+# parametrize-style data-prep inputs → keyword arguments of `Data.prepare_parametrization_data` (quirks live HERE only:
+# `output_dir=tablename`, split RNG seeded from `split_seed` alone so all folds share the shuffle).
+function _prep_kwargs(; cohorts_db_path::String, eco_field, tablename::String, filter_eco_field::String,
+  filter_ecos::Vector{String}, filter_plots::Vector{NTuple{4,Int}}, exclude_plots::Vector{NTuple{4,Int}},
+  filter_species::Vector{String}, filter_planted::Bool=false, skip_disturbances::Bool, spinup::Bool, by_subplot::Bool,
+  val_frac::Float64, split_seed::Int, n_folds::Int, fold_index::Int, test_frac::Float64,
+  min_trees::Int, min_agb_frac::Float64, stratify_eco_mixed::Bool, single_ecoregion::Bool, stratify_landuse::Bool,
+  site_class_strata::Bool, siteclass_hi_max::Int, siteclass_scheme::String, shade_tier_csv::Union{Nothing,String},
+  filter_extent::Union{Nothing,String}, filter_states::Vector{Int}, siteclass_l3s::Vector{String},
+  max_exact::Int, max_group::Int, train_cap::Union{Nothing,Int,String}, train_cap_k::Float64, train_cap_min::Int,
+  rng::Random.AbstractRNG)
+  split_rng = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) ? RNGType(UInt64(split_seed)) : nothing   # seeded from split_seed only ⇒ all folds share the shuffle
+  return (cohorts_db_path=cohorts_db_path,
+    eco_field=eco_field,
+    tablename=tablename,
+    output_dir=tablename,
+    skip_disturbances=skip_disturbances,
+    spinup=spinup,
+    by_subplot=by_subplot,
+    val_frac=val_frac,
+    split_rng=split_rng,
+    n_folds=n_folds,
+    fold_index=fold_index,
+    test_frac=test_frac,
+    min_trees=min_trees,
+    min_agb_frac=min_agb_frac,
+    stratify_eco_mixed=stratify_eco_mixed,
+    single_ecoregion=single_ecoregion,
+    stratify_landuse=stratify_landuse,
+    site_class_strata=site_class_strata,
+    siteclass_hi_max=siteclass_hi_max,
+    siteclass_scheme=siteclass_scheme,
+    shade_tier_csv=shade_tier_csv,
+    filter_extent=filter_extent,
+    filter_states=filter_states, siteclass_l3s=siteclass_l3s, max_exact=max_exact, max_group=max_group,
+    train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min,
+    filter_eco_field=filter_eco_field,
+    filter_ecos=filter_ecos,
+    filter_plots=filter_plots,
+    exclude_plots=exclude_plots,
+    filter_species=filter_species,
+    filter_planted=filter_planted,
+    RNG=rng)
+end
+
+"""
+    prep_kwargs_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, rng=nothing) -> NamedTuple
+
+Keyword arguments for `Data.prepare_parametrization_data`, computed from a YAML-loaded config EXACTLY as the training
+path (`run_from_yaml` → `parametrize`) computes them: `\${VAR}`/`~` expansion of string values, the `FIADB` env override,
+`exclude_plots` + `exclude_plots_csv`, `filter_plots`/`filter_species`/`filter_extent`/`filter_ecos`, region keys
+(`filter_states`, `siteclass_l3s`, `max_exact`, `max_group`, `train_cap[_k|_min]`), site-class/shade-tier keys, and the
+split RNG (seeded from `split_seed` when val/test/folds are used). `split_rng_seed_override` replaces `split_seed`;
+`rng` is the (currently unused by prepare) `RNG` argument — default is derived from `seed` without touching global RNG state.
+Per-fold scripts can override with `prepare_from_cfg(cfg; fold_index=k)`.
+"""
+function prep_kwargs_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, rng::Union{Nothing,Random.AbstractRNG}=nothing)
+  get!(ENV, "PAN_DATA", "runs")
+  get!(ENV, "PAN_OUT", "runs/outputs")
+  din = _cfg_data_inputs(cfg)
+  split_seed = split_rng_seed_override === nothing ? din.split_seed : Int(split_rng_seed_override)
+  rng_ = rng === nothing ? RNGType(rand(Random.Xoshiro(_cfg_getter(cfg)("seed", 404)), UInt64)) : rng   # == run_from_yaml's RNGType(rand(UInt64)) after Random.seed!(seed)
+  return _prep_kwargs(; din..., split_seed=split_seed, rng=rng_)
+end
+
+"""
+    prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw...)
+
+`Data.prepare_parametrization_data(; prep_kwargs_from_cfg(cfg)..., kw...)` — returns
+`(splots, eco_list, species_list, eco_species_ids, splots_val, splots_test)`. Extra `kw` override individual arguments.
+"""
+function prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw...)
+  return Data.prepare_parametrization_data(; prep_kwargs_from_cfg(cfg; split_rng_seed_override=split_rng_seed_override)..., kw...)
+end
+
 function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}())
   PAN_TIMING[] = get(ENV, "PAN_TIMING", "") in ["1", "true", "yes"]   # per-gen wall-time breakdown to stdout
   SKIP_VAL[] = get(ENV, "PAN_SKIP_VAL", "") in ["1", "true", "yes"]   # skip held-out val re-sim during training
@@ -5465,24 +5581,11 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   Random.seed!(seed)
   rng = RNGType(rand(UInt64))
 
-  filter_plots = NTuple{4,Int}[
-    NTuple{4,Int}([x isa AbstractString ? parse(Int, x) : Int(x) for x in p])
-    for p in get_cfg("filter_plots", [])
-  ]
-
-  # Plots to DROP from the loaded set (outlier exclusion). Accepts an inline `exclude_plots:` list of
-  # [statecd,unitcd,countycd,plot] and/or an `exclude_plots_csv:` file with those four columns; merged.
-  exclude_plots = NTuple{4,Int}[
-    NTuple{4,Int}([x isa AbstractString ? parse(Int, x) : Int(x) for x in p])
-    for p in get_cfg("exclude_plots", [])
-  ]
-  let epc = get_cfg("exclude_plots_csv", nothing)
-    if !(epc === nothing || epc == "null")
-      for r in eachrow(CSV.read(String(epc), DataFrame))
-        push!(exclude_plots, (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)))
-      end
-    end
-  end
+  # Data-prep inputs (filter_plots, exclude_plots[_csv], split/region/site-class keys, ...) are parsed by the SAME
+  # function the analysis scripts use (`prep_kwargs_from_cfg`), so training and re-derivations can never drift.
+  din = _cfg_data_inputs(cfg)
+  filter_plots = din.filter_plots
+  exclude_plots = din.exclude_plots
   isempty(exclude_plots) || @info "exclude_plots: dropping $(length(exclude_plots)) plots from the loaded set"
 
   sw_size = get_cfg("smoothing_window_size", 0)
@@ -5494,8 +5597,6 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   resume_from = (resume_from === nothing || resume_from == "null") ? nothing : String(resume_from)
   start_from = get_cfg("start_from", nothing)
   start_from = (start_from === nothing || start_from == "null") ? nothing : String(start_from)
-  filter_extent = get_cfg("filter_extent", nothing)
-  filter_extent = (filter_extent === nothing || filter_extent == "null") ? nothing : String(filter_extent)
   sobol_candidates_db = get_cfg("sobol_candidates_db", nothing)
   sobol_candidates_db = (sobol_candidates_db === nothing || sobol_candidates_db == "null") ? nothing : String(sobol_candidates_db)
 
@@ -5506,37 +5607,37 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   isdir(_output_dir) || mkpath(_output_dir)
 
   # DB path: env FIADB wins (portable across machines); else the yaml value (get_cfg already expands ${VAR}/~).
-  _db_path = get(ENV, "FIADB", "") != "" ? ENV["FIADB"] : String(get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"))
+  _db_path = din.cohorts_db_path   # (FIADB env override + yaml value resolved in _cfg_data_inputs)
 
   # Fields shared by parametrize, plot_sample, and plot_sample_sobol
   common_kw = (
     cohorts_db_path=_db_path,
-    filter_eco_field=get_cfg("filter_eco_field", "epa_l3"),
-    eco_field=get_cfg("eco_field", "epa_l3"),
-    tablename=get_cfg("tablename", "data_eco_cohorts"),
+    filter_eco_field=din.filter_eco_field,
+    eco_field=din.eco_field,
+    tablename=din.tablename,
     output_dir=_output_dir,
-    filter_ecos=String.(get_cfg("filter_ecos", String[])),
+    filter_ecos=din.filter_ecos,
     filter_plots=filter_plots,
-    filter_species=String.(get_cfg("filter_species", String[])),
-    skip_disturbances=get_cfg("skip_disturbances", true),
-    spinup=get_cfg("spinup", false),
-    by_subplot=get_cfg("by_subplot", false),
+    filter_species=din.filter_species,
+    skip_disturbances=din.skip_disturbances,
+    spinup=din.spinup,
+    by_subplot=din.by_subplot,
     no_establishment=get_cfg("no_establishment", false),
-    min_trees=Int(get_cfg("min_trees", 100)),
-    min_agb_frac=Float64(get_cfg("min_agb_frac", 0.05)),
-    stratify_eco_mixed=Bool(get_cfg("stratify_eco_mixed", false)),
-    single_ecoregion=Bool(get_cfg("single_ecoregion", false)),
-    stratify_landuse=Bool(get_cfg("stratify_landuse", false)),
-    site_class_strata=Bool(get_cfg("site_class_strata", false)),
-    siteclass_hi_max=Int(get_cfg("siteclass_hi_max", 4)),
-    siteclass_scheme=String(get_cfg("siteclass_scheme", "2way")),
-    shade_tier_csv=(haskey(cfg, "shade_tier_csv") ? String(get_cfg("shade_tier_csv", "")) : nothing),
-    filter_extent=filter_extent,
-    filter_states=Int.(get_cfg("filter_states", Int[])),
-    siteclass_l3s=String.(string.(get_cfg("siteclass_l3s", String[]))),
-    max_exact=Int(get_cfg("max_exact", 12)), max_group=Int(get_cfg("max_group", 4)),
-    train_cap=(c = get_cfg("train_cap", nothing); (c === nothing || c == "null") ? nothing : (c isa Integer ? Int(c) : String(c))),
-    train_cap_k=Float64(get_cfg("train_cap_k", 1.5)), train_cap_min=Int(get_cfg("train_cap_min", 20)),
+    min_trees=din.min_trees,
+    min_agb_frac=din.min_agb_frac,
+    stratify_eco_mixed=din.stratify_eco_mixed,
+    single_ecoregion=din.single_ecoregion,
+    stratify_landuse=din.stratify_landuse,
+    site_class_strata=din.site_class_strata,
+    siteclass_hi_max=din.siteclass_hi_max,
+    siteclass_scheme=din.siteclass_scheme,
+    shade_tier_csv=din.shade_tier_csv,
+    filter_extent=din.filter_extent,
+    filter_states=din.filter_states,
+    siteclass_l3s=din.siteclass_l3s,
+    max_exact=din.max_exact, max_group=din.max_group,
+    train_cap=din.train_cap,
+    train_cap_k=din.train_cap_k, train_cap_min=din.train_cap_min,
     split_only=Bool(get_cfg("split_only", false)),
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
@@ -5650,11 +5751,11 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     sobol_candidates_db=sobol_candidates_db,
     sobol_top_frac=Float64(get_cfg("sobol_top_frac", 0.5)),
     n_output_plots=n_output_plots,
-    val_frac=Float64(get_cfg("val_frac", 0.0)),
-    split_seed=Int(get_cfg("split_seed", 42)),
-    n_folds=Int(get_cfg("n_folds", 1)),
-    fold_index=Int(get_cfg("fold_index", 1)),
-    test_frac=Float64(get_cfg("test_frac", 0.0)),
+    val_frac=din.val_frac,
+    split_seed=din.split_seed,
+    n_folds=din.n_folds,
+    fold_index=din.fold_index,
+    test_frac=din.test_frac,
     diagnose=get_cfg("diagnose", false),
     cycle_years=get_cfg("cycle_years", 8),
     loss_lambda=Float64(get_cfg("loss_lambda", 1.0)),

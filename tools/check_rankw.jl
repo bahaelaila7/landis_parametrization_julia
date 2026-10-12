@@ -5,14 +5,7 @@
 using Pan, YAML, DataFrames
 const P = Pan; const D = P.Data; const PU = P.PU
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
-splots, eco_list, species_list, eco_species_ids, _ = D.prepare_parametrization_data(;
-  cohorts_db_path=cfg["cohorts_db_path"], eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]),
-  output_dir=String(cfg["tablename"]), filter_eco_field=String(g("filter_eco_field", "epa_l4")),
-  filter_ecos=String.(get(cfg, "filter_ecos", String[])), filter_plots=NTuple{4,Int}[],
-  min_trees=Int(g("min_trees", 100)), min_agb_frac=Float64(g("min_agb_frac", 0.05)),
-  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=0.0,
-  single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
-  RNG=P.RNGType(UInt64(Int(g("seed", 1)))))
+splots, eco_list, species_list, eco_species_ids, _ = P.prepare_from_cfg(cfg)[1:5]   # same data-prep as training
 
 # reference AGB per (global species, stratum eco_id) + plots per stratum (split size)
 agb = zeros(P.FloatType, length(species_list), length(eco_list))

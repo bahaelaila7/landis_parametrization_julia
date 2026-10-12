@@ -25,26 +25,9 @@ rng = P.RNGType(UInt64(Int(g("seed", 1))))
 val_frac = Float64(g("val_frac", 0.0))
 test_frac = Float64(g("test_frac", 0.0))               # 3-way split: reproduce the run's held-out TEST set too
 n_folds = Int(g("n_folds", 1)); fold_index = parse(Int, get(ENV, "PAN_FOLD", string(g("fold_index", 1))))  # PAN_FOLD picks the CV fold
-split_rng = (val_frac > 0 || n_folds > 1 || test_frac > 0) ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
-excl_plots = NTuple{4,Int}[]                       # honor the run's outlier exclusions so the fold split matches
-let epc = g("exclude_plots_csv", nothing)
-  if !(epc === nothing || epc == "null")
-    for ln in Iterators.drop(eachline(String(epc)), 1); isempty(strip(ln)) && continue; v = parse.(Int, split(ln, ",")); push!(excl_plots, (v[1], v[2], v[3], v[4])); end
-  end
-end
-splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = D.prepare_parametrization_data(;
-  cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=String(g("filter_eco_field", "epa_l4")),
-  eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]), output_dir=String(cfg["tablename"]),
-  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=val_frac, split_rng=split_rng, test_frac=test_frac,
-  n_folds=n_folds, fold_index=fold_index, exclude_plots=excl_plots,
-  min_trees=Int(g("min_trees", 100)), min_agb_frac=Float64(g("min_agb_frac", 0.05)),
-  stratify_eco_mixed=Bool(g("stratify_eco_mixed", false)),
-  single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
-  site_class_strata=Bool(g("site_class_strata", false)), siteclass_hi_max=Int(g("siteclass_hi_max", 4)),
-  filter_extent=(haskey(cfg, "filter_extent") ? String(cfg["filter_extent"]) : nothing),
-  filter_ecos=String.(get(cfg, "filter_ecos", String[])),
-  filter_plots=NTuple{4,Int}[NTuple{4,Int}(Int.(p)) for p in get(cfg, "filter_plots", [])],
-  RNG=rng)
+# Data prep via the SAME code path as training (Pan.prepare_from_cfg → prep_kwargs_from_cfg): identical split, region/site-class
+# filters, outlier exclusions, species tiering caps. (PAN_FOLD picks the CV fold.)
+splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = P.prepare_from_cfg(cfg; fold_index=fold_index)
 n_species = length(species_list)
 bins = Int.(g("bins_idx", [20, 60, 120]))
 loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true),

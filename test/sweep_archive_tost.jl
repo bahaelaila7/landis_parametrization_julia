@@ -23,16 +23,9 @@ D.FIA_CYCLE_MERGE[] = Int(g("fia_cycle_merge", 1))
 P.INIT_PERTURB_FRAC[] = 0.0
 no_estab = Bool(g("no_establishment", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
-val_frac = Float64(g("val_frac", 0.0)); split_rng = val_frac > 0 ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
-splots, eco_list, species_list, eco_species_ids, splots_val = D.prepare_parametrization_data(;
-  cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=String(g("filter_eco_field", "epa_l4")),
-  eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]), output_dir=String(cfg["tablename"]),
-  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=val_frac, split_rng=split_rng,
-  min_trees=Int(g("min_trees", 100)), min_agb_frac=Float64(g("min_agb_frac", 0.05)),
-  single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
-  filter_extent=(haskey(cfg, "filter_extent") ? String(cfg["filter_extent"]) : nothing),
-  filter_ecos=String.(get(cfg, "filter_ecos", String[])),
-  filter_plots=NTuple{4,Int}[NTuple{4,Int}(Int.(p)) for p in get(cfg, "filter_plots", [])], RNG=rng)
+val_frac = Float64(g("val_frac", 0.0))
+# Data prep via the SAME code path as training (Pan.prepare_from_cfg): identical split / region filters / exclusions.
+splots, eco_list, species_list, eco_species_ids, splots_val = P.prepare_from_cfg(cfg)[1:5]
 n_species = length(species_list)
 bins = Int.(g("bins_idx", [20, 60, 120]))
 loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))

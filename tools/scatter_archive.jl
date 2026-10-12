@@ -17,23 +17,10 @@ P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false)); P
 D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false)); P.INIT_PERTURB_FRAC[] = 0.0
 no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("seed", 1))))
 
-# honor the run's outlier exclusions so candidates are evaluated on the SAME plot universe they were fit on
-excl_plots = NTuple{4,Int}[]
-let epc = g("exclude_plots_csv", nothing)
-  if !(epc === nothing || epc == "null")
-    for r in eachrow(CSV.read(String(epc), DF.DataFrame)); push!(excl_plots, (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot))); end
-    println("exclude_plots: dropping $(length(excl_plots)) plots")
-  end
-end
-
-# data-prep once (train split); reference + sites built once (candidate-independent)
-splots, eco_list, species_list, eco_species_ids, _ = D.prepare_parametrization_data(;
-  cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=String(g("filter_eco_field", "epa_l4")),
-  eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]), output_dir=String(cfg["tablename"]),
-  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=0.0, split_rng=nothing,
-  min_trees=Int(g("min_trees", 100)), min_agb_frac=Float64(g("min_agb_frac", 0.05)),
-  single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
-  filter_ecos=String.(get(cfg, "filter_ecos", String[])), exclude_plots=excl_plots, RNG=rng)
+# data-prep once (train split) via the SAME code path as training (Pan.prepare_from_cfg): honors the run's outlier
+# exclusions, region/site-class filters and split so candidates are evaluated on the plot universe they were fit on;
+# reference + sites built once (candidate-independent)
+splots, eco_list, species_list, eco_species_ids, _ = P.prepare_from_cfg(cfg)[1:5]
 n_species = length(species_list)
 bins = Int.(g("bins_idx", [20, 60, 120]))
 loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))
