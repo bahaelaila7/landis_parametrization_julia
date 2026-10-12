@@ -787,6 +787,27 @@ function plot_biomass_bin_deltas(splots::DataFrame, loss_params::PU.LossParams; 
   println("Saved diagnostic: $fname")
 end
 
+# Persist the exact train/val/test plot assignment (+ eco cell, + dominant species when train_cap ran) so floor
+# builders / analysis scripts reuse the run's split instead of re-deriving it (scripts drift from training kwargs).
+function _write_split_plots(output_dir::AbstractString, eco_list, splots, sv, st)
+  mkpath(output_dir)
+  ids = [:statecd, :unitcd, :countycd, :plot]
+  parts = DataFrame[]
+  for (set, d) in (("train", splots), ("val", sv), ("test", st))
+    (d === nothing || nrow(d) == 0) && continue
+    u = unique(select(d, vcat(ids, [:eco_id])))
+    u.eco = [eco_list[i] for i in u.eco_id]; u.set .= set
+    push!(parts, select(u, vcat(ids, [:eco, :set])))
+  end
+  isempty(parts) && return
+  out = vcat(parts...)
+  dd = Data.LAST_SPLIT_DOM[]
+  out = dd === nothing ? out : leftjoin(out, select(dd, vcat(ids, [:dom])), on=ids)
+  sort!(out, vcat([:set], ids))
+  CSV.write(joinpath(output_dir, "split_plots.csv"), out)
+  @info "split_plots.csv: $(nrow(out)) plots → $(output_dir)"
+end
+
 function parametrize(; cohorts_db_path::String,
   eco_field=:epa_l4,
   tablename::String="data_eco_cohorts_g",
@@ -841,6 +862,11 @@ function parametrize(; cohorts_db_path::String,
   siteclass_scheme::String="2way",      # "2way" (hi/lo) or "4cell" (A=1-3,B=4,C=5,D=6-7) site-tier label
   shade_tier_csv::Union{Nothing,String}=nothing,  # species→shade_class CSV; splits grouping key by LST(1-3)/HST(4-5)
   filter_extent::Union{Nothing,String}=nothing,
+  filter_states::Vector{Int}=Int[],        # region = state ∩ filter_ecos (FIPS, e.g. EPA Region 4); empty ⇒ no state filter
+  siteclass_l3s::Vector{String}=String[],  # site-class cells only in these ecos; others → one cell "X" (empty ⇒ all)
+  max_exact::Int=12, max_group::Int=4,     # species tiering caps (own-param species / pooled groups)
+  train_cap::Union{Nothing,Int,String}=nothing,  # species-balanced TRAIN: cap plots per (eco cell × dominant species); Int | "auto"; surplus → val/test
+  train_cap_k::Float64=1.5, train_cap_min::Int=20, # "auto" cap = max(train_cap_min, ceil(k × median stratum size per eco cell))
   loss_lambda::Float64=1.0,
   loss_alpha::Float64=1.0,
   agb_hinge::Bool=false,
@@ -983,6 +1009,8 @@ function parametrize(; cohorts_db_path::String,
       siteclass_scheme=siteclass_scheme,
       shade_tier_csv=shade_tier_csv,
       filter_extent=filter_extent,
+      filter_states=filter_states, siteclass_l3s=siteclass_l3s, max_exact=max_exact, max_group=max_group,
+      train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min,
       filter_eco_field=filter_eco_field,
       filter_ecos=filter_ecos,
       filter_plots=filter_plots,
@@ -990,6 +1018,7 @@ function parametrize(; cohorts_db_path::String,
       filter_species=filter_species,
       filter_planted=filter_planted,
       RNG=rng)
+  _write_split_plots(output_dir, eco_list, splots, splots_val_raw, splots_test_raw)
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
   n_plots = maximum(splots.plot_id)
@@ -5434,6 +5463,11 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     siteclass_scheme=String(get_cfg("siteclass_scheme", "2way")),
     shade_tier_csv=(haskey(cfg, "shade_tier_csv") ? String(get_cfg("shade_tier_csv", "")) : nothing),
     filter_extent=filter_extent,
+    filter_states=Int.(get_cfg("filter_states", Int[])),
+    siteclass_l3s=String.(string.(get_cfg("siteclass_l3s", String[]))),
+    max_exact=Int(get_cfg("max_exact", 12)), max_group=Int(get_cfg("max_group", 4)),
+    train_cap=(c = get_cfg("train_cap", nothing); (c === nothing || c == "null") ? nothing : (c isa Integer ? Int(c) : String(c))),
+    train_cap_k=Float64(get_cfg("train_cap_k", 1.5)), train_cap_min=Int(get_cfg("train_cap_min", 20)),
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
   n_output_plots = get_cfg("n_output_plots", 0)

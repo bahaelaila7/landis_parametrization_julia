@@ -138,8 +138,59 @@ end
 # Each site goes to exactly one stratum — (its eco_id, its rarest species) — so the val fraction
 # stays close to val_frac WITHIN every ecoregion×land-use, not just globally per species (the
 # per-cell normalization needs each eco×lu×sp cell represented in both halves). Returns (df_train, df_val).
+# Species-balanced TRAINING set. The proportional split hands train a pine-heavy sample (commercial pines dominate
+# plantations), so cap the train plots per (eco cell × dominant species); the surplus is NOT discarded but moved to
+# val/test (alternating, 2-way ⇒ all to val), so it still measures transfer. Dominant species = largest summed AGB at
+# the plot's LAST visit (ties by name). Order = each site's normalized position in its split-stratum shuffle (no new
+# RNG draws, no spatial bias toward low FIPS). cap: Int, or "auto" = max(train_cap_min, ceil(train_cap_k × median
+# stratum size in that eco cell)). Returns (surplus_val_sites, surplus_test_sites).
+_median(v) = (w = sort(v); n = length(w); isodd(n) ? Float64(w[(n+1)÷2]) : (w[n÷2] + w[n÷2+1]) / 2)
+const LAST_SPLIT_DOM = Ref{Union{Nothing,DataFrame}}(nothing)   # id_cols + eco_id + dom + set (for split_plots.csv)
+function _cap_train_sites(df::DataFrame, id_cols::Vector{Symbol}, parts, three_way::Bool;
+  train_cap::Union{Int,String}, train_cap_k::Float64, train_cap_min::Int)
+  tr = vcat([let t = p[3], n = nrow(p[3])
+    n == 0 ? hcat(t, DataFrame(_rk=Float64[])) : hcat(t, DataFrame(_rk=[(i - 0.5) / n for i in 1:n]))
+  end for p in parts]...)
+  last_d = combine(groupby(df, id_cols), :measdate => maximum => :_last)
+  j = innerjoin(select(df, vcat(id_cols, [:measdate, :effective_species, :agb, :eco_id])), last_d, on=id_cols)
+  j = j[j.measdate .== j._last, :]
+  spa = combine(groupby(j, vcat(id_cols, [:effective_species])), :agb => sum => :_a, :eco_id => first => :eco_id)
+  dom = combine(groupby(spa, id_cols)) do r
+    i = argmin(k -> (-Float64(r._a[k]), String(r.effective_species[k])), 1:nrow(r))
+    (; eco_id=r.eco_id[i], dom=String(r.effective_species[i]))
+  end
+  tr = innerjoin(tr, dom, on=id_cols)
+  sort!(tr, vcat([:eco_id, :dom, :_rk], id_cols))
+  sizes = combine(groupby(tr, [:eco_id, :dom]), nrow => :n)
+  capof = if train_cap isa Int
+    Dict(e => train_cap for e in unique(sizes.eco_id))
+  else
+    train_cap == "auto" || error("train_cap must be an Int or \"auto\" (got \"$train_cap\")")
+    Dict(e => max(train_cap_min, ceil(Int, train_cap_k * _median(sizes.n[sizes.eco_id .== e]))) for e in unique(sizes.eco_id))
+  end
+  keep = falses(nrow(tr))
+  for g in groupby(tr, [:eco_id, :dom]; sort=false)
+    c = capof[g.eco_id[1]]
+    rows = parentindices(g)[1]
+    keep[rows[1:min(c, length(rows))]] .= true
+  end
+  surplus = tr[.!keep, :]
+  sort!(surplus, vcat([:_rk, :eco_id, :dom], id_cols))          # interleave strata so val/test both get every stratum
+  to_test = three_way ? isodd.(1:nrow(surplus)) .== false : falses(nrow(surplus))
+  sv = surplus[.!to_test, id_cols]; st = surplus[to_test, id_cols]
+  tab = combine(groupby(tr, [:eco_id, :dom]), nrow => :n_before)
+  tab.n_after = [min(capof[e], n) for (e, n) in zip(tab.eco_id, tab.n_before)]
+  @info "train_cap ($(train_cap)): train $(nrow(tr)) → $(count(keep)); surplus → val $(nrow(sv)), test $(nrow(st))"
+  show(stdout, MIME("text/plain"), sort(tab[tab.n_before .> tab.n_after, :], :n_before, rev=true); allrows=true); println()
+  dd = select(dom, vcat(id_cols, [:eco_id, :dom]))
+  LAST_SPLIT_DOM[] = dd
+  return sv, st
+end
+
 function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
-  val_frac::Float64, rng::Random.AbstractRNG; n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0)
+  val_frac::Float64, rng::Random.AbstractRNG; n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0,
+  train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20)
+  LAST_SPLIT_DOM[] = nothing
   three_way = test_frac > 0.0            # train/val/test single split — a SEPARATE mode from K-fold CV
   three_way && n_folds > 1 && error("test_frac>0 (3-way train/val/test split) is incompatible with n_folds>1 (cross-validation) — pick one")
   site_sp = unique(select(df, vcat(id_cols, [:eco_id, :effective_species])))
@@ -163,19 +214,25 @@ function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
         n_val = max(1, round(Int, m * val_frac))
         if three_way
           n_test = min(m - n_val, max(1, round(Int, m * test_frac)))
-          (shuffled[1:n_val, :], n_test > 0 ? shuffled[n_val+1:n_val+n_test, :] : shuffled[1:0, :])
+          (shuffled[1:n_val, :], n_test > 0 ? shuffled[n_val+1:n_val+n_test, :] : shuffled[1:0, :], shuffled[n_val+n_test+1:end, :])
         else
-          (shuffled[1:n_val, :], shuffled[1:0, :])   # test part empty in 2-way mode
+          (shuffled[1:n_val, :], shuffled[1:0, :], shuffled[n_val+1:end, :])   # test part empty in 2-way mode
         end
       else
         lo = div((fold_index - 1) * m, n_folds) + 1   # contiguous K-fold chunk (partitions the stratum)
         hi = div(fold_index * m, n_folds)
-        (hi >= lo ? shuffled[lo:hi, :] : shuffled[1:0, :], shuffled[1:0, :])
+        (hi >= lo ? shuffled[lo:hi, :] : shuffled[1:0, :], shuffled[1:0, :], shuffled[1:0, :])
       end
     end for gdf in groupby(site_strata, :stratum)
   ]
   val_sites  = vcat([p[1] for p in parts]...)
   test_sites = three_way ? vcat([p[2] for p in parts]...) : nothing
+  if train_cap !== nothing
+    n_folds > 1 && error("train_cap (species-balanced training set) is not supported with n_folds>1 cross-validation")
+    sv, st = _cap_train_sites(df, id_cols, parts, three_way; train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min)
+    val_sites = vcat(val_sites, sv)
+    three_way && (test_sites = vcat(test_sites, st))
+  end
   n_total = nrow(site_strata); n_val_out = nrow(val_sites); n_test_out = three_way ? nrow(test_sites) : 0
   @info "Split" mode = (three_way ? "train/val/test" : (n_folds > 1 ? "cv" : "train/val")) n_folds fold_index n_train = n_total - n_val_out - n_test_out n_val = n_val_out n_test = n_test_out
   df_val = semijoin(df, val_sites, on=id_cols)
@@ -209,7 +266,9 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   min_trees::Int=100, min_agb_frac::Float64=0.05,
   stratify_eco_mixed::Bool=false,
   single_ecoregion::Bool=false, stratify_landuse::Bool=false,
-  tree_stats::Union{Nothing,DataFrame}=nothing, shade_tier::Union{Nothing,Dict{String,String}}=nothing)
+  tree_stats::Union{Nothing,DataFrame}=nothing, shade_tier::Union{Nothing,Dict{String,String}}=nothing,
+  max_exact::Int=12, max_group::Int=4,
+  train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20)
   # eco_field can be any column of the loaded cohorts (epa_l4/epa_l3/ecosubcd, or a curated
   # stratifier like land_use). Falls back to ecosubcd only for the legacy unspecified case.
   eco_field = if eco in ("epa_l4", "epa_l3", "ecosubcd", "land_use")
@@ -221,7 +280,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   end
   hasproperty(df, eco_field) || error("make_splots: eco_field :$eco_field is not a column of the cohorts table")
 
-  assign_tiered_species!(df; min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats, shade_tier=shade_tier)
+  assign_tiered_species!(df; max_exact=max_exact, max_group=max_group, min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats, shade_tier=shade_tier)
   if !isempty(filter_species)
     fs = Set(filter_species)
     filter!(row -> row.effective_species in fs, df)
@@ -282,7 +341,8 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   # Split right here — after mapping, before aggregation — so each half gets its
   # own contiguous plot_ids and is fully self-contained.
   do_split = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) && !isnothing(split_rng)
-  df_train, df_val_raw, df_test_raw = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac) :
+  df_train, df_val_raw, df_test_raw = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
+                           train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min) :
                          (df, nothing, nothing)
 
   # Aggregate a raw cohort df into a splots DataFrame with contiguous plot_ids.
@@ -594,7 +654,7 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   return cohorts_df[keep, :]
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", shade_tier_csv::Union{Nothing,String}=nothing, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", shade_tier_csv::Union{Nothing,String}=nothing, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, filter_states::Vector{Int}=Int[], siteclass_l3s::Vector{String}=String[], max_exact::Int=12, max_group::Int=4, train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20, RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
   # In-memory main DB + ATTACH the file READ-ONLY: a killed run can never corrupt the file (a mid-write
   # checkpoint was the corruption cause), yet df registrations (loaded_subplots) still land in the writable
@@ -605,6 +665,9 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   sql = "SELECT * FROM src.$(tablename) WHERE true"
   if length(filter_ecos) > 0
     sql *= " AND $(filter_eco_field) in ('$(join(filter_ecos,"','"))')"
+  end
+  if length(filter_states) > 0   # region = state ∩ eco (e.g. EPA Region 4 FIPS); empty ⇒ no state filter
+    sql *= " AND statecd IN ($(join(filter_states, ",")))"
   end
   if skip_disturbances
     sql *= " AND subp_has_dstrb= false"
@@ -651,6 +714,10 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
     """) |> DataFrame
     scmap = Dict((r.statecd, r.unitcd, r.countycd, r.plot) => String(r.site_class) for r in eachrow(sc))
     cohorts_df.land_use = [get(scmap, (r.statecd, r.unitcd, r.countycd, r.plot), "NA") for r in eachrow(cohorts_df)]
+    if !isempty(siteclass_l3s)   # site cells only in the listed ecos; every other eco collapses to ONE cell "X"
+      keep_sc = Set(siteclass_l3s); ecol = Symbol(eco_field)
+      cohorts_df.land_use = [string(e) in keep_sc ? lu : "X" for (e, lu) in zip(cohorts_df[!, ecol], cohorts_df.land_use)]
+    end
     nplt(v) = length(unique(zip(cohorts_df.statecd[cohorts_df.land_use.==v], cohorts_df.unitcd[cohorts_df.land_use.==v], cohorts_df.countycd[cohorts_df.land_use.==v], cohorts_df.plot[cohorts_df.land_use.==v])))
     scheme_desc = siteclass_scheme == "4cell" ? "4cell A=1-3,B=4,C=5,D=6-7" : "2way hi≤$(siteclass_hi_max),lo=above"
     println("site_class_strata: land_use ← site-tier ($(scheme_desc)); plots: " *
@@ -715,7 +782,8 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
     make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
       by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng, n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
       min_trees=min_trees, min_agb_frac=min_agb_frac,
-      stratify_eco_mixed=stratify_eco_mixed, single_ecoregion=single_ecoregion, stratify_landuse=stratify_landuse, tree_stats=tree_stats, shade_tier=shade_tier)
+      stratify_eco_mixed=stratify_eco_mixed, single_ecoregion=single_ecoregion, stratify_landuse=stratify_landuse, tree_stats=tree_stats, shade_tier=shade_tier,
+      max_exact=max_exact, max_group=max_group, train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min)
   mark_estab_year!(splots)
   isnothing(splots_val) || mark_estab_year!(splots_val)
   isnothing(splots_test) || mark_estab_year!(splots_test)
