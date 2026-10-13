@@ -49,7 +49,7 @@ succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "b
 
 # Tools/diagnostics (tools/tost_common.jl, calib_coord.jl): select and configure the succession plugin from a yaml cfg
 # exactly as `parametrize` does, and point SITE_ATTRS_FN at the plugin's site attributes (make_sites_like). Returns the type.
-function setup_plugin_from_cfg(cfg::AbstractDict, eco_list::Vector{String})
+function setup_plugin_from_cfg(cfg::AbstractDict, eco_list::Vector{String}; species_list=nothing, eco_species_ids=nothing)
   g(k, d) = get(cfg, k, d); X(s) = _expandenv(String(s))
   SUCC = succession_plugin_type(String(g("succession_plugin", "biomass")))
   if SUCC === PnETPlugin.PnET
