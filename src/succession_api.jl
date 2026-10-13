@@ -90,3 +90,30 @@ init_sites!(::Type{_PN}, soa, site_attrs) = (site_attrs === nothing ? error("PnE
 @inline set_cohort_bio!(::Type{_PN}, site, k, newbio) = PnETPlugin.set_cohort_bio!(site, k, newbio)
 
 succession_plugin_for(::PnETPlugin.PnETParams) = PnETPlugin.PnET
+
+# --- HBAD (height / basal area / density) ---
+const _HB = HBADPlugin.HBAD
+
+params_type(::Type{_HB}) = HBADPlugin.HBADParams
+
+make_param_dists(::Type{_HB}, args...; kw...) = HBP.make_hbad_param_dists(args...; kw...)
+
+generate_params(::Type{_HB}, args...; kw...) = HBADPlugin.generate_hbad_params(args...; kw...)
+
+generate_eco_params(::Type{_HB}, params) = HBADPlugin.generate_hbad_eco_params(params)
+
+make_ctx(::Type{_HB}, eco_params) = (HBAD=(eco=eco_params, cst=HBADPlugin.FIXED[]),)
+
+step!(::Type{_HB}, soa, year::Integer, ctx) = PanCore.process_plugin!(soa, _HB, year; ctx=ctx.HBAD)
+
+spinup!(::Type{_HB}, soa, spinup_cohorts, eco_params) = error("HBAD has no spinup path: run with spinup: false (cohorts start from the observed state)")
+
+add_cohort!(::Type{_HB}, site, args...) = HBADPlugin.add_cohort!(site, args...)
+
+per_eco_groups(::Type{_HB}) = HBP.HBAD_PER_ECO_GROUPS
+
+init_sites!(::Type{_HB}, soa, site_attrs) = soa
+@inline set_cohort_bio!(::Type{_HB}, site, k, newbio) = HBADPlugin.set_cohort_bio!(site, k, newbio)
+
+# Tools that only hold params (post-hoc sims) get the fixed priors re-resolved for the params' species list when needed.
+succession_plugin_for(p::HBADPlugin.HBADParams) = (HBADPlugin.ensure_configured!(p.SPECIES_LIST, p.ECO_SPECIES_IDS); HBADPlugin.HBAD)

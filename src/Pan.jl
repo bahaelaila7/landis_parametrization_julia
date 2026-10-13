@@ -12,10 +12,11 @@ include("Spatial.jl")
 #end
 #include("plugins/BiomassSuccessionPlugin.jl")
 using .PanCore
-using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin, PnETPlugin
+using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin, PnETPlugin, HBADPlugin
 import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
 import .Parametrization.PnETParametrization as PNP
+import .Parametrization.HBADParametrization as HBP
 using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel
 import .Data as Data
 import .Spatial
@@ -45,7 +46,8 @@ include("succession_api.jl")
 
 succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "biomasssuccession", "bs") ? _BS :
                                                 lowercase(name) in ("pnet", "pnet-succession") ? _PN :
-                                                error("unknown succession_plugin '$name' (biomass | pnet)")
+                                                lowercase(name) in ("hbad", "hbad-succession") ? _HB :
+                                                error("unknown succession_plugin '$name' (biomass | pnet | hbad)")
 
 # Tools/diagnostics (tools/tost_common.jl, calib_coord.jl): select and configure the succession plugin from a yaml cfg
 # exactly as `parametrize` does, and point SITE_ATTRS_FN at the plugin's site attributes (make_sites_like). Returns the type.
@@ -98,6 +100,23 @@ function _init_site_plugin!(::Type{_PN}, site, no_establishment::Bool)
   site.c_age .= zero(FloatType)
   site.c_bio .= zero(FloatType)
   site.c_tbio .= zero(FloatType)
+  site.sp_mature .= false
+  return nothing
+end
+
+function _init_site_plugin!(::Type{_HB}, site, no_establishment::Bool)
+  site.B = zero(FloatType)
+  site.BA = zero(FloatType)
+  site.SDI = zero(FloatType)
+  site.RD = zero(FloatType)
+  site.thin_tph = zero(FloatType)
+  site.c_species .= zero(UIntType)
+  site.c_age .= zero(FloatType)
+  site.c_bio .= zero(FloatType)
+  site.c_tph .= zero(FloatType)
+  site.c_dq .= zero(FloatType)
+  site.c_h .= zero(FloatType)
+  site.c_bal .= zero(FloatType)
   site.sp_mature .= false
   return nothing
 end
@@ -929,6 +948,9 @@ function parametrize(; cohorts_db_path::String,
   pnet_generic::AbstractDict=Dict{String,Any}(),       # pnet: PnETConst field overrides
   pnet_soil_texture::AbstractDict=Dict{String,Any}(),  # pnet: {L3 => Saxton-Rawls texture code}; default LOAM
   pnet_soil_csv::String="",                            # pnet: per-plot SOLUS soil (tools/build_plot_soil.jl); "" = texture path (legacy)
+  hbad_priors_csv::String="",                          # hbad: fixed priors (results/hbad/priors.csv); "" = repo default
+  hbad_coefs_csv::String="",                           # hbad: translation coefficients (results/hbad/translation_coefs.csv); "" = repo default
+  hbad_init::String="jitter",                          # hbad: start candidates default | jitter | prior (see HBADPlugin.INIT_MODE)
   cmaes_blocks::String="eco",                          # CMA-ES covariance blocks: "eco" (per cell, legacy) | "l3" (per L3 + tail)
   spinup::Bool=true,
   search_mode::String="lbsa",
@@ -1103,6 +1125,15 @@ function parametrize(; cohorts_db_path::String,
     (isempty(pnet_climate_cache) || isempty(pnet_co2_csv)) && error("succession_plugin=pnet requires pnet_climate_cache and pnet_co2_csv")
     PnETPlugin.configure!(; climate_cache=pnet_climate_cache, co2_csv=pnet_co2_csv, generic=pnet_generic, db_path=cohorts_db_path)
     @info "PnET succession: climate cache $(basename(pnet_climate_cache)) ($(length(PnETPlugin.CLIMATE[].ids)) L4s, $(PnETPlugin.CLIMATE[].y1)-$(PnETPlugin.CLIMATE[].y2)); fixed constants" PnETPlugin.FIXED[]
+  end
+  if SUCC === HBADPlugin.HBAD
+    spinup && error("succession_plugin=hbad requires spinup: false (cohorts start from the observed state)")
+    DUAL_MODE[] === :off || error("succession_plugin=hbad does not support dual_mode yet (Sim B needs establishment)")
+    no_establishment || @warn "succession_plugin=hbad has no establishment (HBAD never recruits); no_establishment: false is treated the same as true"
+    HBADPlugin.INIT_MODE[] = Symbol(lowercase(hbad_init))
+    HBADPlugin.configure!(; species_list=species_list, eco_species_ids=eco_species_ids,
+      priors_csv=isempty(hbad_priors_csv) ? HBADPlugin.DEFAULT_PRIORS_CSV : hbad_priors_csv,
+      coefs_csv=isempty(hbad_coefs_csv) ? HBADPlugin.DEFAULT_COEFS_CSV : hbad_coefs_csv)
   end
   _site_attrs(sp) = SUCC === PnETPlugin.PnET ?
     PnETPlugin.build_site_attrs(cohorts_db_path, tablename, sp, eco_list; soil_map=Dict{String,String}(String(k) => String(v) for (k, v) in pnet_soil_texture), soil_csv=pnet_soil_csv) : nothing
@@ -5817,6 +5848,9 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     pnet_generic=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("pnet_generic", Dict())),
     pnet_soil_texture=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("pnet_soil_texture", Dict())),
     pnet_soil_csv=String(get_cfg("pnet_soil_csv", "")),
+    hbad_priors_csv=String(get_cfg("hbad_priors_csv", "")),
+    hbad_coefs_csv=String(get_cfg("hbad_coefs_csv", "")),
+    hbad_init=String(get_cfg("hbad_init", "jitter")),
     cmaes_blocks=String(get_cfg("cmaes_blocks", "eco")),
     param_tier_merge=Dict{String,Any}(String(k) => Dict{String,Any}(String(sp) => Dict{String,String}(String(c) => String(g) for (c, g) in cm) for (sp, cm) in v) for (k, v) in get_cfg("param_tier_merge", Dict())),
     TRIALS=get_cfg("trials", 1000000),
