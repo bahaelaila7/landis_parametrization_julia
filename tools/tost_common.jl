@@ -41,12 +41,22 @@ function _split_ctx(sp)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DF.select(sp, [:plot_id, :eco_id]))))
   especo2sp = Dict((Int(r.eco_id), Int(r.eco_species_id)) => Int(r.species_id) for r in eachrow(unique(DF.select(sp, [:eco_id, :eco_species_id, :species_id]))))
+  ph = hasproperty(inj, :phantom_frac) ? Float64.(inj.phantom_frac) : zeros(DF.nrow(inj))
   injc = DF.DataFrame(plot_id=Int.(inj.plot_id), sim_year=Int.(inj.sim_year), esp=Int.(inj.eco_species_id), age=Int.(inj.age_calc),
-                      obs_agb=Float64.(inj.agb_sum), drop=Float64.(inj.disturbance_drop_pct))
-  injc = DF.combine(DF.groupby(DF.subset(injc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]), :obs_agb => sum => :obs_agb, :drop => maximum => :drop)
-  (; sp, spdf_plts, ssy, spc, inj, msy, plot2eco, especo2sp, injc)
+                      obs_agb=Float64.(inj.agb_sum), drop=Float64.(inj.disturbance_drop_pct), phantom=ph)
+  # REAL_ONLY support: phantom share of every observed cohort (all years incl. 0) + each plot's previous visit year
+  phmap = Dict((r.plot_id, r.sim_year, r.esp, r.age) => r.phantom for r in eachrow(injc))
+  prevyr = Dict{Tuple{Int,Int},Int}()
+  for gd in DF.groupby(unique(DF.select(injc, [:plot_id, :sim_year])), :plot_id)
+    ys = sort(gd.sim_year); for k in 2:length(ys); prevyr[(gd.plot_id[1], ys[k])] = ys[k-1]; end
+  end
+  injc = DF.combine(DF.groupby(DF.subset(injc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]),
+                    :obs_agb => sum => :obs_agb, :drop => maximum => :drop, :phantom => maximum => :phantom)
+  (; sp, spdf_plts, ssy, spc, inj, msy, plot2eco, especo2sp, injc, phmap, prevyr)
 end
 SPLITS = String.(split(SPLIT, "+"))
+REAL_ONLY = get(ENV, "TOST_REAL_ONLY", "0") == "1"
+REAL_ONLY && println("TOST_REAL_ONLY: pairs restricted to real (non-phantom) observed cohorts with a real previous-visit state")
 CTXS = [_split_ctx(_split_df(nm)) for nm in SPLITS]
 sp = CTXS[1].sp   # (first split; used by callers for counts)
 function _paired_one(params, c, offset)
@@ -60,6 +70,14 @@ function _paired_one(params, c, offset)
   simc = DF.combine(DF.groupby(DF.subset(simc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]), :sim_agb => sum => :sim_agb)
   m = DF.innerjoin(simc, c.injc, on=[:plot_id, :sim_year, :esp, :age])
   P.OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && (m = DF.filter(r -> r.drop <= 0.0, m))
+  if REAL_ONLY   # D9: compare only REAL measurements whose simulated interval also STARTED from a real record
+    keep = map(eachrow(m)) do r
+      r.phantom >= 0.5 && return false
+      py = get(c.prevyr, (r.plot_id, r.sim_year), nothing); py === nothing && return true
+      get(c.phmap, (r.plot_id, py, r.esp, r.age - (r.sim_year - py)), 0.0) < 0.5
+    end
+    m = m[keep, :]
+  end
   pr = DF.combine(DF.groupby(m, [:plot_id, :sim_year, :esp]), :sim_agb => sum => :sim_agb, :obs_agb => sum => :obs_agb)
   pr.eco = [c.plot2eco[p] for p in pr.plot_id]; pr.sp = [c.especo2sp[(e, esp)] for (e, esp) in zip(pr.eco, pr.esp)]
   pr.pgrp = [grp(s, e) for (s, e) in zip(pr.sp, pr.eco)]

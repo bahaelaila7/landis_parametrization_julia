@@ -115,3 +115,29 @@ Decision: (i) the deployable GA+FL parameter set is calibrated on **all** plots 
 procedure (more data per group ⇒ smaller parameter error); (ii) its generalization is estimated by **3-fold CV over the
 existing splits** (calibrate on two, test on the third: train+val→test, train+test→val, val+test→train), procedure
 fixed in advance: start = Stage-A best, schedule S, ratio, bmax, S, ratio, bmax, ratio~, S~, bmax~, ratio~, S~, bmax~.
+
+### D8 results — 3-fold CV over the existing splits (all pairs), all-data fit
+| held-out | calibrated on | pass ±10 % | pass ±20 % | median abs bias |
+|---|---|---|---|---|
+| val | train+test | 20/48 | 37/48 | 3.9 % |
+| train | val+test | 17/46 | 35/46 | 6.0 % |
+| test | train+val | 19/46 | 31/46 | 6.9 % |
+All-data fit (`runs_local/final_calibrated_gafl.jld2`): in-sample 42/48 (±10 %), 45/48 (±20 %). Held-out biases average ≈ 0
+across folds with alternating signs (sampling variance; 13 groups pass ±10 % in all folds, 26 pass ±20 % in all folds).
+Training objectives (warm-start eval, new `igel_warm_start`): W 0.091–0.094 (Stage-A best 0.0955, better) but AGB objective
+2.70 vs 2.59 (worse): the calibration zeroes the MEAN log bias by over-predicting mid-size cohorts (+12 % at 1–5 kg m⁻²)
+while still under-predicting the smallest (−14 % < 100 g m⁻²); total absolute error +19 %.
+
+## D9. Phantom-backfill cohorts are synthetic — evaluate and calibrate on REAL records only (2026-10-13)
+`curated_cohorts_landis_stdorg` contains `intro_type = phantom_backfill` rows (FIA_DATA_PREP/cohorts_landis.py: pre-debut
+cohort biomass extrapolated from a sapling growth model, not measured). GA+FL share by cohort size: < 100 g m⁻² **46.5 %**,
+100–1,000 3.5 %, 1–5 kg 1.2 %, > 5 kg 0.8 %. The "under-prediction of small cohorts" (D4) — and the phantom → first-real-
+tally jump — is therefore largely a data artifact, and D4–D8 calibrated toward it. Code: `make_splots` now carries an
+AGB-weighted `phantom_frac` per aggregated cohort into splots and injection cohorts (evaluation-only; not read by the
+simulator or the loss — gate byte-identical); `TOST_REAL_ONLY=1` keeps a matched pair only if the observed cohort AND the
+same cohort at the plot's previous visit (where the simulated interval started) are majority-real.
+Evidence: the D8 all-data parameters, evaluated real-only on all GA+FL plots: **5/47 at ±10 %**, 33/47 at ±20 %, median
+|bias| 13.2 %, with 45/47 groups OVER-predicted by a near-uniform +7…+16 % in every size class (no size structure left) —
+the real growth shape is captured; only the level is off because it was fitted to inflated phantom growth.
+Decision: redo the calibration and the 3-fold CV with `TOST_REAL_ONLY=1` (same fixed procedure, from the Stage-A start).
+The real-only TOST is the reported criterion from here on (all-pairs numbers kept for reference).
