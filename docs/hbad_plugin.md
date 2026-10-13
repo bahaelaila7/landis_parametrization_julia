@@ -141,3 +141,40 @@ Losses are finite: train 2.5625 -> 2.5593, val 4.418 -> 4.411. Per generation of
 Whole run wall time 3m37s (HBAD) vs 3m46s (biomass), ~145 s of it data preparation + compilation.
 
 Regression gate for the default biomass plugin (`tools/regress_gate.sh`, 4 threads): REGRESS_ARCHIVE.txt byte-identical to `docs/regress/baseline_853_split-productive-species.txt` (`cmp` silent).
+
+## GA+FL inverse parameterization (Sim A, 2026-10-13)
+Same data, split, train cap, groups, real-only TOST criterion and 3-fold CV procedure as the BiomassSuccession GA+FL
+calibration (`docs/gafl_calibration_log.md` D1–D11), so the three models are directly comparable.
+- Config `configs/region4/gafl_hbad.yml` (= gafl_A.yml with `succession_plugin: hbad`; G_MULT/M_MULT pooled like B_MAX:
+  region level, per site cell for PITA/PIEL). Tools now drive HBAD through `Pan.setup_plugin_from_cfg` (configures the
+  priors with the run's species lists).
+- Start `tools/seed_hbad_start.jl`: G_MULT = M_MULT = 1 (empirical priors as fitted), SDIMAX = species P95, LONGEVITY from
+  the BS set. **With no calibration at all** this start already passes 7/16/33 of 46 groups at ±5/10/20 % on train
+  (median |bias| 8.3 %) — BS defaults / PnET PFT defaults pass 0–2 at ±10 %.
+- Levers (`tools/calib_coord.jl`): `gmult` (grid 0.4–2.3) and `mmult` (0.3–3.5), per TOST group; schedule
+  `gmult,gmult~,mmult~,gmult~,mmult~,gmult~` (`tools/gafl_cv.sh`). SDIMAX is not a calibration lever (kept at P95).
+
+| held-out | ±5 % | ±10 % | ±20 % | median abs bias |
+|---|---|---|---|---|
+| val (fit train+test) | 16/47 | 37/47 | 41/47 | 3.1 % |
+| train (fit val+test) | 17/46 | 33/46 | 42/46 | 2.6 % |
+| test (fit train+val) | 17/46 | 31/46 | 41/46 | 2.7 % |
+| mean | ≈ 17 (36 %) | ≈ 34 (72 %) | ≈ 41 (89 %) | 2.8 % |
+| BiomassSuccession v1, same protocol | ≈ 8 | ≈ 20 | ≈ 36 | 5.1 % |
+| PnET, same protocol | ≈ 3 | ≈ 16 | ≈ 33 | 6.1 % |
+
+Robust (held-out pass in all 3 folds): ±5 % 9 groups (LIST2, NYBI, PITA·B, QUAL, QULA3, QUNI, QUPR2, _H_HST, _H_LST);
+±10 % 28; ±20 % 40 (BS v1: 14 at ±10 %, 29 at ±20 %).
+Deployable set (all GA+FL plots): `results/hbad_gafl/params_gafl_hbad.jld2` — in-sample 42/47 ±5 %, 44/47 ±10 %, 47/47 ±20 %.
+G_MULT median 1.17 (0.70–2.26), M_MULT median 1.00 (0.85–1.16); nothing at a bound.
+
+Sanity check of the gain (held-out test, fold-3 parameters, same pairs as BS): pairs 36,175 (BS 37,386 — HBAD drops the
+~3 % of cohorts it thins below 1 tree/ha; Sim A pairs are survivors-only for every model), per-pair log-error SD 0.51
+(BS 0.78), log-log correlation 0.934 (BS 0.877), Σsim/Σobs 0.99 (BS 1.12); 101 pairs equal obs to 0.1 % (BS 110) ⇒ no leak.
+Why it fits better: growth is a function of tree size and competition (BAL) taken from 600 k remeasured trees, and the
+cohort's size comes from its own (age, AGB) via the translation — BiomassSuccession's ANPP curve sees only cohort biomass.
+Residual size structure (test): obs < 100 g/m² +61 % (5 % of pairs), 100–1,000 +3 %, 1–5 kg −5 %, > 5 kg −8 %
+(BS: +14/−2/+4/−2 %) — tiny cohorts grow too fast (translation clamps them to one macroplot tree with a small QMD;
+the diameter-growth prior is weakest there). Candidate next step: a size-targeted lever (e.g. per-group small-tree growth
+exponent) or a sapling-aware translation (README §4).
+Files: `results/hbad_gafl/` (cvH_* held-out group tables, final in-sample table, rounds, cv_summary.log).

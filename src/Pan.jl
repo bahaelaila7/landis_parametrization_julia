@@ -61,6 +61,12 @@ function setup_plugin_from_cfg(cfg::AbstractDict, eco_list::Vector{String}; spec
     soil_map = Dict{String,String}(String(k) => String(v) for (k, v) in g("pnet_soil_texture", Dict()))
     soil_csv = X(g("pnet_soil_csv", ""))
     SITE_ATTRS_FN[] = sp -> PnETPlugin.build_site_attrs(db, tbl, sp, eco_list; soil_map=soil_map, soil_csv=soil_csv)
+  elseif SUCC === HBADPlugin.HBAD
+    (species_list === nothing || eco_species_ids === nothing) && error("setup_plugin_from_cfg(hbad) needs species_list and eco_species_ids")
+    pc = String(g("hbad_priors_csv", "")); cc = String(g("hbad_coefs_csv", ""))
+    HBADPlugin.configure!(; species_list=species_list, eco_species_ids=eco_species_ids,
+      priors_csv=isempty(pc) ? HBADPlugin.DEFAULT_PRIORS_CSV : X(pc), coefs_csv=isempty(cc) ? HBADPlugin.DEFAULT_COEFS_CSV : X(cc))
+    SITE_ATTRS_FN[] = sp -> nothing
   else
     SITE_ATTRS_FN[] = sp -> nothing
   end

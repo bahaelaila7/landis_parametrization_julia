@@ -1,0 +1,9 @@
+fit train+test: round 6 (gmult~): set 46 groups → train+test pass±5% 42/46, ±10% 44/46, ±20% 46/46, median|bias| 0.0%
+  held-out val:   [1/1] cand 1  pass±5%=16/47  pass±10%=37/47  pass±20%=41/47  median|bias|=3.1%
+fit val+test: round 6 (gmult~): set 47 groups → val+test pass±5% 41/47, ±10% 42/47, ±20% 45/47, median|bias| 0.0%
+  held-out train:   [1/1] cand 1  pass±5%=17/46  pass±10%=33/46  pass±20%=42/46  median|bias|=2.6%
+fit train+val: round 6 (gmult~): set 47 groups → train+val pass±5% 42/47, ±10% 44/47, ±20% 47/47, median|bias| 0.0%
+  held-out test:   [1/1] cand 1  pass±5%=17/46  pass±10%=31/46  pass±20%=41/46  median|bias|=2.7%
+fit train+val+test: round 6 (gmult~): set 47 groups → train+val+test pass±5% 42/47, ±10% 44/47, ±20% 47/47, median|bias| 0.0%
+  in-sample train+val+test:   [1/1] cand 1  pass±5%=42/47  pass±10%=44/47  pass±20%=47/47  median|bias|=0.0%
+CV_DONE
