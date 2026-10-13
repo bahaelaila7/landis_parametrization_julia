@@ -279,6 +279,12 @@ be `filter_states: [12, 13]`, 8,985 plots); site cells in 8.3.5/8.3.4/8.5.3; spe
   balanced-training effect on accuracy.
 - Outputs: `runs_local/r4_gafl_test_outputs/` (checkpoints, `analysis/` from `tools/analyze_run.jl`, `bestagg/` TOST).
 
+### 8b. Georgia + Florida calibration (follow-up)
+The GA+FL-only BiomassSuccession calibration (per-species TOST-bias calibration, real records only, 3-fold CV) is
+documented step by step in `docs/gafl_calibration_log.md` (decisions D1–D10); final parameters and per-species results are
+in `results/gafl/`. Headline: final parameters pass TOST ±10 % for 42/47 species groups (±20 %: 45/47) on all GA+FL plots;
+out-of-sample (CV) ≈ 20/46 at ±10 % and ≈ 36/46 at ±20 %, with 14 groups passing ±10 % in every held-out fold.
+
 ## 9. Review (2026-10-13) and fixes
 
 An independent code review of the full branch diff found no high-severity defects. Fixed:
