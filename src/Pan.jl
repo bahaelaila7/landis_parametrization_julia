@@ -2303,8 +2303,10 @@ end
 # pair them. Returns a DataFrame(cyc, eco, esp, bin, sp, obs_agb, sim_agb) — the common input for the Sim-B
 # scatter / sMAPE / TOST plots (so all three reflect the actual free-regen sim, not the Sim-A tier-3 path).
 # by_plot=true keeps the plot id (pairs per (plot, cycle, eco, species, bin)) — used by the plot-cluster bootstrap TOST.
+# preexist=true keeps only cohorts that existed at the plot's first visit (age > sim_year) on BOTH sides: drops simulated
+# recruits and observed cohorts younger than the run (timber-only data cannot observe recruits until they reach 5 in).
 function resim_simB_paired(cfg, params, sp, spdf_plts, site_sim_years, spinup_cohorts, loss_params,
-                           eco_list, species_list, eco_species_ids, rng; by_plot::Bool=false)
+                           eco_list, species_list, eco_species_ids, rng; by_plot::Bool=false, preexist::Bool=false)
   g(k, d) = get(cfg, k, d)
   DUAL_MODE[] = :b
   SIMB_DISTURB_ONLY[] = Bool(g("simB_disturb_only", false))
@@ -2331,6 +2333,7 @@ function resim_simB_paired(cfg, params, sp, spdf_plts, site_sim_years, spinup_co
   for (pid, sy, esp, age, bio) in cached
     haskey(plot2eco, Int(pid)) || continue
     cyc = get(cycle_map, (Int(pid), Int(sy)), 0); cyc == 0 && continue
+    (preexist && Float64(age) <= sy) && continue
     b = PU.find_age_bin(Int(ceil(Float64(age))), ab); b == 0 && continue
     push!(simdf, (by_plot ? Int(pid) : 0, cyc, plot2eco[Int(pid)], Int(esp), Int(b), Float64(bio)))
   end
@@ -2339,6 +2342,7 @@ function resim_simB_paired(cfg, params, sp, spdf_plts, site_sim_years, spinup_co
   obsdf = DataFrames.DataFrame(plot=Int[], cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
   for r in eachrow(DataFrames.subset(sp, :sim_year => DataFrames.ByRow(>(0))))
     cyc = get(cycle_map, (Int(r.plot_id), Int(r.sim_year)), 0); cyc == 0 && continue
+    (preexist && Float64(r.age_calc) <= r.sim_year) && continue
     b = PU.find_age_bin(Int(ceil(Float64(r.age_calc))), ab); b == 0 && continue
     push!(obsdf, (by_plot ? Int(r.plot_id) : 0, cyc, Int(r.eco_id), Int(r.eco_species_id), Int(b), Float64(r.agb_sum)))
   end

@@ -14,7 +14,7 @@ include(joinpath(@__DIR__, "tost_common.jl"))
 # search boxes from the config (same keys as training: bmax_upper, anpp_ratio_bounds)
 BU = Float64(g("bmax_upper", 35000)); RB = Float64.(g("anpp_ratio_bounds", [20.0, 35.0]))
 GRID = Dict("pestab" => [0.02, 0.05, 0.1, 0.2, 0.35, 0.55, 0.8],
-            "pmort" => [0.0, 0.003, 0.007, 0.012, 0.02, 0.03, 0.045],   # Sim B whole-cohort death prob/yr (D13)
+            "pmort" => [0.0, 0.003, 0.007, 0.012, 0.02, 0.03, 0.045, 0.07, 0.1, 0.15],   # Sim B whole-cohort death prob/yr (D13, D15)
             "foln" => [0.7, 1.0, 1.4, 1.8, 2.3, 3.0],                    # PnET foliar N % (EcoSpecies)
             "gmult" => [0.4, 0.6, 0.8, 1.0, 1.3, 1.7, 2.3],              # HBAD diameter-growth multiplier (EcoSpecies)
             "mmult" => [0.3, 0.5, 0.75, 1.0, 1.5, 2.2, 3.5],             # HBAD mortality-hazard multiplier (EcoSpecies)

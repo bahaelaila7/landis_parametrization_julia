@@ -1,0 +1,9 @@
+fit train+test: round 8 (pmort~): set 47 groups → train+test pass±5% 4/47, ±10% 22/47, ±20% 36/47, median|bias| 0.5%
+  held-out val:   [1/1] cand 1  pass±5%=0/48  pass±10%=3/48  pass±20%=22/48  median|bias|=6.6%
+fit val+test: round 8 (pmort~): set 48 groups → val+test pass±5% 2/48, ±10% 21/48, ±20% 35/48, median|bias| 0.7%
+  held-out train:   [1/1] cand 1  pass±5%=0/47  pass±10%=6/47  pass±20%=16/47  median|bias|=8.9%
+fit train+val: round 8 (pmort~): set 48 groups → train+val pass±5% 3/48, ±10% 22/48, ±20% 35/48, median|bias| 0.4%
+  held-out test:   [1/1] cand 1  pass±5%=0/47  pass±10%=4/47  pass±20%=13/47  median|bias|=8.3%
+fit train+val+test: round 8 (pmort~): set 48 groups → train+val+test pass±5% 10/48, ±10% 28/48, ±20% 39/48, median|bias| 0.4%
+  in-sample train+val+test:   [1/1] cand 1  pass±5%=7/48  pass±10%=26/48  pass±20%=40/48  median|bias|=0.9%
+CV_DONE

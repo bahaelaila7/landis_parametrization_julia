@@ -184,13 +184,14 @@ Change: yaml `bmax_upper` (upper B_MAX bound; lower stays 12,000) and `anpp_rati
 Also added: yaml `drop_phantom` (SQL `intro_type <> 'phantom_backfill'` — training data without phantom cohorts; D10 limitation c;
 default off ⇒ unchanged) and the roster margin ±5 % (all tools now report ±5/10/20 %).
 
-| held-out | v2 (wide box) ±5 / ±10 / ±20 % | v1 (D10) ±10 / ±20 % |
+| held-out | v2 (wide box) ±5 / ±10 / ±20 % | v1 (D10) ±5 / ±10 / ±20 % |
 |---|---|---|
-| val | 8 / 22 / 36 of 47 | 23 / 38 |
-| train | 5 / 14 / 34 of 46 | 18 / 37 |
-| test | 9 / 18 / 31 of 46 | 19 / 32 |
-| mean | ≈ 7 / 18 / 34 | ≈ 20 / 36 |
-In-sample (all plots): v2 33/47 ±5 %, 41/47 ±10 %, 44/47 ±20 % (v1: 42/47, 45/47). Robust in all 3 folds: v2 3 (±5 %), 12 (±10 %), 26 (±20 %).
+| val | 8 / 22 / 36 of 47 | 8 / 23 / 38 |
+| train | 5 / 14 / 34 of 46 | 7 / 18 / 37 |
+| test | 9 / 18 / 31 of 46 | 8 / 19 / 32 |
+| mean | ≈ 7 / 18 / 34 | ≈ 8 / 20 / 36 |
+In-sample (all plots): v2 33/47 ±5 %, 41/47 ±10 %, 44/47 ±20 %; v1 34/47, 42/47, 45/47 (v1 re-scored at ±5 % with
+`tools/rescore_v1_5pct.sh`; ±10/20 % identical to D10). Robust in all 3 folds: v2 3 (±5 %), 12 (±10 %), 26 (±20 %).
 The wider box WAS used (35 targets at the new 60,000 cap, 61 ratios at 15, 58 at 40) but bought nothing: per-group AGB
 bias is matched by many (B_MAX, ratio, S) combinations, so extra room only adds variance. **Decision: keep v1
 (`results/gafl/params_gafl_biomass_real.jld2`) as the deployable Sim A set**; v2 kept for reference in
@@ -227,3 +228,38 @@ dead-in-sim/alive-in-obs pairs (|log| ≈ 5–10). A first calibration on per-(c
 but 0/47 groups passed (CIs ±30–80 %). Sim B statistic per group: log(Σ sim / Σ obs) over all (plot, cycle) pairs of the
 comparable bins; 90 % CI = percentile bootstrap over PLOTS (B = 1000, fixed seed; `SIMB_BOOT`); equivalent at margin m iff the
 CI lies within ±log(1+m) (TOST at α = 0.05, same margins as Sim A). The calibrator root-finds the same statistic.
+
+## D15. Sim B calibration and result (2026-10-13)
+Procedure (fixed; `tools/gafl_cv.sh configs/region4/gafl_B.yml … pmort,pmort~,bmax~,pmort,ratio~,pmort~,bmax~,pmort~`,
+`SIMB_REPS=2` for calibration, `EVAL_SIMB_REPS=4` for evaluation): start = Sim A v1 growth remapped + PROB_MORT 0
+(`tools/seed_simB_start.jl`, PROB_ESTAB 0.02); levers PROB_MORT (whole-cohort death, grid widened to 0–0.15 yr⁻¹ after the
+first CV attempt left `_GRP_41_HST` under-corrected at ≈0.11 — absolute grid ended at 0.045 and relative rounds move ×1.25),
+then B_MAX and the ANPP ratio relative refinements. Replicates: averaging 4 free runs per plot narrows the bootstrap CI only
+from a median half-width of 12.8 % to 11.6 % ⇒ the CI is dominated by between-plot divergence of the free run, not the
+model's own demographic noise.
+
+| held-out | ±5 % | ±10 % | ±20 % | median abs bias |
+|---|---|---|---|---|
+| val (fit train+test) | 0/48 | 3/48 | 22/48 | 6.6 % |
+| train (fit val+test) | 0/47 | 6/47 | 16/47 | 8.9 % |
+| test (fit train+val) | 0/47 | 4/47 | 13/47 | 8.3 % |
+| mean | 0 | ≈ 4 | ≈ 17 (36 %) | 7.9 % |
+In-sample on the fit splits: 2–4 / 21–22 / 35–36. **Deployable Sim B set (all GA+FL plots):
+`results/gafl_simB/params_gafl_simB_3lever.jld2` — in-sample 7/48 ±5 %, 26/48 ±10 %, 40/48 ±20 %, median |bias| 0.9 %.**
+Robust in all 3 folds: 0 (±5 %), 1 (±10 %), 8 (±20 %).
+
+Why held-out Sim B is weak (checked, not assumed):
+- Not systematic model error: only 4/47 groups keep the same held-out bias sign in all three folds; biases alternate
+  (e.g. QUNI +4.6 / +15.2 / −16.6 %, LIST2 +3.9 / +18.2 / −15.3 %). The "train" fold (species-leveled split) pulls most
+  hardwoods negative while val/test (which hold the capped surplus of dominant strata) pull them positive: a group's
+  free-run AGB retention depends on stand composition/context, which group-level parameters cannot represent.
+- Not lever over-fitting: a low-variance procedure (PROB_MORT only, Sim A growth kept; `tools/simB_lowvar.sh`) is no
+  better held-out (train 0/3/20, val 0/1/17; median |bias| 10.7 / 9.3 %).
+- Not recruitment bookkeeping: restricting both sides to cohorts present at the first visit (`SIMB_PREEXIST=1`,
+  `resim_simB_paired(preexist=true)`) changes held-out biases by < 2 points, so the systematic over-prediction of
+  `_GRP_41_*` / `_*_NA` is not simulated recruits outgrowing the 5-in observation threshold.
+- Plot sampling: held-out CIs of ±6–15 % alone make ±5 % unattainable and ±10 % attainable only for |bias| ≲ 3 %.
+Remaining gaps: the `_S_NA` / `_H_NA` shade-tier-unknown catch-alls (+100–1,400 %, < 60 plots) and CAGL8/CAAL27
+(−12…−34 %; B_MAX already ≥ 45k) never fit. Natural next steps: a model whose free-run dynamics carry stand context
+(HBAD: BAL/RD-dependent growth and mortality — it needs an establishment module first) or Sim B groups keyed by
+species × stand type.

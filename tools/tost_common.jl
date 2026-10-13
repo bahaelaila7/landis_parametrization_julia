@@ -18,7 +18,7 @@ _split_df(nm) = nm == "train" ? splots : nm == "val" ? splots_val : nm == "test"
 n_species = length(species_list)
 # Succession plugin (biomass | pnet | hbad): configured from the yaml exactly as `parametrize` does when the branch provides
 # Pan.setup_plugin_from_cfg (pnet/hbad branches); otherwise BiomassSuccession via plain make_sites.
-SP = isdefined(P, :setup_plugin_from_cfg) ? P.setup_plugin_from_cfg(cfg, eco_list) : nothing
+SP = isdefined(P, :setup_plugin_from_cfg) ? P.setup_plugin_from_cfg(cfg, eco_list; species_list=species_list, eco_species_ids=eco_species_ids) : nothing
 _mk_sites(sp_; kw...) = SP === nothing ? P.make_sites(sp_, eco_species_ids; kw...) : P.make_sites_like(SP, sp_, eco_species_ids; kw...)
 # grouping identical to tost_sim_obs.jl (tiered = param_split_species ∪ param_pooling cell_split, with merges)
 tiered = Set{String}(); merge_map = Dict{String,Dict{String,String}}()
@@ -69,11 +69,16 @@ SIMB = lowercase(string(g("dual_mode", "off"))) == "b"
 # SIMB_MIN_BIN (default 3 = cohorts older than 20 yr with bins_idx [10,20,…]): Sim B observed cohorts are timber-only
 # (DIA ≥ 5 in; saplings dropped), while the simulation has no size cutoff ⇒ the youngest bins are not comparable (D12).
 SIMB_MIN_BIN = parse(Int, get(ENV, "SIMB_MIN_BIN", "3"))
+SIMB_REPS = parse(Int, get(ENV, "SIMB_REPS", "1"))   # replicate free runs averaged per plot (D15)
+SIMB_PREEXIST = get(ENV, "SIMB_PREEXIST", "0") == "1"   # only cohorts present at the first visit, both sides (D15)
 SIMB && println("Sim B mode: pairs = Σ AGB per (cycle, eco cell, species, age bin ≥ $SIMB_MIN_BIN) from the free simulation")
 function _paired_one(params, c, offset)
   rng = P.RNGType(UInt64(rng0))
   if SIMB
-    pr, _, _ = P.resim_simB_paired(cfg, params, c.sp, c.spdf_plts, c.ssy, c.spc, loss_params, eco_list, species_list, eco_species_ids, rng; by_plot=true)
+    # SIMB_REPS replicate free runs (different seeds), sim AGB averaged per (plot, cycle, eco, species, bin): the plot's
+    # EXPECTED simulated AGB, so the bootstrap CI reflects plot sampling rather than the model's own demographic noise.
+    prs = [P.resim_simB_paired(cfg, params, c.sp, c.spdf_plts, c.ssy, c.spc, loss_params, eco_list, species_list, eco_species_ids, rng; by_plot=true, preexist=SIMB_PREEXIST)[1] for _ in 1:SIMB_REPS]
+    pr = DF.combine(DF.groupby(reduce(vcat, prs), [:plot, :cyc, :eco, :esp, :bin, :sp]), :obs_agb => maximum => :obs_agb, :sim_agb => (x -> sum(x) / SIMB_REPS) => :sim_agb)
     pr = DF.filter(r -> (r.obs_agb > 0 || r.sim_agb > 0) && r.bin >= SIMB_MIN_BIN, pr)
     # plot-level pairs: Σ over the comparable bins per (plot, cycle, eco, species); the test clusters on plot (D14)
     pr = DF.combine(DF.groupby(pr, [:plot, :cyc, :eco, :esp, :sp]), :obs_agb => sum => :obs_agb, :sim_agb => sum => :sim_agb)
