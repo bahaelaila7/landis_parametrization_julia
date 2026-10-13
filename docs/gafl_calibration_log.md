@@ -141,3 +141,37 @@ Evidence: the D8 all-data parameters, evaluated real-only on all GA+FL plots: **
 the real growth shape is captured; only the level is off because it was fitted to inflated phantom growth.
 Decision: redo the calibration and the 3-fold CV with `TOST_REAL_ONLY=1` (same fixed procedure, from the Stage-A start).
 The real-only TOST is the reported criterion from here on (all-pairs numbers kept for reference).
+
+## D10. Final result — GA+FL BiomassSuccession parameters, real-only calibration (2026-10-13)
+Procedure (fixed in advance, identical for every fold): start = Stage-A best (≈ prior medians); `tools/calib_coord.jl` with
+`TOST_REAL_ONLY=1`, schedule `S,ratio,bmax,S,ratio,bmax,ratio~,S~,bmax~,ratio~,S~,bmax~` (`runs_local/run_cv_real.sh`).
+
+**Out-of-sample (3-fold CV over the existing splits, real records only):**
+| held-out | calibrated on | pass ±10 % | pass ±20 % | median abs bias |
+|---|---|---|---|---|
+| val | train+test | 23/47 | 38/47 | 4.3 % |
+| train | val+test | 18/46 | 37/46 | 4.8 % |
+| test | train+val | 19/46 | 32/46 | 6.3 % |
+| mean | | ≈ 20/46 (43 %) | ≈ 36/46 (77 %) | ≈ 5.1 % |
+Robust groups (held-out ±10 % in all 3 folds, 14/47): LIST2, ACRU, QUNI, _H_HST, NYBI, LITU, QULA3, QUAL, PIEL·AB, PIPA2,
+CAGL8, TAAS, QUST, QUPR2. Held-out ±20 % in all 3 folds: 29/47. Remaining held-out misses are sampling variance (biases
+average ≈ 0 across folds with alternating signs; cohort pairs are clustered within plots, so a group mean varies by several
+% between plot samples), concentrated in groups with < ~1,500 pairs.
+
+**Deployable parameter set (calibrated on all GA+FL plots):** `results/gafl/params_gafl_biomass_real.jld2`
+(+ readable `params_gafl_biomass_real.csv`: eco, species, S, B_MAX, ANPP_MAX, ratio, D, LONGEVITY, SHADE_TOL).
+In-sample (all plots, real records): **42/47 groups at ±10 %, 45/47 at ±20 %**, median |bias| 0.1 %.
+- Size structure on real records is flat: median bias +2 % (< 100 g m⁻²), 0 % (100–1,000), +6 % (1–5 kg), +1 % (> 5 kg)
+  (defaults: −42 / −31 / −16 / −12 %); total absolute error 92.3 M g m⁻² (phantom-fitted D8 set: 117 M).
+- Training objectives (warm-start eval on the leveled train split): W 0.0952 (Stage-A 0.0955), AGB 2.644 (Stage-A 2.587;
+  the training AGB loss still scores phantom cohorts, which this calibration deliberately no longer chases).
+- Parameters: S 0.085–0.84 (median 0.20), ratio 20–35 (19 targets at 20, 24 at 35), B_MAX median 24,116; 110/508 targets at
+  ≥ 34,900 — where the data floor (20 × p99 growth) exceeds the 35,000 box the floor wins (same as Pan's decode) ⇒ the B_MAX
+  box is too tight for GA/FL fast growers (candidate follow-up: widen the upper bound).
+- Files: `results/gafl/` — per_group_summary.csv (CV + final per group), cv_heldout_{val,train,test}_groups.csv,
+  final_insample_tost_groups.csv, final_calib_rounds.csv.
+
+Not done / possible next iterations: (a) widen the B_MAX/ANPP box and re-calibrate the 110 pinned targets; (b) a warm-started
+CMA-ES refinement (`igel_warm_start`) on W/AGB with the training loss restricted to real records; (c) the training
+pipeline itself still includes phantom cohorts in its W/AGB objectives — excluding them there is a data-pipeline decision
+for the user.
