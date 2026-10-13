@@ -16,6 +16,10 @@ splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = P.pre
 # (plot ids offset per split so they stay unique). Each split keeps its own simulation inputs.
 _split_df(nm) = nm == "train" ? splots : nm == "val" ? splots_val : nm == "test" ? splots_test : error("unknown split $nm")
 n_species = length(species_list)
+# Succession plugin (biomass | pnet | hbad): configured from the yaml exactly as `parametrize` does when the branch provides
+# Pan.setup_plugin_from_cfg (pnet/hbad branches); otherwise BiomassSuccession via plain make_sites.
+SP = isdefined(P, :setup_plugin_from_cfg) ? P.setup_plugin_from_cfg(cfg, eco_list) : nothing
+_mk_sites(sp_; kw...) = SP === nothing ? P.make_sites(sp_, eco_species_ids; kw...) : P.make_sites_like(SP, sp_, eco_species_ids; kw...)
 # grouping identical to tost_sim_obs.jl (tiered = param_split_species ∪ param_pooling cell_split, with merges)
 tiered = Set{String}(); merge_map = Dict{String,Dict{String,String}}()
 for (_, syms) in get(cfg, "param_split_species", Dict()), s in syms; push!(tiered, uppercase(strip(String(s)))); end
@@ -59,9 +63,25 @@ REAL_ONLY = get(ENV, "TOST_REAL_ONLY", "0") == "1"
 REAL_ONLY && println("TOST_REAL_ONLY: pairs restricted to real (non-phantom) observed cohorts with a real previous-visit state")
 CTXS = [_split_ctx(_split_df(nm)) for nm in SPLITS]
 sp = CTXS[1].sp   # (first split; used by callers for counts)
+# Sim B (dual_mode: b): free simulation from year-0 cohorts with establishment; pairs = Σ AGB per (cycle, eco cell,
+# species, age bin), sim vs obs (Pan.resim_simB_paired, same as test/tost_sim_obs.jl). Cells are landscape aggregates.
+SIMB = lowercase(string(g("dual_mode", "off"))) == "b"
+# SIMB_MIN_BIN (default 3 = cohorts older than 20 yr with bins_idx [10,20,…]): Sim B observed cohorts are timber-only
+# (DIA ≥ 5 in; saplings dropped), while the simulation has no size cutoff ⇒ the youngest bins are not comparable (D12).
+SIMB_MIN_BIN = parse(Int, get(ENV, "SIMB_MIN_BIN", "3"))
+SIMB && println("Sim B mode: pairs = Σ AGB per (cycle, eco cell, species, age bin ≥ $SIMB_MIN_BIN) from the free simulation")
 function _paired_one(params, c, offset)
   rng = P.RNGType(UInt64(rng0))
-  rs = P.make_sites(c.sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
+  if SIMB
+    pr, _, _ = P.resim_simB_paired(cfg, params, c.sp, c.spdf_plts, c.ssy, c.spc, loss_params, eco_list, species_list, eco_species_ids, rng; by_plot=true)
+    pr = DF.filter(r -> (r.obs_agb > 0 || r.sim_agb > 0) && r.bin >= SIMB_MIN_BIN, pr)
+    # plot-level pairs: Σ over the comparable bins per (plot, cycle, eco, species); the test clusters on plot (D14)
+    pr = DF.combine(DF.groupby(pr, [:plot, :cyc, :eco, :esp, :sp]), :obs_agb => sum => :obs_agb, :sim_agb => sum => :sim_agb)
+    pr.pgrp = [grp(s, e) for (s, e) in zip(pr.sp, pr.eco)]
+    pr.plot_id = offset .+ pr.plot
+    return pr
+  end
+  rs = _mk_sites(c.sp; rng=rng, spinup=false, no_establishment=no_estab)
   idict = P._build_injection_dict(c.inj, rs); iyears = Set(Int.(c.inj.sim_year))
   res = P.fit_params(rs, params, c.msy, n_species, eco_species_ids, c.spdf_plts, c.ssy, false, c.spc, loss_params;
     debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true)
@@ -94,9 +114,35 @@ function tost(d, Δ)
   (n=n, mean=md, lo=ci[1], hi=ci[2], p=max(pl, pu), equiv=(max(pl, pu) < ALPHA))
 end
 
+# Sim B (D14): the free simulation is stochastic per plot (whole-cohort death, regeneration), so per-plot log differences
+# are not a meaningful bias estimator. Statistic = log(Σ sim / Σ obs) over the group's plot-cycle pairs; its 90 % CI is a
+# plot-cluster percentile bootstrap (plots resampled with replacement, B = SIMB_BOOT, fixed seed). Equivalent at margin m
+# iff the CI lies inside ±log1p(m) (= the TOST at α = 0.05).
+SIMB_BOOT = parse(Int, get(ENV, "SIMB_BOOT", "1000"))
+function boot_ratio(d, margins)
+  pl = unique(d.plot_id); idx = Dict(p => k for (k, p) in enumerate(pl))
+  so = zeros(length(pl)); ss = zeros(length(pl))
+  for r in eachrow(d); k = idx[r.plot_id]; so[k] += r.obs_agb; ss[k] += r.sim_agb; end
+  stat = log(sum(ss) + 1) - log(sum(so) + 1)
+  rb = P.RNGType(UInt64(12345)); bs = Vector{Float64}(undef, SIMB_BOOT); np = length(pl)
+  for b in 1:SIMB_BOOT
+    a = 0.0; o = 0.0
+    for _ in 1:np; k = rand(rb, 1:np); a += ss[k]; o += so[k]; end
+    bs[b] = log(a + 1) - log(o + 1)
+  end
+  lo, hi = Statistics.quantile(bs, [ALPHA, 1 - ALPHA])
+  (n=np, mean=stat, tests=[(n=np, mean=stat, lo=lo, hi=hi, p=NaN, equiv=(lo > -log1p(m) && hi < log1p(m))) for m in margins])
+end
 # per-group mean log1p-difference and TOST for one params set → Dict(label => (n, mean, lo, hi, equiv per margin))
 function group_stats(pr, margins)
   out = Dict{String,Any}()
+  if SIMB
+    for (s, gp) in sort(unique([(r.sp, r.pgrp) for r in eachrow(pr)]))
+      d = DF.subset(pr, [:sp, :pgrp] => DF.ByRow((a, b) -> a == s && b == gp)); length(unique(d.plot_id)) < 3 && continue
+      br = boot_ratio(d, margins); out[label(s, gp)] = (s=s, gp=gp, n=br.n, mean=br.mean, tests=br.tests)
+    end
+    return out
+  end
   for (s, gp) in sort(unique([(r.sp, r.pgrp) for r in eachrow(pr)]))
     d = DF.subset(pr, [:sp, :pgrp] => DF.ByRow((a, b) -> a == s && b == gp)); DF.nrow(d) < 3 && continue
     dd = log1p.(Float64.(d.sim_agb)) .- log1p.(Float64.(d.obs_agb))

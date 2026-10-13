@@ -925,6 +925,7 @@ function parametrize(; cohorts_db_path::String,
   filter_states::Vector{Int}=Int[],        # region = state ∩ filter_ecos (FIPS, e.g. EPA Region 4); empty ⇒ no state filter
   siteclass_l3s::Vector{String}=String[],  # site-class cells only in these ecos; others → one cell "X" (empty ⇒ all)
   max_exact::Int=12, max_group::Int=4,     # species tiering caps (own-param species / pooled groups)
+  drop_phantom::Bool=false,                # drop intro_type=phantom_backfill rows (synthetic pre-debut biomass) at load
   train_cap::Union{Nothing,Int,String}=nothing,  # species-balanced TRAIN: cap plots per (eco cell × dominant species); Int | "auto"; surplus → val/test
   train_cap_k::Float64=1.5, train_cap_min::Int=20, # "auto" cap = max(train_cap_min, ceil(k × median stratum size per eco cell))
   split_only::Bool=false,                  # write split_plots.csv + species_map.csv (+ pool_map.csv) and stop (floor-building pass)
@@ -1052,7 +1053,7 @@ function parametrize(; cohorts_db_path::String,
       filter_plots, exclude_plots, filter_species, filter_planted, skip_disturbances, spinup, by_subplot,
       val_frac, split_seed, n_folds, fold_index, test_frac, min_trees, min_agb_frac, stratify_eco_mixed,
       single_ecoregion, stratify_landuse, site_class_strata, siteclass_hi_max, siteclass_scheme, shade_tier_csv,
-      filter_extent, filter_states, siteclass_l3s, max_exact, max_group, train_cap, train_cap_k, train_cap_min, rng)...)
+      filter_extent, filter_states, siteclass_l3s, max_exact, max_group, train_cap, train_cap_k, train_cap_min, rng, drop_phantom)...)
   _write_split_plots(output_dir, eco_list, splots, splots_val_raw, splots_test_raw)
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
@@ -2301,8 +2302,9 @@ end
 # fit_params(b_only), then bin the simulated cohorts AND the observed cohorts into the tier-4 age-bins and
 # pair them. Returns a DataFrame(cyc, eco, esp, bin, sp, obs_agb, sim_agb) — the common input for the Sim-B
 # scatter / sMAPE / TOST plots (so all three reflect the actual free-regen sim, not the Sim-A tier-3 path).
+# by_plot=true keeps the plot id (pairs per (plot, cycle, eco, species, bin)) — used by the plot-cluster bootstrap TOST.
 function resim_simB_paired(cfg, params, sp, spdf_plts, site_sim_years, spinup_cohorts, loss_params,
-                           eco_list, species_list, eco_species_ids, rng)
+                           eco_list, species_list, eco_species_ids, rng; by_plot::Bool=false)
   g(k, d) = get(cfg, k, d)
   DUAL_MODE[] = :b
   SIMB_DISTURB_ONLY[] = Bool(g("simB_disturb_only", false))
@@ -2325,25 +2327,27 @@ function resim_simB_paired(cfg, params, sp, spdf_plts, site_sim_years, spinup_co
     debug=false, search_tier=3, dual_b=dual_b, seeds=[rand(rng, UInt64)])
   cached = res[1][2]; ab = loss_params.age_bins
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DataFrames.select(sp, [:plot_id, :eco_id]))))
-  simdf = DataFrames.DataFrame(cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
+  simdf = DataFrames.DataFrame(plot=Int[], cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
   for (pid, sy, esp, age, bio) in cached
     haskey(plot2eco, Int(pid)) || continue
     cyc = get(cycle_map, (Int(pid), Int(sy)), 0); cyc == 0 && continue
     b = PU.find_age_bin(Int(ceil(Float64(age))), ab); b == 0 && continue
-    push!(simdf, (cyc, plot2eco[Int(pid)], Int(esp), Int(b), Float64(bio)))
+    push!(simdf, (by_plot ? Int(pid) : 0, cyc, plot2eco[Int(pid)], Int(esp), Int(b), Float64(bio)))
   end
-  sim_agg = DataFrames.combine(DataFrames.groupby(simdf, [:cyc, :eco, :esp, :bin]), :agb => sum => :sim_agb)
-  obsdf = DataFrames.DataFrame(cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
+  keys_ = [:plot, :cyc, :eco, :esp, :bin]
+  sim_agg = DataFrames.combine(DataFrames.groupby(simdf, keys_), :agb => sum => :sim_agb)
+  obsdf = DataFrames.DataFrame(plot=Int[], cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
   for r in eachrow(DataFrames.subset(sp, :sim_year => DataFrames.ByRow(>(0))))
     cyc = get(cycle_map, (Int(r.plot_id), Int(r.sim_year)), 0); cyc == 0 && continue
     b = PU.find_age_bin(Int(ceil(Float64(r.age_calc))), ab); b == 0 && continue
-    push!(obsdf, (cyc, Int(r.eco_id), Int(r.eco_species_id), Int(b), Float64(r.agb_sum)))
+    push!(obsdf, (by_plot ? Int(r.plot_id) : 0, cyc, Int(r.eco_id), Int(r.eco_species_id), Int(b), Float64(r.agb_sum)))
   end
-  obs_agg = DataFrames.combine(DataFrames.groupby(obsdf, [:cyc, :eco, :esp, :bin]), :agb => sum => :obs_agb)
-  paired = DataFrames.outerjoin(obs_agg, sim_agg, on=[:cyc, :eco, :esp, :bin])
+  obs_agg = DataFrames.combine(DataFrames.groupby(obsdf, keys_), :agb => sum => :obs_agb)
+  paired = DataFrames.outerjoin(obs_agg, sim_agg, on=keys_)
   paired.obs_agb = coalesce.(paired.obs_agb, 0.0); paired.sim_agb = coalesce.(paired.sim_agb, 0.0)
   especo2sp = Dict((Int(r.eco_id), Int(r.eco_species_id)) => Int(r.species_id) for r in eachrow(unique(DataFrames.select(sp, [:eco_id, :eco_species_id, :species_id]))))
   paired.sp = [especo2sp[(e, esp)] for (e, esp) in zip(paired.eco, paired.esp)]
+  by_plot || DataFrames.select!(paired, DataFrames.Not(:plot))
   return paired, cycle_map, n_cycles
 end
 
@@ -5488,6 +5492,7 @@ function _cfg_data_inputs(cfg::AbstractDict)
     filter_states=Int.(get_cfg("filter_states", Int[])),
     siteclass_l3s=String.(string.(get_cfg("siteclass_l3s", String[]))),
     max_exact=Int(get_cfg("max_exact", 12)), max_group=Int(get_cfg("max_group", 4)),
+    drop_phantom=Bool(get_cfg("drop_phantom", false)),
     train_cap=(c = get_cfg("train_cap", nothing); (c === nothing || c == "null") ? nothing : (c isa Integer ? Int(c) : String(c))),
     train_cap_k=Float64(get_cfg("train_cap_k", 1.5)), train_cap_min=Int(get_cfg("train_cap_min", 20)),
   )
@@ -5503,7 +5508,7 @@ function _prep_kwargs(; cohorts_db_path::String, eco_field, tablename::String, f
   site_class_strata::Bool, siteclass_hi_max::Int, siteclass_scheme::String, shade_tier_csv::Union{Nothing,String},
   filter_extent::Union{Nothing,String}, filter_states::Vector{Int}, siteclass_l3s::Vector{String},
   max_exact::Int, max_group::Int, train_cap::Union{Nothing,Int,String}, train_cap_k::Float64, train_cap_min::Int,
-  rng::Random.AbstractRNG)
+  rng::Random.AbstractRNG, drop_phantom::Bool=false)
   split_rng = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) ? RNGType(UInt64(split_seed)) : nothing   # seeded from split_seed only ⇒ all folds share the shuffle
   return (cohorts_db_path=cohorts_db_path,
     eco_field=eco_field,
@@ -5528,7 +5533,7 @@ function _prep_kwargs(; cohorts_db_path::String, eco_field, tablename::String, f
     shade_tier_csv=shade_tier_csv,
     filter_extent=filter_extent,
     filter_states=filter_states, siteclass_l3s=siteclass_l3s, max_exact=max_exact, max_group=max_group,
-    train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min,
+    train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min, drop_phantom=drop_phantom,
     filter_eco_field=filter_eco_field,
     filter_ecos=filter_ecos,
     filter_plots=filter_plots,
@@ -5642,7 +5647,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     filter_extent=din.filter_extent,
     filter_states=din.filter_states,
     siteclass_l3s=din.siteclass_l3s,
-    max_exact=din.max_exact, max_group=din.max_group,
+    max_exact=din.max_exact, max_group=din.max_group, drop_phantom=din.drop_phantom,
     train_cap=din.train_cap,
     train_cap_k=din.train_cap_k, train_cap_min=din.train_cap_min,
     split_only=Bool(get_cfg("split_only", false)),
@@ -5707,7 +5712,9 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   IgelMOCMAES.MATURITY_OVERRIDE[]     = Int(get_cfg("igel_maturity_override", -1))             # >=0 retunes maturity shield on RESUME (else struct field)
   BSP.FIX_GROWTH[] = Bool(get_cfg("fix_growth", false))     # stage-B: fix {D,S,ANPP_MAX,B_MAX}, fit establishment only
   BSP.FIX_MATURITY[] = Bool(get_cfg("fix_maturity", false)) # pin MATURITY out of the search (at MATURITY_TABLE/SONA)
-  BSP.FIX_MIN_REL[] = Bool(get_cfg("fix_min_rel", false))   # pin MIN_REL_BIOMASS out of the search (at MIN_REL_PINNED)
+  BSP.FIX_MIN_REL[] = Bool(get_cfg("fix_min_rel", false))
+  BSP.BMAX_BOUNDS[] = (12000, Int(get_cfg("bmax_upper", 35000)))                       # widen the B_MAX search box (lower stays 12000)
+  BSP.ANPP_RATIO_BOUNDS[] = Tuple(Float32.(get_cfg("anpp_ratio_bounds", [20.0, 35.0])))   # B_MAX/ANPP ratio box   # pin MIN_REL_BIOMASS out of the search (at MIN_REL_PINNED)
   PROB_ESTAB_LOWER_BOUND[] = Bool(get_cfg("prob_estab_lower_bound", false))   # PROB_ESTAB data value as a search LOWER bound (needs prob_estab_from_data)
   PROB_ESTAB_LOWER_MULT[] = Float64(get_cfg("prob_estab_lower_bound_mult", 1.0))   # floor = mult × data (e.g. 0.8)
 

@@ -8,7 +8,7 @@ import YAML
 cfg = YAML.load_file(ARGS[1]); run_dir = ARGS[2]
 K = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 16
 SPLIT = length(ARGS) >= 4 ? ARGS[4] : "val"
-MARGINS = length(ARGS) >= 5 ? parse.(Float64, split(ARGS[5], ",")) : [0.1, 0.2]
+MARGINS = length(ARGS) >= 5 ? parse.(Float64, split(ARGS[5], ",")) : [0.05, 0.1, 0.2]
 include(joinpath(@__DIR__, "tost_common.jl"))
 struct _FileCand; x; fx; end
 if occursin(".jld2", run_dir)
@@ -23,27 +23,33 @@ else
   pick = unique(vcat(ord[round.(Int, range(1, length(ord); length=min(K, length(ord))))], argmin([sum(Float64.(c.fx.objectives)) for c in arch])))
   println("$(last(ck)): archive $(length(arch)); scoring $(length(pick)) candidates on $SPLIT")
 end
-crow = NamedTuple[]; grows = NamedTuple[]
+col(m) = Symbol("pass_$(round(Int, 100m))")
+PRIMARY = findfirst(≈(0.1), MARGINS) === nothing ? 1 : findfirst(≈(0.1), MARGINS)   # rank by ±10 % first if present
+crow = DF.DataFrame(); grows = DF.DataFrame()
 for (k, i) in enumerate(pick)
   c = arch[i]; pr = paired(c.x)
   haskey(ENV, "TOST_DUMP") && CSV.write(joinpath(ENV["TOST_DUMP"], "pairs_cand$(i).csv"),
     DF.transform(pr, :sp => DF.ByRow(s -> species_list[s]) => :species, :eco => DF.ByRow(e -> String(eco_list[e])) => :eco_name))
   gs = group_stats(pr, MARGINS)
   for (lbl, r) in gs
-    t1 = r.tests[1]
-    push!(grows, (cand=i, group=lbl, n=r.n, pct_bias=round(expm1(r.mean) * 100, digits=1), ci_lo=round(expm1(t1.lo) * 100, digits=1),
-                  ci_hi=round(expm1(t1.hi) * 100, digits=1), pass1=t1.equiv, pass2=length(r.tests) > 1 ? r.tests[2].equiv : false))
+    t = r.tests[PRIMARY]
+    row = Dict{Symbol,Any}(:cand => i, :group => lbl, :n => r.n, :pct_bias => round(expm1(r.mean) * 100, digits=1),
+      :ci_lo => round(expm1(t.lo) * 100, digits=1), :ci_hi => round(expm1(t.hi) * 100, digits=1))
+    for (mi, m) in enumerate(MARGINS); row[col(m)] = r.tests[mi].equiv; end
+    push!(grows, NamedTuple(row); cols=:union)
   end
   np = [count(r -> r.tests[m].equiv, values(gs)) for m in eachindex(MARGINS)]
   obj = Float64.(c.fx.objectives); mab = Statistics.median([abs(expm1(r.mean)) * 100 for r in values(gs)])
-  push!(crow, (cand=i, W=round(sum(obj[1:2:end]), digits=5), AGB=round(sum(obj[2:2:end]), digits=4), groups=length(gs),
-               pass1=np[1], pass2=length(np) > 1 ? np[2] : 0, median_abs_bias=round(mab, digits=1)))
-  println("  [$k/$(length(pick))] cand $i  pass±$(round(Int,100MARGINS[1]))%=$(np[1])/$(length(gs))  " *
-          (length(np) > 1 ? "pass±$(round(Int,100MARGINS[2]))%=$(np[2])/$(length(gs))  " : "") * "median|bias|=$(round(mab, digits=1))%")
+  row = Dict{Symbol,Any}(:cand => i, :W => round(sum(obj[1:2:end]), digits=5), :AGB => round(sum(obj[2:2:end]), digits=4),
+                         :groups => length(gs), :median_abs_bias => round(mab, digits=1))
+  for (mi, m) in enumerate(MARGINS); row[col(m)] = np[mi]; end
+  push!(crow, NamedTuple(row); cols=:union)
+  println("  [$k/$(length(pick))] cand $i  " * join(["pass±$(round(Int,100m))%=$(np[mi])/$(length(gs))" for (mi, m) in enumerate(MARGINS)], "  ") *
+          "  median|bias|=$(round(mab, digits=1))%")
 end
-C = sort(DF.DataFrame(crow), [DF.order(:pass1, rev=true), DF.order(:pass2, rev=true), :median_abs_bias])
-G = DF.DataFrame(grows)
-CSV.write(joinpath(run_dir, "tost_select_$(SPLIT).csv"), C); CSV.write(joinpath(run_dir, "tost_select_$(SPLIT)_groups.csv"), G)
+order_ = vcat([DF.order(col(MARGINS[PRIMARY]), rev=true)], [DF.order(col(m), rev=true) for (mi, m) in enumerate(MARGINS) if mi != PRIMARY], [:median_abs_bias])
+C = sort(crow, order_)
+CSV.write(joinpath(run_dir, "tost_select_$(SPLIT).csv"), C); CSV.write(joinpath(run_dir, "tost_select_$(SPLIT)_groups.csv"), grows)
 best = C.cand[1]; mkpath(joinpath(run_dir, "selected_$(SPLIT)"))
 JLD2.save_object(joinpath(run_dir, "selected_$(SPLIT)", "params.jld2"), arch[best].x)
-println("SELECTED cand $best: pass±$(round(Int,100MARGINS[1]))% $(C.pass1[1])/$(C.groups[1]), median|bias| $(C.median_abs_bias[1])%")
+println("SELECTED cand $best: " * join(["±$(round(Int,100m))% $(C[1, col(m)])/$(C.groups[1])" for m in MARGINS], ", ") * ", median|bias| $(C.median_abs_bias[1])%")

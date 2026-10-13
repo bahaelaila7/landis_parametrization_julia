@@ -664,7 +664,7 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   return cohorts_df[keep, :]
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", shade_tier_csv::Union{Nothing,String}=nothing, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, filter_states::Vector{Int}=Int[], siteclass_l3s::Vector{String}=String[], max_exact::Int=12, max_group::Int=4, train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20, RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", shade_tier_csv::Union{Nothing,String}=nothing, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, filter_states::Vector{Int}=Int[], siteclass_l3s::Vector{String}=String[], max_exact::Int=12, max_group::Int=4, drop_phantom::Bool=false, train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20, RNG::Union{Nothing,Random.AbstractRNG})
   println("Connecting to: $(cohorts_db_path) ")
   # In-memory main DB + ATTACH the file READ-ONLY: a killed run can never corrupt the file (a mid-write
   # checkpoint was the corruption cause), yet df registrations (loaded_subplots) still land in the writable
@@ -675,6 +675,9 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   sql = "SELECT * FROM src.$(tablename) WHERE true"
   if length(filter_ecos) > 0
     sql *= " AND $(filter_eco_field) in ('$(join(filter_ecos,"','"))')"
+  end
+  if drop_phantom   # synthetic pre-debut cohorts (FIA_DATA_PREP phantom backfill) are not measurements
+    sql *= " AND coalesce(intro_type, '') <> 'phantom_backfill'"
   end
   if length(filter_states) > 0   # region = state ∩ eco (e.g. EPA Region 4 FIPS); empty ⇒ no state filter
     sql *= " AND statecd IN ($(join(filter_states, ",")))"

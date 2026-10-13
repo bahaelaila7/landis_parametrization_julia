@@ -175,3 +175,55 @@ Not done / possible next iterations: (a) widen the B_MAX/ANPP box and re-calibra
 CMA-ES refinement (`igel_warm_start`) on W/AGB with the training loss restricted to real records; (c) the training
 pipeline itself still includes phantom cohorts in its W/AGB objectives — excluding them there is a data-pipeline decision
 for the user.
+
+## D11. Sim A follow-up: widened B_MAX/ANPP box (2026-10-13) — no out-of-sample gain; v1 stays deployable
+Motivation (D10 limitation a): 110/508 B_MAX targets sat at the 35,000 box and the ANPP ratio at its bounds (19 at 20, 24 at 35).
+Change: yaml `bmax_upper` (upper B_MAX bound; lower stays 12,000) and `anpp_ratio_bounds` (`BSP.BMAX_BOUNDS` /
+`BSP.ANPP_RATIO_BOUNDS`, also read by `tools/calib_coord.jl` for its grids); `configs/region4/gafl_A2.yml` = gafl_A +
+`bmax_upper: 60000`, `anpp_ratio_bounds: [15, 40]`. Same fixed procedure (`tools/gafl_cv.sh`, real-only TOST, D10 schedule).
+Also added: yaml `drop_phantom` (SQL `intro_type <> 'phantom_backfill'` — training data without phantom cohorts; D10 limitation c;
+default off ⇒ unchanged) and the roster margin ±5 % (all tools now report ±5/10/20 %).
+
+| held-out | v2 (wide box) ±5 / ±10 / ±20 % | v1 (D10) ±10 / ±20 % |
+|---|---|---|
+| val | 8 / 22 / 36 of 47 | 23 / 38 |
+| train | 5 / 14 / 34 of 46 | 18 / 37 |
+| test | 9 / 18 / 31 of 46 | 19 / 32 |
+| mean | ≈ 7 / 18 / 34 | ≈ 20 / 36 |
+In-sample (all plots): v2 33/47 ±5 %, 41/47 ±10 %, 44/47 ±20 % (v1: 42/47, 45/47). Robust in all 3 folds: v2 3 (±5 %), 12 (±10 %), 26 (±20 %).
+The wider box WAS used (35 targets at the new 60,000 cap, 61 ratios at 15, 58 at 40) but bought nothing: per-group AGB
+bias is matched by many (B_MAX, ratio, S) combinations, so extra room only adds variance. **Decision: keep v1
+(`results/gafl/params_gafl_biomass_real.jld2`) as the deployable Sim A set**; v2 kept for reference in
+`results/gafl/A2_bounds/`. The pinned v1 targets are not a binding constraint on the held-out AGB fit.
+
+## D12. Sim B setup (GA+FL, timber-only free simulation) (2026-10-13)
+Config `configs/region4/gafl_B.yml`: table `curated_cohorts_landis_simB` (real cohorts with DIA ≥ 5 in; phantoms and
+saplings dropped), `dual_mode: b` (free run from the first visit; no injection; observed partial-disturbance drops applied to
+matching cohorts, `simB_disturb_only`), establishment ON, SHADE_TOL/MATURITY from data, tier-4 per-plot-mean objective.
+Start: `tools/seed_simB_start.jl` remaps the Sim A v1 growth parameters by (eco cell, species) NAME (Sim B has its own
+species/eco lists: 504/504 cells matched), sets SHADE_TOL/MATURITY/PROB_ESTAB from data, MIN_REL pinned.
+Evaluation (`tools/tost_common.jl`, Sim B mode): sim vs obs AGB from `Pan.resim_simB_paired` restricted to age bins ≥ 3
+(age > 20 yr, `SIMB_MIN_BIN`): observed cohorts are timber-only while the simulation has no size cut-off, so the youngest
+bins are not comparable (regeneration/ingrowth below 5 in is unobserved).
+
+## D13. Two Sim B defects found and fixed before calibrating (2026-10-13)
+First evaluation: 0/47 groups at any margin, sim ≈ 0.3 × obs from the first simulated year. Diagnosis by a per-cohort
+probe (year-0 SoA Σ c_bio = observed Σ, 22.96 M vs 22.98 M ⇒ initialisation fine; median cohort retained 28 % after ONE year;
+many cohorts at ~1e-6 of their biomass):
+1. **Seeding bug** — `seed_simB_start.jl` left `PROB_MORT_SPP` at the random prior draw of `generate_biomass_params`
+   (median 0.56 yr⁻¹ catastrophic death); Sim A has 0. Fixed: PROB_MORT is remapped with the growth parameters (new cells 0).
+2. **Sim A never scores whole-cohort death.** With PROB_MORT fixed, the free run OVER-predicts (+28 % at cycle 1, +57 % at
+   cycle 2). The Sim A TOST pairs are an inner join on (plot, year, species, age) — survivors only — so Sim A growth is growth
+   *conditional on survival*. In the data, 13–16 % of cohort AGB present at a visit is gone at the next one (whole cohort
+   absent; ±0–3 yr age tolerance), and 5–6 % of next-visit AGB is ingrowth/age-mismatch. BiomassSuccession's only
+   whole-cohort death process besides longevity is `PROB_MORT_SPP`, so Sim B calibrates it (new `pmort` lever in
+   `calib_coord.jl`, grid 0–0.045 yr⁻¹, then relative refinement), keeping Sim A's survivor growth as the start.
+3. **Test statistic for a free run (D14 below).**
+
+## D14. Sim B equivalence test: plot-cluster bootstrap on the ratio of sums (2026-10-13)
+A free stochastic run cannot reproduce WHICH cohorts die on a plot, only how much biomass a group keeps on average, so the
+Sim A statistic (mean per-pair log difference) is the wrong estimator: per-pair differences are dominated by
+dead-in-sim/alive-in-obs pairs (|log| ≈ 5–10). A first calibration on per-(cycle, eco, bin) cells reached median |bias| 6 %
+but 0/47 groups passed (CIs ±30–80 %). Sim B statistic per group: log(Σ sim / Σ obs) over all (plot, cycle) pairs of the
+comparable bins; 90 % CI = percentile bootstrap over PLOTS (B = 1000, fixed seed; `SIMB_BOOT`); equivalent at margin m iff the
+CI lies within ±log(1+m) (TOST at α = 0.05, same margins as Sim A). The calibrator root-finds the same statistic.
