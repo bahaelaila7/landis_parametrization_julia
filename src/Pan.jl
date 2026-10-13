@@ -47,6 +47,24 @@ succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "b
                                                 lowercase(name) in ("pnet", "pnet-succession") ? _PN :
                                                 error("unknown succession_plugin '$name' (biomass | pnet)")
 
+# Tools/diagnostics (tools/tost_common.jl, calib_coord.jl): select and configure the succession plugin from a yaml cfg
+# exactly as `parametrize` does, and point SITE_ATTRS_FN at the plugin's site attributes (make_sites_like). Returns the type.
+function setup_plugin_from_cfg(cfg::AbstractDict, eco_list::Vector{String})
+  g(k, d) = get(cfg, k, d); X(s) = _expandenv(String(s))
+  SUCC = succession_plugin_type(String(g("succession_plugin", "biomass")))
+  if SUCC === PnETPlugin.PnET
+    db = X(g("cohorts_db_path", "")); tbl = String(g("tablename", ""))
+    PnETPlugin.configure!(; climate_cache=X(g("pnet_climate_cache", "")), co2_csv=X(g("pnet_co2_csv", "")),
+      generic=Dict{String,Any}(String(k) => v for (k, v) in g("pnet_generic", Dict())), db_path=db)
+    soil_map = Dict{String,String}(String(k) => String(v) for (k, v) in g("pnet_soil_texture", Dict()))
+    soil_csv = X(g("pnet_soil_csv", ""))
+    SITE_ATTRS_FN[] = sp -> PnETPlugin.build_site_attrs(db, tbl, sp, eco_list; soil_map=soil_map, soil_csv=soil_csv)
+  else
+    SITE_ATTRS_FN[] = sp -> nothing
+  end
+  SUCC
+end
+
 # Optional diagnostic hook: called with the prepared training data right after the search driver returns (used by test/pnet_smoke_diag.jl).
 const POST_SEARCH_HOOK = Ref{Any}(nothing)
 
