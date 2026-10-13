@@ -37,6 +37,12 @@ _merge_map = Dict{String,Dict{String,String}}()
 for (_, spmap) in get(cfg, "param_tier_merge", Dict()), (sp_, cm) in spmap
   d = get!(_merge_map, uppercase(strip(String(sp_))), Dict{String,String}()); for (c, gp) in cm; d[String(c)] = String(gp); end
 end
+let pp = get(cfg, "param_pooling", Dict())     # param_pooling cell_split species are per-cell too (+ its cell_merge)
+  for (_, spec) in get(pp, "params", Dict()), s in get(spec, "cell_split", String[]); push!(_tiered_set, uppercase(strip(String(s)))); end
+  for (sp_, cm) in get(pp, "cell_merge", Dict())
+    d = get!(_merge_map, uppercase(strip(String(sp_))), Dict{String,String}()); for (c, gp) in cm; d[String(c)] = String(gp); end
+  end
+end
 _eco_cell(e) = (p = split(String(eco_list[e]), "|lu="); length(p) == 2 ? String(p[2]) : "")
 _is_tiered(s) = uppercase(species_list[s]) in _tiered_set
 _panel_grp(s, e) = _is_tiered(s) ? get(get(_merge_map, uppercase(species_list[s]), Dict{String,String}()), _eco_cell(e), _eco_cell(e)) : "pooled"
