@@ -11,6 +11,7 @@ output_dir: "${PAN_OUT}/r4_pnet_igelmo_outputs"
 succession_plugin: "pnet"
 pnet_climate_cache: "${PAN_DATA}/pnet_climate_r4_l4.jld2"   # tools/build_pnet_climate.jl (PRISM L4, 1980–2025)
 pnet_co2_csv: "${PAN_DATA}/co2_annual.csv"                  # NOAA Mauna Loa annual means
+pnet_soil_csv: "${PAN_DATA}/plot_soil_r4.csv"                # per-plot SOLUS soil hydraulics (tools/build_plot_soil.jl); omit => per-L3 texture (LOAM)
 filter_eco_field: "epa_l3"
 filter_ecos: ["8.3.5", "8.5.3", "8.3.4", "8.3.3", "8.5.1", "8.3.6", "8.4.1", "8.4.9", "8.4.4", "8.5.2", "15.4.1", "8.4.2", "8.3.2", "8.4.3"]
 filter_states: [1, 12, 13, 21, 28, 37, 45, 47]

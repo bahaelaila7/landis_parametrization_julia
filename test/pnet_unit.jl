@@ -386,3 +386,71 @@ end
   @test a_serial == 0 && a_serial2 == 0
   @test a_kernel == 0
 end
+
+# ------------------------------------------------------------------------------------------------------------------
+# (f) per-plot SOLUS soil (yaml pnet_soil_csv): pressure-head curve from theta33/theta1500, invariants, legacy path untouched
+# ------------------------------------------------------------------------------------------------------------------
+using DataFrames
+@testset "(f) per-plot soil: curve derivation, repairs, legacy path" begin
+  K = 0.1019977334     # kPa -> m H2O, same constant as press_head (plugin.jl) / C# CalculateWaterPressure
+  # (a) A/B round trip in the plugin's units: tension(theta33) = 33 kPa, tension(theta1500) = 1500 kPa
+  for (por, fc, wp) in ((0.45, 0.28, 0.13), (0.38, 0.12, 0.05), (0.52, 0.38, 0.25), (0.40, 0.30, 0.29))
+    p, f, w, A, B, nrep = PN.saxton_rawls_theta(por, fc, wp)
+    @test p > f > w
+    @test A * f^(-B) ≈ 33.0 rtol = 1e-12
+    @test A * w^(-B) ≈ 1500.0 rtol = 1e-12
+    @test PN.press_head(f, p, A, B) ≈ round(33.0 * K * 100) / 100 atol = 1e-9          # head [m] at field capacity (3.37 m)
+    @test PN.press_head(w, p, A, B) ≈ round(1500.0 * K * 100) / 100 atol = 1e-9        # head [m] at wilting point (153.00 m)
+    @test PN.press_head(p + 0.01, p, A, B) == 0.0                                       # above porosity -> 0 (C# line 49)
+    @test 1.0 - 1e-9 <= B <= 12.0 + 1e-9
+    # unchanged inputs <=> no repair
+    nrep == 0 && @test (f, w) == (fc, wp)
+  end
+  # consistency with the texture path: feeding the texture's own (por, fc, wp) reproduces its A, B
+  por0, fc0, wp0, A0, B0 = PN.saxton_rawls("LOAM")
+  _, _, _, A1, B1, nr = PN.saxton_rawls_theta(por0, fc0, wp0)
+  @test nr == 0
+  @test A1 ≈ A0 rtol = 1e-9
+  @test B1 ≈ B0 rtol = 1e-9
+  # (b) repairs: invariants wiltpnt < fieldcap < porosity always hold
+  for (por, fc, wp) in ((0.30, 0.30, 0.30), (0.25, 0.35, 0.40), (0.4, 0.2, 0.0), (0.4, 0.2, 0.199), (0.5, 0.45, 0.005))
+    p, f, w, A, B, nrep = PN.saxton_rawls_theta(por, fc, wp)
+    @test w < f < p
+    @test nrep == 1
+    @test isfinite(A) && A > 0
+    @test 1.0 - 1e-9 <= B <= 12.0 + 1e-9
+    @test Float32(A) > 0
+    @test isfinite(Float32(A))
+  end
+
+  # (c) init_sites!: no soil columns => identical to the legacy texture path; with columns => per-plot values + depth, texture fallback for NaN
+  PN.CLIMATE[] = make_climate(PPT)
+  mk() = make_soa([3, 3, 3])
+  attrs0 = DataFrame(plot_id=1:3, clim_id=Int32[1, 1, 1], cal_year0=Int16[2000, 2000, 2000], lat=Float32[33, 33, 33], soil=["LOAM", "SAND", "LOAM"])
+  a = mk(); PN.init_sites!(a, attrs0)
+  b = mk(); for i in 1:3; PN.init_site!(b, i; clim_id=1, cal_year0=2000, lat=33.0, soil=attrs0.soil[i]); end
+  @test all(k -> getfield(a.scalar, k) == getfield(b.scalar, k), (:soil_por, :soil_fc, :soil_wp, :soil_A, :soil_B, :rooting_depth, :soil_water))
+  @test all(a.scalar.rooting_depth .== Float32(PN.FIXED[].root_depth_base))
+  attrs1 = copy(attrs0)
+  attrs1.soil_por = [0.45, NaN, 0.30]; attrs1.soil_fc = [0.28, NaN, 0.30]; attrs1.soil_wp = [0.13, NaN, 0.30]; attrs1.soil_rd = [650.0, NaN, 1500.0]
+  c = mk(); PN.init_sites!(c, attrs1)
+  @test c.scalar.soil_fc[1] == Float32(0.28) && c.scalar.soil_wp[1] == Float32(0.13) && c.scalar.soil_por[1] == Float32(0.45)
+  @test c.scalar.rooting_depth[1] == 650f0
+  @test c.scalar.rooting_depth[3] == 1500f0
+  @test c.scalar.soil_water[1] == c.scalar.soil_fc[1]
+  @test all(k -> getfield(c.scalar, k)[2] == getfield(b.scalar, k)[2], (:soil_por, :soil_fc, :soil_wp, :soil_A, :soil_B, :rooting_depth))   # NaN row -> texture path (SAND)
+  @test all(c.scalar.soil_wp .< c.scalar.soil_fc .< c.scalar.soil_por)
+  # effective rooting depth = plot depth * RD_MULT (semantics of the 1000 mm constant preserved)
+  @test Float64(c.scalar.rooting_depth[1]) * ep.rd_mult == 650.0 * ep.rd_mult
+  # the model runs on per-plot soil and stays finite
+  d = mk(); PN.init_sites!(d, attrs1)
+  for i in 1:3
+    s = PC.getsite(d, i)
+    PN.add_cohort!(s, 1, 35 + i, 4000.0 + 100 * i; eco=ep); PN.add_cohort!(s, 2, 30 + i, 3000.0 + 50 * i; eco=ep); PN.add_cohort!(s, 2, 12, 900.0 + 10 * i; eco=ep)
+  end
+  for t in 1:3; PC.process_plugin!(d, PN.PnET, t; ctx=mkctx()); end
+  @test all(isfinite, d.scalar.soil_water)
+  @test all(d.scalar.soil_water .>= 0)
+  @test all(isfinite, d.scalar.B)
+  println("(f) per-plot soil: A/B round trip OK; repairs OK; legacy path identical when pnet_soil_csv unset")
+end

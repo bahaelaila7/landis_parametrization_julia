@@ -5,6 +5,7 @@ module PnETPlugin
 using ..PanCore
 import ..BiomassSuccessionPlugin
 using DataFrames
+import CSV
 import Random, JLD2, DuckDB, Dates
 
 const IMAX = 5     # sublayers per cohort (E2 IMAX). Compile-time constant: scratch/loop sizes depend on it.

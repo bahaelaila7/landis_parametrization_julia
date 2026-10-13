@@ -209,6 +209,45 @@ function saxton_rawls(texture::AbstractString)
   return (porosity, fc, wp, A, B)
 end
 
+"""
+    saxton_rawls_theta(porosity, fieldcap, wiltpnt) -> (por, fc, wp, A, B, nrepair)
+
+Pressure-head curve of one site from MEASURED/derived volumetric contents (e.g. per-plot SOLUS rooting-zone means, tools/build_plot_soil.jl)
+instead of a texture class. Same two-point Saxton & Rawls (2006) fit the texture path ends with (`saxton_rawls` above, and the C# reference
+PressureHeadSaxton_Rawls.cs:116-117), with theta33 = `fieldcap` and theta1500 = `wiltpnt`:
+
+    B = (ln 1500 - ln 33) / (ln theta33 - ln theta1500)         [C# tensionB, line 116]
+    A = exp(ln 33 + B * ln theta33)                               [C# tensionA, line 117]
+    tension [kPa] = A * theta^-B   =>  tension(theta33) = 33 kPa, tension(theta1500) = 1500 kPa
+
+Same convention as the plugin (`press_head`, plugin.jl): tension in kPa, head [m H2O] = tension * 0.1019977334 (C# CalculateWaterPressure,
+lines 56-64: 0 above porosity, rounded to 0.01 m); the Feddes wilting point uses h4*9.804139432/A (kPa) the same way, and `fc`/`wp` here play
+the role of `(33/A)^(-1/B)` / `(1500/A)^(-1/B)` (identical by construction).
+
+Invariant wiltpnt < fieldcap < porosity is enforced by repair (counted in `nrepair`): wp in [0.005, 0.60], fc >= wp + 0.01, por >= fc + 0.01,
+and B limited to [1, 12] (the SOLUS lambda_bc raster clips 1/B to [0.1, 30]; B > 12 would underflow `A` in Float32) by lowering wp / raising wp.
+"""
+function saxton_rawls_theta(porosity::Real, fieldcap::Real, wiltpnt::Real)
+  por = Float64(porosity); fc = Float64(fieldcap); wp = Float64(wiltpnt)
+  nrep = 0
+  w0 = wp
+  wp = clamp(wp, 0.005, 0.60)
+  fc = max(fc, wp + 0.01)
+  # B bounds <=> ln(fc/wp) in [ln(1500/33)/12, ln(1500/33)/1]
+  lr = log(1500.0) - log(33.0)
+  r = log(fc) - log(wp)
+  if r < lr / 12
+    wp = exp(log(fc) - lr / 12)
+  elseif r > lr
+    wp = exp(log(fc) - lr)
+  end
+  por = max(por, fc + 0.01)
+  (wp != w0 || fc != Float64(fieldcap) || por != Float64(porosity)) && (nrep = 1)
+  B = lr / (log(fc) - log(wp))
+  A = exp(log(33.0) + B * log(fc))
+  return (por, fc, wp, A, B, nrep)
+end
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Param generation / eco-param resolution
 # ---------------------------------------------------------------------------------------------------------------------
