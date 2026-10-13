@@ -35,7 +35,13 @@ function species_slot_map(param_dists, slots, eco_species_ids, n_species)
     gsp = if samp isa PU_SpeciesSampler_type(param_dists)
       idx isa Integer ? Int(idx) : 0
     elseif samp isa PU_EcoSpeciesSampler_type(param_dists)
-      (idx isa Tuple) ? Int(eco_species_ids[Int(idx[1])][Int(idx[2])]) : 0
+      if idx isa Tuple
+        Int(eco_species_ids[Int(idx[1])][Int(idx[2])])
+      elseif idx isa AbstractVector && !isempty(idx)   # pooled/broadcast slot (param_pooling, shared species): all members are one species
+        Int(eco_species_ids[Int(idx[1][1])][Int(idx[1][2])])
+      else
+        0
+      end
     else
       0
     end

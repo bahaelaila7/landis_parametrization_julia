@@ -343,6 +343,9 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   # Split right here — after mapping, before aggregation — so each half gets its
   # own contiguous plot_ids and is fully self-contained.
   do_split = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) && !isnothing(split_rng)
+  LAST_SPLIT_DOM[] = nothing   # never let a previous call's split dominance leak into this call's split_plots.csv
+  train_cap !== nothing && !do_split &&
+    @warn "train_cap=$(train_cap) is IGNORED: no train/val/test split is active (set val_frac/test_frac)"
   df_train, df_val_raw, df_test_raw = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
                            train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min) :
                          (df, nothing, nothing)

@@ -43,7 +43,10 @@ b = q("""SELECT UPPER(TRIM(r.SPECIES_SYMBOL)) sym, t.STATECD s, t.UNITCD u, t.CO
          WHERE t.STATUSCD=1 AND t.TPA_UNADJ>0 AND t.DRYBIO_AG>0 GROUP BY ALL""")
 println("species×plot×visit biomass rows: $(nrow(b))")
 pinfo = Dict((r.statecd, r.unitcd, r.countycd, r.plot) => (r.l3, r.cell) for r in eachrow(tr))
-b.cat = [get(cat_of, s, "_H_NA") for s in b.sym]
+nunk = count(s -> !haskey(cat_of, s), b.sym)
+nunk > 0 && println("excluding $(nunk) tree-species rows whose species is not in species_map.csv (not a fitted category)")
+b = b[[haskey(cat_of, s) for s in b.sym], :]
+b.cat = [cat_of[s] for s in b.sym]
 b.l3 = [pinfo[(r.s, r.u, r.c, r.p)][1] for r in eachrow(b)]
 b.cell = [pinfo[(r.s, r.u, r.c, r.p)][2] for r in eachrow(b)]
 yrs(a, z) = Dates.value(z - a) / 365.25
