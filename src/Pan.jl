@@ -1088,6 +1088,7 @@ function parametrize(; cohorts_db_path::String,
   end
   _site_attrs(sp) = SUCC === PnETPlugin.PnET ?
     PnETPlugin.build_site_attrs(cohorts_db_path, tablename, sp, eco_list; soil_map=Dict{String,String}(String(k) => String(v) for (k, v) in pnet_soil_texture), soil_csv=pnet_soil_csv) : nothing
+  SITE_ATTRS_FN[] = _site_attrs   # diagnostics (make_sites_like) rebuild sites with the run's plugin attributes
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
   n_plots = maximum(splots.plot_id)
@@ -2153,7 +2154,7 @@ function parametrize_sobol(; ref_soa::SiteSoA, output_dir::AbstractString, splot
       sampled_ids = _sample_plot_ids(UIntType.(unique(splots.plot_id)), n_output_plots, rng; injection_cohorts=injection_cohorts)
       emp_sample = _make_emp_df(splots, sampled_ids)
       best_params = results[1].params
-      best_soa = make_sites(splots, eco_species_ids; rng, spinup, no_establishment=no_establishment)
+      best_soa = make_sites_like(SP, splots, eco_species_ids; rng, spinup, no_establishment=no_establishment)
       best_result = only(fit_params(best_soa, best_params, site_sim_years.sim_years .|> maximum |> maximum,
         length(species_list), eco_species_ids, spdf_plts,
         site_sim_years, spinup, spinup_cohorts, loss_params;
@@ -6027,7 +6028,7 @@ end
 
 function _run_and_plot(bio_params, label, ctx::PlotContext;
   sampled_ids, emp_sample, output_dir, spinup, rng)
-  ref_soa = make_sites(ctx.splots, ctx.eco_species_ids; rng, spinup, no_establishment=ctx.no_establishment)
+  ref_soa = make_sites_like(succession_plugin_for(bio_params), ctx.splots, ctx.eco_species_ids; rng, spinup, no_establishment=ctx.no_establishment)
   inj_dict = isnothing(ctx.injection_cohorts) ? nothing : _build_injection_dict(ctx.injection_cohorts, ref_soa)
   inj_years = isnothing(ctx.injection_cohorts) ? Set{Int}() : Set(Int.(ctx.injection_cohorts.sim_year))
   result = only(fit_params(ref_soa, bio_params, ctx.max_sim_year,
@@ -6178,7 +6179,7 @@ function simulate_and_test(;
   n_ecos = length(eco_list)
   n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
   max_sim_year = maximum(maximum.(filter(!isempty, site_sim_years.sim_years)))
-  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=false, no_establishment=no_establishment)
+  ref_soa = make_sites_like(succession_plugin_for(bio_params), splots, eco_species_ids; rng=rng, spinup=false, no_establishment=no_establishment)
   SP = succession_plugin_of(ref_soa)
   eco_params = generate_eco_params(SP, bio_params)
   ctx = make_ctx(SP, eco_params)

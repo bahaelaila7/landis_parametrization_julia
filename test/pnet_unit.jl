@@ -65,6 +65,26 @@ ep = PN.generate_pnet_eco_params(params, cst0)[1]
   println("(c) done")
 end
 
+# (g) unreachable target: reported AGB peaks at finite TotalBiomass (foliage/LAI saturates). An observed AGB above the
+#     peak must start the cohort AT the peak with finite pools (was: runaway TB ≈ 8e6 → reported 0 → cohort deleted).
+@testset "(g) solve beyond the reported-AGB peak" begin
+  PN.CLIMATE[] = make_climate(PPT)
+  for sp in 1:3
+    tbs = 10.0 .^ range(0, 7; length=4000)
+    reps = [PN.reported_of_tb(t, ep, sp) for t in tbs]
+    peak = maximum(reps); tbpk = tbs[argmax(reps)]
+    n0 = PN.UNREACHABLE_INIT[]
+    tb = PN.solve_total_biomass(1.5 * peak, ep, sp)
+    @test isfinite(tb) && tb > 0
+    @test PN.reported_of_tb(tb, ep, sp) >= 0.995 * peak        # starts at (numerically) the max achievable
+    @test abs(log(tb / tbpk)) < 0.05                            # near the grid argmax
+    @test PN.UNREACHABLE_INIT[] == n0 + 1                       # counted
+    tb2 = PN.solve_total_biomass(0.5 * peak, ep, sp)            # reachable targets unchanged: rising-branch root
+    @test abs(PN.reported_of_tb(tb2, ep, sp) - 0.5 * peak) <= 2.0 && tb2 < tbpk
+    println("(g) sp $sp: peak reported $(round(peak)) at TB $(round(tbpk)); solve(1.5×peak) → TB $(round(tb))")
+  end
+end
+
 # ------------------------------------------------------------------------------------------------------------------
 # (a) one cohort, constant climate, no precipitation, no events: per-month sublayer-summed fluxes vs an independent
 #     transcription of the spec equations (docs/pnet_spec.md sections 3, 4.4, 5.x, 6.1) written here with explicit sublayer arrays.

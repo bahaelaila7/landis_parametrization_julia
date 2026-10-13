@@ -28,10 +28,17 @@ function per_eco_groups end
 function init_sites! end       # init_sites!(P, soa, site_attrs): per-site static attributes (BS: nothing needed)
 function set_cohort_bio! end   # set_cohort_bio!(P, site, k, newbio): write a cohort's reported biomass (BS: plain assignment)
 
+# Plugin type from a params struct (for tools that only hold params, not a SoA).
+function succession_plugin_for end
+# Builds plugin site attributes for a splots DataFrame (PnET: per-plot climate/lat/soil); set by `parametrize`.
+const SITE_ATTRS_FN = Ref{Any}(sp -> nothing)
+make_sites_like(P::Type, splots, eco_species_ids; kw...) = make_sites(splots, eco_species_ids; plugin=P, site_attrs=SITE_ATTRS_FN[](splots), kw...)
+
 # --- BiomassSuccession ---
 const _BS = BiomassSuccessionPlugin.BiomassSuccession
 
 params_type(::Type{_BS}) = BiomassSuccessionPlugin.BiomassSuccessionParams
+succession_plugin_for(::BiomassSuccessionPlugin.BiomassSuccessionParams) = _BS
 
 make_param_dists(::Type{_BS}, args...; kw...) = BSP.make_biomass_param_dists(args...; kw...)
 
@@ -81,3 +88,5 @@ per_eco_groups(::Type{_PN}) = PNP.PNET_PER_ECO_GROUPS
 
 init_sites!(::Type{_PN}, soa, site_attrs) = (site_attrs === nothing ? error("PnET needs site attributes (clim_id, cal_year0, lat, soil)") : PnETPlugin.init_sites!(soa, site_attrs))
 @inline set_cohort_bio!(::Type{_PN}, site, k, newbio) = PnETPlugin.set_cohort_bio!(site, k, newbio)
+
+succession_plugin_for(::PnETPlugin.PnETParams) = PnETPlugin.PnET

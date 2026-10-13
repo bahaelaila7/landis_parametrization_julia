@@ -17,6 +17,7 @@ function configure!(; climate_cache::AbstractString, co2_csv::AbstractString, ge
   end
   base = PnETConst()
   FIXED[] = PnETConst(; (f => convert(fieldtype(PnETConst, f), get(ov, f, getfield(base, f))) for f in fieldnames(PnETConst))...)
+  1 <= FIXED[].max_layers <= MAXL || error("pnet_generic.max_layers must be in 1:$(MAXL) (scratch arrays are sized for MAXL)")
   if db_path !== nothing && isfile(db_path)
     db = DuckDB.DB(); con = DuckDB.connect(db)
     try

@@ -244,15 +244,41 @@ end
 end
 
 """Find TotalBiomass such that the reported AGB equals `target` (tolerance 2 g/m2 in the reference; bisection reaches ~1e-6)."""
+# Count of injected cohorts whose observed AGB exceeds the maximum reportable AGB for the candidate's parameters
+# (reported AGB rises then falls with TotalBiomass because foliage/LAI saturates). They start at the peak.
+const UNREACHABLE_INIT = Threads.Atomic{Int}(0)
+
+# argmax of reported_of_tb on [a, b] (unimodal around the peak) — golden-section, allocation-free
+function _tb_at_peak(a::Float64, b::Float64, ep::PnETEcoParams, s::Int)
+  g = 0.6180339887498949
+  c = b - g * (b - a); d = a + g * (b - a)
+  fc = reported_of_tb(c, ep, s); fd = reported_of_tb(d, ep, s)
+  for _ in 1:80
+    if fc >= fd
+      b = d; d = c; fd = fc; c = b - g * (b - a); fc = reported_of_tb(c, ep, s)
+    else
+      a = c; c = d; fc = fd; d = a + g * (b - a); fd = reported_of_tb(d, ep, s)
+    end
+    b - a < 1e-3 * max(1.0, a) && break
+  end
+  return 0.5 * (a + b)
+end
+
 function solve_total_biomass(target::Float64, ep::PnETEcoParams, s::Int)
   target <= 0 && return 1.0
   lo = 1.0
-  reported_of_tb(lo, ep, s) >= target && return lo
+  r_lo = reported_of_tb(lo, ep, s)
+  r_lo >= target && return lo
   hi = 2.0
-  while reported_of_tb(hi, ep, s) < target
-    lo = hi
+  while true                    # bracket on the RISING branch
+    r_hi = reported_of_tb(hi, ep, s)
+    r_hi >= target && break
+    if r_hi <= r_lo || hi > 1e7 # passed the peak without reaching the target ⇒ unreachable: start at the peak
+      Threads.atomic_add!(UNREACHABLE_INIT, 1)
+      return _tb_at_peak(max(1.0, 0.5 * lo), hi, ep, s)
+    end
+    lo = hi; r_lo = r_hi
     hi *= 2
-    hi > 1e7 && return lo       # unreachable target (beyond the rising branch): keep the largest bracketed value
   end
   for _ in 1:60
     mid = 0.5 * (lo + hi)
