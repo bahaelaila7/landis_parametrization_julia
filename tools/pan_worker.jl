@@ -11,7 +11,8 @@ const OUT = stdout
 redirect_stdout(stderr)
 
 const PARAMS_DIR = get(ENV, "PAN_PARAMS_DIR", joinpath(dirname(@__DIR__), "results", "params_yaml"))
-const DEFAULTS = Dict("biomass" => "gafl_biomass_v1.yaml", "pnet" => "gafl_pnet_v1.yaml", "hbad" => "gafl_hbad_v1.yaml")
+# defaults: EPA Region 4 sets (cover all R4 ecoregions incl. GA+FL); GA+FL-specific, cross-validated sets ship as samples
+const DEFAULTS = Dict("biomass" => "r4_biomass_v1.yaml", "pnet" => "r4_pnet_v1.yaml", "hbad" => "r4_hbad_v1.yaml")
 const CACHE = Dict{String,Any}()        # params_id => ParamSet
 
 send(x) = (println(OUT, JSON3.write(x)); flush(OUT))

@@ -213,7 +213,8 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       @info "gdigel explore: anchor total $(round(GDIgel._tot(fa), sigdigits=4)); tau_abs $(round(t0, sigdigits=3)), slack $sl; groups at the absolute tolerance: $(count(==(t0), tau))/$(count(isfinite, tau))"
     end
     st = GDIgel.GDState(bdefs, nd; sigma0=σ0, sigma_stop=σstop, sigma_min=σmin, patience=patience, rel_tol=Float64(o("rel_tol", 1e-3)), seed=Int(o("seed", 1)),
-                        mode=mode, tau=tau, anchors=(mode === :explore ? [u_anchor] : Vector{Float64}[]))
+                        mode=mode, tau=tau, anchors=(mode === :explore ? [u_anchor] : Vector{Float64}[]),
+                        restart_sigma=Float64(o("explore_start_sigma", 0.02)))
     starts = Vector{Vector{Float64}}()
     if mode === :explore   # every lineage starts at the anchor, slightly perturbed
       while length(starts) < mu; push!(starts, clamp.(u_anchor .+ Float64(o("explore_start_sigma", 0.02)) .* randn(st.rng, nd), 0.0, 1.0)); end

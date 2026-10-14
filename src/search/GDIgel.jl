@@ -69,6 +69,7 @@ mutable struct GDState
   mode::Symbol                      # :optimize (minimize group losses) | :explore (spread within the behavioural set)
   tau::Vector{Float64}              # :explore — group g is behavioural iff f_g ≤ tau[g]
   anchors::Vector{Vector{Float64}}  # :explore — points to stay away from (anchor + recorded solutions)
+  restart_sigma::Float64            # :explore — u-noise around the anchor for a restarted lineage (0 = exactly the anchor)
 end
 
 _tot(f) = (s = 0.0; for v in f; isnan(v) || (s += v); end; s)
@@ -76,9 +77,9 @@ _score(f, resp) = (s = 0.0; for g in resp; v = f[g]; isnan(v) || (s += v); end; 
 _fresh_bs(b::BlockDef, σ0) = BlockState(σ0, b.p_target, Matrix{Float64}(LA.I, length(b.idx), length(b.idx)), zeros(length(b.idx)))
 
 function GDState(blocks::Vector{BlockDef}, n::Int; sigma0=0.15, sigma_stop=0.004, sigma_min=0.002, patience=40, rel_tol=1e-3, seed=1,
-                 mode::Symbol=:optimize, tau::Vector{Float64}=Float64[], anchors=Vector{Float64}[])
+                 mode::Symbol=:optimize, tau::Vector{Float64}=Float64[], anchors=Vector{Float64}[], restart_sigma::Float64=0.02)
   GDState(blocks, Lineage[], n, sigma0, sigma_stop, sigma_min, patience, rel_tol, 0, 0, 1, Sobol.SobolSeq(n), Random.Xoshiro(seed),
-    NamedTuple[], Any[], mode, tau, Vector{Vector{Float64}}(anchors))
+    NamedTuple[], Any[], mode, tau, Vector{Vector{Float64}}(anchors), restart_sigma)
 end
 
 # :explore helpers — a block is behavioural iff every group it affects (with data) has f_g ≤ tau; its novelty is the
@@ -192,7 +193,7 @@ function finish!(st::GDState, fxps::Vector{Any}, restart_eval)
       push!(st.solutions, (lineage=L.id, gen=st.gen, born=L.born, x=copy(L.x), f=copy(L.f), tot=L.tot))
       st.mode === :explore && push!(st.anchors, copy(L.x))
       x0 = st.mode === :explore && !isempty(st.anchors) ?
-           clamp.(st.anchors[1] .+ 0.02 .* randn(st.rng, st.n), 0.0, 1.0) : next_start!(st)
+           clamp.(st.anchors[1] .+ st.restart_sigma .* randn(st.rng, st.n), 0.0, 1.0) : next_start!(st)
       f0 = restart_eval(x0); st.n_evals += 1
       t0 = _tot(f0)
       st.lineages[k] = Lineage(st.next_id, x0, f0, t0, [_fresh_bs(b, st.sigma0) for b in st.blocks], st.gen, t0, st.gen)
