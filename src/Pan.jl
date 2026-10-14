@@ -66,12 +66,26 @@ function setup_plugin_from_cfg(cfg::AbstractDict, eco_list::Vector{String}; spec
     pc = String(g("hbad_priors_csv", "")); cc = String(g("hbad_coefs_csv", ""))
     HBADPlugin.configure!(; species_list=species_list, eco_species_ids=eco_species_ids,
       priors_csv=isempty(pc) ? HBADPlugin.DEFAULT_PRIORS_CSV : X(pc), coefs_csv=isempty(cc) ? HBADPlugin.DEFAULT_COEFS_CSV : X(cc))
+    _configure_hbad_estab!(; seed_rain=Bool(g("hbad_seed_rain", false)), prob_estab_csv=X(g("hbad_prob_estab_csv", "")), cycle_years=Float64(g("cycle_years", 8)))
     SITE_ATTRS_FN[] = sp -> nothing
   else
     SITE_ATTRS_FN[] = sp -> nothing
   end
+  ACTIVE_SUCCESSION[] = SUCC
   SUCC
 end
+
+# HBAD establishment configuration (called by `parametrize` and the tool path `setup_plugin_from_cfg`): the seed-rain default of generated
+# parameter sets, the remeasurement interval of the per-cycle -> annual PROB_ESTAB conversion and the optional (species, L3) PROB_ESTAB table.
+function _configure_hbad_estab!(; seed_rain::Bool=false, prob_estab_csv::AbstractString="", cycle_years::Real=8)
+  HBADPlugin.ESTAB_SEED_RAIN_DEFAULT[] = seed_rain
+  HBADPlugin.ESTAB_CYCLE_YEARS[] = Float64(cycle_years)
+  isempty(prob_estab_csv) ? (HBADPlugin.ESTAB_PROB_TABLE[] = nothing) : HBADPlugin.load_estab_table!(prob_estab_csv)
+  return nothing
+end
+
+# Succession plugin of the run being set up (Sim-B free-run sites are built with it); set by `parametrize` / `setup_plugin_from_cfg` / `resim_simB_paired`.
+const ACTIVE_SUCCESSION = Ref{DataType}(_BS)
 
 # Optional diagnostic hook: called with the prepared training data right after the search driver returns (used by test/pnet_smoke_diag.jl).
 const POST_SEARCH_HOOK = Ref{Any}(nothing)
@@ -116,6 +130,8 @@ function _init_site_plugin!(::Type{_HB}, site, no_establishment::Bool)
   site.SDI = zero(FloatType)
   site.RD = zero(FloatType)
   site.thin_tph = zero(FloatType)
+  site.shade_class = zero(UIntType)
+  site.no_establish = no_establishment
   site.c_species .= zero(UIntType)
   site.c_age .= zero(FloatType)
   site.c_bio .= zero(FloatType)
@@ -124,6 +140,7 @@ function _init_site_plugin!(::Type{_HB}, site, no_establishment::Bool)
   site.c_h .= zero(FloatType)
   site.c_bal .= zero(FloatType)
   site.sp_mature .= false
+  site.sp_estab .= false
   return nothing
 end
 
@@ -956,6 +973,9 @@ function parametrize(; cohorts_db_path::String,
   pnet_soil_csv::String="",                            # pnet: per-plot SOLUS soil (tools/build_plot_soil.jl); "" = texture path (legacy)
   hbad_priors_csv::String="",                          # hbad: fixed priors (results/hbad/priors.csv); "" = repo default
   hbad_coefs_csv::String="",                           # hbad: translation coefficients (results/hbad/translation_coefs.csv); "" = repo default
+  hbad_seed_rain::Bool=false,                          # hbad: every species of the ecoregion is a seed source (ESTAB_SEED_RAIN)
+  hbad_prob_estab_csv::String="",                      # hbad: per-cycle (species, L3) PROB_ESTAB table (prob_estab_all_species.csv); "" = constant fallback
+  hbad_cycle_years::Float64=8.0,                       # hbad: remeasurement interval for the per-cycle -> annual PROB_ESTAB conversion
   hbad_init::String="jitter",                          # hbad: start candidates default | jitter | prior (see HBADPlugin.INIT_MODE)
   cmaes_blocks::String="eco",                          # CMA-ES covariance blocks: "eco" (per cell, legacy) | "l3" (per L3 + tail)
   spinup::Bool=true,
@@ -1126,6 +1146,7 @@ function parametrize(; cohorts_db_path::String,
   n_species = length(species_list)
   # --- succession plugin selection (static type; everything downstream dispatches on succession_plugin_of(soa)) ---
   SUCC = succession_plugin_type(succession_plugin)
+  ACTIVE_SUCCESSION[] = SUCC
   if SUCC === PnETPlugin.PnET
     spinup && error("succession_plugin=pnet requires spinup: false (cohorts start from the observed state)")
     DUAL_MODE[] === :off || error("succession_plugin=pnet does not support dual_mode yet (Sim B needs establishment)")
@@ -1135,9 +1156,10 @@ function parametrize(; cohorts_db_path::String,
   end
   if SUCC === HBADPlugin.HBAD
     spinup && error("succession_plugin=hbad requires spinup: false (cohorts start from the observed state)")
-    DUAL_MODE[] === :off || error("succession_plugin=hbad does not support dual_mode yet (Sim B needs establishment)")
-    no_establishment || @warn "succession_plugin=hbad has no establishment (HBAD never recruits); no_establishment: false is treated the same as true"
+    # Establishment (natural recruitment, docs/hbad_plugin.md): ON when no_establishment is false (Sim B / free runs); Sim A keeps no_establishment: true.
+    no_establishment || @info "succession_plugin=hbad: natural establishment is ON (PROB_ESTAB x SUFFICIENT_LIGHT(shade class from RD), seed rain=$(hbad_seed_rain))"
     HBADPlugin.INIT_MODE[] = Symbol(lowercase(hbad_init))
+    _configure_hbad_estab!(; seed_rain=hbad_seed_rain, prob_estab_csv=hbad_prob_estab_csv, cycle_years=hbad_cycle_years)
     HBADPlugin.configure!(; species_list=species_list, eco_species_ids=eco_species_ids,
       priors_csv=isempty(hbad_priors_csv) ? HBADPlugin.DEFAULT_PRIORS_CSV : hbad_priors_csv,
       coefs_csv=isempty(hbad_coefs_csv) ? HBADPlugin.DEFAULT_COEFS_CSV : hbad_coefs_csv)
@@ -2356,7 +2378,7 @@ function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params
   # Sim B start: SIMB_SPINUP[]=true spins up from a deficit (model establishes the stand from scratch via the
   # back-cast); false starts from the OBSERVED year-0 cohorts (anchored to data, no invented history) while
   # still running free establishment forward.
-  ref_b = make_sites(splots, eco_species_ids; rng=rng, spinup=SIMB_SPINUP[], no_establishment=false)
+  ref_b = make_sites_like(ACTIVE_SUCCESSION[], splots, eco_species_ids; rng=rng, spinup=SIMB_SPINUP[], no_establishment=false)
   idict_b = isnothing(inj_b) ? nothing : _build_injection_dict(inj_b, ref_b)
   iyears_b = isnothing(inj_b) ? Set{Int}() : Set(Int.(inj_b.sim_year))
   # Disturbance-apply for the free (natural) plots: at each disturbance year, reduce the species' free-sim
@@ -2402,6 +2424,7 @@ end
 function resim_simB_paired(cfg, params, sp, spdf_plts, site_sim_years, spinup_cohorts, loss_params,
                            eco_list, species_list, eco_species_ids, rng; by_plot::Bool=false, preexist::Bool=false)
   g(k, d) = get(cfg, k, d)
+  ACTIVE_SUCCESSION[] = succession_plugin_for(params)
   DUAL_MODE[] = :b
   SIMB_DISTURB_ONLY[] = Bool(g("simB_disturb_only", false))
   SIMB_SPINUP[] = Bool(g("simB_spinup", true))
@@ -5498,6 +5521,7 @@ const MIN_REL_PINNED = FloatType[0.10, 0.275, 0.45, 0.625, 0.80]
 # next_candidate() draws a random gradient, so (like _apply_frozen_growth!) this must be re-applied on restart.
 function _seed_min_rel!(params, eco_list)
   BSP.FIX_MIN_REL[] || return params
+  hasproperty(params, :MIN_REL_BIOMASS) || return params   # other succession plugins (HBAD has MIN_REL_RD, fixed by default)
   for e in eachindex(params.MIN_REL_BIOMASS)
     params.MIN_REL_BIOMASS[e] = copy(MIN_REL_PINNED)
   end
@@ -5860,6 +5884,9 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     hbad_priors_csv=String(get_cfg("hbad_priors_csv", "")),
     hbad_coefs_csv=String(get_cfg("hbad_coefs_csv", "")),
     hbad_init=String(get_cfg("hbad_init", "jitter")),
+    hbad_seed_rain=Bool(get_cfg("hbad_seed_rain", false)),
+    hbad_prob_estab_csv=String(get_cfg("hbad_prob_estab_csv", "")),
+    hbad_cycle_years=Float64(get_cfg("cycle_years", 8)),
     cmaes_blocks=String(get_cfg("cmaes_blocks", "eco")),
     param_tier_merge=Dict{String,Any}(String(k) => Dict{String,Any}(String(sp) => Dict{String,String}(String(c) => String(g) for (c, g) in cm) for (sp, cm) in v) for (k, v) in get_cfg("param_tier_merge", Dict())),
     TRIALS=get_cfg("trials", 1000000),
@@ -6033,6 +6060,9 @@ function _load_params_from_path(params_path::String)
   elseif raw isa CMAMAE.CMAMAEMOState
     @info "Loaded CMAMAEMOState — using representative params" agg = raw.representative.fx.aggregate iter = raw.best_iteration archive = length(raw.archive)
     return raw.representative.x
+  elseif raw isa JLD2.ReconstructedMutable && occursin("HBADParams", String(typeof(raw).parameters[1]))
+    @info "Loaded HBADParams saved before the establishment fields existed - upgraded with the defaults"
+    return HBADPlugin.upgrade_params(raw)
   elseif raw isa Vector  # sobol results
     @info "Loaded sobol results — using rank-1 params" mean_loss = raw[1].mean_loss
     return raw[1].params

@@ -1,0 +1,118 @@
+# GA+FL Sim B with the HBAD succession plugin (smoke: plumbing check, not a calibration). Derived from gafl_B.yml: HBAD natural establishment ON
+# (PROB_ESTAB_SPP searched; SHADE_TOL/MATURITY from the data tables; MIN_REL_RD/SUFFICIENT_LIGHT/ESTAB_TPH fixed). See docs/hbad_plugin.md.
+# GA+FL Sim B — timber-only cohorts (no saplings, no phantom backfill), FREE simulation from year-0 cohorts with
+# establishment ON and observed disturbance scaling (no re-injection). See docs/gafl_calibration_log.md (Sim B).
+# Plots of Georgia (13) + Florida (12) in the 7 L3s they contain; species-balanced training (train_cap k=4).
+# Growth params pooled at REGION level (PITA/PIEL keep per-site-cell values); small σ0; plain Sobol start (centre first).
+seed: 1337
+succession_plugin: "hbad"
+hbad_init: "default"
+hbad_seed_rain: false             # false: only species with a mature (age >= MATURITY) cohort on the site seed; true: every species of the ecoregion
+hbad_prob_estab_csv: "${PAN_DATA}/prob_estab_all_species.csv"   # per-cycle (species, L3) occurrence -> annual p = 1-(1-p)^(1/cycle_years)
+cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
+tablename: "curated_cohorts_landis_simB"
+output_dir: "${PAN_OUT}/gafl_hbad_B_outputs"
+filter_eco_field: "epa_l3"
+filter_ecos: ["8.3.5", "8.3.4", "8.5.3", "8.4.4", "8.4.9", "8.4.1", "15.4.1"]
+filter_states: [12, 13]             # Georgia + Florida only
+eco_field: "epa_l3"
+single_ecoregion: false
+stratify_landuse: true
+site_class_strata: true
+siteclass_scheme: "4cell"
+siteclass_l3s: ["8.3.5", "8.3.4", "8.5.3"]   # the pine L3s among the GA/FL set; others one cell "X"
+shade_tier_csv: "${PAN_DATA}/shadetol_all_species_ext.csv"
+max_exact: 30
+max_group: 8
+min_trees: 100
+min_agb_frac: 0.005        # region-wide: 0.02 admits only ~11 species with ~197 present — TUNE from the split_only species table
+skip_disturbances: false
+spinup: false
+override_injection: true
+override_injection_sync: true
+override_injection_disturbance: "exclude_overwrite"
+no_establishment: false
+search_mode: "igelmo"
+tier: 3
+dual_mode: "b"
+trials: 16                # smoke
+igel_mu: 8
+igel_sigma0: 0.08          # D3: step norm ≈ σ√d; 0.3 never shrank in time
+igel_reseed_sigma: 0.03
+igel_reseed_random_frac: 0.5
+igel_maturity: 30
+igel_seed_maturity: true
+igel_sobol_init: true
+igel_sobol_pool_k: 1       # D3: plain μ Sobol points (first = box centre), no screening pool
+igel_sobol_raw_mult: 2
+cmaes_archive_cap: 300
+cmaes_single_cov: false
+cmaes_blocks: "l3"          # one block per (param group, L3) + tail; A/B vs single_cov on the smoke before production
+igel_cholesky: true
+train_cap: 15            # smoke
+train_cap_k: 4.0         # softer all-species leveling (user choice 2026-10-12): cap ≈ 4× median stratum per eco cell
+train_cap_min: 20
+param_pooling:               # D3 Stage A: everything region-level except per-cell PITA/PIEL
+  min_plots: 150
+  floor_pooled: max
+  params:
+    G_MULT: {level: region, cell_split: [PITA, PIEL]}
+    M_MULT: {level: region, cell_split: [PITA, PIEL]}
+    PROB_ESTAB_SPP: {level: region, cell_split: [PITA, PIEL]}
+  cell_merge: {PIEL: {A: AB, B: AB}}
+rankw_mode: "cbal_pct"
+rankw_beta: 0.999
+rankw_pct_floor: 0.1
+bmax_floor_from_data: false
+anpp_floor_from_data: false
+n_folds: 1
+val_frac: 0.25
+test_frac: 0.25
+split_seed: 42
+fia_cycle: true
+fia_cycle_merge: 3
+bins_idx: [10, 20, 30, 40, 50, 60, 80, 100, 120, 150]
+smoothing_window_size: 1
+smoothing_variance: 0.49
+n_reps: 1                 # D3: Stage A favours progress over replication
+init_perturb_frac: 0.05
+longevity_from_data: true
+longevity_overrides: {PIEL: 275}
+cycle_years: 8
+agb_hinge: true
+agb_hinge_pct: 0.05
+agb_hinge_pct_min: 2.0
+agb_hinge_pct_max: 10.0
+agb_hinge_p: 1.0
+agb_hinge_beta: 0.1
+agb_normalize: true
+w_normalize: true
+cell_normalize: true
+w_scale_factor: 0.01
+w_p: 1.0
+loss_piecewise: false
+unbinned_w: false          # REQUIRED for dual_mode b (tier-4 CBAL_W-length trap)
+w_count_balance: true
+w_count_balance_mode: "both"
+w_count_beta: 0.99
+w_count_pct_floor: 0.1
+w_smooth: true
+w_smooth_auto_knee: false
+w_smooth_beta: 1.0
+w_smooth_band: 0.05
+w_hinge: true
+w_hinge_pct: 0.01
+w_hinge_pct_min: 2.0
+w_hinge_pct_max: 5.0
+dominance_species: "all"
+simB_spinup: false            # start from observed year-0 cohorts
+simB_disturb_only: true       # free everywhere; observed disturbance scales matching cohorts; no re-injection
+simB_per_plot_mean: true
+simB_rep_mean: true
+tier_b: 4
+shade_tol_from_data: true
+shade_tol_csv: "${PAN_DATA}/shadetol_all_species.csv"
+maturity_from_data: true
+maturity_csv: "${PAN_DATA}/prob_estab_all_species.csv"
+fix_maturity: true
+fix_min_rel: true
