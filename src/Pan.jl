@@ -43,6 +43,7 @@ const RNGType = Random.Xoshiro #Random.MersenneTwister
 const ActivePlugins = (BaseSitePlugin.BaseSite, BiomassSuccessionPlugin.BiomassSuccession)
 const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 include("succession_api.jl")
+include("params_yaml.jl")
 
 succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "biomasssuccession", "bs") ? _BS :
                                                 lowercase(name) in ("pnet", "pnet-succession") ? _PN :
@@ -7121,5 +7122,8 @@ function landis_main()
 end
 
 include("gdigel_driver.jl")
+
+include("climate_scenario.jl")
+include("scenario.jl")
 
 end
