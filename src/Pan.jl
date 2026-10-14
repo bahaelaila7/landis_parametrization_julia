@@ -17,7 +17,7 @@ import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
 import .Parametrization.PnETParametrization as PNP
 import .Parametrization.HBADParametrization as HBP
-using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel
+using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel, GDIgel
 import .Data as Data
 import .Spatial
 import Dates
@@ -1057,6 +1057,7 @@ function parametrize(; cohorts_db_path::String,
   cc_integ_gens::Int=20,
   cc_cycles::Int=5,
   cc_fix_others::Bool=false,
+  gdigel::AbstractDict=Dict{String,Any}(),   # search_mode gdigel: group-decomposed (1+1)-CMA options (docs/cmaes_gdigel.md)
   cmame_alpha::Float64=0.02,
   cmame_grid::Int=15,
   cmame_reseed_explore::Float64=1.0,
@@ -1310,13 +1311,15 @@ function parametrize(; cohorts_db_path::String,
            search_mode == "igelmo" ? parametrize_IgelMOCMAES :
            search_mode == "cmame" ? parametrize_CMAMAE :
            search_mode == "ccigel" ? parametrize_CCIgel :
-           search_mode == "nsga2" ? parametrize_NSGA2 : parametrize_LBSA
+           search_mode == "nsga2" ? parametrize_NSGA2 :
+           search_mode == "gdigel" ? parametrize_GDIgel : parametrize_LBSA
   # CMA-ES-only knobs; LBSA/MOLBSA don't accept these, so only splat them for the (MO)CMA-ES drivers.
   cmaes_kw = search_mode == "molbsa" ? (archive_cap=cmaes_archive_cap, seed_archive_from=seed_archive_from) :
              search_mode == "cmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, ipop=ipop, ipop_stagnation=ipop_stagnation, ipop_max_barren_restarts=ipop_max_barren_restarts, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
              search_mode == "mocmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmaes_warmstart_seeds=cmaes_warmstart_seeds, ipop=ipop, ipop_stagnation=ipop_stagnation, ipop_max_barren_restarts=ipop_max_barren_restarts, archive_cap=cmaes_archive_cap, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov, seed_archive_from=seed_archive_from) :
              search_mode == "igelmo" ? (archive_cap=cmaes_archive_cap, igel_mu=igel_mu, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_sobol_pool_k=igel_sobol_pool_k, igel_sobol_raw_mult=igel_sobol_raw_mult, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_reseed_random_frac=igel_reseed_random_frac, igel_maturity=igel_maturity, igel_seed_maturity=igel_seed_maturity, igel_warm_start=igel_warm_start, igel_freeze_seed_growth=igel_freeze_seed_growth, single_cov=cmaes_single_cov) :
              search_mode == "ccigel" ? (archive_cap=cmaes_archive_cap, igel_sigma0=igel_sigma0, igel_sobol_init=igel_sobol_init, igel_niche_radius=igel_niche_radius, igel_reseed_sigma=igel_reseed_sigma, igel_maturity=igel_maturity, single_cov=cmaes_single_cov, cc_group_size=cc_group_size, cc_spec_gens=cc_spec_gens, cc_integ_gens=cc_integ_gens, cc_cycles=cc_cycles, cc_fix_others=cc_fix_others) :
+             search_mode == "gdigel" ? (gd_opts=gdigel,) :
              search_mode == "nsga2" ? (archive_cap=cmaes_archive_cap, nsga2_pop=nsga2_pop, nsga2_offspring=nsga2_offspring, nsga2_eta_c=nsga2_eta_c, nsga2_eta_m=nsga2_eta_m, nsga2_pc=nsga2_pc, nsga2_pm=nsga2_pm, sobol_init=nsga2_sobol_init) :
              search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed, balanced_quality=balanced_quality, cmame_mo_rank=cmame_mo_rank, archive_by_sp=archive_by_sp, bounds_by_sobol=bounds_by_sobol, top_seeds=top_seeds, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
              NamedTuple()
@@ -5940,6 +5943,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     cc_integ_gens=Int(get_cfg("cc_integ_gens", 20)),
     cc_cycles=Int(get_cfg("cc_cycles", 5)),
     cc_fix_others=Bool(get_cfg("cc_fix_others", false)),
+    gdigel=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("gdigel", Dict())),
     cmame_alpha=Float64(get_cfg("cmame_alpha", 0.02)),
     cmame_grid=Int(get_cfg("cmame_grid", 15)),
     cmame_reseed_explore=Float64(get_cfg("cmame_reseed_explore", 1.0)),
@@ -7115,5 +7119,7 @@ function landis_main()
     output_every_years=1,
   )
 end
+
+include("gdigel_driver.jl")
 
 end

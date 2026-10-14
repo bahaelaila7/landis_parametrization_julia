@@ -9,6 +9,7 @@ module Search
     include("search/NSGA2.jl")
     include("search/CCIgel.jl")
     include("search/MOSA.jl")
+    include("search/GDIgel.jl")
     using .SA
     using .LBSA
     using .MOLBSA
@@ -19,4 +20,5 @@ module Search
     using .NSGA2
     using .CCIgel
     using .MOSA
+    using .GDIgel
 end

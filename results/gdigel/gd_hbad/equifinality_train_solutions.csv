@@ -1,0 +1,16 @@
+file,n05,n10,n20,median_abs_bias_pct
+sol_001_converged_L1.jld2,23,41,44,1.04
+sol_002_converged_L5.jld2,20,38,44,1.34
+sol_003_converged_L6.jld2,26,39,45,0.94
+sol_004_converged_L7.jld2,23,35,44,1.48
+sol_005_converged_L3.jld2,21,42,44,1.48
+sol_006_converged_L8.jld2,26,41,45,1.25
+sol_007_converged_L4.jld2,22,40,45,1.32
+sol_008_final_L9.jld2,23,42,45,1.32
+sol_009_final_L2.jld2,24,40,45,1.14
+sol_010_final_L13.jld2,18,34,43,1.94
+sol_011_final_L15.jld2,10,26,41,4.17
+sol_012_final_L10.jld2,17,36,44,2.36
+sol_013_final_L11.jld2,18,39,45,2.17
+sol_014_final_L12.jld2,16,37,44,1.71
+sol_015_final_L14.jld2,14,33,40,3.72

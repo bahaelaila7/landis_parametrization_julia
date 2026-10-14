@@ -1,0 +1,9 @@
+file,n05,n10,n20,median_abs_bias_pct
+sol_001_final_L1.jld2,5,18,30,9.36
+sol_002_final_L2.jld2,6,18,31,8.29
+sol_003_final_L3.jld2,5,18,29,8.71
+sol_004_final_L4.jld2,6,18,29,8.77
+sol_005_final_L5.jld2,5,18,30,9.01
+sol_006_final_L6.jld2,5,15,30,8.97
+sol_007_final_L7.jld2,5,19,31,8.56
+sol_008_final_L8.jld2,6,18,30,9.52
