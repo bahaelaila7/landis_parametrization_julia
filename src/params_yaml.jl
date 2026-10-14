@@ -165,7 +165,7 @@ function params_from_yaml(text::AbstractString)
   esi = [idel[idel(spidx[String(r["species"])]) for r in (something(get(e, "species", nothing), Any[]))] for e in ecos]
   kw = Dict{Symbol,Any}(:ECO_LIST => _conv(ft[:ECO_LIST], eco_list), :SPECIES_LIST => _conv(ft[:SPECIES_LIST], species_list),
                         :ECO_SPECIES_IDS => _conv(idtype, esi))
-  warnings = String[]
+  warnings = String[]; missing_fields = String[]
   for f in fieldnames(T)
     f in _ID_FIELDS && continue
     k = String(f); FT = ft[f]
@@ -178,10 +178,16 @@ function params_from_yaml(text::AbstractString)
     elseif all(all(haskey(r, k) for r in something(get(e, "species", nothing), Any[])) for e in ecos)
       kw[f] = _conv(FT, [[r[k] for r in something(get(e, "species", nothing), Any[])] for e in ecos])
     else
-      error("parameter '$k' missing from the roster (expected under global, species, ecoregions or ecoregions[].species)")
+      push!(missing_fields, k)   # left to the struct's default (if it has one) — reported below
     end
   end
-  p = T(; kw...)
+  p = try
+    T(; kw...)
+  catch e
+    e isa UndefKeywordError || rethrow()
+    error("parameter '$(e.var)' missing from the roster (expected under global, species, ecoregions or ecoregions[].species)")
+  end
+  isempty(missing_fields) || push!(warnings, "parameters not in the file, defaults used: " * join(missing_fields, ", "))
   if hasproperty(p, :SUFFICIENT_LIGHT)
     sl = p.SUFFICIENT_LIGHT
     (length(sl) == 6 && all(length(r) == 5 for r in sl)) || push!(warnings, "SUFFICIENT_LIGHT should be 6 shade classes × 5 tolerance classes")
