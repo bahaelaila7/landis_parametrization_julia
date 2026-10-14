@@ -1,0 +1,5 @@
+alt,file,source,groups_above_tau,n05,n10,n20,dist_anchor,dist_nearest,family_change
+1,alt_1.jld2,solution L23 g90,0,-1,-1,-1,0.541,0.541,D 10.3%; S 19.7%; B_MAX_SPP 3.9%; ANPP_MAX_SPP 7.4%
+2,alt_2.jld2,solution L12 g60,0,-1,-1,-1,0.294,0.268,D 17.0%; S 21.7%; B_MAX_SPP 6.2%; ANPP_MAX_SPP 8.3%
+3,alt_3.jld2,solution L2 g30,0,-1,-1,-1,0.251,0.251,D 19.7%; S 15.6%; B_MAX_SPP 7.2%; ANPP_MAX_SPP 9.2%
+4,alt_4.jld2,solution L8 g30,0,-1,-1,-1,0.175,0.147,D 15.9%; S 19.0%; B_MAX_SPP 6.8%; ANPP_MAX_SPP 9.2%

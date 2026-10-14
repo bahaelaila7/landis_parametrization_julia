@@ -1,5 +1,5 @@
-alt,file,source,n05,n10,n20,dist_anchor,dist_nearest,family_change
-1,alt_1.jld2,archive g60 L15,6,39,53,2.452,2.452,G_MULT 10.4%; M_MULT 24.0%; SDIMAX 20.3%
-2,alt_2.jld2,archive g28 L5,10,35,49,2.392,2.392,G_MULT 12.7%; M_MULT 39.9%; SDIMAX 26.6%
-3,alt_3.jld2,archive g52 L9,11,35,47,2.355,2.355,G_MULT 12.8%; M_MULT 33.6%; SDIMAX 16.3%
-4,alt_4.jld2,archive g59 L12,12,37,51,2.343,2.343,G_MULT 12.5%; M_MULT 35.4%; SDIMAX 28.7%
+alt,file,source,groups_above_tau,n05,n10,n20,dist_anchor,dist_nearest,family_change
+1,alt_1.jld2,archive g24 L4,0,13,32,50,0.548,0.548,G_MULT 8.4%; M_MULT 24.2%; SDIMAX 12.2%
+2,alt_2.jld2,solution L11 g60,0,14,36,51,0.354,0.354,G_MULT 10.2%; M_MULT 20.7%; SDIMAX 15.9%
+3,alt_3.jld2,solution L9 g60,0,10,34,47,0.3,0.3,G_MULT 11.6%; M_MULT 27.8%; SDIMAX 15.4%
+4,alt_4.jld2,archive g66 L17,0,11,34,50,0.24,0.24,G_MULT 5.6%; M_MULT 12.8%; SDIMAX 7.6%

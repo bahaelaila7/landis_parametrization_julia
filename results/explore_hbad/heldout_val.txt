@@ -1,0 +1,5 @@
+  [1/5] cand 1  pass±5%=21/47  pass±10%=39/47  pass±20%=43/47  median|bias|=2.1%
+  [2/5] cand 2  pass±5%=7/47  pass±10%=25/47  pass±20%=38/47  median|bias|=5.4%
+  [3/5] cand 3  pass±5%=8/47  pass±10%=27/47  pass±20%=38/47  median|bias|=4.9%
+  [4/5] cand 4  pass±5%=11/47  pass±10%=25/47  pass±20%=38/47  median|bias|=5.3%
+  [5/5] cand 5  pass±5%=5/47  pass±10%=27/47  pass±20%=42/47  median|bias|=5.3%
