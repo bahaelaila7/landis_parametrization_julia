@@ -263,10 +263,10 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     best = minimum(L.tot for L in st.lineages)
     @info "gdigel gen $(st.gen): evals $(st.n_evals), best total $(round(best, sigdigits=4)), solutions $(length(st.solutions)), archive $(length(archive)), $(round((time() - t_start) / st.gen, digits=1)) s/gen"
     if st.gen % ckpt_every == 0
-      JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels))
+      JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels, slots=slots, template=template))
     end
   end
-  JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels))
+  JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels, slots=slots, template=template))
   # final solutions: converged lineages + the current lineages (as unconverged end points)
   sols = vcat([(kind="converged", lineage=s.lineage, gen=s.gen, x=s.x) for s in st.solutions],
               [(kind="final", lineage=L.id, gen=st.gen, x=L.x) for L in st.lineages])

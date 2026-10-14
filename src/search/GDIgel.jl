@@ -149,7 +149,7 @@ function assemble!(st::GDState, ys::Vector{Vector{Float64}}, fys::Vector{Vector{
                        (1 - b.c_cov) .* B.C .+ b.c_cov .* (B.p_c * B.p_c' .+ b.c_c * (2 - b.c_c) .* B.C)
         xp[b.idx] .= y[b.idx]; nsucc += 1
       end
-      B.sigma = max(st.sigma_min, B.sigma * exp((1 / b.d) * (B.p_succ - b.p_target) / (1 - b.p_target)))
+      B.sigma = clamp(B.sigma * exp((1 / b.d) * (B.p_succ - b.p_target) / (1 - b.p_target)), st.sigma_min, 0.5)   # cap: u-space is [0,1]
     end
     st.pending[k] = (y=y, fy=fy, xp=xp, mode=(nsucc == 0 ? :none : nsucc == nact ? :all : :mixed))
     out[k] = st.pending[k].mode === :mixed ? xp : nothing

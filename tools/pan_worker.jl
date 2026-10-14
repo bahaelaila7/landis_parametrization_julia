@@ -35,6 +35,9 @@ function op_simulate(id, req)
   pid = get(req, "params_id", nothing)
   ps = pid === nothing ? _default(String(get(req, "plugin", "biomass"))) : get(CACHE, String(pid), nothing)
   ps === nothing && error("unknown params_id $(pid) — upload the parameter file again (worker restarted?)")
+  want = get(req, "plugin", nothing)
+  (want === nothing || String(want) == ps.meta.plugin) ||
+    error("the parameter set '$(ps.meta.name)' is for plugin '$(ps.meta.plugin)', but the selected engine is '$(want)'")
   plots = [(cn=String(p["cn"]), acres=Float64(get(p, "acres", 1.0))) for p in req["plots"]]
   plan = req["plan"]; climate = get(req, "climate", nothing)
   t0 = time()
