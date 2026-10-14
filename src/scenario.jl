@@ -319,6 +319,9 @@ Dict(cn => (status, message, metrics::Vector{SCMetrics}, dist::Dict{Int,Dict{(sp
 """
 function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=1, establishment::Bool=true, progress=nothing)
   SP = ps.plugin; p = ps.params
+  # HBAD priors are module-level state (also used for the TPA/QMD/H translation of Biomass/PnET cohorts): configure them
+  # for THIS parameter set's species lists — another set may have been loaded since (multi-set worker).
+  HBADPlugin.configure!(; species_list=String.(p.SPECIES_LIST), eco_species_ids=[Int.(ids) for ids in p.ECO_SPECIES_IDS])
   cycles = Int(get(plan, "cycles", 10)); period = Int(get(plan, "period", 10)); horizon = cycles * period
   warnings = String[]
   info = load_scenario_plots(String[String(x.cn) for x in plots])
