@@ -110,25 +110,111 @@ function _gd_losses(ix::GDGroupIndex, cached; size_weight::Float64=0.5, min_pair
     seen[r] || (po[p] += ix.rec_obs[r]; seen[r] = true)
   end
   G = ix.ngroups
-  s = zeros(G); s2 = zeros(G); n = zeros(Int, G); sc = zeros(G, 4); nc = zeros(Int, G, 4)
+  s = zeros(G); s2 = zeros(G); n = zeros(Int, G); sc = zeros(G, 4); nc = zeros(Int, G, 4); sabs = zeros(G)
   for p in 1:np
     po[p] > 0 || continue
     d = log1p(ps[p]) - log1p(po[p]); g = ix.pair_group[p]; c = _gd_class(po[p])
-    s[g] += d; s2[g] += d * d; n[g] += 1; sc[g, c] += d; nc[g, c] += 1
+    s[g] += d; s2[g] += d * d; n[g] += 1; sc[g, c] += d; nc[g, c] += 1; sabs[g] += abs(d)
   end
-  f = fill(NaN, G); m = fill(NaN, G); se = fill(NaN, G)
+  f = fill(NaN, G); m = fill(NaN, G); se = fill(NaN, G); a = fill(NaN, G)
   for g in 1:G
     n[g] >= 3 || continue
+    a[g] = sabs[g] / n[g]   # objective :mo — absolute accuracy a_g = mean |log1p(sim) − log1p(obs)|
     m[g] = s[g] / n[g]; se[g] = sqrt(max(s2[g] / n[g] - m[g]^2, 0.0) * n[g] / (n[g] - 1) / n[g])
     cl = 0.0; k = 0
     for c in 1:4; nc[g, c] >= min_pairs || continue; cl += (sc[g, c] / nc[g, c])^2; k += 1; end
     f[g] = m[g]^2 + (k > 0 ? size_weight * cl / k : 0.0)
   end
-  (f=f, m=m, se=se, n=n)
+  (f=f, m=m, se=se, n=n, a=a)
 end
+
+# ---- objective :mo — Wasserstein-1 age-structure distance per group (docs/mo_gdigel.md §2) -------------------------------
+# Re-uses the main loss: `fit_params` returns eco_losses[e].sp_w_loss[gsp] = Σ over the scored (site, measurement-year) visits
+# of the per-species W1 age-CDF distance (calculate_species_loss_acc!: `_w_finish(_w1_sum(...))`). One (eco, eco-species) CELL
+# is one (e, j) with gsp = eco_species_ids[e][j]; a group is a set of cells (`cell_group`). The group value is the
+# ratio-of-sums with the SAME normalisation the main loss applies per cell:
+#   CELL_NORM (cell_normalize: true; GA+FL configs): w_g = _w_pow( Σ_cells sp_w_loss / Σ_cells W_SCALE_A )   (W_SCALE_A[gsp,e] =
+#       Σ over the cell's reference visits of the per-reference-max W1 × w_scale_factor, i.e. what `_mo_objectives` divides by;
+#       the RANKW stratum weights are NOT applied — they weight the loss, not the accuracy of a group)
+#   otherwise: w_g = Σ_cells sp_w_loss / (# scored visits with a reference record for the cells)  (the plain visit mean)
+# Per-cell numerator / denominator are returned so several splits can be pooled before the division.
+"Number of scored (site, year) visits that carry a reference record, per cell: nvis[e][j]."
+function _gd_cell_visits(spdf_plts, eco_species_ids, first_year::Int)
+  nv = [zeros(Int, length(ids)) for ids in eco_species_ids]
+  for ((_, e), yd) in spdf_plts, (yr, gt) in yd
+    yr >= first_year || continue
+    for j in eachindex(nv[e]); gt.keys[j] && (nv[e][j] += 1); end
+  end
+  nv
+end
+"Per-cell (numerator, denominator) of the W term for ONE evaluation: num[e][j] = sp_w_loss, den[e][j] = W_SCALE_A or visit count."
+function _gd_cell_w(eco_losses, eco_species_ids, nvis)
+  ne = length(eco_species_ids); cell = PU.CELL_NORM[]; Ws = PU.W_SCALE_A[]
+  num = [zeros(length(ids)) for ids in eco_species_ids]; den = [zeros(length(ids)) for ids in eco_species_ids]
+  for e in 1:ne, (j, gsp) in enumerate(eco_species_ids[e])
+    num[e][j] = Float64(eco_losses[e].sp_w_loss[gsp])
+    den[e][j] = cell ? (size(Ws, 1) >= gsp && size(Ws, 2) >= e ? Float64(Ws[gsp, e]) : 0.0) : Float64(nvis[e][j])
+  end
+  num, den
+end
+"Group values w_g from per-cell (num, den) — `groupcells[g]` is the vector of (e, j) cells of group g; NaN when the group has no reference visits."
+function _gd_group_w(num, den, groupcells::AbstractVector)
+  w = fill(NaN, length(groupcells))
+  for (g, cs) in enumerate(groupcells)
+    nn = 0.0; dd = 0.0
+    for (e, j) in cs; nn += num[e][j]; dd += den[e][j]; end
+    dd > 0 || continue
+    r = nn / dd
+    w[g] = PU.CELL_NORM[] ? Float64(PU._w_pow(FloatType(r))) : r
+  end
+  w
+end
+_gd_groupcells(cell_group, G) = (gc = [Tuple{Int,Int}[] for _ in 1:G]; for (c, g) in cell_group; push!(gc[g], c); end; gc)
 
 # approximate TOST (normal CI, α = 0.05) at margin M: equivalent iff m ± 1.645·se inside ±log1p(M)
 _gd_pass(m, se, M) = count(g -> !isnan(m[g]) && abs(m[g]) + 1.645 * se[g] < log1p(M), eachindex(m))
+
+# ---- objective :mo — non-dominated archive on (ΣA, ΣW) --------------------------------------------------------------------
+# 2-objective crowding: index of the interior point with the smallest normalised neighbour gap (extremes are never dropped).
+function _nd_most_crowded(nd, aref, wref)
+  n = length(nd); n <= 2 && return 1
+  o = sortperm([e.A for e in nd]); best = 0; bd = Inf
+  for k in 2:n-1
+    p, q, r = nd[o[k-1]], nd[o[k]], nd[o[k+1]]
+    d = abs(r.A - p.A) / aref + abs(p.W - r.W) / wref
+    d < bd && (bd = d; best = o[k])
+  end
+  best
+end
+# Writes <dir>/mo_archive.csv (sorted by ΣA; knee + extremes flagged) and <dir>/mo_archive/arch_XXXX.jld2 (decoded params);
+# mo_archive_u.jld2 holds the u-points. knee = point farthest below the chord between the two extremes in (A/A_ref, W/W_ref).
+# lambda_balance = (W/Wref)/(A/Aref + W/Wref): the λ at which the Chebyshev terms are equal at that point.
+function _write_mo_archive(dir, nd, st, labels, dec)
+  isempty(nd) && return
+  o = sortperm([e.A for e in nd]); E = nd[o]; n = length(E)
+  x = [e.A / st.aref for e in E]; y = [e.W / st.wref for e in E]
+  knee = 1
+  if n >= 3
+    x1, y1, x2, y2 = x[1], y[1], x[n], y[n]; L = hypot(x2 - x1, y2 - y1) + 1e-300
+    dist = [((y2 - y1) * (x[i] - x1) - (x2 - x1) * (y[i] - y1)) / L for i in 1:n]   # signed distance to the chord
+    knee = argmin(dist)    # chord runs from min-A (high W) to min-W (high A); convex fronts bulge to the lower-left ⇒ most negative
+  else
+    knee = argmin(max.(x, y))
+  end
+  adir = joinpath(dir, "mo_archive"); isdir(adir) && rm(adir; recursive=true); mkpath(adir)
+  df = DataFrame(idx=Int[], file=String[], gen=Int[], lineage=Int[], lambda_lineage=Float64[], sumA=Float64[], sumW=Float64[],
+                 A_rel=Float64[], W_rel=Float64[], lambda_balance=Float64[], role=String[])
+  for (i, e) in enumerate(E)
+    fn = "arch_$(lpad(i, 4, '0')).jld2"; JLD2.save_object(joinpath(adir, fn), dec(e.u))
+    role = i == knee ? "knee" : i == 1 ? "min_A" : i == n ? "min_W" : ""
+    i == knee && (i == 1 || i == n) && (role = "knee+" * (i == 1 ? "min_A" : "min_W"))
+    push!(df, (i, fn, e.gen, e.lineage, e.lam, e.A, e.W, x[i], y[i], y[i] / (x[i] + y[i] + 1e-300), role))
+  end
+  CSV.write(joinpath(dir, "mo_archive.csv"), df)
+  JLD2.save_object(joinpath(dir, "mo_archive_u.jld2"), (u=[e.u for e in E], A=[e.A for e in E], W=[e.W for e in E], lam=[e.lam for e in E],
+                   aref=st.aref, wref=st.wref, labels=labels, a=[e.a for e in E], w=[e.w for e in E]))
+  nothing
+end
 
 function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years,
     species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool,
@@ -140,6 +226,10 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   patience = Int(o("patience", 40)); sw = Float64(o("size_weight", 0.5)); real_only = Bool(o("real_only", true))
   include_start = Bool(o("include_start", false)); ckpt_every = Int(o("ckpt_every", 10)); min_pairs = Int(o("min_pairs", 20))
   arch_frac = Float64(o("archive_min_pass_frac", 0.8))
+  objective = Symbol(String(o("objective", "bias"))); objective in (:bias, :mo) || error("gdigel: objective must be bias | mo")
+  MO = objective === :mo
+  MO && String(o("mode", "optimize")) == "explore" && error("gdigel: objective mo is not available in mode explore")
+  MO && Bool(o("single_block", false)) && @warn "gdigel mo: single_block ablation uses the total A, W of all groups as the one block"
   DUAL_MODE[] == :off || error("gdigel: Sim A only (dual_mode must be off)")
   isnothing(injection_cohorts) && error("gdigel needs override injection cohorts (Sim A)")
   mkpath(output_dir)
@@ -164,14 +254,21 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   n_species = length(species_list)
   fixed_seeds = _fixed_seeds(rng, n_reps)
+  groupcells = _gd_groupcells(ix.cell_group, ix.ngroups)
+  nvis = MO ? _gd_cell_visits(spdf_plts, eco_species_ids, spinup ? 0 : 1) : nothing
   ws_t = [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()]
   dec(u) = PU.u_to_params(clamp.(u, 0.0, 1.0), pd, slots, template)
   function ev(u; ws=ws_t[Threads.threadid()])
     r = fit_params(ref_soa, dec(u), max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params;
       debug=false, search_tier=search_tier, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, work_soa=ws, cache_preinject=true)
     _, _, k = _agg_reps(r)
-    _gd_losses(ix, r[k][2]; size_weight=sw, min_pairs=min_pairs)
+    res = _gd_losses(ix, r[k][2]; size_weight=sw, min_pairs=min_pairs)
+    MO || return res
+    num, den = _gd_cell_w(r[k][3], eco_species_ids, nvis)
+    w = _gd_group_w(num, den, groupcells)
+    merge(res, (w=w, fx=vcat(res.a, w)))   # fx = per-group objective vector handed to GDIgel (a_g ; w_g)
   end
+  fvec(r) = MO ? r.fx : r.f
   # evaluate a batch: candidate-parallel (each eval sites-serial) when PAN_PARALLEL=candidate, else sequential sites-parallel
   function evbatch(us)
     out = Vector{Any}(undef, length(us))
@@ -196,11 +293,24 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       deleteat!(archive, argmax([GDIgel._tot(a.f) for a in archive]))
     end
   end
+  # objective :mo — non-dominated archive on (ΣA, ΣW) of EVERY evaluated point (no TOST gating), capped by archive_cap
+  ndarc = NamedTuple[]
+  function offer_nd!(u, r, gen, lid, lam)
+    A, W = GDIgel.mo_sums(r.fx, ix.ngroups)
+    any(e -> e.A <= A && e.W <= W, ndarc) && return
+    filter!(e -> !(A <= e.A && W <= e.W), ndarc)
+    push!(ndarc, (gen=gen, lineage=lid, lam=lam, u=copy(u), A=A, W=W, a=copy(r.a), w=copy(r.w)))
+    length(ndarc) > cap && deleteat!(ndarc, _nd_most_crowded(ndarc, st_ref[].aref, st_ref[].wref))
+  end
+  st_ref = Ref{Any}(nothing)
   if resume_from !== nothing
     saved = JLD2.load_object(resume_from); st = saved.st; append!(archive, saved.archive)
+    MO && hasproperty(saved, :nd) && append!(ndarc, saved.nd)
+    st_ref[] = st
     @info "gdigel: resumed $(basename(resume_from)) at gen $(st.gen), $(st.n_evals) evals, $(length(st.solutions)) solutions"
   else
     mode = Symbol(String(o("mode", "optimize")))
+    lams = MO ? GDIgel.mo_lambdas(Int(o("weights", 8))) : Float64[]
     # :explore (anchor-and-explore, docs/cmaes_gdigel.md §4): behavioural threshold tau from the tolerated bias
     u_anchor = start_from === nothing ? nothing : PU.params_to_u(template, pd, slots)
     mode === :explore && u_anchor === nothing && error("gdigel mode explore needs start_from (the anchor parameter set)")
@@ -214,7 +324,8 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     end
     st = GDIgel.GDState(bdefs, nd; sigma0=σ0, sigma_stop=σstop, sigma_min=σmin, patience=patience, rel_tol=Float64(o("rel_tol", 1e-3)), seed=Int(o("seed", 1)),
                         mode=mode, tau=tau, anchors=(mode === :explore ? [u_anchor] : Vector{Float64}[]),
-                        restart_sigma=Float64(o("explore_start_sigma", 0.02)))
+                        restart_sigma=Float64(o("explore_start_sigma", 0.02)), obj=objective, G=ix.ngroups, lams=lams)
+    st_ref[] = st
     starts = Vector{Vector{Float64}}()
     if mode === :explore   # every lineage starts at the anchor, slightly perturbed
       while length(starts) < mu; push!(starts, clamp.(u_anchor .+ Float64(o("explore_start_sigma", 0.02)) .* randn(st.rng, nd), 0.0, 1.0)); end
@@ -223,25 +334,41 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     end
     while length(starts) < mu; push!(starts, GDIgel.next_start!(st)); end
     r0 = evbatch(starts)
-    for k in 1:mu; GDIgel.add_lineage!(st, starts[k], r0[k].f); offer!(starts[k], r0[k], 0, k); end
+    if MO   # reference totals A_ref, W_ref (fixed for the run): the start_from point if given, else the median of the μ start points
+      sums = [GDIgel.mo_sums(r.fx, ix.ngroups) for r in r0]
+      if start_from !== nothing
+        sa = GDIgel.mo_sums(only(evbatch([u_anchor])).fx, ix.ngroups); st.aref, st.wref = sa
+      else
+        st.aref = Statistics.median(first.(sums)); st.wref = Statistics.median(last.(sums))
+      end
+      haskey(gd_opts, "aref") && (st.aref = Float64(gd_opts["aref"])); haskey(gd_opts, "wref") && (st.wref = Float64(gd_opts["wref"]))
+      @info "gdigel mo: A_ref = $(round(st.aref, sigdigits=5)), W_ref = $(round(st.wref, sigdigits=5)); λ grid $(round.(st.lams, digits=3)) over $mu lineages"
+    end
+    for k in 1:mu; GDIgel.add_lineage!(st, starts[k], fvec(r0[k])); offer!(starts[k], r0[k], 0, k); MO && offer_nd!(starts[k], r0[k], 0, k, st.lineages[k].lam); end
     st.n_evals = mu
   end
   logf = joinpath(output_dir, "gd_log.csv")
-  isfile(logf) || open(io -> println(io, "gen,n_evals,lineage,born,total,n05,n10,n20,median_abs_bias_pct,mean_sigma,min_sigma,max_sigma"), logf, "w")
+  isfile(logf) || open(io -> println(io, "gen,n_evals,lineage,born,total,n05,n10,n20,median_abs_bias_pct,mean_sigma,min_sigma,max_sigma" * (MO ? ",lambda,sumA,sumW" : "")), logf, "w")
   last_r = Dict{Int,Any}()
   t_start = time()
   while st.n_evals < TRIALS
     ys = GDIgel.ask(st)
     rys = evbatch(ys)
-    xps = GDIgel.assemble!(st, ys, [r.f for r in rys])
+    xps = GDIgel.assemble!(st, ys, [fvec(r) for r in rys])
     need = findall(!isnothing, xps)
     rxp = isempty(need) ? Any[] : evbatch([xps[k] for k in need])
     fxps = Vector{Any}(nothing, length(st.lineages)); rmap = Dict{Int,Any}()
-    for (j, k) in enumerate(need); fxps[k] = rxp[j].f; rmap[k] = rxp[j]; end
-    for (k, L) in enumerate(st.lineages); offer!(ys[k], rys[k], st.gen + 1, L.id); haskey(rmap, k) && offer!(xps[k], rmap[k], st.gen + 1, L.id); end
+    for (j, k) in enumerate(need); fxps[k] = fvec(rxp[j]); rmap[k] = rxp[j]; end
+    for (k, L) in enumerate(st.lineages)
+      offer!(ys[k], rys[k], st.gen + 1, L.id); haskey(rmap, k) && offer!(xps[k], rmap[k], st.gen + 1, L.id)
+      if MO
+        offer_nd!(ys[k], rys[k], st.gen + 1, L.id, L.lam); haskey(rmap, k) && offer_nd!(xps[k], rmap[k], st.gen + 1, L.id, L.lam)
+      end
+    end
     # which evaluated result is the new parent (for logging): resolved after finish!
     cand = [(ys[k], rys[k], haskey(rmap, k) ? (xps[k], rmap[k]) : nothing) for k in eachindex(ys)]
-    restart_eval(x) = (r = only(evbatch([x])); offer!(x, r, st.gen, -1); r.f)
+    restart_eval(x, lam::Float64) = (r = only(evbatch([x])); offer!(x, r, st.gen, -1); MO && offer_nd!(x, r, st.gen, -1, lam); fvec(r))
+    restart_eval(x) = restart_eval(x, 0.5)
     GDIgel.finish!(st, fxps, restart_eval)
     open(logf, "a") do io
       for (k, L) in enumerate(st.lineages)
@@ -253,31 +380,41 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
         r === nothing && (r = get(last_r, L.id, nothing))
         r === nothing || (last_r[L.id] = r)
         sig = [B.sigma for B in L.bs]
+        mo_cols = MO ? (sa = GDIgel.mo_sums(L.f, ix.ngroups); ",$(L.lam),$(sa[1]),$(sa[2])") : ""
         if r === nothing
-          println(io, "$(st.gen),$(st.n_evals),$(L.id),$(L.born),$(L.tot),,,,,$(sum(sig)/length(sig)),$(minimum(sig)),$(maximum(sig))")
+          println(io, "$(st.gen),$(st.n_evals),$(L.id),$(L.born),$(L.tot),,,,,$(sum(sig)/length(sig)),$(minimum(sig)),$(maximum(sig))$(mo_cols)")
         else
-          mab = Statistics.median(filter(!isnan, abs.(expm1.(r.m)))) * 100
-          println(io, "$(st.gen),$(st.n_evals),$(L.id),$(L.born),$(L.tot),$(_gd_pass(r.m, r.se, 0.05)),$(_gd_pass(r.m, r.se, 0.1)),$(_gd_pass(r.m, r.se, 0.2)),$(round(mab, digits=2)),$(sum(sig)/length(sig)),$(minimum(sig)),$(maximum(sig))")
+          mab = Statistics.median(filter(!isnan, abs.(expm1.(r.m)))) * 100   # (TOST pass counts here are INFORMATION only; never used by the search)
+          println(io, "$(st.gen),$(st.n_evals),$(L.id),$(L.born),$(L.tot),$(_gd_pass(r.m, r.se, 0.05)),$(_gd_pass(r.m, r.se, 0.1)),$(_gd_pass(r.m, r.se, 0.2)),$(round(mab, digits=2)),$(sum(sig)/length(sig)),$(minimum(sig)),$(maximum(sig))$(mo_cols)")
         end
       end
     end
     best = minimum(L.tot for L in st.lineages)
-    @info "gdigel gen $(st.gen): evals $(st.n_evals), best total $(round(best, sigdigits=4)), solutions $(length(st.solutions)), archive $(length(archive)), $(round((time() - t_start) / st.gen, digits=1)) s/gen"
+    @info "gdigel gen $(st.gen): evals $(st.n_evals), best total $(round(best, sigdigits=4)), solutions $(length(st.solutions)), archive $(MO ? length(ndarc) : length(archive)), $(round((time() - t_start) / st.gen, digits=1)) s/gen"
     if st.gen % ckpt_every == 0
-      JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels, slots=slots, template=template))
+      JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels, slots=slots, template=template, nd=ndarc))
+      MO && _write_mo_archive(output_dir, ndarc, st, labels, dec)
     end
   end
-  JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels, slots=slots, template=template))
+  JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels, slots=slots, template=template, nd=ndarc))
+  MO && _write_mo_archive(output_dir, ndarc, st, labels, dec)
   # final solutions: converged lineages + the current lineages (as unconverged end points)
-  sols = vcat([(kind="converged", lineage=s.lineage, gen=s.gen, x=s.x) for s in st.solutions],
-              [(kind="final", lineage=L.id, gen=st.gen, x=L.x) for L in st.lineages])
+  sols = vcat([(kind="converged", lineage=s.lineage, gen=s.gen, x=s.x, lam=s.lam) for s in st.solutions],
+              [(kind="final", lineage=L.id, gen=st.gen, x=L.x, lam=L.lam) for L in st.lineages])
   sdir = joinpath(output_dir, "solutions"); mkpath(sdir)
   rows = DataFrame(file=String[], kind=String[], lineage=Int[], gen=Int[], total=Float64[], n05=Int[], n10=Int[], n20=Int[], median_abs_bias_pct=Float64[])
+  MO && (rows.lambda = Float64[]; rows.sumA = Float64[]; rows.sumW = Float64[])
   rs = evbatch([s.x for s in sols])
   for (i, s) in enumerate(sols)
     fn = "sol_$(lpad(i, 3, '0'))_$(s.kind)_L$(s.lineage).jld2"; JLD2.save_object(joinpath(sdir, fn), dec(s.x)); r = rs[i]
-    push!(rows, (fn, s.kind, s.lineage, s.gen, GDIgel._tot(r.f), _gd_pass(r.m, r.se, 0.05), _gd_pass(r.m, r.se, 0.1), _gd_pass(r.m, r.se, 0.2),
-      round(Statistics.median(filter(!isnan, abs.(expm1.(r.m)))) * 100, digits=2)))
+    if MO   # total = F(λ) of the lineage; TOST counts are information only
+      sa = GDIgel.mo_sums(r.fx, ix.ngroups)
+      push!(rows, (fn, s.kind, s.lineage, s.gen, GDIgel.lineage_total(st, s.lam, r.fx), _gd_pass(r.m, r.se, 0.05), _gd_pass(r.m, r.se, 0.1), _gd_pass(r.m, r.se, 0.2),
+        round(Statistics.median(filter(!isnan, abs.(expm1.(r.m)))) * 100, digits=2), s.lam, sa[1], sa[2]))
+    else
+      push!(rows, (fn, s.kind, s.lineage, s.gen, GDIgel._tot(r.f), _gd_pass(r.m, r.se, 0.05), _gd_pass(r.m, r.se, 0.1), _gd_pass(r.m, r.se, 0.2),
+        round(Statistics.median(filter(!isnan, abs.(expm1.(r.m)))) * 100, digits=2)))
+    end
   end
   CSV.write(joinpath(output_dir, "gd_solutions.csv"), rows)
   CSV.write(joinpath(output_dir, "gd_groups.csv"), DataFrame(group=1:ix.ngroups, label=labels))

@@ -5,83 +5,34 @@
 # Groups = tools/tost_common.jl labels (species, or species·cell for cell-split species) ⇒ representable in the
 # region-level pooling of configs/region4/gafl_A.yml. Bounds/floors enforced as in u_to_params: S∈[0.01,1];
 # ratio=B_MAX/ANPP∈[20,35]; B_MAX∈[floor,35000]; ANPP≥data floor.
-#   ./julia_gdal.sh --project=. --threads=N tools/calib_coord.jl <config.yml> <start.jld2> <out_dir> [schedule=S,ratio,S,ratio]
+#   ./julia_gdal.sh --project=. --threads=N tools/calib_coord.jl <config.yml> <start.jld2> <out_dir> [schedule=S,ratio,S,ratio] [mode=root|minimize]
 import YAML
 cfg = YAML.load_file(ARGS[1]); start = ARGS[2]; outd = ARGS[3]; mkpath(outd)
 SCHED = length(ARGS) >= 4 ? String.(split(ARGS[4], ",")) : ["S", "ratio", "S", "ratio"]
 SPLIT = get(ENV, "CALIB_SPLIT", "train"); MARGINS = [0.05, 0.1, 0.2]   # e.g. CALIB_SPLIT=train+val (D6)
+# CALIB_MODE (env, or 5th argument): "root" (default, the TOST-bias root-finding below) | "minimize" (docs/mo_gdigel.md: per-group
+# Chebyshev minimisation of accuracy a_g and age-structure w_g; CALIB_LAMBDA, CALIB_AREF/WREF) — see tools/calib_minimize.jl.
+MODE = lowercase(get(ENV, "CALIB_MODE", length(ARGS) >= 5 ? ARGS[5] : "root"))
+MODE in ("root", "minimize") || error("CALIB_MODE must be root | minimize")
+MODE == "minimize" && (include(joinpath(@__DIR__, "calib_minimize.jl")); exit(0))
 include(joinpath(@__DIR__, "tost_common.jl"))
-# search boxes from the config (same keys as training: bmax_upper, anpp_ratio_bounds)
-BU = Float64(g("bmax_upper", 35000)); RB = Float64.(g("anpp_ratio_bounds", [20.0, 35.0]))
-GRID = Dict("pestab" => [0.02, 0.05, 0.1, 0.2, 0.35, 0.55, 0.8],
-            "pmort" => [0.0, 0.003, 0.007, 0.012, 0.02, 0.03, 0.045, 0.07, 0.1, 0.15],   # Sim B whole-cohort death prob/yr (D13, D15)
-            "foln" => [0.7, 1.0, 1.4, 1.8, 2.3, 3.0],                    # PnET foliar N % (EcoSpecies)
-            "gmult" => [0.4, 0.6, 0.8, 1.0, 1.3, 1.7, 2.3],              # HBAD diameter-growth multiplier (EcoSpecies)
-            "mmult" => [0.3, 0.5, 0.75, 1.0, 1.5, 2.2, 3.5],             # HBAD mortality-hazard multiplier (EcoSpecies)
-            "S" => [0.12, 0.18, 0.25, 0.33, 0.42, 0.55, 0.75],
-            "ratio" => collect(range(RB[1], RB[2]; length=6)),
-            "bmax" => collect(range(14000.0, BU; length=6)))
+include(joinpath(@__DIR__, "calib_levers.jl"))   # levers: GRID/NESTED/REL_FACTORS, data floors, cur_value/setv!/enforce! (shared with the minimize mode)
 # Size-targeted calibration (D5): S governs young/small-cohort growth, ANPP ratio and B_MAX the large cohorts. Each
 # parameter's root-finding uses only the matched pairs of its size regime (obs AGB < / ≥ SIZE_THR g/m²); groups with
 # < 3 pairs in the regime fall back to all pairs. SIZE_THR=0 disables (all pairs, the D4 behaviour).
 SIZE_THR = parse(Float64, get(ENV, "CALIB_SIZE_THR", "1000"))
 REGIME = Dict("S" => :small, "ratio" => :large, "bmax" => :large, "pestab" => :small, "pmort" => :large,
               "foln" => :large, "gmult" => :large, "mmult" => :large)
-# Generic per-(eco, species) nested levers: name => (params field, lower, upper)
-NESTED = Dict("pestab" => (:PROB_ESTAB_SPP, 0.0, 1.0), "pmort" => (:PROB_MORT_SPP, 0.0, 0.2),
-              "foln" => (:FolN, 0.6, 3.0), "gmult" => (:G_MULT, 0.3, 3.0), "mmult" => (:M_MULT, 0.2, 5.0))
-# Relative refinement (D7): a schedule entry "S~" / "ratio~" / "bmax~" multiplies EACH group's current value by a shared
-# factor (one eval still covers every group) and root-finds the factor per group — fine, local steps around the
-# group's own value instead of a coarse absolute grid shared by all groups.
-REL_FACTORS = [0.8, 0.9, 1.0, 1.1, 1.25]
 function regime_stats(pr, reg)
   SIZE_THR <= 0 && return group_stats(pr, MARGINS)
   sub = reg === :small ? pr[pr.obs_agb .< SIZE_THR, :] : pr[pr.obs_agb .>= SIZE_THR, :]
   gsub = group_stats(sub, MARGINS); gall = group_stats(pr, MARGINS)
   Dict(l => (haskey(gsub, l) && gsub[l].n >= 3 ? gsub[l] : r) for (l, r) in gall)
 end
-# data floors (same tables as training), keyed by (CATEGORY, l3, lu)
-bmax_tbl = g("bmax_floor_from_data", false) ? P._load_bmax_floor_table(P._expandenv(String(g("bmax_floor_csv", "")))) : nothing
-anpp_tbl = g("anpp_floor_from_data", false) ? P._load_anpp_floor_table(P._expandenv(String(g("anpp_floor_csv", "")))) : nothing
-l3lu(e) = (q = split(String(eco_list[e]), "|lu="); (String(q[1]), length(q) == 2 ? String(q[2]) : ""))
-fl(tbl, s, e, d) = tbl === nothing ? d : get(tbl, (uppercase(species_list[s]), l3lu(e)...), d)
 # targets of each group: all (e, j) with that species and group cell
 targets = Dict{String,Vector{Tuple{Int,Int}}}()
 for (e, ids) in enumerate(eco_species_ids), (j, s) in enumerate(ids)
   push!(get!(targets, label(Int(s), grp(Int(s), e)), Tuple{Int,Int}[]), (e, j))
-end
-function cur_value(p, P_, ts)
-  e, j = first(ts)
-  haskey(NESTED, P_) && return Float64(getproperty(p, NESTED[P_][1])[e][j])
-  P_ == "S" ? Float64(p.S[e][j]) : P_ == "bmax" ? Float64(p.B_MAX_SPP[e][j]) :
-    Float64(p.B_MAX_SPP[e][j] / p.ANPP_MAX_SPP[e][j])
-end
-function setv!(p, P_, ts, v)
-  for (e, j) in ts
-    s = Int(eco_species_ids[e][j])
-    if haskey(NESTED, P_)   # pestab (Sim B establishment), pmort (annual whole-cohort death), foln, gmult, mmult
-      f, lo, hi = NESTED[P_]; getproperty(p, f)[e][j] = Float32(clamp(v, lo, hi))
-    elseif P_ == "S"
-      p.S[e][j] = Float32(clamp(v, 0.01, 1.0))
-    elseif P_ == "ratio"
-      r = clamp(v, RB[1], RB[2]); p.ANPP_MAX_SPP[e][j] = Float32(max(p.B_MAX_SPP[e][j] / r, fl(anpp_tbl, s, e, 0.0)))
-    else  # bmax: keep the ratio
-      r = p.B_MAX_SPP[e][j] / p.ANPP_MAX_SPP[e][j]
-      p.B_MAX_SPP[e][j] = Float32(clamp(v, max(12000.0, fl(bmax_tbl, s, e, 12000.0)), BU))
-      p.ANPP_MAX_SPP[e][j] = Float32(max(p.B_MAX_SPP[e][j] / r, fl(anpp_tbl, s, e, 0.0)))
-    end
-  end
-  p
-end
-function enforce!(p)   # make a start point feasible (floors) before calibrating
-  hasproperty(p, :B_MAX_SPP) || return p   # non-biomass plugins (pnet/hbad): their levers carry their own bounds
-  for (lbl, ts) in targets, (e, j) in ts
-    s = Int(eco_species_ids[e][j]); r = clamp(p.B_MAX_SPP[e][j] / p.ANPP_MAX_SPP[e][j], RB[1], RB[2])
-    p.B_MAX_SPP[e][j] = Float32(clamp(p.B_MAX_SPP[e][j], max(12000.0, fl(bmax_tbl, s, e, 12000.0)), BU))
-    p.ANPP_MAX_SPP[e][j] = Float32(max(p.B_MAX_SPP[e][j] / r, fl(anpp_tbl, s, e, 0.0)))
-    p.S[e][j] = Float32(clamp(p.S[e][j], 0.01, 1.0))
-  end
-  p
 end
 summ(gs) = (n05=count(r -> r.tests[1].equiv, values(gs)), n10=count(r -> r.tests[2].equiv, values(gs)), n20=count(r -> r.tests[3].equiv, values(gs)), ng=length(gs),
             mab=Statistics.median([abs(expm1(r.mean)) * 100 for r in values(gs)]))

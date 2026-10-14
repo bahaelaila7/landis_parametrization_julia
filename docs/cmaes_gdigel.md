@@ -122,3 +122,6 @@ lineage converges to whatever optimum it meets first. The marriage of the two (2
    Results: `results/explore_{hbad,biomass}/`.
 Run: `tools/gd_run.jl <cfg> <out> 1600 mode=explore start_from=<anchor.jld2> sigma0=0.05 patience=30 explore_bias=0.07
 explore_slack=1.5` (PAN_PARALLEL=candidate). Cost ≈ 1600 simulations (HBAD ≈ 40 min, Biomass ≈ 60 min, PnET ≈ 90 min on 6 threads).
+
+## 5. Multi-objective variant (accuracy + age structure, no TOST in the objective)
+`gdigel: {objective: mo, weights: k}` replaces the TOST-aligned bias objective by per-group accuracy a_g and Wasserstein age-structure w_g with Chebyshev-scalarized lineages and a non-dominated archive; `CALIB_MODE=minimize` is the matching refinement of `calib_coord.jl`. TOST is then used only on held-out splits. See `docs/mo_gdigel.md`.
