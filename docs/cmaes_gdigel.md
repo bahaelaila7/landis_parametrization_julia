@@ -101,3 +101,24 @@ u-regions; `tools/gd_equifinality.jl` reports the effective value).
 
 Files: `runs_local/gd_{bs,bs_div,bs_single,hbad,pnet}/` (git-excluded): gd_log.csv, gd_state@N.jld2, solutions/,
 gd_solutions.csv, equifinality_{train,val,test}[_solutions].csv; comparators `runs_local/coord_{bs,hbad,pnet}_train/`.
+
+## 4. Anchor-and-explore: meaningfully distinct plausible parameter sets (`gdigel: {mode: explore}`)
+Coordinate calibration finds ONE behavioural parameter set fast; gdigel (§2) finds several, but from random starts each
+lineage converges to whatever optimum it meets first. The marriage of the two (2026-10-14):
+1. **Anchor** = the coordinate-calibrated set (`start_from`). The anchor's per-group losses define the behavioural set:
+   group g is acceptable iff f_g ≤ τ_g = max(log1p(`explore_bias`)², `explore_slack` × f_g(anchor)) (defaults 7 % and 1.5),
+   so the anchor is behavioural by construction and groups it fits well keep an absolute ±7 % tolerance.
+2. **Explore**: every lineage starts at the anchor (+ `explore_start_sigma` noise). A block step is accepted when the
+   groups it affects stay behavioural AND the block moves farther (u-space distance over the block's coordinates) from
+   the nearest other lineage, the anchor and every recorded solution; a block whose groups are out of tolerance is first
+   repaired by loss (as in optimize mode). Lineages therefore spread over the set of equally acceptable parameterizations.
+   After `patience` generations a lineage is recorded and restarted from the anchor. Block σ is capped at 0.5.
+3. **Select** (`tools/gd_select_distinct.jl <cfg> <run> <anchor> K <out> [max_groups_above_tau]`, run inside the same data
+   preparation so the u-space layout matches the search): candidates = recorded solutions + final lineage points +
+   behavioural archive; behavioural = no group above τ_g (default strict); K picks by farthest-point sampling from the
+   anchor. Writes `alt_k.jld2` + `selection.csv` (distance to the anchor and to the nearest pick, per-family change).
+4. **Check** that the picks are meaningfully distinct: held-out TOST (val, test) of v1 and the alternatives
+   (`tools/tost_select.jl`), and 100-year grow-only projections on 60 GA/FL plots (`tools/compare_param_sets.jl`).
+   Results: `results/explore_{hbad,biomass}/`.
+Run: `tools/gd_run.jl <cfg> <out> 1600 mode=explore start_from=<anchor.jld2> sigma0=0.05 patience=30 explore_bias=0.07
+explore_slack=1.5` (PAN_PARALLEL=candidate). Cost ≈ 1600 simulations (HBAD ≈ 40 min, Biomass ≈ 60 min, PnET ≈ 90 min on 6 threads).

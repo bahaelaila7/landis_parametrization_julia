@@ -572,6 +572,12 @@ function climate_preview(plots, climate; start_year::Integer, years::Integer)
                  baseline_annual=round.(ann(B); digits=3), modified_annual=round.(ann(M); digits=3),
                  baseline_monthly=round.(vec(B); digits=3), modified_monthly=round.(vec(M); digits=3)))
   end
+  # derived driver PnET actually uses: vapour-pressure deficit from Tday = (Tmax + Tave)/2 and Tmin (PnET climate.jl)
+  vpd(cl) = (tn = agg(cl, "tmin"); tx = agg(cl, "tmax"); ta = 0.5 .* (tn .+ tx); td = 0.5 .* (tx .+ ta); PnETPlugin.vpd_kpa.(td, tn))
+  VB = vpd(cb); VM = vpd(cm)
+  push!(vars, (name="vpd", label="Vapour-pressure deficit (derived)", units="kPa", annual_units="kPa", years=yrs,
+               baseline_annual=round.(vec(Statistics.mean(VB; dims=1)); digits=4), modified_annual=round.(vec(Statistics.mean(VM; dims=1)); digits=4),
+               baseline_monthly=round.(vec(VB); digits=4), modified_monthly=round.(vec(VM); digits=4)))
   push!(vars, (name="co2", label="Atmospheric CO₂", units="ppm", annual_units="ppm", years=yrs,
                baseline_annual=round.(co2b; digits=2), modified_annual=round.(co2m; digits=2),
                baseline_monthly=round.(repeat(co2b; inner=12); digits=2), modified_monthly=round.(repeat(co2m; inner=12); digits=2)))
