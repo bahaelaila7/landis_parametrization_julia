@@ -22,9 +22,10 @@ done
 PROJECT_PATH="${PROJECT_PATH:-.}"
 CACHE_FILE="${PROJECT_PATH}/.gdal_driver_path_cache"
 
-# Rebuild cache if missing or Manifest.toml is newer
+# Rebuild cache if missing, Manifest.toml is newer, or the cached folder is gone (checkout moved / other depot)
 if [[ ! -f "$CACHE_FILE" ]] || \
-   [[ "${PROJECT_PATH}/Manifest.toml" -nt "$CACHE_FILE" ]]; then
+   [[ "${PROJECT_PATH}/Manifest.toml" -nt "$CACHE_FILE" ]] || \
+   [[ ! -d "$(cat "$CACHE_FILE")" ]]; then
     julia --project="${PROJECT_PATH}" -e \
         'using GDAL_jll; print(joinpath(dirname(GDAL_jll.libgdal_path), "gdalplugins"))' \
         > "$CACHE_FILE"
