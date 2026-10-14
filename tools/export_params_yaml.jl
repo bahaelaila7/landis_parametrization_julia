@@ -10,7 +10,7 @@
 #   SITECLCD in the listed L3s, one cell "X" elsewhere).
 using Pan, JLD2, YAML, DuckDB, DataFrames, JSON3
 const P = Pan
-cfg = YAML.load_file(ARGS[1]); p = JLD2.load_object(ARGS[2]); out = ARGS[3]; name = ARGS[4]
+cfg = YAML.load_file(ARGS[1]); p = P._load_params_from_path(ARGS[2]); out = ARGS[3]; name = ARGS[4]   # (upgrades older HBAD param files)
 desc = length(ARGS) >= 5 ? ARGS[5] : ""
 prov = length(ARGS) >= 6 ? Dict{String,Any}(String(k) => v for (k, v) in JSON3.read(ARGS[6])) : Dict{String,Any}()
 X(s) = P._expandenv(String(s))

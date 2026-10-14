@@ -66,15 +66,29 @@ mutable struct GDState
   rng::Random.Xoshiro
   solutions::Vector{NamedTuple}     # converged lineages: (lineage, gen, x, f, tot)
   pending::Vector{Any}              # per-lineage transient state between ask/assemble/finish
+  mode::Symbol                      # :optimize (minimize group losses) | :explore (spread within the behavioural set)
+  tau::Vector{Float64}              # :explore — group g is behavioural iff f_g ≤ tau[g]
+  anchors::Vector{Vector{Float64}}  # :explore — points to stay away from (anchor + recorded solutions)
 end
 
 _tot(f) = (s = 0.0; for v in f; isnan(v) || (s += v); end; s)
 _score(f, resp) = (s = 0.0; for g in resp; v = f[g]; isnan(v) || (s += v); end; s)
 _fresh_bs(b::BlockDef, σ0) = BlockState(σ0, b.p_target, Matrix{Float64}(LA.I, length(b.idx), length(b.idx)), zeros(length(b.idx)))
 
-function GDState(blocks::Vector{BlockDef}, n::Int; sigma0=0.15, sigma_stop=0.004, sigma_min=0.002, patience=40, rel_tol=1e-3, seed=1)
+function GDState(blocks::Vector{BlockDef}, n::Int; sigma0=0.15, sigma_stop=0.004, sigma_min=0.002, patience=40, rel_tol=1e-3, seed=1,
+                 mode::Symbol=:optimize, tau::Vector{Float64}=Float64[], anchors=Vector{Float64}[])
   GDState(blocks, Lineage[], n, sigma0, sigma_stop, sigma_min, patience, rel_tol, 0, 0, 1, Sobol.SobolSeq(n), Random.Xoshiro(seed),
-    NamedTuple[], Any[])
+    NamedTuple[], Any[], mode, tau, Vector{Vector{Float64}}(anchors))
+end
+
+# :explore helpers — a block is behavioural iff every group it affects (with data) has f_g ≤ tau; its novelty is the
+# distance (block coordinates, u-space) to the nearest OTHER lineage or anchor/solution.
+_feasible(f, resp, tau) = all(g -> isnan(f[g]) || f[g] <= tau[g], resp)
+function _novelty(st, k::Int, idx::Vector{Int}, x::Vector{Float64})
+  d = Inf
+  for (j, L) in enumerate(st.lineages); j == k && continue; d = min(d, sqrt(sum(abs2, x[idx] .- L.x[idx]))); end
+  for a in st.anchors; d = min(d, sqrt(sum(abs2, x[idx] .- a[idx]))); end
+  d
 end
 
 """Add a lineage at u-point x with evaluated group losses f."""
@@ -119,7 +133,13 @@ function assemble!(st::GDState, ys::Vector{Vector{Float64}}, fys::Vector{Vector{
     for (bi, b) in enumerate(st.blocks)
       all(g -> isnan(L.f[g]), b.resp) && continue
       nact += 1; B = L.bs[bi]
-      succ = _score(fy, b.resp) < _score(L.f, b.resp) ? 1.0 : 0.0
+      succ = if st.mode === :explore
+        fx_ok = _feasible(L.f, b.resp, st.tau); fy_ok = _feasible(fy, b.resp, st.tau)
+        (fy_ok && (!fx_ok || _novelty(st, k, b.idx, y) > _novelty(st, k, b.idx, L.x))) ||
+          (!fx_ok && !fy_ok && _score(fy, b.resp) < _score(L.f, b.resp)) ? 1.0 : 0.0
+      else
+        _score(fy, b.resp) < _score(L.f, b.resp) ? 1.0 : 0.0
+      end
       B.p_succ = (1 - b.c_p) * B.p_succ + b.c_p * succ
       if succ == 1.0
         step = (y[b.idx] .- L.x[b.idx]) ./ B.sigma
@@ -148,7 +168,14 @@ function finish!(st::GDState, fxps::Vector{Any}, restart_eval)
     elseif p.mode === :mixed
       st.n_evals += 1; fxp = fxps[k]
       txp, tx, ty = _tot(fxp), L.tot, _tot(p.fy)
-      if txp <= tx || txp <= ty
+      nbad(f) = count(g -> !isnan(f[g]) && f[g] > st.tau[g], eachindex(f))
+      if st.mode === :explore
+        if nbad(fxp) <= nbad(L.f)
+          L.x, L.f = p.xp, fxp
+        elseif nbad(p.fy) <= nbad(L.f)
+          L.x, L.f = p.y, p.fy
+        end
+      elseif txp <= tx || txp <= ty
         L.x, L.f = p.xp, fxp
       elseif ty < tx                       # interactions spoiled the assembly: keep the better whole point
         L.x, L.f = p.y, p.fy
@@ -159,10 +186,14 @@ function finish!(st::GDState, fxps::Vector{Any}, restart_eval)
       L.best_tot = L.tot; L.last_improve = st.gen
     end
     st.pending[k] = nothing
-    conv = all(B -> B.sigma <= st.sigma_stop, L.bs) || (st.gen - L.last_improve) >= st.patience
+    conv = st.mode === :explore ? all(B -> B.sigma <= st.sigma_stop, L.bs) || (st.gen - L.born) >= st.patience :
+           all(B -> B.sigma <= st.sigma_stop, L.bs) || (st.gen - L.last_improve) >= st.patience
     if conv && st.gen - L.born >= 5
       push!(st.solutions, (lineage=L.id, gen=st.gen, born=L.born, x=copy(L.x), f=copy(L.f), tot=L.tot))
-      x0 = next_start!(st); f0 = restart_eval(x0); st.n_evals += 1
+      st.mode === :explore && push!(st.anchors, copy(L.x))
+      x0 = st.mode === :explore && !isempty(st.anchors) ?
+           clamp.(st.anchors[1] .+ 0.02 .* randn(st.rng, st.n), 0.0, 1.0) : next_start!(st)
+      f0 = restart_eval(x0); st.n_evals += 1
       t0 = _tot(f0)
       st.lineages[k] = Lineage(st.next_id, x0, f0, t0, [_fresh_bs(b, st.sigma0) for b in st.blocks], st.gen, t0, st.gen)
       st.next_id += 1

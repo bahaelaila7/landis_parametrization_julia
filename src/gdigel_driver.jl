@@ -200,9 +200,26 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     saved = JLD2.load_object(resume_from); st = saved.st; append!(archive, saved.archive)
     @info "gdigel: resumed $(basename(resume_from)) at gen $(st.gen), $(st.n_evals) evals, $(length(st.solutions)) solutions"
   else
-    st = GDIgel.GDState(bdefs, nd; sigma0=σ0, sigma_stop=σstop, sigma_min=σmin, patience=patience, rel_tol=Float64(o("rel_tol", 1e-3)), seed=Int(o("seed", 1)))
+    mode = Symbol(String(o("mode", "optimize")))
+    # :explore (anchor-and-explore, docs/cmaes_gdigel.md §4): behavioural threshold tau from the tolerated bias
+    u_anchor = start_from === nothing ? nothing : PU.params_to_u(template, pd, slots)
+    mode === :explore && u_anchor === nothing && error("gdigel mode explore needs start_from (the anchor parameter set)")
+    # per-group behavioural threshold: tau_g = max(log1p(explore_bias)², explore_slack × f_g(anchor)) — the anchor is
+    # behavioural by construction, and groups the anchor already fits well get the absolute tolerance
+    tau = Float64[]
+    if mode === :explore
+      fa = only(evbatch([u_anchor])).f; t0 = log1p(Float64(o("explore_bias", 0.07)))^2; sl = Float64(o("explore_slack", 1.5))
+      tau = [isnan(v) ? Inf : max(t0, sl * v) for v in fa]
+      @info "gdigel explore: anchor total $(round(GDIgel._tot(fa), sigdigits=4)); tau_abs $(round(t0, sigdigits=3)), slack $sl; groups at the absolute tolerance: $(count(==(t0), tau))/$(count(isfinite, tau))"
+    end
+    st = GDIgel.GDState(bdefs, nd; sigma0=σ0, sigma_stop=σstop, sigma_min=σmin, patience=patience, rel_tol=Float64(o("rel_tol", 1e-3)), seed=Int(o("seed", 1)),
+                        mode=mode, tau=tau, anchors=(mode === :explore ? [u_anchor] : Vector{Float64}[]))
     starts = Vector{Vector{Float64}}()
-    include_start && start_from !== nothing && push!(starts, PU.params_to_u(template, pd, slots))
+    if mode === :explore   # every lineage starts at the anchor, slightly perturbed
+      while length(starts) < mu; push!(starts, clamp.(u_anchor .+ Float64(o("explore_start_sigma", 0.02)) .* randn(st.rng, nd), 0.0, 1.0)); end
+    else
+      include_start && start_from !== nothing && push!(starts, u_anchor)
+    end
     while length(starts) < mu; push!(starts, GDIgel.next_start!(st)); end
     r0 = evbatch(starts)
     for k in 1:mu; GDIgel.add_lineage!(st, starts[k], r0[k].f); offer!(starts[k], r0[k], 0, k); end
