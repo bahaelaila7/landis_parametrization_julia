@@ -39,7 +39,7 @@ function op_simulate(id, req)
   want = get(req, "plugin", nothing)
   (want === nothing || String(want) == ps.meta.plugin) ||
     error("the parameter set '$(ps.meta.name)' is for plugin '$(ps.meta.plugin)', but the selected engine is '$(want)'")
-  plots = [(cn=String(p["cn"]), acres=Float64(get(p, "acres", 1.0))) for p in req["plots"]]
+  plots = _plots(req)
   plan = req["plan"]; climate = get(req, "climate", nothing)
   t0 = time()
   res, warns = P.run_scenario(ps, plots, plan; climate=climate, seed=Int(get(req, "seed", 1)),
@@ -52,10 +52,14 @@ function op_simulate(id, req)
       dist=Dict(string(y) => [[Int(k[1]), k[2], v[1], v[2]] for (k, v) in d] for (y, d) in r.dist),
       spsym=Dict(string(k) => v for (k, v) in r.spsym))
   end
-  approx = "Pan volumes/board feet are approximations from basal area × height × form factor $(P.SC_FORM); carbon_total = live above + belowground (roots $(P.SC_ROOT_FRAC)×AG); no dead-wood pools"
+  approx = "Pan volumes: FIA Region-4 species equations at each cohort's QMD and height (total-stem ft³; board feet International ¼-inch); carbon_total = live above + belowground (roots $(P.SC_ROOT_FRAC)×AG); no dead-wood pools"
   (plots=out, warnings=vcat(warns, [approx]), engine_info=(params_name=ps.meta.name, plugin=ps.meta.plugin, params_id=ps.id),
    seconds=round(time() - t0; digits=1))
 end
+
+# plots: [{cn, acres, l4?, lon?, lat?}] — l4/lon/lat = AOI location of the plot's pixels (site from location, vegetation from the plot)
+_plots(req) = [(cn=String(p["cn"]), acres=Float64(get(p, "acres", 1.0)), l4=String(something(get(p, "l4", ""), "")),
+                lon=Float64(something(get(p, "lon", NaN), NaN)), lat=Float64(something(get(p, "lat", NaN), NaN))) for p in req["plots"]]
 
 function handle(id, req)
   op = String(get(req, "op", ""))
@@ -65,7 +69,7 @@ function handle(id, req)
   op == "list_params" && return [(file=f, path=joinpath(PARAMS_DIR, f)) for f in sort(readdir(PARAMS_DIR)) if endswith(f, ".yaml")]
   op == "simulate" && return op_simulate(id, req)
   if op == "climate_preview"
-    plots = [(cn=String(p["cn"]), acres=Float64(get(p, "acres", 1.0))) for p in req["plots"]]
+    plots = _plots(req)
     return P.climate_preview(plots, get(req, "climate", nothing); start_year=Int(get(req, "start_year", 2025)), years=Int(get(req, "years", 100)))
   end
   error("unknown op '$op'")

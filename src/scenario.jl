@@ -19,8 +19,6 @@ const SCEN_CO2_CSV = Ref(get(ENV, "PAN_CO2_CSV", "/workspace/landis_region4/data
 const SC_HA_PER_AC = 0.40468564224
 const SC_M2HA_TO_FT2AC = 4.356            # m²/ha → ft²/ac
 const SC_M3HA_TO_FT3AC = 14.2913          # m³/ha → ft³/ac
-const SC_FORM = 0.42                      # stem form factor: V = BA · H · 0.42 (total stem, documented approximation)
-const SC_BDFT_PER_CUFT = 4.0              # Scribner bd ft per total ft³ for sawtimber-size cohorts (QMD ≥ 9 in), approximation
 const SC_ROOT_FRAC = 0.25                 # belowground/aboveground live biomass (Cairns et al. 1997 mean) for carbon_total
 const SC_CARBON = 0.5                     # carbon fraction of dry biomass
 
@@ -122,6 +120,68 @@ function load_scenario_plots(cns::Vector{String})
   end
 end
 
+const SCEN_DONORS = Ref(get(ENV, "PAN_DONORS", normpath(joinpath(@__DIR__, "..", "data", "treemap_donors.csv"))))
+const _DONORS = Ref{Union{Nothing,Dict{String,String}}}(nothing)
+"TreeMap plot CN → donor CN for plots without curated cohorts (data/treemap_donors.csv, docs/treemap_donors.md)."
+function _donor_map()
+  _DONORS[] === nothing || return _DONORS[]
+  d = Dict{String,String}()
+  if isfile(SCEN_DONORS[])
+    df = CSV.read(SCEN_DONORS[], DataFrame; types=Dict(:cn => String, :donor_cn => String))
+    for r in eachrow(df)
+      ismissing(r.donor_cn) || isempty(r.donor_cn) || (d[r.cn] = r.donor_cn)
+    end
+  else
+    @warn "TreeMap donor table not found" SCEN_DONORS[]
+  end
+  _DONORS[] = d
+end
+
+"""
+    load_scenario_units(plots, warnings) -> rows like `load_scenario_plots` plus `donor` (CN or "") and `lon`
+
+The FIA plot (TreeMap imputation) supplies the vegetation; a plot with no curated cohorts (mostly pre-2008 FIA visits) takes
+the cohorts of its TreeMap donor (same forest type, nearest in BA/QMD/height/TPA/canopy). When a plot carries a location
+(`l4`, `lon`, `lat` = majority EPA L4 and centroid of its pixels in the AOI), the ecoregion (eco cell, PnET climate), the
+site class and the PnET soils come from that location instead of from where the FIA plot was measured.
+"""
+function load_scenario_units(plots, warnings)
+  info = load_scenario_plots(String[String(x.cn) for x in plots])
+  dm = _donor_map()
+  need = [r.cn for r in info if r.status == "no_data" && haskey(dm, r.cn)]
+  dinfo = isempty(need) ? Dict{String,Any}() : Dict{String,Any}(d.cn => d for d in load_scenario_plots(unique([dm[c] for c in need])))
+  loc = Dict{String,Any}()
+  for x in plots
+    l4 = hasproperty(x, :l4) ? String(something(x.l4, "")) : ""
+    l3 = isempty(l4) ? "" : l3_of_l4(l4)
+    isempty(l3) || (loc[String(x.cn)] = (l4=l4, l3=l3, lon=Float64(x.lon), lat=Float64(x.lat)))
+  end
+  acres = Dict(String(x.cn) => Float64(get(x, :acres, 1.0)) for x in plots)
+  out = NamedTuple[]; ndon = 0; adon = 0.0; nloc = 0; nsc = 0
+  for r in info
+    donor = ""
+    if r.status == "no_data" && haskey(dm, r.cn)
+      d = get(dinfo, dm[r.cn], nothing)
+      if d !== nothing && d.status == "ok"
+        r = merge(d, (cn=r.cn,)); donor = d.cn; ndon += 1; adon += get(acres, r.cn, 0.0)
+      end
+    end
+    lon = NaN
+    if r.status == "ok" && haskey(loc, r.cn)
+      L = loc[r.cn]; sc = site_class_at(L.l3, L.lon, L.lat)
+      sc > 0 && (nsc += 1)
+      r = merge(r, (l3=L.l3, l4=L.l4, lat=L.lat, siteclcd=(sc > 0 ? sc : r.siteclcd))); lon = L.lon; nloc += 1
+    end
+    push!(out, merge(r, (donor=donor, lon=lon)))
+  end
+  tot = sum(values(acres); init=0.0)
+  ndon > 0 && push!(warnings, "$ndon plots ($(round(100 * adon / max(tot, 1e-9); digits=1)) % of the area) have no curated FIA cohorts " *
+                              "(mostly pre-2008 visits); their vegetation comes from a TreeMap donor plot of the same forest type")
+  nok = count(r -> r.status == "ok", out)
+  nok > 0 && nloc < nok && push!(warnings, "$(nok - nloc) of $nok plots have no AOI location; their ecoregion, site class and soils come from the FIA plot's own location")
+  out
+end
+
 """Eco cell of a plot under the param set's eco_mapping (fallbacks: 'NA' cell, then the L3's first available cell)."""
 function scenario_eco(ps::ParamSet, l3::AbstractString, siteclcd::Integer)
   em = ps.meta.eco_mapping
@@ -179,21 +239,22 @@ end
 function _site_summary(ps::ParamSet, site)
   ba = 0.0; tph = 0.0; vol = 0.0; bd = 0.0; agb = 0.0
   dist = Dict{Tuple{Int16,Int},NTuple{2,Float64}}()
+  veq = volume_eqs(ps)
   for k in 1:Int(site.live)
     t, dq, h = _cohort_struct(ps, site, k); b = Float64(site.c_bio[k]); agb += b
     t > 0 || continue
+    gsp = _gsp(ps, site.eco_id, site.c_species[k])
     bak = pi / 4 * (dq / 100)^2 * t          # m²/ha
-    v = bak * h * SC_FORM                     # m³/ha
-    ba += bak; tph += t; vol += v
-    dq / 2.54 >= 9 && (bd += v * SC_M3HA_TO_FT3AC * SC_BDFT_PER_CUFT)
-    sp = String(ps.params.SPECIES_LIST[_gsp(ps, site.eco_id, site.c_species[k])])
+    v, bf = cohort_volume(veq[gsp], t, dq, h) # ft³/ac (total stem), bd ft/ac (Int'l ¼)
+    ba += bak; tph += t; vol += v; bd += bf
+    sp = String(ps.params.SPECIES_LIST[gsp])
     key = (Int16(ps.spcd[sp]), min(2 * floor(Int, dq / 2.54 / 2), 40))
     c, bb = get(dist, key, (0.0, 0.0))
     dist[key] = (c + t * SC_HA_PER_AC, bb + bak * SC_M2HA_TO_FT2AC)
   end
   tpa = tph * SC_HA_PER_AC; baf = ba * SC_M2HA_TO_FT2AC
   qmd = tpa > 0 ? sqrt(baf / (0.005454154 * tpa)) : 0.0
-  (ba=baf, tpa=tpa, qmd=qmd, tcuft=vol * SC_M3HA_TO_FT3AC, bdft=bd, agb=agb,
+  (ba=baf, tpa=tpa, qmd=qmd, tcuft=vol, bdft=bd, agb=agb,
    c_ag=agb * SC_CARBON * 0.01, dist=dist)
 end
 
@@ -210,11 +271,11 @@ function _remove_cohort!(site, k::Int)
   site.old = min(site.old, site.live)
 end
 
-"""Apply one removal to the selected cohorts of a site. Returns (removed AGB g/m², removed volume m³/ha, removed sawtimber vol m³/ha)."""
+"""Apply one removal to the selected cohorts of a site. Returns (removed AGB g/m², removed total cubic ft³/ac, removed board feet/ac)."""
 function _apply_removal!(ps::ParamSet, site, act, sym_ok::Function)
   SP = ps.plugin
   n = Int(site.live); n == 0 && return 0.0, 0.0, 0.0
-  st = [_cohort_struct(ps, site, k) for k in 1:n]
+  st = [_cohort_struct(ps, site, k) for k in 1:n]; veq = volume_eqs(ps)
   sel = Int[]
   sl = get(act, "selection", Dict{String,Any}())
   alo = Float64(get(sl, "age_lo", 0)); ahi = Float64(get(sl, "age_hi", 9999))
@@ -257,8 +318,8 @@ function _apply_removal!(ps::ParamSet, site, act, sym_ok::Function)
   for k in n:-1:1
     f[k] > 0 || continue
     b = Float64(site.c_bio[k]); t, dq, h = st[k]
-    v = pi / 4 * (dq / 100)^2 * t * h * SC_FORM * f[k]
-    rb += b * f[k]; rv += v; dq / 2.54 >= 9 && (rs += v)
+    v, bf = cohort_volume(veq[_gsp(ps, site.eco_id, site.c_species[k])], t, dq, h)
+    rb += b * f[k]; rv += v * f[k]; rs += bf * f[k]
     if f[k] >= 0.999 || b * (1 - f[k]) < 1.0
       _remove_cohort!(site, k)
     else
@@ -324,7 +385,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
   HBADPlugin.configure!(; species_list=String.(p.SPECIES_LIST), eco_species_ids=[Int.(ids) for ids in p.ECO_SPECIES_IDS])
   cycles = Int(get(plan, "cycles", 10)); period = Int(get(plan, "period", 10)); horizon = cycles * period
   warnings = String[]
-  info = load_scenario_plots(String[String(x.cn) for x in plots])
+  info = load_scenario_units(plots, warnings)
   acres = Dict(String(x.cn) => Float64(x.acres) for x in plots)
   results = Dict{String,Any}()
   rows = NamedTuple[]; meta = NamedTuple[]
@@ -339,7 +400,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
     end
     isempty(msg) || push!(warnings, msg)
     pid = length(meta) + 1
-    push!(meta, (cn=r.cn, plot_id=pid, eco=e, measdate=r.measdate, l4=r.l4, l3=r.l3, lat=r.lat, key=r.key))
+    push!(meta, (cn=r.cn, plot_id=pid, eco=e, measdate=r.measdate, l4=r.l4, l3=r.l3, lat=r.lat, lon=r.lon, key=r.key))
     for c in eachrow(r.cohorts)
       ntot += c.agb
       j = scenario_species(ps, e, c.sym)
@@ -405,7 +466,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
     for i in 1:soa.n
       sm = sms[i]; r_ = rem[i]; t = c * period
       push!(mets[i], SCMetrics(y0[i] + t, sm.ba, sm.tpa, sm.qmd, sm.tcuft, sm.bdft,
-        r_[2] * SC_M3HA_TO_FT3AC, r_[3] * SC_M3HA_TO_FT3AC * SC_BDFT_PER_CUFT,
+        r_[2], r_[3],
         sm.c_ag * (1 + SC_ROOT_FRAC), sm.c_ag, r_[1] * SC_CARBON * 0.01, sm.agb))
       dists[i][y0[i] + t] = sm.dist
       fill!(r_, 0.0)
@@ -527,6 +588,9 @@ function _pnet_site_attrs(meta, warnings)
   cl = PnETPlugin.CLIMATE[]
   idpos = Dict(id => i for (i, id) in enumerate(cl.ids))
   soil = isfile(SCEN_SOIL_CSV[]) ? PnETPlugin.load_plot_soil(SCEN_SOIL_CSV[]) : Dict()
+  located = [m for m in meta if isfinite(m.lon)]
+  lsoil = Dict(zip((m.plot_id for m in located), soil_at(Float64[m.lon for m in located], Float64[m.lat for m in located])))
+  nls = count(!isnothing, values(lsoil))
   rows = NamedTuple[]; nfb = 0
   for m in meta
     cid = get(idpos, m.l4, 0)
@@ -534,12 +598,14 @@ function _pnet_site_attrs(meta, warnings)
       nfb += 1; cid = something(findfirst(id -> startswith(id, m.l3 * "."), cl.ids), 1)
     end
     k = Tuple(parse.(Int, split(m.key, "_")))
-    sv = get(soil, k, nothing)
+    sv = get(lsoil, m.plot_id, nothing)                  # soils of the location (SOLUS), else of the FIA plot
+    sv === nothing && (sv = get(soil, k, nothing))
     push!(rows, (plot_id=m.plot_id, clim_id=Int32(cid), cal_year0=Int16(Dates.year(m.measdate)), lat=Float32(isnan(m.lat) ? 33.0 : m.lat), soil="LOAM",
                  soil_por=sv === nothing ? NaN : sv.soil_por, soil_fc=sv === nothing ? NaN : sv.soil_fc,
                  soil_wp=sv === nothing ? NaN : sv.soil_wp, soil_rd=sv === nothing ? NaN : sv.soil_rd))
   end
   nfb > 0 && push!(warnings, "PnET: $nfb plots have an L4 outside the climate cache; an L4 of the same L3 was used")
+  length(located) > nls && push!(warnings, "PnET: $(length(located) - nls) of $(length(located)) located plots have no SOLUS soil data at their location; the FIA plot's soil (or a loam default) was used")
   DataFrame(rows)
 end
 
@@ -550,7 +616,7 @@ AOI-weighted (acres) monthly series of tmin, tmax, tmean, ppt and annual CO₂ f
 plots' L4s: `baseline` = the scenario's baseline mode with no changes, `modified` = with its changes and CO₂ pathway.
 """
 function climate_preview(plots, climate; start_year::Integer, years::Integer)
-  info = load_scenario_plots(String[String(x.cn) for x in plots])
+  info = load_scenario_units(plots, String[])
   acres = Dict(String(x.cn) => Float64(x.acres) for x in plots)
   w = Dict{String,Float64}()
   for r in info

@@ -24,19 +24,35 @@ plan (thin / harvest / plant) and — for PnET — a climate scenario. Used by t
   Shipped sets: `results/params_yaml/gafl_{biomass,pnet,hbad}_v1.yaml` (GA+FL calibrations).
 
 ## 2. Scenario runner — `src/scenario.jl`
-- **Plots**: FIA `PLOT.CN` (what TreeMap pixels resolve to) → plot key + visit → curated cohorts of that visit
-  (`curated_cohorts_landis_stdorg` in the national FIADB, phantom backfill excluded), summed over subplots per
-  (species, age) — the same per-plot cohorts as training. Site class from COND; L3/L4 from the cohort table.
-- Plots whose L3 is not in the parameter set are `out_of_region` (FVSjl can still simulate them); plots without curated
-  cohorts are `no_data`. Cohorts of species the eco cell cannot represent are dropped (share of AGB reported).
+- **Plots = vegetation only**: FIA `PLOT.CN` (what TreeMap pixels resolve to) → plot key + visit → curated cohorts of that
+  visit (`curated_cohorts_landis_stdorg` in the national FIADB, phantom backfill excluded), summed over subplots per
+  (species, age) — the same per-plot cohorts as training.
+- **Site = the AOI location** (`src/scenario_site.jl`, 2026-10-14). TreeMap imputes plots from anywhere (e.g. Oklahoma plots
+  in a Georgia AOI), so everything that belongs to the place comes from where the pixels are: the caller (Forest Explorer)
+  sends per plot the majority EPA L4 of its AOI pixels and their centroid (`l4`, `lon`, `lat`); then
+  - EPA L3/L4 → parameter eco cell and PnET climate (L4 series);
+  - site class (eco-cell split) = inverse-distance vote of the 7 nearest FIA plots of the same L3 (actual plot coordinates);
+  - PnET soils = SOLUS100 rooting-zone hydraulics at the centroid (same procedure as `tools/build_plot_soil.jl`; `PAN_SOLUS`),
+    falling back to the FIA plot's soil row, then loam.
+  Without a location (older callers) the FIA plot's own L3/L4, site class and soil are used, with a warning.
+- **Plots without curated cohorts** (8,541 of 65,043 TreeMap plots, mostly pre-2008 visits) take the cohorts of a TreeMap
+  **donor**: same forest type, nearest in BA/QMD/height/TPA/canopy/softwood share (+ geography), from
+  `data/treemap_donors.csv` (`tools/build_treemap_donors.py`, `docs/treemap_donors.md`; `PAN_DONORS`). Remaining
+  failures: `out_of_region` = the location's L3 is not in the parameter set; `no_data` = no cohorts and no donor.
+  Cohorts of species the eco cell cannot represent fall back to the `_H*`/`_S*` catch-alls, else are dropped (AGB share reported).
 - **Run**: annual steps of the plugin (establishment on for Biomass Succession and HBAD; PnET has none). Records every
   `period` years, at elapsed 0, P, 2P, … (start-of-cycle state, before that cycle's management — FVS `.sum` convention);
   management removals are reported on the row of the cycle they happen in.
 - **Outputs per plot and record** (FE `CycleMetrics`): BA ft²/ac, TPA, QMD in, total cubic ft³/ac, board feet, removed volume,
   carbon (t C/ha: `carbon_live_ag` = 0.5 × AGB; `carbon_total` = live above + belowground with roots 0.25 × AG; removed),
   plus AGB g/m², and a species × 2-inch-DBH tally. Tree structure (TPA, QMD, height) comes from HBAD's state for HBAD and
-  from the empirical translation (species, age, AGB) → (TPA, QMD, H) for Biomass Succession and PnET. **Approximations**:
-  volume = BA × H × 0.42; board feet = 4 × cubic volume of cohorts with QMD ≥ 9 in; no dead-wood pools.
+  from the empirical translation (species, age, AGB) → (TPA, QMD, H) for Biomass Succession and PnET. **Volumes**
+  (`src/scenario_volume.jl`): FIA Region-4 per-tree equations v = cf·exp(b0)·ba^b1·H^b2 by species (→ FIA species group →
+  softwood/hardwood), evaluated at each cohort's QMD and height × TPA: total-stem cubic ft (VOLTSGRS) and board feet
+  **International ¼-inch** (VOLBFGRS — the Scribner column is empty in this FIADB) for cohorts with QMD ≥ 9 in (softwood) /
+  11 in (hardwood) × a fitted sawtimber-qualifying probability. Held-out FIA plots: cubic plot R² 0.997, bias −0.02 %
+  (old BA × H × 0.42: +6 %); board feet plot R² 0.93, total bias +1.4 % (old 4 × cubic: +14 %). `docs/volume_equations.md`,
+  `data/volume_eqs_r4.csv` (`PAN_VOLUME_EQS`). No dead-wood pools.
 
 ## 3. Management (LANDIS Biomass-Harvest style, FE vocabulary)
 Plan actions (FE plan JSON): `thin` (FE/FVS form: residual BA/TPA/SDI, from below/above, DBH range, species — mapped to a

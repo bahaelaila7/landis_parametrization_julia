@@ -7155,5 +7155,7 @@ include("gdigel_driver.jl")
 
 include("climate_scenario.jl")
 include("scenario.jl")
+include("scenario_site.jl")
+include("scenario_volume.jl")
 
 end
