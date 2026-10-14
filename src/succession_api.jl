@@ -24,6 +24,8 @@ function step! end
 function spinup! end
 function add_cohort! end
 function per_eco_groups end
+function plant! end            # plant!(P, site, species_local, tph; kw...): add planted trees to one site (caller handles CSR capacity, see plant_sites!)
+function plant_slot_needed end # plant_slot_needed(P, site, species_local, age): 1 if plant! appends a cohort, 0 if it merges
 # Plugin-specific hooks with BiomassSuccession-neutral defaults:
 function init_sites! end       # init_sites!(P, soa, site_attrs): per-site static attributes (BS: nothing needed)
 function set_cohort_bio! end   # set_cohort_bio!(P, site, k, newbio): write a cohort's reported biomass (BS: plain assignment)
@@ -61,6 +63,18 @@ per_eco_groups(::Type{_BS}) = BSP.BIOMASS_PER_ECO_GROUPS
 init_sites!(::Type{_BS}, soa, site_attrs) = soa
 @inline set_cohort_bio!(::Type{_BS}, site, k, newbio) = (site.c_bio[k] = newbio; nothing)
 
+# BiomassSuccession planting: a new cohort of the species with the LANDIS initial biomass (calculate_initial_biomass: exp(-1.6 B/B_MAX_ECO) * ANPP_MAX_SPP,
+# floor 2 g/m2) at `age` (default 1). `tph` is ignored (BiomassSuccession carries no stem density). Needs the ecoregion's resolved parameters
+# (`eco_params=generate_eco_params(SP, params)[site.eco_id]`) for ANPP_MAX_SPP / B_MAX_ECO. A free cohort slot is the caller's job (`plant_sites!`).
+function plant!(::Type{_BS}, site, species_local::Integer, tph::Real=0; eco_params, age::Real=1, kw...)
+  nbio = BiomassSuccessionPlugin.calculate_initial_biomass(eco_params.ANPP_MAX_SPP[species_local], FloatType(site.B), eco_params.B_MAX_ECO)
+  Int(site.live) < length(site.c_species) || error("BiomassSuccession plant!: site has no free cohort slot (capacity $(length(site.c_species))); use plant_sites!")
+  BiomassSuccessionPlugin.add_cohort!(site, UIntType(species_local), FloatType(age), nbio)
+  site.B += nbio
+  return Int(site.live)
+end
+plant_slot_needed(::Type{_BS}, site, species_local::Integer, age::Real=1) = 1
+
 # --- PnET ---
 const _PN = PnETPlugin.PnET
 
@@ -83,6 +97,9 @@ step!(::Type{_PN}, soa, year::Integer, ctx) = PanCore.process_plugin!(soa, _PN, 
 spinup!(::Type{_PN}, soa, spinup_cohorts, eco_params) = error("PnET has no spinup path yet: run with spinup: false (cohorts start from the observed state)")
 
 add_cohort!(::Type{_PN}, site, args...) = PnETPlugin.add_cohort!(site, args...)
+
+plant!(::Type{_PN}, site, species_local::Integer, tph::Real; kw...) = error("PnET: plant! is not supported yet (no planting / establishment in the PnET plugin)")
+plant_slot_needed(::Type{_PN}, site, species_local::Integer, age::Real=1) = error("PnET: plant! is not supported yet")
 
 per_eco_groups(::Type{_PN}) = PNP.PNET_PER_ECO_GROUPS
 
@@ -115,5 +132,40 @@ per_eco_groups(::Type{_HB}) = HBP.HBAD_PER_ECO_GROUPS
 init_sites!(::Type{_HB}, soa, site_attrs) = soa
 @inline set_cohort_bio!(::Type{_HB}, site, k, newbio) = HBADPlugin.set_cohort_bio!(site, k, newbio)
 
+plant!(::Type{_HB}, site, species_local::Integer, tph::Real; eco_params=nothing, kw...) = HBADPlugin.plant!(site, species_local, tph; kw...)
+plant_slot_needed(::Type{_HB}, site, species_local::Integer, age::Real=1) = HBADPlugin.plant_slot_needed(site, species_local, age)
+
 # Tools that only hold params (post-hoc sims) get the fixed priors re-resolved for the params' species list when needed.
 succession_plugin_for(p::HBADPlugin.HBADParams) = (HBADPlugin.ensure_configured!(p.SPECIES_LIST, p.ECO_SPECIES_IDS); HBADPlugin.HBAD)
+
+"""
+    plant_sites!(soa, plantings; age=1, eco_params=nothing, kw...)
+
+Scenario planting harness for any succession plugin. `plantings` = iterable of `(site_index, species_local, tph)`. Reserves one CSR cohort slot per planting
+(`_new_cohort_counts = live + #plantings of that site`, one `PanCore.readjust_soa!`, the same pattern as `_inject_observed_cohorts!`), then calls the plugin's
+`plant!(SP, site, species_local, tph; age, kw...)` for each planting in order. `eco_params` (BiomassSuccession only) is the vector from `generate_eco_params`;
+it is indexed by the site's `eco_id`. Inactive sites are skipped. Call it between annual steps (never inside one).
+"""
+function plant_sites!(soa, plantings; age::Real=1, eco_params=nothing, kw...)
+  SP = succession_plugin_of(soa)
+  cnt = soa.scalar._new_cohort_counts
+  @inbounds for i in 1:soa.n
+    cnt[i] = soa.scalar.live[i]
+  end
+  any_ = false
+  for (si, _, _) in plantings
+    soa.scalar.active[si] || continue
+    cnt[si] += 1; any_ = true
+  end
+  any_ && PanCore.readjust_soa!(soa, (cohort=cnt,))
+  for (si, sp, tph) in plantings
+    site = getsite(soa, si)
+    site.active || continue
+    if eco_params === nothing
+      plant!(SP, site, sp, tph; age=age, kw...)
+    else
+      plant!(SP, site, sp, tph; age=age, eco_params=eco_params[site.eco_id], kw...)
+    end
+  end
+  return soa
+end

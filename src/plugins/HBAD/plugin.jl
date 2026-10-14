@@ -11,6 +11,8 @@ PanCore.scalar_arrays(::Type{PluginType}, n::Int) =
     SDI=Vector{FloatType}(undef, n),        # Reineke stand density index (metric: trees/ha at 25.4 cm)
     RD=Vector{FloatType}(undef, n),         # relative density SDI / site SDImax
     thin_tph=Vector{FloatType}(undef, n),   # trees/ha removed by self-thinning in the last step (diagnostic)
+    shade_class=Vector{UIntType}(undef, n), # 0..5 from RD and MIN_REL_RD (set by the establishment check; 0 when establishment is off)
+    no_establish=Vector{Bool}(undef, n),    # true: no natural establishment on this site (Sim A / injection-driven runs)
   )
 
 PanCore.csr_fields(::Type{PluginType}) =
@@ -22,7 +24,8 @@ PanCore.csr_fields(::Type{PluginType}) =
     c_dq=:cohort,        # quadratic mean diameter, cm
     c_h=:cohort,         # mean tree height, m
     c_bal=:cohort,       # basal area (m2/ha) of larger-dq cohorts at the start of the last step (scratch / diagnostic)
-    sp_mature=:species,  # unused (no establishment); its length carries the eco species count for the shared loss
+    sp_mature=:species,  # per eco species: a cohort of age >= MATURITY is present (written by the establishment check only); its length carries the eco species count for the shared loss
+    sp_estab=:species,   # per eco species: establishment succeeded this year and needs a new cohort slot (scratch between the two phases)
   )
 
 PanCore.csr_arrays(::Type{PluginType}, nnz::NamedTuple) =
@@ -35,6 +38,7 @@ PanCore.csr_arrays(::Type{PluginType}, nnz::NamedTuple) =
     c_h=Vector{FloatType}(undef, nnz.cohort),
     c_bal=Vector{FloatType}(undef, nnz.cohort),
     sp_mature=Vector{Bool}(undef, nnz.species),
+    sp_estab=Vector{Bool}(undef, nnz.species),
   )
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -60,20 +64,23 @@ end
 # One site, one year
 # ---------------------------------------------------------------------------------------------------------------------
 """
-    site_year!(soa, i, ep, cst)
+    site_prepare!(soa, i, ep, cst)
 
-Annual update of site `i` (see docs/hbad_plugin.md): (a) BA/SDI/RD + BAL snapshot, (b) longevity removal then age+1, (c) diameter growth,
+Phase 1 of the annual update of site `i` (see docs/hbad_plugin.md): (a) BA/SDI/RD + BAL snapshot, (b) longevity removal then age+1, (c) diameter growth,
 (d) height by Chapman-Richards ratio, (e) expected-value mortality, (f) self-thinning from the smallest cohort, (g) removal of cohorts < 1 tree/ha,
-(h) reported AGB = allometric AGB, site totals. Allocation-free; reads/writes only site i. Establishment hook: see `# ESTABLISHMENT HOOK`.
+(g2) establishment check (only when the site is not flagged `no_establish`): shade class from RD, one uniform draw per candidate species; a success either
+merges into an existing age-1 cohort or flags `sp_estab` (a new cohort slot is needed). Sets `live` and `_new_cohort_counts = live + #new cohorts`.
+Allocation-free; reads/writes only site i. The CSR capacity is adjusted by `process_plugin!` between the phases; `site_commit!` is phase 2.
 """
-function site_year!(soa::PanCore.AnySoA, i::Int, ep::HBADEcoParams, cst::HBADConst)
+function site_prepare!(soa::PanCore.AnySoA, i::Int, ep::HBADEcoParams, cst::HBADConst)
   csr = soa.csr
   species = csr.c_species; age = csr.c_age; bio = csr.c_bio; tph = csr.c_tph; dq = csr.c_dq; hh = csr.c_h; bal = csr.c_bal
   sc = soa.scalar
   o = Int(soa.refs.cohort[i]) - 1
   n = Int(sc.live[i])
-  if n == 0
-    sc.B[i] = 0; sc.BA[i] = 0; sc.SDI[i] = 0; sc.RD[i] = 0; sc.thin_tph[i] = 0; sc.old[i] = 0
+  if n == 0 && sc.no_establish[i]
+    sc.B[i] = 0; sc.BA[i] = 0; sc.SDI[i] = 0; sc.RD[i] = 0; sc.thin_tph[i] = 0; sc.old[i] = 0; sc.shade_class[i] = 0
+    sc._new_cohort_counts[i] = 0
     return nothing
   end
   site = SiteView(soa, i)
@@ -177,8 +184,49 @@ function site_year!(soa::PanCore.AnySoA, i::Int, ep::HBADEcoParams, cst::HBADCon
     end
   end
 
-  # ESTABLISHMENT HOOK: new cohorts (seedlings/saplings) would be appended here (needs CSR capacity growth via readjust_soa!, see
-  # BiomassSuccession reproduction_commit_step!); not implemented in this version.
+  # (g2) establishment (after self-thinning / removal, before the AGB update)
+  nnew = 0
+  if sc.no_establish[i]
+    sc.shade_class[i] = 0
+  else
+    nnew = establish_check!(soa, i, ep, cst, o, last)
+  end
+  sc.live[i] = last
+  sc.thin_tph[i] = FloatType(thinned)
+  sc._new_cohort_counts[i] = last + nnew
+  return nothing
+end
+
+"""
+    site_commit!(soa, i, ep, cst)
+
+Phase 2 of the annual update: append the cohorts flagged by `establish_check!` (age 1, `ESTAB_TPH`, dq = `estab_dq`, h = 1.3 + CR(dq)) into the slots made
+available by `process_plugin!`, then (h) reported AGB = allometric AGB of every cohort and the site totals. Errors if the site has no free slot (cannot
+happen through `process_plugin!`; guards direct callers against writing into the neighbouring site).
+"""
+function site_commit!(soa::PanCore.AnySoA, i::Int, ep::HBADEcoParams, cst::HBADConst)
+  csr = soa.csr
+  species = csr.c_species; age = csr.c_age; bio = csr.c_bio; tph = csr.c_tph; dq = csr.c_dq; hh = csr.c_h; bal = csr.c_bal
+  sc = soa.scalar
+  o = Int(soa.refs.cohort[i]) - 1
+  cap = Int(soa.refs.cohort[i+1]) - Int(soa.refs.cohort[i])
+  last = Int(sc.live[i])
+  if !sc.no_establish[i]
+    so = Int(soa.refs.species[i]) - 1
+    nsp = Int(soa.refs.species[i+1]) - Int(soa.refs.species[i])
+    sest = csr.sp_estab
+    @inbounds for j in 1:nsp
+      if sest[so+j]
+        last >= cap && error("HBAD site_commit!: site $i has no free cohort slot (capacity $cap) - the caller must readjust_soa! first")
+        last += 1
+        k = o + last
+        d0 = cst.estab_dq
+        species[k] = UIntType(j); age[k] = one(FloatType); tph[k] = FloatType(ep.estab_tph[j]); dq[k] = FloatType(d0)
+        hh[k] = FloatType(1.3 + chapman_richards(ep.pri[j].hd_a, ep.pri[j].hd_b, ep.pri[j].hd_c, d0)); bal[k] = zero(FloatType)
+        sest[so+j] = false
+      end
+    end
+  end
 
   # (h) reported AGB = allometric AGB of the state; site totals
   B = 0.0
@@ -196,8 +244,77 @@ function site_year!(soa::PanCore.AnySoA, i::Int, ep::HBADEcoParams, cst::HBADCon
   sc.BA[i] = FloatType(ba2)
   sc.SDI[i] = FloatType(sdi2)
   sc.RD[i] = FloatType(sdm2 > 0 ? sdi2 / sdm2 : 0.0)
-  sc.thin_tph[i] = FloatType(thinned)
   return nothing
+end
+
+"""Both phases for one site (tests, single-site tools). Valid only when no new cohort slot is needed (`_new_cohort_counts[i] <= capacity`)."""
+function site_year!(soa::PanCore.AnySoA, i::Int, ep::HBADEcoParams, cst::HBADConst)
+  site_prepare!(soa, i, ep, cst)
+  site_commit!(soa, i, ep, cst)
+end
+
+# Union-split so that the per-site RNG (stored as AbstractRNG) is called statically in the production case (Xoshiro = Pan.RNGType).
+@inline _draw(rng::Random.AbstractRNG) = rng isa Random.Xoshiro ? rand(rng::Random.Xoshiro) : rand(rng)
+
+"""Shade class 0..5 = number of ascending RD thresholds exceeded by the stand's relative density."""
+@inline shade_class_of(rd::Float64, t::NTuple{5,Float64}) = Int(rd > t[1]) + Int(rd > t[2]) + Int(rd > t[3]) + Int(rd > t[4]) + Int(rd > t[5])
+
+"""Merge `rtph` trees of size (`rdq`, `rh`) into cohort k: densities add, dq = quadratic mean, h = tph-weighted mean."""
+@inline function merge_cohort!(tph, dq, hh, k::Int, rtph::Float64, rdq::Float64, rh::Float64)
+  t0 = Float64(tph[k]); d0 = Float64(dq[k]); h0 = Float64(hh[k])
+  tt = t0 + rtph
+  dq[k] = FloatType(sqrt((t0 * d0 * d0 + rtph * rdq * rdq) / tt))
+  hh[k] = FloatType((t0 * h0 + rtph * rh) / tt)
+  tph[k] = FloatType(tt)
+  return nothing
+end
+
+"""
+    establish_check!(soa, i, ep, cst, o, last) -> Int
+
+Natural establishment of site `i` (cohorts `o+1:o+last` after thinning/removal). Writes `sp_mature` (cohort of age >= MATURITY present), the site
+`shade_class` (RD vs `MIN_REL_RD`) and `sp_estab`. For every candidate species (mature, or all with `seed_rain`) ONE uniform draw `u` of the site RNG
+is consumed (fixed draw count -> deterministic for any thread count); success iff `u < PROB_ESTAB * SUFFICIENT_LIGHT[shade class][SHADE_TOL]`.
+A success merges into an existing age-1 cohort of the species (no duplicates) or flags `sp_estab`. Returns the number of new slots needed.
+"""
+function establish_check!(soa::PanCore.AnySoA, i::Int, ep::HBADEcoParams, cst::HBADConst, o::Int, last::Int)::Int
+  csr = soa.csr
+  species = csr.c_species; age = csr.c_age; tph = csr.c_tph; dq = csr.c_dq; hh = csr.c_h
+  sc = soa.scalar
+  so = Int(soa.refs.species[i]) - 1
+  nsp = Int(soa.refs.species[i+1]) - Int(soa.refs.species[i])
+  smat = csr.sp_mature; sest = csr.sp_estab
+  @inbounds for j in 1:nsp
+    smat[so+j] = false; sest[so+j] = false
+  end
+  @inbounds for k in 1:last
+    j = Int(species[o+k])
+    Float64(age[o+k]) >= ep.maturity[j] && (smat[so+j] = true)
+  end
+  _, sdi, sdm = stand_stats(species, tph, dq, o, last, ep.sdimax)
+  rd = sdm > 0 ? sdi / sdm : 0.0
+  cls = shade_class_of(rd, ep.min_rel_rd)
+  sc.shade_class[i] = UIntType(cls)
+  rng = sc.rng[i]
+  nnew = 0
+  @inbounds for j in 1:nsp
+    (ep.seed_rain || smat[so+j]) || continue
+    u = _draw(rng)
+    u < ep.prob_estab[j] * ep.light[cls*5+ep.shade_tol[j]] || continue
+    kmatch = 0
+    for k in 1:last
+      if Int(species[o+k]) == j && age[o+k] == one(FloatType)
+        kmatch = k; break
+      end
+    end
+    if kmatch > 0
+      p = ep.pri[j]
+      merge_cohort!(tph, dq, hh, o + kmatch, ep.estab_tph[j], cst.estab_dq, 1.3 + chapman_richards(p.hd_a, p.hd_b, p.hd_c, cst.estab_dq))
+    else
+      sest[so+j] = true; nnew += 1
+    end
+  end
+  return nnew
 end
 
 function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, current_time::Int; ctx::NamedTuple)
@@ -205,21 +322,27 @@ function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, curren
   PanCore.@maybe_threads PanCore.PARALLEL_SITES[] for i in 1:soa.n
     @inbounds begin
       if soa.scalar.active[i]
-        site_year!(soa, i, eco[soa.scalar.eco_id[i]], cst)
+        site_prepare!(soa, i, eco[soa.scalar.eco_id[i]], cst)
+      else
+        soa.scalar._new_cohort_counts[i] = soa.scalar.live[i]
       end
-      soa.scalar._new_cohort_counts[i] = soa.scalar.live[i]
     end
   end
-  # shrink CSR capacity only when a cohort actually died (keeps the steady state allocation-free)
-  refs = soa.refs.cohort; live = soa.scalar.live
-  shrink = false
+  # resize the CSR only when a cohort died or was established (keeps the steady state allocation-free)
+  refs = soa.refs.cohort; cnt = soa.scalar._new_cohort_counts
+  resize = false
   @inbounds for i in 1:soa.n
-    if live[i] != Int(refs[i+1]) - Int(refs[i])
-      shrink = true
+    if max(Int(cnt[i]), 1) != Int(refs[i+1]) - Int(refs[i])
+      resize = true
       break
     end
   end
-  shrink && PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+  resize && PanCore.readjust_soa!(soa, (cohort=cnt,))
+  PanCore.@maybe_threads PanCore.PARALLEL_SITES[] for i in 1:soa.n
+    @inbounds if soa.scalar.active[i]
+      site_commit!(soa, i, eco[soa.scalar.eco_id[i]], cst)
+    end
+  end
   return nothing
 end
 
@@ -268,4 +391,78 @@ function set_cohort_bio!(site::SiteView, k::Integer, newbio::Real)
   end
   site.c_bio[k] = FloatType(nb)
   return nothing
+end
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Planting API (scenario harvest / plant actions; also usable by tests)
+# ---------------------------------------------------------------------------------------------------------------------
+"""
+    plant_slot_needed(site, species_local, age) -> Int
+
+1 if `plant!` has to append a cohort (no cohort of this species and age exists on the site), 0 if it merges into an existing one.
+"""
+function plant_slot_needed(site::SiteView, species::Integer, age::Real=1)::Int
+  n = Int(site.live)
+  cs = site.c_species; ca = site.c_age
+  a = FloatType(age)
+  @inbounds for k in 1:n
+    Int(cs[k]) == Int(species) && ca[k] == a && return 0
+  end
+  return 1
+end
+
+"""
+    plant!(site, species_local, tph; age=1, dq=nothing, prior=nothing, cst=FIXED[]) -> Int
+
+Plant / add `tph` trees/ha of eco-local species `species_local` at `age` (years) and quadratic mean diameter `dq` (cm; default `cst.estab_dq` = the
+establishment state, clamped to [0.25, 170]). Same state initialisation as natural establishment: `h = 1.3 + CR(dq)` (Chapman-Richards of the
+species prior), `c_bio` = allometric AGB of (tph, dq). If a cohort of the same species and age exists the trees are merged into it (densities add,
+dq = quadratic mean, h = tph-weighted mean); otherwise a cohort is appended. Site totals `B`, `BA`, `SDI` are updated incrementally (`RD` is refreshed by
+the next annual step, which recomputes it from the state). Returns the index of the cohort (1-based within the site).
+
+CSR capacity is the CALLER's job, exactly as for `add_cohort!` in `_inject_observed_cohorts!`: before appending, set
+`site._new_cohort_counts = site.live + plant_slot_needed(site, sp, age)` (summed over all plantings of that site) for every planted site and call
+`PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))` once (note the SiteView must be re-fetched afterwards). `Pan.plant_sites!`
+does this for a list of plantings. Throws a descriptive error when no free slot exists. Reads the module-level `PRIORS[]` / `ECO_GIDS[]`.
+"""
+function plant!(site::SiteView, species::Integer, tph::Real; age::Real=1, dq::Union{Nothing,Real}=nothing,
+                prior::Union{Nothing,SpPrior}=nothing, cst::HBADConst=FIXED[])
+  t = Float64(tph)
+  (isfinite(t) && t > 0) || error("HBAD plant!: tph must be positive and finite, got $tph")
+  age >= 0 || error("HBAD plant!: age must be >= 0, got $age")
+  p = prior === nothing ? PRIORS[].sp[global_species(Int(site.eco_id), species)] : prior
+  d = clamp(dq === nothing ? cst.estab_dq : Float64(dq), HB_DQ_MIN, HB_DQ_MAX)
+  h = 1.3 + chapman_richards(p.hd_a, p.hd_b, p.hd_c, d)
+  n = Int(site.live)
+  cs = site.c_species; ca = site.c_age
+  a = FloatType(age)
+  kk = 0
+  @inbounds for k in 1:n
+    if Int(cs[k]) == Int(species) && ca[k] == a
+      kk = k; break
+    end
+  end
+  if kk > 0
+    ob = Float64(site.c_bio[kk])
+    oba = _PI4E4 * Float64(site.c_dq[kk])^2 * Float64(site.c_tph[kk]); osd = Float64(site.c_tph[kk]) * (Float64(site.c_dq[kk]) / HB_REINEKE_REF)^HB_REINEKE
+    merge_cohort!(site.c_tph, site.c_dq, site.c_h, kk, t, d, h)
+    nb = agb_of(p, Float64(site.c_tph[kk]), Float64(site.c_dq[kk]))
+    site.c_bio[kk] = FloatType(nb)
+    site.B += FloatType(nb - ob)
+    site.BA += FloatType(_PI4E4 * Float64(site.c_dq[kk])^2 * Float64(site.c_tph[kk]) - oba)
+    site.SDI += FloatType(Float64(site.c_tph[kk]) * (Float64(site.c_dq[kk]) / HB_REINEKE_REF)^HB_REINEKE - osd)
+    return kk
+  end
+  n < length(cs) || error("HBAD plant!: site has no free cohort slot (capacity $(length(cs)), live $n); set _new_cohort_counts = live + plant_slot_needed(...) and PanCore.readjust_soa! first")
+  k = n + 1
+  site.live = k
+  age > 1 && (site.old += 1)
+  cs[k] = UIntType(species); ca[k] = a
+  site.c_tph[k] = FloatType(t); site.c_dq[k] = FloatType(d); site.c_h[k] = FloatType(h); site.c_bal[k] = zero(FloatType)
+  b = agb_of(p, t, d)
+  site.c_bio[k] = FloatType(b)
+  site.B += FloatType(b)
+  site.BA += FloatType(_PI4E4 * d * d * t)
+  site.SDI += FloatType(t * (d / HB_REINEKE_REF)^HB_REINEKE)
+  return k
 end
