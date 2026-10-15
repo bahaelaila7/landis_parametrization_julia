@@ -1692,38 +1692,45 @@ function parametrize(; cohorts_db_path::String,
              search_mode == "nsga2" ? (archive_cap=cmaes_archive_cap, nsga2_pop=nsga2_pop, nsga2_offspring=nsga2_offspring, nsga2_eta_c=nsga2_eta_c, nsga2_eta_m=nsga2_eta_m, nsga2_pc=nsga2_pc, nsga2_pm=nsga2_pm, sobol_init=nsga2_sobol_init) :
              search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed, balanced_quality=balanced_quality, cmame_mo_rank=cmame_mo_rank, archive_by_sp=archive_by_sp, bounds_by_sobol=bounds_by_sobol, top_seeds=top_seeds, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
              NamedTuple()
-  _driver_result = driver(; ref_soa=ref_soa,
-    output_dir=output_dir,
-    splots=splots,
-    spdf_plts=spdf_plts,
-    spinup_cohorts=spinup_cohorts,
-    site_sim_years=site_sim_years,
-    species_list=species_list,
-    eco_list=eco_list,
-    eco_species_ids=eco_species_ids,
-    spinup=spinup,
-    search_tier=tier,
-    TRIALS=TRIALS,
-    resume_from=resume_from,
-    start_from=start_from,
-    force_restart_from_random=force_restart_from_random,
-    n_reps=n_reps,
-    sobol_candidates_db=sobol_candidates_db,
-    sobol_top_frac=sobol_top_frac,
-    loss_params=loss_params,
-    no_establishment=no_establishment,
-    injection_cohorts=injection_cohorts,
-    n_output_plots=n_output_plots,
-    val_splots=val_splots,
-    val_ref_soa=val_ref_soa,
-    val_spdf_plts=val_spdf_plts,
-    val_site_sim_years=val_site_sim_years,
-    val_spinup_cohorts=val_spinup_cohorts,
-    val_injection_cohorts=val_injection_cohorts,
-    cycle_years=cycle_years,
-    rng=rng,
-    debug=debug,
-    cmaes_kw...)
+  # every driver may switch site-parallelism off (candidate mode); restore the caller's setting on ANY exit (normal end, early
+  # `return search_state`, error) — the Igel early return used to leave it false for the rest of the process (B2).
+  _prev_parallel_sites = PARALLEL_SITES[]
+  _driver_result = try
+    driver(; ref_soa=ref_soa,
+      output_dir=output_dir,
+      splots=splots,
+      spdf_plts=spdf_plts,
+      spinup_cohorts=spinup_cohorts,
+      site_sim_years=site_sim_years,
+      species_list=species_list,
+      eco_list=eco_list,
+      eco_species_ids=eco_species_ids,
+      spinup=spinup,
+      search_tier=tier,
+      TRIALS=TRIALS,
+      resume_from=resume_from,
+      start_from=start_from,
+      force_restart_from_random=force_restart_from_random,
+      n_reps=n_reps,
+      sobol_candidates_db=sobol_candidates_db,
+      sobol_top_frac=sobol_top_frac,
+      loss_params=loss_params,
+      no_establishment=no_establishment,
+      injection_cohorts=injection_cohorts,
+      n_output_plots=n_output_plots,
+      val_splots=val_splots,
+      val_ref_soa=val_ref_soa,
+      val_spdf_plts=val_spdf_plts,
+      val_site_sim_years=val_site_sim_years,
+      val_spinup_cohorts=val_spinup_cohorts,
+      val_injection_cohorts=val_injection_cohorts,
+      cycle_years=cycle_years,
+      rng=rng,
+      debug=debug,
+      cmaes_kw...)
+  finally
+    PARALLEL_SITES[] = _prev_parallel_sites
+  end
   POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, injection_cohorts, spinup_cohorts, output_dir, n_species, tier))
   return _driver_result
 end
@@ -4273,6 +4280,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
   _run(p; ws=_work_soa) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, work_soa=ws)
   # Candidate mode: sites go serial for EVERY eval in this driver (init population, RANKW freeze, gen loop, val),
   # so each eval is single-threaded/deterministic and the gen loop parallelizes over candidates. Restored in `finally`.
+  _prev_parallel_sites_igel = PARALLEL_SITES[]
   PARALLEL_MODE[] == :candidate && (PARALLEL_SITES[] = false)
   function _fitness(rep_results)
     run_result, eco_losses, _ = _agg_reps(rep_results)
@@ -4509,7 +4517,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
   finally
-    PARALLEL_SITES[] = true   # restore site-parallelism (candidate mode set it false for this driver)
+    PARALLEL_SITES[] = _prev_parallel_sites_igel   # restore what this driver found (candidate mode set it false)
     stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
     try; close(_reseed_io); catch; end
     try
@@ -4764,7 +4772,6 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
   finally
-    PARALLEL_SITES[] = true   # restore site-parallelism (candidate mode set it false for this driver)
     stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
     try
       mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
@@ -4898,7 +4905,6 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
   finally
-    PARALLEL_SITES[] = true   # restore site-parallelism (candidate mode set it false for this driver)
     stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
     try
       mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
