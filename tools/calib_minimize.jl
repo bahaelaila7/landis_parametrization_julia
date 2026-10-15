@@ -31,6 +31,7 @@ ov = Dict{String,Any}("output_dir" => joinpath(outd, "_ctx"), "trials" => 1, "ig
 haskey(ENV, "CALIB_W_SCOPE") && (ov["w_scope"] = ENV["CALIB_W_SCOPE"])        # the scoring flags of the Sim A run being refined
 haskey(ENV, "CALIB_DEATH_TERM") && (ov["death_term"] = ENV["CALIB_DEATH_TERM"])
 P.run_from_yaml(ARGS[1]; overrides=ov)
+P.PARALLEL_SITES[] = true   # the 1-trial igelmo context run returns early in candidate mode and leaves site-parallelism off (B2, fixed in src on branch refactor)
 d = CTX[]; d === nothing && error("training context was not captured")
 eco_list = d.eco_list; species_list = d.species_list; eco_species_ids = d.eco_species_ids
 include(joinpath(@__DIR__, "calib_levers.jl"))
