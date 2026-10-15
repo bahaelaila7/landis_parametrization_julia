@@ -65,7 +65,7 @@ CTXS = [_split_ctx(_split_df(nm)) for nm in SPLITS]
 sp = CTXS[1].sp   # (first split; used by callers for counts)
 # Sim B (dual_mode: b): free simulation from year-0 cohorts with establishment; pairs = Σ AGB per (cycle, eco cell,
 # species, age bin), sim vs obs (Pan.resim_simB_paired, same as test/tost_sim_obs.jl). Cells are landscape aggregates.
-SIMB = lowercase(string(g("dual_mode", "off"))) == "b"
+SIMB = P._parse_dual_mode(g("dual_mode", "off")) === :b
 # SIMB_MIN_BIN (default 3 = cohorts older than 20 yr with bins_idx [10,20,…]): Sim B observed cohorts are timber-only
 # (DIA ≥ 5 in; saplings dropped), while the simulation has no size cutoff ⇒ the youngest bins are not comparable (D12).
 SIMB_MIN_BIN = parse(Int, get(ENV, "SIMB_MIN_BIN", "3"))

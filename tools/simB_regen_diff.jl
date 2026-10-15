@@ -30,7 +30,7 @@ else
   P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
   P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
   D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
-  let dm = g("dual_mode", false); P.DUAL_MODE[] = dm == "joint" ? :joint : dm == "b" ? :b : :off; end
+  P.DUAL_MODE[] = P._parse_dual_mode(g("dual_mode", false))
   P.TIER_B[] = Int(g("tier_b", 4)); PU.CELL_NORM[] = Bool(g("cell_normalize", false))
   P.SIMB_SPINUP[] = Bool(g("simB_spinup", true))   # honor non-spinup Sim B (start from observed cohorts)
   no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("seed", 1))))

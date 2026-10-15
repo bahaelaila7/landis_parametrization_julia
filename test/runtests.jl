@@ -8,6 +8,7 @@ using Test, Pan
   @testset "unit_loss" begin include("unit_loss.jl") end
   @testset "unit_api" begin include("unit_api.jl") end
   @testset "unit_config" begin include("unit_config.jl") end
+  @testset "unit_fixes" begin include("unit_fixes.jl") end
 
   # Pre-existing asserting scripts: run as subprocesses (they call exit(), define globals / @check macros, or print-and-exit-code).
   julia = Base.julia_cmd()

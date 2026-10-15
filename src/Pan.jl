@@ -6060,6 +6060,18 @@ function _prep_kwargs(; cohorts_db_path::String, eco_field, tablename::String, f
     RNG=rng)
 end
 
+# yaml `dual_mode` → :off | :joint | :b. Accepts Bool (true = joint, the pre-June spelling) and strings in any case
+# ("off"/"false", "joint"/"true", "b"). The single parser for every reader (run_from_yaml, the disturbance-shock setup, tools).
+function _parse_dual_mode(v)::Symbol
+  v === true && return :joint
+  (v === false || v === nothing) && return :off
+  s = lowercase(strip(String(v)))
+  s in ("off", "false") && return :off
+  s in ("joint", "true") && return :joint
+  s == "b" && return :b
+  error("dual_mode must be off | joint | b (or true/false), got $(repr(v))")
+end
+
 """
     prep_kwargs_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, rng=nothing) -> NamedTuple
 
@@ -6077,7 +6089,7 @@ Per-fold scripts can override with `prepare_from_cfg(cfg; fold_index=k)`.
 function _configure_disturbance_shock!(cfg::AbstractDict)
   g = _cfg_getter(cfg)
   lbi = Bool(g("loss_before_injection", true))
-  dm = g("dual_mode", "off"); dual = !(dm === false || String(dm) in ("off", "false"))
+  dual = _parse_dual_mode(g("dual_mode", "off")) !== :off
   # Sim A needs sync injection; Sim B (dual mode / simB_disturb_only) uses the full removals + partial drops on its own
   on = lbi && ((Bool(g("override_injection", OVERRIDE_INJECTION[])) && Bool(g("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))) || dual || Bool(g("simB_disturb_only", false)))
   explicit = g("disturbance_full_removals", nothing)
@@ -6218,9 +6230,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(get_cfg("override_injection_disturbance", String(OVERRIDE_INJECTION_DISTURBANCE[])))
   Data.USE_FIA_CYCLE[] = Bool(get_cfg("fia_cycle", false))   # tier-4/5 cycles from FIA `cycle` vs computed split
   Data.FIA_CYCLE_MERGE[] = Int(get_cfg("fia_cycle_merge", 3))   # merge N consecutive FIA cycles into one group
-  DUAL_MODE[] = let v = get_cfg("dual_mode", "off")          # off (A only) | joint (A⊕B) | b (B only, seed from A)
-    v === true ? :joint : v === false ? :off : Symbol(lowercase(String(v)))
-  end
+  DUAL_MODE[] = _parse_dual_mode(get_cfg("dual_mode", "off"))   # off (A only) | joint (A⊕B) | b (B only, seed from A)
   TIER_B[] = Int(get_cfg("tier_b", 4))                       # Sim B's tier (A's tier = config `tier`)
   LBSA_STRETCH_LEN[] = Int(get_cfg("lbsa_stretch_len", 150)) # LBSA stretch length
   LBSA_STALE_RATIO[] = Float64(get_cfg("lbsa_stale_ratio", 0.95)) # LBSA freeze-detection uphill-attempt ratio
