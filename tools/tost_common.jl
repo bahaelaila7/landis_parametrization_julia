@@ -86,6 +86,11 @@ function _paired_one(params, c, offset)
     pr.plot_id = offset .+ pr.plot
     return pr
   end
+  # Sim A never applies stochastic whole-cohort mortality: PROB_MORT is pinned at 0 there, or (death_term likelihood / in-tandem) a fitted
+  # score-only parameter that fit_params zeroes in Sim A. Evaluate the same way (it used to be applied here: B25).
+  if hasproperty(params, :PROB_MORT_SPP) && any(v -> any(!iszero, v), params.PROB_MORT_SPP)
+    params = deepcopy(params); for v in params.PROB_MORT_SPP; fill!(v, zero(eltype(v))); end
+  end
   rs = _mk_sites(c.sp; rng=rng, spinup=false, no_establishment=no_estab)
   idict = P._build_injection_dict(c.inj, rs); iyears = Set(Int.(c.inj.sim_year))
   res = P.fit_params(rs, params, c.msy, n_species, eco_species_ids, c.spdf_plts, c.ssy, false, c.spc, loss_params;
