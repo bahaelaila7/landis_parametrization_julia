@@ -2108,6 +2108,13 @@ function build_split_scales(lp::PU.LossParams, seed::PU.LossScales, search_tier:
     dual_b=nothing, cell_plots=nothing, train::Union{Nothing,PU.LossScales}=nothing)
   main = compute_loss_scales(lp, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; cell_plots=cell_plots, cbal=seed.cbal, ncoh=seed.ncoh,
     rankw = train === nothing ? nothing : train.rankw, softplus_cell_from = train)
+  if train !== nothing && dual_b === nothing && T4_PRIMARY[] && !(search_tier == 4 && t4_ref !== nothing)
+    # Tier-4-only run (T4_PRIMARY, no Sim B) whose val reference is evaluated as Sim A (tier 3): its per-cell objective has always been
+    # normalised by the TRAIN tier-4 tables (the val Sim A reference never produced tier-4 tables of its own). Kept as is: the loss
+    # kernels use the val reference's own fields, `_mo_objectives` reads the train cell scales.
+    main = PU.LossScales(w_global=main.w_global, agb_global=main.agb_global, w_cell=train.w_cell, agb_cell=train.agb_cell, rankw=main.rankw,
+      softplus_beta=main.softplus_beta, softplus_beta_cell=main.softplus_beta_cell, cbal=main.cbal, ncoh=main.ncoh)
+  end
   dual_b === nothing && return main, nothing
   bs = compute_loss_scales(dual_b.loss_params, dual_b.tier, dual_b.spdf_plts, dual_b.t4_ref, eco_species_ids, n_species; cell_plots=dual_b.cell_plots,
     cbal=seed.cbal, ncoh=seed.ncoh, rankw=main.rankw, softplus_cell_from=(train === nothing ? main : train))
