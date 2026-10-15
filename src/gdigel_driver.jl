@@ -277,7 +277,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool,
     TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing,
     start_from::Union{Nothing,String}=nothing, n_reps::Int=1, no_establishment::Bool=false, injection_cohorts=nothing,
-    gd_opts::AbstractDict=Dict{String,Any}(), scale_seed::PU.LossScales=PU.LossScales(), kw...)
+    gd_opts::AbstractDict=Dict{String,Any}(), scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), kw...)
   gd = resolve_gdigel(gd_opts)   # validated against GDIGEL_LIST, defaults filled (idempotent for a resolved dict)
   o(k) = gd[k]
   mu = o("mu"); σ0 = o("sigma0"); σstop = o("sigma_stop"); σmin = o("sigma_min")
@@ -347,7 +347,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   # evaluate a batch: candidate-parallel (each eval sites-serial) when PAN_PARALLEL=candidate, else sequential sites-parallel
   function evbatch(us)
     out = Vector{Any}(undef, length(us))
-    if PARALLEL_MODE[] == :candidate
+    if candidate_parallel(exec)
       # :static — the work SoA (and the PnET scratch pool) are indexed by threadid, which :dynamic tasks may not keep.
       # Each eval is sites-serial (`ev` passes parallel_sites=false in candidate mode).
       Threads.@threads :static for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[Threads.threadid()], sites_parallel=false); end

@@ -23,7 +23,7 @@ for k in $(seq 1 "$NF"); do
   else
     echo "  fold_$k: generating (scoring archive on val)..."
     $J --threads=4 -e \
-      "using Pan; Pan.CV_RESELECT[]=true; Pan.run_from_yaml(\"$CFG\"; overrides=Dict(\"n_folds\"=>$NF, \"fold_index\"=>$k))" \
+      "using Pan; Pan.run_from_yaml(\"$CFG\"; exec=Pan.exec_options_from_env(cv_reselect=true), overrides=Dict(\"n_folds\"=>$NF, \"fold_index\"=>$k))" \
       2>&1 | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -aiE 'VAL-ranked|ERROR' | sed "s/^/    /"
   fi
 done
