@@ -6091,7 +6091,7 @@ function _configure_disturbance_shock!(cfg::AbstractDict)
   lbi = Bool(g("loss_before_injection", true))
   dual = _parse_dual_mode(g("dual_mode", "off")) !== :off
   # Sim A needs sync injection; Sim B (dual mode / simB_disturb_only) uses the full removals + partial drops on its own
-  on = lbi && ((Bool(g("override_injection", OVERRIDE_INJECTION[])) && Bool(g("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))) || dual || Bool(g("simB_disturb_only", false)))
+  on = lbi && ((Bool(g("override_injection", false)) && Bool(g("override_injection_sync", false))) || dual || Bool(g("simB_disturb_only", false)))
   explicit = g("disturbance_full_removals", nothing)
   default = joinpath(dirname(@__DIR__), "data", "cohort_disturbance_full.parquet")
   path = ""
@@ -6217,17 +6217,17 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
 
   # Injection-override flags (module Refs read at injection time). Default = the current Ref
   # value, so omitting a key keeps the in-code default; set them in yaml to control a run.
-  OVERRIDE_INJECTION[] = Bool(get_cfg("override_injection", OVERRIDE_INJECTION[]))
-  OVERRIDE_INJECTION_REPLACE[] = Bool(get_cfg("override_injection_replace", OVERRIDE_INJECTION_REPLACE[]))
-  OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))
+  OVERRIDE_INJECTION[] = Bool(get_cfg("override_injection", false))
+  OVERRIDE_INJECTION_REPLACE[] = Bool(get_cfg("override_injection_replace", false))
+  OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", false))
   LOSS_BEFORE_INJECTION[] = Bool(get_cfg("loss_before_injection", true))
   _configure_disturbance_shock!(cfg)
   EXCLUDE_RECRUITS_AT_ENTRY[] = Bool(get_cfg("exclude_recruits_at_entry", true))
   W_SCOPE[] = Symbol(get_cfg("w_scope", "all")); W_SCOPE[] in (:all, :survivors) || error("w_scope must be all | survivors")
   DEATH_TERM[] = Symbol(get_cfg("death_term", "none")); DEATH_TERM[] in (:none, :likelihood) || error("death_term must be none | likelihood")
   BSP.DEATH_PMORT_SIMA[] = DEATH_TERM[] === :likelihood
-  OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", OVERRIDE_INJECTION_NOISE[]))
-  OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(get_cfg("override_injection_disturbance", String(OVERRIDE_INJECTION_DISTURBANCE[])))
+  OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", 0.0))
+  OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(get_cfg("override_injection_disturbance", "off"))
   Data.USE_FIA_CYCLE[] = Bool(get_cfg("fia_cycle", false))   # tier-4/5 cycles from FIA `cycle` vs computed split
   Data.FIA_CYCLE_MERGE[] = Int(get_cfg("fia_cycle_merge", 3))   # merge N consecutive FIA cycles into one group
   DUAL_MODE[] = _parse_dual_mode(get_cfg("dual_mode", "off"))   # off (A only) | joint (A⊕B) | b (B only, seed from A)
