@@ -1,0 +1,22 @@
+# Pan test suite.   cd <worktree> && source wt_env.sh && ./julia_gdal.sh --project=. --threads=2 test/runtests.jl
+using Test, Pan
+
+@testset "Pan" begin
+  # New unit suites: included in-process (each file is wrapped in its own module).
+  @testset "unit_pancore" begin include("unit_pancore.jl") end
+  @testset "unit_params" begin include("unit_params.jl") end
+  @testset "unit_loss" begin include("unit_loss.jl") end
+  @testset "unit_api" begin include("unit_api.jl") end
+  @testset "unit_config" begin include("unit_config.jl") end
+
+  # Pre-existing asserting scripts: run as subprocesses (they call exit(), define globals / @check macros, or print-and-exit-code).
+  julia = Base.julia_cmd()
+  proj = dirname(@__DIR__)
+  for f in ("hbad_unit.jl", "pnet_unit.jl", "disturbance_shock_unit.jl", "mo_gdigel_unit.jl", "split_cap_test.jl", "simab_unit.jl")
+    isfile(joinpath(@__DIR__, f)) || continue
+    @testset "$f (subprocess)" begin
+      cmd = Cmd(`$julia --project=$proj --threads=2 $(joinpath(@__DIR__, f))`; dir=proj)
+      @test success(pipeline(cmd; stdout=stdout, stderr=stderr))
+    end
+  end
+end

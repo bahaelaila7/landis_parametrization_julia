@@ -58,3 +58,9 @@ StatsBase = "0.34"
 Term = "2.0.8"
 UMAP = "0.3.0"
 YAML = "0.4.16"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5f14d2ba6"
+
+[targets]
+test = ["Test"]
