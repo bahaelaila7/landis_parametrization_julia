@@ -12,66 +12,75 @@ import Sobol
 const LA = LinearAlgebra
 import ..MOLBSA: MOFitness, MOCandidate, dominates
 
-export IgelState, ask, tell!, is_search_over
+export IgelState, IgelOptions, ask, tell!, is_search_over
 
-# Fraction of reseeds (see `ask`) drawn UNIFORM-RANDOM in u-space instead of from the shared Sobol sequence.
-# A module-level Ref (NOT an IgelState field) so it can be flipped on a stop→resume WITHOUT changing the
-# serialized state layout (old checkpoints still deserialize). 0.0 ⇒ all-Sobol (backward-compatible: the
-# guard short-circuits, so no extra RNG draw). Set from `igel_reseed_random_frac` at launch.
-const RESEED_RANDOM_FRAC = Ref{Float64}(0.0)
+"""
+    IgelOptions
 
-# Live overrides for the two RESEED knobs that are otherwise SERIALIZED IgelState fields (so a resume would
-# restore the checkpoint's value and ignore the config). >=0 ⇒ use this instead of the struct field; the sentinel
-# <0 ⇒ fall back to the struct field (default: normal resume unchanged). Set from igel_{reseed_sigma,maturity}_override
-# at launch, so you can RETUNE reseed rate / maturity shield on a stop→resume without a fresh run.
-const RESEED_SIGMA_OVERRIDE = Ref{Float64}(-1.0)
-const MATURITY_OVERRIDE     = Ref{Int}(-1)
-@inline _reseed_sigma(st) = RESEED_SIGMA_OVERRIDE[] >= 0 ? RESEED_SIGMA_OVERRIDE[] : st.reseed_sigma
-@inline _maturity(st)     = MATURITY_OVERRIDE[]     >= 0 ? MATURITY_OVERRIDE[]     : st.maturity_period
+The run-time knobs of the Igel engine that are deliberately NOT fields of the serialized `IgelState` (so a checkpoint keeps its layout and a
+stop→resume can retune them). Immutable and passed explicitly to `ask` / `tell!`; the defaults give the canonical algorithm (no niching,
+all-Sobol reseeds, eigen square-root, struct-field reseed/maturity).
 
-# Sampling square-root of the covariance block. false (default) => eigendecomposition V*sqrt(Lambda) (as before).
-# true => Cholesky factor L (C = L*L') — SAME C-based algorithm and SAME N(0,C) sampling distribution, but the
-# factorization is ~n^3/3 flops vs a symmetric eigendecomposition's much larger constant, so `ask()` is cheaper
-# for large blocks (esp. cmaes_single_cov). A module Ref (not a state field) so it's toggleable on resume; C is
-# still what's stored, so checkpoints are unchanged. Set from `igel_cholesky` at launch.
-const USE_CHOLESKY = Ref{Bool}(false)
+  - `use_cholesky`: sampling square-root of the covariance block = Cholesky factor L (C = L L') instead of the eigendecomposition. SAME
+    N(0,C) distribution, cheaper `ask` for large blocks (cmaes_single_cov). C is what is stored, so checkpoints are unchanged.
+  - `reseed_random_frac`: fraction of reseeds (see `ask`) drawn UNIFORM-RANDOM in u-space instead of from the shared Sobol sequence.
+    0.0 ⇒ all-Sobol (the guard short-circuits: no extra RNG draw).
+  - `reseed_sigma_override`, `maturity_override`: ≥0 ⇒ use this instead of the (serialized) `reseed_sigma` / `maturity_period` struct field; the sentinel
+    <0 ⇒ the struct field (normal resume unchanged). Lets a stop→resume RETUNE the reseed rate / maturity shield.
+  - parameter-space niching, measured in NATIVE units / semantic quanta: `niche_q` (length-d per-slot native quantum; empty ⇒ niching inactive),
+    `u_to_nvec` (u-vector of the population → native value vector) and `params_to_nvec` (decoded params struct of the archive → same). Niche
+    distance is the quantum-scaled L∞ max_j |a_j-b_j|/q_j ("worst param, in quanta"), so `igel_niche_radius` is a native-quantum count
+    (r=1 ⇒ same niche iff every searched param is within one quantum). The two functions are type parameters `U`, `P`: calls are statically dispatched.
+"""
+struct IgelOptions{U,P}
+  use_cholesky::Bool
+  reseed_random_frac::Float64
+  reseed_sigma_override::Float64
+  maturity_override::Int
+  niche_q::Vector{Float64}
+  u_to_nvec::U
+  params_to_nvec::P
+end
+IgelOptions(; use_cholesky::Bool=false, reseed_random_frac::Real=0.0, reseed_sigma_override::Real=-1.0, maturity_override::Integer=-1,
+            niche_q::Vector{Float64}=Float64[], u_to_nvec=identity, params_to_nvec=identity) =
+  IgelOptions(use_cholesky, Float64(reseed_random_frac), Float64(reseed_sigma_override), Int(maturity_override), niche_q, u_to_nvec, params_to_nvec)
 
-# --- parameter-space niching, measured in NATIVE units / semantic quanta ---
-# Launch-set module Refs (NOT serialized IgelState fields → checkpoint layout unchanged), mirroring the
-# knobs above. NICHE_Q: length-d per-slot native quantum (empty ⇒ niching helpers inactive). U_TO_NVEC:
-# u-vector (population) → native value vector; PARAMS_TO_NVEC: decoded params struct (archive) → same.
-# Niche distance is quantum-scaled L∞: max_j |a_j-b_j|/q_j ("worst param, in quanta"), so `igel_niche_radius`
-# is a native-quantum count (r=1 ⇒ same niche iff every searched param is within one quantum).
-const NICHE_Q        = Ref{Vector{Float64}}(Float64[])
-const U_TO_NVEC      = Ref{Any}(identity)
-const PARAMS_TO_NVEC = Ref{Any}(identity)
+"`o` with niching switched on (or replaced): quanta `q` and the two native-vector maps."
+with_niching(o::IgelOptions, q::Vector{Float64}, u_to_nvec, params_to_nvec) =
+  IgelOptions(o.use_cholesky, o.reseed_random_frac, o.reseed_sigma_override, o.maturity_override, q, u_to_nvec, params_to_nvec)
+"`o` with the given reseed random fraction."
+with_reseed_random_frac(o::IgelOptions, f::Real) =
+  IgelOptions(o.use_cholesky, Float64(f), o.reseed_sigma_override, o.maturity_override, o.niche_q, o.u_to_nvec, o.params_to_nvec)
 
-@inline function _ndist(a::AbstractVector, b::AbstractVector)::Float64   # quantum-scaled L∞
-  q = NICHE_Q[]; m = 0.0
-  @inbounds for j in eachindex(a); d = abs(a[j] - b[j]) / q[j]; d > m && (m = d); end
+@inline _reseed_sigma(st, o::IgelOptions) = o.reseed_sigma_override >= 0 ? o.reseed_sigma_override : st.reseed_sigma
+@inline _maturity(st, o::IgelOptions)     = o.maturity_override     >= 0 ? o.maturity_override     : st.maturity_period
+
+@inline function _ndist(a::AbstractVector, b::AbstractVector, quanta::AbstractVector)::Float64   # quantum-scaled L∞
+  m = 0.0
+  @inbounds for j in eachindex(a); d = abs(a[j] - b[j]) / quanta[j]; d > m && (m = d); end
   return m
 end
 
 # per-point isolation = nearest-neighbour quantum-L∞ distance (higher ⇒ more isolated; <2 pts ⇒ Inf).
 # Parameter-space analogue of _crowding, for the niching tiebreak / most-redundant eviction.
-function _niso(V::Vector{<:AbstractVector})::Vector{Float64}
+function _niso(V::Vector{<:AbstractVector}, quanta::AbstractVector)::Vector{Float64}
   m = length(V); m <= 1 && return fill(Inf, m)
   iso = fill(Inf, m)
   @inbounds for i in 1:m, j in 1:m
     i == j && continue
-    d = _ndist(V[i], V[j]); d < iso[i] && (iso[i] = d)
+    d = _ndist(V[i], V[j], quanta); d < iso[i] && (iso[i] = d)
   end
   return iso
 end
 
-@inline _niching(st) = st.niche_radius > 0 && !isempty(NICHE_Q[])
+@inline _niching(st, o::IgelOptions) = st.niche_radius > 0 && !isempty(o.niche_q)
 
 # y ~ N(0, Cb): return the transform applied to a fresh standard-normal draw. Cholesky path falls back to a
 # jittered retry then eigen if Cb has drifted numerically non-PD (the C update is a PSD combination, but Float
 # round-off can nudge it), so it always returns a valid square-root.
-@inline function _sample_transform(Cb::AbstractMatrix, rng, m::Int)
+@inline function _sample_transform(Cb::AbstractMatrix, rng, m::Int, use_cholesky::Bool)
   z = randn(rng, m)
-  if USE_CHOLESKY[]
+  if use_cholesky
     F = LA.cholesky(LA.Symmetric(Cb); check=false)
     LA.issuccess(F) && return F.L * z
     jit = 1e-10 * (sum(LA.diag(Cb)) / m + 1e-30)
@@ -164,15 +173,15 @@ end
 # Sample one offspring per parent from N(x, σ²C); returns the μ offspring u-vectors (clamped to box).
 # With reseed_sigma>0, a converged parent (σ < reseed_sigma) instead emits a fresh Sobol point with a
 # fresh (1+1) strategy — re-exploration that gives the fixed population IPOP-like cumulative coverage.
-function ask(st::IgelState)::Vector{Vector{Float64}}
+function ask(st::IgelState, o::IgelOptions=IgelOptions())::Vector{Vector{Float64}}
   n = st.n; offs = Vector{Vector{Float64}}(undef, st.mu); st._off = Vector{Individual}(undef, st.mu); st._reseed = falses(st.mu)
-  rs = _reseed_sigma(st)                              # live-overridable reseed threshold (else the struct field)
+  rs = _reseed_sigma(st, o)                              # live-overridable reseed threshold (else the struct field)
   for k in 1:st.mu
     ind = st.pop[k]
     if rs > 0 && ind.sigma < rs
-      # re-explore from a fresh point: RESEED_RANDOM_FRAC of the time uniform-random in the box, else the
+      # re-explore from a fresh point: `reseed_random_frac` of the time uniform-random in the box, else the
       # shared low-discrepancy Sobol point. Guard short-circuits when frac==0 → no RNG draw, Sobol as before.
-      xo = (RESEED_RANDOM_FRAC[] > 0 && rand(st.rng) < RESEED_RANDOM_FRAC[]) ?
+      xo = (o.reseed_random_frac > 0 && rand(st.rng) < o.reseed_random_frac) ?
              rand(st.rng, n) : clamp.(Sobol.next!(st._sobol), 0.0, 1.0)
       offs[k] = xo
       st._off[k] = Individual(xo, st.sigma0, st.p_target, Matrix{Float64}(LA.I, n, n), zeros(n), ind.fx, 0)  # fresh strategy
@@ -180,7 +189,7 @@ function ask(st::IgelState)::Vector{Vector{Float64}}
     else
       xo = copy(ind.x)                              # per-block: y_b ~ N(0, C[b,b]), assembled into xo
       for idx in st.blocks
-        yb = _sample_transform(ind.C[idx, idx], st.rng, length(idx))   # eigen (default) or Cholesky sqrt (USE_CHOLESKY)
+        yb = _sample_transform(ind.C[idx, idx], st.rng, length(idx), o.use_cholesky)   # eigen (default) or Cholesky sqrt (IgelOptions.use_cholesky)
         @inbounds for (j, gi) in enumerate(idx); xo[gi] = ind.x[gi] + ind.sigma * yb[j]; end
       end
       xo = clamp.(xo, 0.0, 1.0)
@@ -207,12 +216,12 @@ end
 # fast non-dominated sort → front rank (1 = best). With niche_radius>0, two individuals only COMPETE
 # (can dominate one another) when within `r` in decision space — so explorers descending toward a
 # different optimum aren't killed by an individual already converged at another basin.
-function _fronts(Q::Vector{Individual}, nv::Vector{<:AbstractVector}, r::Float64)::Vector{Int}
+function _fronts(Q::Vector{Individual}, nv::Vector{<:AbstractVector}, r::Float64, quanta::AbstractVector)::Vector{Int}
   m = length(Q); objs = [ind.fx.objectives for ind in Q]
   S = [Int[] for _ in 1:m]; ndom = zeros(Int, m); rank = zeros(Int, m)
   for p in 1:m, q in 1:m
     p == q && continue
-    (!isempty(nv) && _ndist(nv[p], nv[q]) >= r) && continue   # niching: only compete within the quantum-L∞ radius
+    (!isempty(nv) && _ndist(nv[p], nv[q], quanta) >= r) && continue   # niching: only compete within the quantum-L∞ radius
     if dominates(objs[p], objs[q]); push!(S[p], q)
     elseif dominates(objs[q], objs[p]); ndom[p] += 1; end
   end
@@ -228,11 +237,11 @@ end
 
 # total preorder key over the combined set: (front rank, −crowding-within-front). Crowding is taken
 # in DECISION space when niching (to spread across basins), else in objective space (standard Igel).
-function _keys(Q::Vector{Individual}, nv::Vector{<:AbstractVector}, r::Float64)
-  rank = _fronts(Q, nv, r); cd = zeros(Float64, length(Q))
+function _keys(Q::Vector{Individual}, nv::Vector{<:AbstractVector}, r::Float64, quanta::AbstractVector)
+  rank = _fronts(Q, nv, r, quanta); cd = zeros(Float64, length(Q))
   for rr in 1:maximum(rank)
     idx = findall(==(rr), rank)
-    cd[idx] .= !isempty(nv) ? _niso([nv[i] for i in idx]) : _crowding([Q[i].fx.objectives for i in idx])
+    cd[idx] .= !isempty(nv) ? _niso([nv[i] for i in idx], quanta) : _crowding([Q[i].fx.objectives for i in idx])
   end
   return [(rank[i], -cd[i]) for i in eachindex(Q)]
 end
@@ -260,18 +269,19 @@ end
 end
 
 # Insert into the Pareto archive (dominance + crowding-eviction), mirroring MOCMAES.update_archive!.
-function _archive!(st::IgelState, cand::MOCandidate)::Bool
+function _archive!(st::IgelState, cand::MOCandidate, o::IgelOptions=IgelOptions())::Bool
   objs = cand.fx.objectives
   for m in st.archive; dominates(m.fx.objectives, objs) && return false; end
   filter!(m -> !dominates(objs, m.fx.objectives), st.archive)
-  if _niching(st)
-    cu = PARAMS_TO_NVEC[](cand.x)
-    same = findall(m -> _ndist(cu, PARAMS_TO_NVEC[](m.x)) < st.niche_radius, st.archive)   # same-niche members
+  if _niching(st, o)
+    q = o.niche_q; to_n = o.params_to_nvec
+    cu = to_n(cand.x)
+    same = findall(m -> _ndist(cu, to_n(m.x), q) < st.niche_radius, st.archive)   # same-niche members
     any(i -> st.archive[i].fx.aggregate <= cand.fx.aggregate, same) && return false        # a ≥-good rep exists ⇒ cull cand
     isempty(same) || deleteat!(st.archive, same)                                            # else drop the worse same-niche members
     push!(st.archive, cand)
     length(st.archive) > st.archive_cap &&
-      deleteat!(st.archive, argmin(_niso([PARAMS_TO_NVEC[](m.x) for m in st.archive])))     # cap: drop the most redundant
+      deleteat!(st.archive, argmin(_niso([to_n(m.x) for m in st.archive], q)))     # cap: drop the most redundant
   else
     push!(st.archive, cand)
     if length(st.archive) > st.archive_cap
@@ -289,13 +299,13 @@ end
 
 # One generation: rank parents+offspring, do the (1+1) success-based σ/C updates, select best μ,
 # fold offspring into the archive. `off_params` are the decoded params for the μ offspring.
-function tell!(st::IgelState, off_fxs::Vector{MOFitness}, off_params::Vector)::Bool
+function tell!(st::IgelState, off_fxs::Vector{MOFitness}, off_params::Vector, o::IgelOptions=IgelOptions())::Bool
   μ = st.mu
   for k in 1:μ; st._off[k].fx = off_fxs[k]; end
   resd = st._reseed
   Q = vcat(st.pop, st._off)                        # 2μ; rank everything together (consistent keys)
-  nv = _niching(st) ? [U_TO_NVEC[](ind.x) for ind in Q] : Vector{Float64}[]   # native decision vecs for niching
-  keys = _keys(Q, nv, st.niche_radius)
+  nv = _niching(st, o) ? [o.u_to_nvec(ind.x) for ind in Q] : Vector{Float64}[]   # native decision vecs for niching
+  keys = _keys(Q, nv, st.niche_radius, o.niche_q)
   # (1+1) success-based σ/C updates for non-reseed lineages (re-seeds start fresh, no update)
   for k in 1:μ
     resd[k] && continue
@@ -313,7 +323,7 @@ function tell!(st::IgelState, off_fxs::Vector{MOFitness}, off_params::Vector)::B
   new_pop = Individual[]
   for k in prot
     if resd[k]
-      ind = st._off[k]; ind.mature_at = g + _maturity(st)   # live-overridable shield length (else the struct field)
+      ind = st._off[k]; ind.mature_at = g + _maturity(st, o)   # live-overridable shield length (else the struct field)
     else
       ind = keys[μ+k] <= keys[k] ? st._off[k] : st.pop[k]   # (1+1) winner, maturity preserved
       ind.mature_at = st.pop[k].mature_at
@@ -331,7 +341,7 @@ function tell!(st::IgelState, off_fxs::Vector{MOFitness}, off_params::Vector)::B
   cur_best = st.representative
   for k in 1:μ
     cand = MOCandidate(off_params[k], off_fxs[k])
-    is_new |= _archive!(st, cand)
+    is_new |= _archive!(st, cand, o)
     off_fxs[k].aggregate < cur_best.fx.aggregate && (cur_best = cand)
   end
   st.current = cur_best

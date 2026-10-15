@@ -183,7 +183,7 @@ measure(fx::MOLBSA.MOFitness) = (sum(@view fx.objectives[1:2:end]), sum(@view fx
 
 # One generation with decoded candidates: record per-cell elites + representative, then drive the
 # engine with the aggregate quality. Returns true iff the representative (best aggregate) improved.
-function tell_mo!(w::CMAMAEMOState, cands::Vector{<:MOLBSA.MOCandidate}, meas::AbstractVector, xs_u::Vector{Vector{Float64}})
+function tell_mo!(w::CMAMAEMOState, cands::Vector{<:MOLBSA.MOCandidate}, meas::AbstractVector, xs_u::Vector{Vector{Float64}}; nds::Bool=false)
   eng = w.engine
   # quality = balanced rescaled (ΣW,ΣAGB) sum (scale-fair) OR the raw aggregate sum (legacy), per w.balanced.
   quals = w.balanced ? Float64[_balanced_q(meas[k], eng.lo, eng.hi) for k in eachindex(cands)] :
@@ -204,7 +204,7 @@ function tell_mo!(w::CMAMAEMOState, cands::Vector{<:MOLBSA.MOCandidate}, meas::A
       bestq = q
     end
   end
-  emitter_rank = w.mo_rank ? mo_sortperm(MOLBSA.MOFitness[c.fx for c in cands]) : nothing
+  emitter_rank = w.mo_rank ? mo_sortperm(MOLBSA.MOFitness[c.fx for c in cands]; nds) : nothing
   tell!(eng, quals, meas, xs_u; emitter_rank=emitter_rank)   # ranking + emitter update + thresholds + restart
   w.i = eng.i
   w.t = eng.emitter.sigma

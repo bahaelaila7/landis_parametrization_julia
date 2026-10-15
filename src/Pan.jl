@@ -1447,6 +1447,7 @@ function parametrize(; cohorts_db_path::String,
   top_seeds::Float64=0.2,
   dominance_species::String="exact",
   exec::ExecOptions=ExecOptions(),   # how the run executes (parallel mode, timing, validation switches); see ExecOptions
+  search::SearchOptions=SearchOptions(),   # config-derived knobs of the search engines (LBSA, Igel, MO-CMA-ES ranking); see SearchOptions
   rng::Random.AbstractRNG)
   _check_search_mode(search_mode)   # fail fast, before data preparation
 
@@ -1706,6 +1707,7 @@ function parametrize(; cohorts_db_path::String,
       rng=rng,
       debug=debug,
       exec=exec,
+      search=search,
       cmaes_kw...)
   POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; space, plugin, ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment))
   return _driver_result
@@ -2762,11 +2764,6 @@ end
 # handed in for artificial plots) whose tier-4 per-eco losses are stacked after Sim A's via fit_params'
 # dual_b. Errors attribute to the process each param governs (growth←A, introduction←B).
 # dual_mode: :off (Sim A only) · :joint (A⊕B) · :b (Sim B only, seed from A). t4_primary: see SimBOptions (src/options.jl).
-const LBSA_STRETCH_LEN = Ref{Int}(150)  # LBSA stretch length (yaml lbsa_stretch_len); shorter → faster freeze detection
-const LBSA_STALE_RATIO = Ref{Float64}(0.95)  # LBSA up_attempt_stale_ratio (yaml lbsa_stale_ratio); lower → freezes/reheats sooner
-const LBSA_TEMP_LIST_LEN = Ref{Int}(150)     # LBSA temperature-list length L (yaml lbsa_temp_list_len)
-const LBSA_REPLACE_OLDEST = Ref{Bool}(true)  # LBSA replace_oldest_instead_of_max (yaml lbsa_replace_oldest); false → overwrite the MAX each stretch (temp adapts every stretch instead of a full L-cycle)
-const LBSA_COOLING_ONLY = Ref{Bool}(false)   # LBSA cooling_only_schedule (yaml lbsa_cooling_only); true → max temp can only decrease (monotone cooling) so the search actually freezes → freeze/reheat/restart chain fires. false → temp self-regulates to accepted-uphill mean and never freezes.
 # SimBOptions.simb_spinup (yaml simB_spinup): Sim B start; true = spin up from a deficit (back-cast);
 #                       false = start from the OBSERVED year-0 cohorts (anchored), still free establishment
 # SimBOptions.simb_disturb_only (yaml simB_disturb_only): Sim B is PURELY FREE — NO cohort injection anywhere (natural AND artificial run free
@@ -2932,7 +2929,7 @@ function _filter_cached_to_df(cached, sampled_ids::Set)
   DataFrame(filtered, [:plot_id, :sim_year, :species_id, :age, :agb])
 end
 
-function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions())
+function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   # Fixed plot sample chosen once at startup so progress is comparable across iterations
@@ -3031,7 +3028,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plug
     end
     init_rr, init_el, _ = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, scales=scales, scoring, simb, plugin=plugin), loss_params, scoring)
     cur = LBSA.LBSACandidate(bio_params, _norm_loss(init_rr, init_el))
-    search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS, stretch_len=LBSA_STRETCH_LEN[], up_attempt_stale_ratio=LBSA_STALE_RATIO[], temp_list_len=LBSA_TEMP_LIST_LEN[], replace_oldest_instead_of_max=LBSA_REPLACE_OLDEST[], cooling_only_schedule=LBSA_COOLING_ONLY[])
+    search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS, stretch_len=search.lbsa.stretch_len, up_attempt_stale_ratio=search.lbsa.stale_ratio, temp_list_len=search.lbsa.temp_list_len, replace_oldest_instead_of_max=search.lbsa.replace_oldest, cooling_only_schedule=search.lbsa.cooling_only)
     search_state.sobol_cand_idx = 2
   else
     @info "Resuming from $resume_from"
@@ -3234,7 +3231,7 @@ end
 # threads internally), then updates the CMA-ES distribution. TRIALS is the total fit_params budget
 # (so it's comparable to LBSA); λ defaults to Hansen's 4+⌊3·ln(n)⌋. `ipop=true` enables IPOP
 # restarts (doubling λ from a fresh mean on σ-collapse / stagnation); default is a single run.
-function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions())
+function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   # Fixed plot sample chosen once at startup so progress is comparable across iterations
@@ -3908,7 +3905,7 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
   return save_ckpt
 end
 
-function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmaes_warmstart_seeds::Int=20, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions())
+function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmaes_warmstart_seeds::Int=20, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   all_plot_ids = UIntType.(unique(splots.plot_id))
@@ -4168,7 +4165,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
         end
       end
 
-      MOCMAES.tell!(search_state, fxs, xs_u)
+      MOCMAES.tell!(search_state, fxs, xs_u; nds=search.mocmaes_nds)
       search_state.n_evals = evals_done
 
       is_new_best = false
@@ -4235,7 +4232,7 @@ end
 # writer as parametrize_MOCMAES, but the engine is a population of μ (1+1)-CMA-ES individuals
 # (IgelMOCMAES) rather than one distribution — better front spread/extreme coverage. μ candidates
 # are evaluated per generation (serially); the initial population is a Sobol design.
-function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_sobol_pool_k::Int=1, igel_sobol_raw_mult::Int=2, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_reseed_random_frac::Float64=0.0, igel_maturity::Int=0, igel_seed_maturity::Bool=false, igel_warm_start::Bool=false, igel_freeze_seed_growth::Bool=false, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions())
+function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_sobol_pool_k::Int=1, igel_sobol_raw_mult::Int=2, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_reseed_random_frac::Float64=0.0, igel_maturity::Int=0, igel_seed_maturity::Bool=false, igel_warm_start::Bool=false, igel_freeze_seed_growth::Bool=false, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -4388,15 +4385,16 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
     end
   end
 
-  # Parameter-space niching (native units / semantic quanta): wire the launch-set Refs when igel_niche_radius>0.
-  # bio_params is the u_to_params decode template on both fresh & resume (only slot dims are read ⇒ template
-  # is immaterial, frozen-growth-safe). Left unset ⇒ NICHE_Q empty ⇒ _niching false ⇒ standard Igel (r=0).
-  if igel_niche_radius > 0
-    IgelMOCMAES.NICHE_Q[]        = PU.slot_quanta(space, slots)
-    IgelMOCMAES.U_TO_NVEC[]      = u -> PU.params_to_nativevec(PU.u_to_params(u, space, slots, bio_params), space, slots)
-    IgelMOCMAES.PARAMS_TO_NVEC[] = p -> PU.params_to_nativevec(p, space, slots)
-    @info "igelmo parameter-space niching ON: radius=$(igel_niche_radius) native-quanta (L∞) over $(length(slots)) slots"
+  # Engine options of this run (explicit, not state fields → they apply on fresh AND resume): the config-derived ones of `search.igel` + this
+  # driver's reseed fraction + parameter-space niching in native units / semantic quanta when igel_niche_radius>0 (the typed maps close over
+  # the decode template: bio_params is the u_to_params template on both fresh & resume — only slot dims are read ⇒ immaterial, frozen-growth-safe).
+  igel_opts = let base = IgelMOCMAES.with_reseed_random_frac(search.igel, igel_reseed_random_frac), bp = bio_params
+    igel_niche_radius > 0 ?
+      IgelMOCMAES.with_niching(base, PU.slot_quanta(space, slots),
+        u -> PU.params_to_nativevec(PU.u_to_params(u, space, slots, bp), space, slots),
+        p -> PU.params_to_nativevec(p, space, slots)) : base
   end
+  igel_niche_radius > 0 && @info "igelmo parameter-space niching ON: radius=$(igel_niche_radius) native-quanta (L∞) over $(length(slots)) slots"
 
   if TRIALS < 1 || search_state.n_evals >= TRIALS
     return search_state
@@ -4434,7 +4432,6 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
   est_gens = max(1, cld(TRIALS - evals_done, igel_mu))
   done_gens = isnothing(resume_from) ? 0 : search_state.i    # gens already completed (search_state.i == checkpoint/metrics counter)
   total_gens = done_gens + est_gens                          # size the bar to the WHOLE run so resume continues the counter/bar
-  IgelMOCMAES.RESEED_RANDOM_FRAC[] = igel_reseed_random_frac  # module Ref (not a state field) → applies on fresh AND resume
   # resume-safe reseed/σ trace → a SEPARATE csv (NOT metrics.csv, which appends under a fixed header): a stop→resume
   # just appends; header is written only when the file is new/empty. Columns: gen, mean σ, min σ, #below reseed floor, #reseeds.
   _reseed_path = joinpath(output_dir, "reseed_trace.csv"); _reseed_new = !isfile(_reseed_path) || filesize(_reseed_path) == 0
@@ -4450,7 +4447,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
         reset!(_timer)
       end
       _tg = time_ns()
-      offs = IgelMOCMAES.ask(search_state)
+      offs = IgelMOCMAES.ask(search_state, igel_opts)
       _t_ask = time_ns() - _tg
       off_fxs = Vector{MOLBSA.MOFitness}(undef, igel_mu)
       off_params = Vector{typeof(bio_params)}(undef, igel_mu)
@@ -4488,7 +4485,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
       # parent k, so both carry lineage k's frozen growth (bases[k]). After selection the same objects survive
       # by reference, so we realign bases by object identity — no change to IgelMOCMAES needed.
       _pre_pop = bases === nothing ? nothing : copy(search_state.pop)
-      is_new_best = IgelMOCMAES.tell!(search_state, off_fxs, off_params)
+      is_new_best = IgelMOCMAES.tell!(search_state, off_fxs, off_params, igel_opts)
       if bases !== nothing
         objbase = IdDict{Any,Any}()
         for k in 1:igel_mu; objbase[_pre_pop[k]] = bases[k]; objbase[search_state._off[k]] = bases[k]; end
@@ -4535,7 +4532,7 @@ end
 # checkpoints (mo_gen_finalize!) fire ONLY in integration; specialization phases are warmups (they advance
 # n_evals and log a light progress line). Schedule: cc_cycles × [spec cc_spec_gens + integ cc_integ_gens],
 # then integration until the TRIALS budget is exhausted.
-function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, single_cov::Bool=false, cc_group_size::Int=2, cc_spec_gens::Int=20, cc_integ_gens::Int=20, cc_cycles::Int=5, cc_fix_others::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions())
+function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, single_cov::Bool=false, cc_group_size::Int=2, cc_spec_gens::Int=20, cc_integ_gens::Int=20, cc_cycles::Int=5, cc_fix_others::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -4646,7 +4643,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
 
   # ---- one INTEGRATION generation: verbatim Igel over the whole vector (archive/metrics/ckpt) ----
   function integ_gen!()
-    offs = IgelMOCMAES.ask(search_state)
+    offs = IgelMOCMAES.ask(search_state, search.igel)
     m = search_state.mu
     off_fxs = Vector{MOLBSA.MOFitness}(undef, m)
     off_params = Vector{typeof(bio_params)}(undef, m)
@@ -4659,7 +4656,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
         gen_best_agg = fx_k.aggregate; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
       end
     end
-    is_new_best = IgelMOCMAES.tell!(search_state, off_fxs, off_params)
+    is_new_best = IgelMOCMAES.tell!(search_state, off_fxs, off_params, search.igel)
     search_state.n_evals = evals_done
     mo_gen_finalize!(gio, search_state, m, is_new_best, gb_run, gb_eco, gb_cached)
   end
@@ -4693,7 +4690,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     tot = 0.0; nsp = 0
     for s in 1:n_species
       st = cc.states[s]; st === nothing && continue
-      offs = IgelMOCMAES.ask(st)
+      offs = IgelMOCMAES.ask(st, search.igel)
       off_fxs = Vector{MOLBSA.MOFitness}(undef, st.mu)
       off_params = Vector{typeof(bio_params)}(undef, st.mu)
       for k in 1:st.mu
@@ -4704,7 +4701,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
         p = PU.u_to_params(u, space, slots, bio_params)   # decode WHOLE vector
         off_params[k] = p; off_fxs[k] = _fitness_species(_run(p), s); evals_done += 1
       end
-      IgelMOCMAES.tell!(st, off_fxs, off_params)                      # NSGA-II select K within group g
+      IgelMOCMAES.tell!(st, off_fxs, off_params, search.igel)                      # NSGA-II select K within group g
       tot += minimum(fx.aggregate for fx in off_fxs); nsp += 1
     end
     search_state.n_evals = evals_done
@@ -4776,7 +4773,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   return search_state
 end
 
-function parametrize_NSGA2(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, nsga2_pop::Int=48, nsga2_offspring::Union{Nothing,Int}=nothing, nsga2_eta_c::Float64=20.0, nsga2_eta_m::Float64=20.0, nsga2_pc::Float64=0.9, nsga2_pm::Float64=-1.0, sobol_init::Bool=true, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions())
+function parametrize_NSGA2(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, nsga2_pop::Int=48, nsga2_offspring::Union{Nothing,Int}=nothing, nsga2_eta_c::Float64=20.0, nsga2_eta_m::Float64=20.0, nsga2_pc::Float64=0.9, nsga2_pm::Float64=-1.0, sobol_init::Bool=true, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -4913,7 +4910,7 @@ end
 # (a quality-diversity set of fits), the representative is the lowest-aggregate elite. Same MO objective
 # vector, writer, archive logging and losses.duckdb schema as parametrize_MOCMAES; the emitter re-seeds
 # itself on convergence/stagnation (no external IPOP). Grid bounds are auto-scaled from the seed loss.
-function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmame_alpha::Float64=0.02, cmame_grid::Int=15, cmame_reseed_explore::Float64=1.0, cmame_restart_patience::Int=6, cmame_sobol_reseed::Bool=false, balanced_quality::Bool=false, cmame_mo_rank::Bool=false, archive_by_sp::Bool=false, bounds_by_sobol::Bool=false, top_seeds::Float64=0.2, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions())
+function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmame_alpha::Float64=0.02, cmame_grid::Int=15, cmame_reseed_explore::Float64=1.0, cmame_restart_patience::Int=6, cmame_sobol_reseed::Bool=false, balanced_quality::Bool=false, cmame_mo_rank::Bool=false, archive_by_sp::Bool=false, bounds_by_sobol::Bool=false, top_seeds::Float64=0.2, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -5124,7 +5121,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
       end
 
       is_new_best = archive_by_sp ? CMAMAE.tell_species_mo!(search_state, cands, sp_meas, sp_qual, xs_u) :
-                    CMAMAE.tell_mo!(search_state, cands, meas, xs_u)
+                    CMAMAE.tell_mo!(search_state, cands, meas, xs_u; nds=search.mocmaes_nds)
       search_state.n_evals = evals_done
       search_state.current = cands[gb_idx]
 
@@ -5385,7 +5382,7 @@ end
 # objective win-count (MOLBSA.mo_delta) rather than by the scalar total loss.
 # All tiers (1, 2, 3, 4) expose the per-ecoregion breakdown that the objective
 # vector is built from.
-function parametrize_MOLBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions())
+function parametrize_MOLBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   search_tier in (1, 2, 3, 4, 5) || error("parametrize_MOLBSA: unknown search_tier=$search_tier (expected 1, 2, 3, 4, or 5)")
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
@@ -6157,17 +6154,9 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   scoring, simb = scoring_from_config(cfg)   # scoring rule + Sim B options (shared with the analysis tools), passed explicitly below
   Data.USE_FIA_CYCLE[] = cfg["fia_cycle"]   # tier-4/5 cycles from FIA `cycle` vs computed split
   Data.FIA_CYCLE_MERGE[] = cfg["fia_cycle_merge"]   # merge N consecutive FIA cycles into one group
-  LBSA_STRETCH_LEN[] = cfg["lbsa_stretch_len"] # LBSA stretch length
-  LBSA_STALE_RATIO[] = cfg["lbsa_stale_ratio"] # LBSA freeze-detection uphill-attempt ratio
-  LBSA_TEMP_LIST_LEN[] = cfg["lbsa_temp_list_len"]   # LBSA temperature-list length L
-  LBSA_REPLACE_OLDEST[] = cfg["lbsa_replace_oldest"] # false → overwrite the max each stretch (responsive temp)
-  LBSA_COOLING_ONLY[] = cfg["lbsa_cooling_only"]    # true → monotone cooling → search actually freezes → reheat/restart fires
-  MOCMAES.USE_NDS[] = cfg["mocmaes_true_nds"] # true = MO-CMA-ES offspring ranked by NSGA-II Pareto fronts (vs default win-count)
-  MOCMAES.USE_NDS[] && @info "MO-CMA-ES offspring ranking: TRUE NSGA-II non-dominated sorting (Pareto fronts + crowding)"
+  search = search_options_from_config(cfg)   # LBSA / Igel / MO-CMA-ES-ranking knobs of the run, passed to the drivers explicitly
+  search.mocmaes_nds && @info "MO-CMA-ES offspring ranking: TRUE NSGA-II non-dominated sorting (Pareto fronts + crowding)"
   tables = bs_tables_from_cfg(cfg, _db_path)   # the Biomass Succession data tables of the run, passed explicitly (parametrize(tables=...))
-  IgelMOCMAES.USE_CHOLESKY[] = cfg["igel_cholesky"]   # igelmo sampling sqrt: Cholesky (cheaper) vs eigen; Ref → resume-safe
-  IgelMOCMAES.RESEED_SIGMA_OVERRIDE[] = cfg["igel_reseed_sigma_override"]   # >=0 retunes reseed threshold on RESUME (else struct field)
-  IgelMOCMAES.MATURITY_OVERRIDE[]     = cfg["igel_maturity_override"]             # >=0 retunes maturity shield on RESUME (else struct field)
 
   # plot modes (B8): the plots use the training context (same data prep, splits, strata, loss and scoring flags as a search)
   plot_mode = search_mode in ("plot_only", "plot_only_sobol")
@@ -6303,6 +6292,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     top_seeds=cfg["top_seeds"],
     dominance_species=cfg["dominance_species"],
     exec=exec,
+    search=search,
     rng=rng)
   plot_mode || return _res
   return search_mode == "plot_only" ?

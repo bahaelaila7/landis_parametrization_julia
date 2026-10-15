@@ -129,3 +129,41 @@ reset!(t::RunTimer) = (t.sim = 0; t.io = 0; t)
   t0 = time_ns(); put!(ch, job); t.io += time_ns() - t0
   return nothing
 end
+
+# ── Search-driver options (Step 3e) ────────────────────────────────────────────────────────────────────────
+"""
+    LBSAOptions
+
+The List-Based SA knobs of `parametrize_LBSA` (yaml `lbsa_*`): `stretch_len` (shorter ⇒ faster freeze detection), `stale_ratio`
+(`up_attempt_stale_ratio`; lower ⇒ freezes/reheats sooner), `temp_list_len` (the length L of the temperature list), `replace_oldest`
+(false ⇒ overwrite the MAX each stretch, so the temperature adapts every stretch instead of after a full L-cycle) and `cooling_only`
+(true ⇒ the max temperature can only decrease, so the search actually freezes and the freeze/reheat/restart chain fires).
+"""
+Base.@kwdef struct LBSAOptions
+  stretch_len::Int = 150
+  stale_ratio::Float64 = 0.95
+  temp_list_len::Int = 150
+  replace_oldest::Bool = true
+  cooling_only::Bool = false
+end
+
+"""
+    SearchOptions
+
+The config-derived knobs of the search engines, bundled and passed to the drivers as `search=`: `lbsa` (LBSA), `igel` (the Igel engine's
+resume-retunable knobs, see `IgelMOCMAES.IgelOptions`; the Igel driver adds its niching maps and reseed fraction on top) and `mocmaes_nds`
+(MO-CMA-ES and CMA-ME rank offspring by TRUE NSGA-II non-dominated sorting instead of the net win count; yaml `mocmaes_true_nds`).
+"""
+Base.@kwdef struct SearchOptions
+  lbsa::LBSAOptions = LBSAOptions()
+  igel::IgelMOCMAES.IgelOptions{typeof(identity),typeof(identity)} = IgelMOCMAES.IgelOptions()
+  mocmaes_nds::Bool = false
+end
+
+"The `SearchOptions` of a validated config (see `load_config`)."
+search_options_from_config(cfg::AbstractDict) = SearchOptions(
+  lbsa=LBSAOptions(stretch_len=cfg["lbsa_stretch_len"], stale_ratio=cfg["lbsa_stale_ratio"], temp_list_len=cfg["lbsa_temp_list_len"],
+                   replace_oldest=cfg["lbsa_replace_oldest"], cooling_only=cfg["lbsa_cooling_only"]),
+  igel=IgelMOCMAES.IgelOptions(use_cholesky=cfg["igel_cholesky"], reseed_sigma_override=cfg["igel_reseed_sigma_override"],
+                               maturity_override=cfg["igel_maturity_override"]),
+  mocmaes_nds=cfg["mocmaes_true_nds"])

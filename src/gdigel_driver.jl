@@ -277,7 +277,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool,
     TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing,
     start_from::Union{Nothing,String}=nothing, n_reps::Int=1, no_establishment::Bool=false, injection_cohorts=nothing,
-    gd_opts::AbstractDict=Dict{String,Any}(), scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), kw...)
+    gd_opts::AbstractDict=Dict{String,Any}(), scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions(), kw...)
   gd = resolve_gdigel(gd_opts)   # validated against GDIGEL_LIST, defaults filled (idempotent for a resolved dict)
   o(k) = gd[k]
   mu = o("mu"); σ0 = o("sigma0"); σstop = o("sigma_stop"); σmin = o("sigma_min")

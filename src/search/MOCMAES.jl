@@ -87,13 +87,10 @@ end
   return wins - losses
 end
 
-# Offspring-ranking selector. false (default) → net pairwise win-count; true → TRUE NSGA-II
-# non-dominated sorting (Pareto fronts + crowding). Set from yaml `mocmaes_true_nds`.
-const USE_NDS = Ref{Bool}(false)
-
-# Best→worst total order over the λ offspring for the CMA-ES recombination.
-function mo_sortperm(fxs::Vector{MOFitness})::Vector{Int}
-  USE_NDS[] ? _nds_sortperm(fxs) : _winrank_sortperm(fxs)
+# Best→worst total order over the λ offspring for the CMA-ES recombination. `nds=false` (default): net pairwise win-count;
+# `nds=true`: TRUE NSGA-II non-dominated sorting (Pareto fronts + crowding). yaml `mocmaes_true_nds`, carried by SearchOptions.mocmaes_nds.
+function mo_sortperm(fxs::Vector{MOFitness}; nds::Bool=false)::Vector{Int}
+  nds ? _nds_sortperm(fxs) : _winrank_sortperm(fxs)
 end
 
 # Win-count ranking: each offspring scored by its summed net pairwise objective win-count against the
@@ -175,8 +172,8 @@ function _crowding_fx(fxs::Vector{MOFitness}, idxs::Vector{Int})::Vector{Float64
 end
 
 # One generation update, driven by the multi-objective ranking of the offspring.
-function tell!(state::MOCMAESState, fxs::Vector{MOFitness}, xs_u::Vector{Vector{Float64}})
-  CMAES._update_distribution!(state, mo_sortperm(fxs), xs_u)
+function tell!(state::MOCMAESState, fxs::Vector{MOFitness}, xs_u::Vector{Vector{Float64}}; nds::Bool=false)
+  CMAES._update_distribution!(state, mo_sortperm(fxs; nds), xs_u)
 end
 
 # NSGA-II crowding distance per archive member (higher = more isolated). Boundary members — the
