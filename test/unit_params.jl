@@ -198,6 +198,32 @@ end
   end
 end
 
+@testset "build_param_floors: data floors from the plugin tables, B18 warning once per build" begin
+  BSPl = Pan.Plugins.BiomassSuccessionPlugin
+  saved = (BSPl.BMAX_FLOOR_TABLE[], BSPl.ANPP_FLOOR_TABLE[], BSPl.PROB_ESTAB_TABLE[])
+  try
+    ecos = ["8.3.5|lu=natural", "8.3.7|lu=artificial"]
+    BSPl.BMAX_FLOOR_TABLE[] = Dict(("A", "8.3.5", "natural") => 40000.0, ("B", "8.3.5", "natural") => 20000.0)
+    BSPl.ANPP_FLOOR_TABLE[] = Dict(("A", "8.3.5", "natural") => 900.0)
+    BSPl.PROB_ESTAB_TABLE[] = Dict(("A", "8.3.5", "natural") => 0.5, ("C", "8.3.7", "artificial") => 0.9)
+    o = PU.ParamSpaceOptions(prob_estab_lower_bound=true, prob_estab_lower_mult=0.8)
+    fl = nothing
+    @test_logs (:info, r"bmax_floor_from_data: B_MAX lower bound") (:warn, r"pinned at the floor") (:info, r"prob_estab_lower_bound") (:info, r"anpp_floor_from_data") match_mode=:any (fl = Pan.build_param_floors(o, ecos, SPECIES, ESI))
+    @test fl.bmax[(1, 1)] == 40000f0 && fl.bmax[(1, 2)] == 20000f0 && fl.bmax[(2, 1)] == 12000f0          # max(12000, table); (eco, sp_local)
+    @test fl.anpp[(1, 1)] == 900f0 && fl.anpp[(1, 2)] == 0f0
+    @test fl.prob_estab[(1, 1)] ≈ 0.4f0 && fl.prob_estab[(2, 2)] ≈ 0.72f0 && !haskey(fl.prob_estab, (1, 2))   # mult x data; absent cells keep the param's own bound
+    # floors off: no table or no lower-bound switch
+    BSPl.PROB_ESTAB_TABLE[] = nothing; BSPl.BMAX_FLOOR_TABLE[] = nothing; BSPl.ANPP_FLOOR_TABLE[] = nothing
+    f0 = Pan.build_param_floors(o, ecos, SPECIES, ESI)
+    @test f0.bmax === nothing && f0.anpp === nothing && f0.prob_estab === nothing
+    # the built floors decode: B_MAX of cell (1,1) is pinned above the box at the floor (B18)
+    sp = PU.with_floors(mkspace(), fl); tpl = Pan.generate_params(SP, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1))
+    @test PU.u_to_params(fill(0.5, length(sp.slots)), sp, sp.slots, tpl).B_MAX_SPP[1][1] == 40000f0
+  finally
+    BSPl.BMAX_FLOOR_TABLE[], BSPl.ANPP_FLOOR_TABLE[], BSPl.PROB_ESTAB_TABLE[] = saved
+  end
+end
+
 @testset "slots: split sets / pooling / shared" begin
   let
     sp, tpl, _ = setup(); pd = sp.dists
