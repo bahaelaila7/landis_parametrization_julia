@@ -119,4 +119,26 @@ end
     @test (@allocated PU._w1_sum(lp, sc, gt.records[UT(1)].sp_age_cdf, gt.records[UT(1)].sp_age_cdf, lp.age_bins.bin_widths, 1, 1)) == 0
   end
 end
+
+# The injection / shock functions run per measurement year inside the site loop of fit_params: with the options passed as an immutable struct they must
+# not allocate (removal of a fully disturbed cohort + scaling of a partially disturbed one, and the scoring-order predicate).
+@testset "hot path: _apply_disturbance_shock! / shock_order" begin
+  rng = Random.Xoshiro(5)
+  soas = [make_site(Random.Xoshiro(5)) for _ in 1:4]            # identical fresh sites: the removal path runs once per site, so measure on a fresh one
+  s0 = PC.getsite(soas[1], 1); live0 = Int(s0.live)
+  sp1, age1 = s0.c_species[1], s0.c_age[1]; sp2, age2 = s0.c_species[2], s0.c_age[2]
+  scoring = Pan.ScoringOptions(; override=true, sync=true, disturbance=:scale)
+  shk = Pan._SiteShockYear([(1, Tuple{UT,FT}[(sp1, age1)])])
+  inj = Pan._SiteInjectionYear([(1, Tuple{UT,FT,FT,FT}[(sp2, age2, FT(100), FT(0.4))])])
+  Pan._apply_disturbance_shock!(soas[1], shk, inj, scoring)    # warm-up (compiles)
+  Pan._apply_disturbance_shock!(soas[2], shk, inj, scoring)
+  @test (@allocated Pan._apply_disturbance_shock!(soas[3], shk, inj, scoring)) == 0
+  @test Int(PC.getsite(soas[3], 1).live) == live0 - 1             # it did remove the shocked cohort
+  off = Pan.with_options(scoring; disturbance=:off)
+  Pan._apply_disturbance_shock!(soas[4], nothing, inj, off)
+  @test (@allocated Pan._apply_disturbance_shock!(soas[4], nothing, inj, off)) == 0
+  @test (@allocated Pan.shock_order(scoring)) == 0
+  @test Base.return_types(Pan._apply_disturbance_shock!, (typeof(soas[1]), typeof(shk), typeof(inj), Pan.ScoringOptions))[1] === Nothing
+  @test isempty(red_flags(Tuple{typeof(Pan._apply_disturbance_shock!), typeof(soas[1]), typeof(shk), typeof(inj), Pan.ScoringOptions}))
+end
 end # module

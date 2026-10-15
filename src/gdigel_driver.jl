@@ -316,7 +316,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     bdefs = [GDIgel.BlockDef(collect(1:nd), collect(1:ix.ngroups))]
   end
   @info "gdigel: $nd u-dims → $(length(bdefs)) blocks (sizes $(sort(length.(getfield.(bdefs, :idx)))) ); $(ix.ngroups) groups; $(length(ix.pair_group)) pairs ($(real_only ? "real-only" : "all"))"
-  injection_dict = _build_injection_dict(injection_cohorts, ref_soa); injection_years = Set(Int.(injection_cohorts.sim_year))
+  injection = build_injection_plan(injection_cohorts, ref_soa, eco_species_ids, loss_params, scoring)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   n_species = length(species_list)
   fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
@@ -329,7 +329,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     pp = dec(u)
     dacc = USE_D ? DeathAcc(eco_species_ids) : nothing
     r = fit_params(ref_soa, pp, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params;
-      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales, scoring, simb)
+      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection=injection, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales, scoring, simb)
     _, _, k = _agg_reps(r, loss_params, scoring)
     res = _gd_losses(ix, r[k][2]; size_weight=sw, min_pairs=min_pairs)
     MO || return res

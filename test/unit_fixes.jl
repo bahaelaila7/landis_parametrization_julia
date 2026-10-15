@@ -67,12 +67,33 @@ end
 end
 
 
-@testset "B12 per-run caches are cleared and keyed on every input" begin
-  Pan._EXCL_CACHE[(Dict(), 1, 2)] = Pan._ExclPlan(:off, false, Dict(), Dict(), Dict())
-  Pan._clear_run_caches!()
-  @test isempty(Pan._EXCL_CACHE) && isempty(Pan._SHOCK_REGISTRY)
-  src = read(joinpath(pkgdir(Pan), "src", "Pan.jl"), String)
-  @test occursin("key = (injection_dict, ref_soa, loss_params)", src)
+@testset "B12 injection state is owned by the reference's InjectionPlan, not by global caches" begin
+  @test !isdefined(Pan, :_EXCL_CACHE) && !isdefined(Pan, :_SHOCK_REGISTRY) && !isdefined(Pan, :_EXCL_LOCK) && !isdefined(Pan, :_clear_run_caches!)
+  FT = Pan.FloatType; UI = Pan.UIntType
+  esids = [[1, 2]]
+  lp = Pan.PU.LossParams(age_bins=Pan.PU.AgeBins(bins_idx=collect(1:100), last_bin_open=true), smoothing_weights=FT[one(FT)])
+  mk(cohs) = Pan.make_sites_from_communities(Pan.DataFrame(mapcode=fill(1, length(cohs)), eco_id=fill(1, length(cohs)), eco_species_id=[c[1] for c in cohs],
+                                                            age_calc=[c[2] for c in cohs], agb_sum=[c[3] for c in cohs]), esids, Pan.Random.Xoshiro(1))
+  ref = mk([(1, 40, 100.0), (1, 20, 80.0)])
+  inj(drop) = Pan.DataFrame(plot_id=[1, 1, 1, 1], sim_year=[2, 2, 5, 5], eco_species_id=[1, 1, 1, 1], age_calc=[37, 17, 40, 20],
+                            agb_sum=[90.0, 60.0, 100.0, 80.0], disturbance_drop_pct=[0.0, 0.0, 0.0, drop])
+  sync = Pan.ScoringOptions(; override=true, sync=true, disturbance=:exclude_overwrite)
+  @test Pan.build_injection_plan(nothing, ref, esids, lp, sync) === nothing
+  p1 = Pan.build_injection_plan(inj(0.3), ref, esids, lp, sync)
+  p2 = Pan.build_injection_plan(inj(0.0), ref, esids, lp, sync)
+  @test p1.years == Set([2, 5]) && haskey(p1.dict, 5) && p1.shock === nothing && p1.legacy_excl === nothing
+  @test p1.excl isa Pan._ExclPlan && p1.excl.coh[5][1] == [(UI(1), FT(20))]            # the disturbed cohort is excluded in the shock order
+  @test !haskey(p2.excl.coh, 5)                                                       # a second reference has its own plan: nothing is shared or keyed by identity
+  @test p1.dict !== p2.dict && p1.excl !== p2.excl
+  # outside the shock order the cohort-level plan does not exist; the legacy order keeps the species-level exclusion
+  legacy = Pan.with_options(sync; loss_before_injection=false)
+  pl = Pan.build_injection_plan(inj(0.3), ref, esids, lp, legacy)
+  @test pl.excl === nothing && pl.legacy_excl[5][1] == Set([UI(1)])
+  # a plan built under one scoring rule is refused under another (its exclusions depend on it)
+  @test Pan._check_plan_options(p1, sync) === nothing
+  @test_throws ErrorException Pan._check_plan_options(p1, legacy)
+  @test_throws ErrorException Pan._check_plan_options(p1, Pan.with_options(sync; disturbance=:scale))
+  @test_throws ErrorException Pan._check_plan_options(p1, Pan.with_options(sync; exclude_recruits_at_entry=false))
 end
 
 end
