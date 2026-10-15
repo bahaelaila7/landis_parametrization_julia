@@ -2117,7 +2117,9 @@ end
 # The two scale sets `_mo_objectives` indexes by group: group 0 = the primary reference — Sim A, except when Sim B is primary (T4_PRIMARY: a
 # dual_mode b run, whose only block is Sim B, or a tier-4-only run whose single reference already carries the tier-4 scales); group 1 = Sim B.
 @inline function _group_scales(scales::PU.LossScales, dual_b)
-  dual_b === nothing && return scales, scales
+  # without a Sim B (tier 5 stacks a tier-4 half after the tier-3 half) group 1 has NO scales of its own: the empty LossScales makes _mo_objectives
+  # refuse (B11) instead of normalising tier-4 losses with another reference's scales
+  dual_b === nothing && return scales, PU.LossScales()
   bsc = dual_b.scales::PU.LossScales
   return (T4_PRIMARY[] ? bsc : scales), bsc
 end
@@ -5283,7 +5285,7 @@ _dom_include_name(name::AbstractString, mode::AbstractString) =
   @inbounds M[gsp, e]
 end
 @noinline _cell_error(M, gsp, e) = error("loss scale/weight matrix of size $(size(M)) does not cover (species=$gsp, eco=$e): " *
-                                         "the cell scales / RANKW were not computed for this reference (compute_loss_scales / build_split_scales)")
+                                         "the cell scales / RANKW were not set for this reference (call _set_loss_scales! first)")   # (wording kept: the golden status.txt of the tier-5 scenario records it)
 
 function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}}, lp::PU.LossParams, scales::PU.LossScales, dual_b=nothing)::Vector{FloatType}
   # 4 GROUPED objectives for the dual: [ΣA_W, ΣA_AGB, ΣB_W, ΣB_AGB] — sum each over its eco-blocks and
