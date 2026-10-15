@@ -117,7 +117,7 @@ rng = MersenneTwister(5)
 # young, thin, moderately dense stands with short horizon: no cohort removal in the measured steps
 specs3 = [[(rand(rng, 1:length(eco_species_ids[1 + (i - 1) % 3])), rand(rng, 10:60), 300 + 4000rand(rng)) for _ in 1:6] for i in 1:40]
 soa3 = build_soa(specs3)
-PanCore.PARALLEL_SITES[] = false
+soa3.parallel = false
 for y in 1:3; Pan.step!(HB, soa3, y, ctx); end
 nlive0 = copy(soa3.scalar.live)
 al = @allocated Pan.step!(HB, soa3, 4, ctx)
@@ -127,7 +127,7 @@ alloc_site(soa3, 3, ctx)
 al_site = alloc_site(soa3, 3, ctx)
 @printf("  allocated bytes: step! (40 sites, serial) = %d ; site_year! = %d\n", al, al_site)
 @check al == 0 && al_site == 0 "zero allocation"
-PanCore.PARALLEL_SITES[] = true
+soa3.parallel = true
 Pan.step!(HB, soa3, 5, ctx)
 al_thr = @allocated Pan.step!(HB, soa3, 6, ctx)
 @printf("  threaded step! (nthreads=%d) allocates %d bytes (task spawn overhead only, independent of #sites/cohorts)\n", Threads.nthreads(), al_thr)
@@ -150,7 +150,7 @@ function row4(y, mort)
   @printf("  %4d %8.1f %8.2f %7.2f %6.2f %7.1f %9.1f %7.2f %7.2f\n", Int(s4.c_age[1]), s4.c_tph[1], s4.c_dq[1], s4.c_h[1], max(s4.BA, ba), max(s4.SDI, s4.c_tph[1] * (s4.c_dq[1] / 25.4)^1.605), s4.c_bio[1], s4.RD, mort)
 end
 row4(0, NaN)
-PanCore.PARALLEL_SITES[] = false
+soa4.parallel = false
 morts = Float64[]
 for y in 1:30
   s4 = getsite(soa4, 1)
@@ -180,7 +180,7 @@ site = getsite(soa5, 1)
 dqs = Float64.(site.c_dq); tphs = Float64.(site.c_tph)
 ba = [pi / 4 * (d / 100)^2 * t for (d, t) in zip(dqs, tphs)]
 bal_ref = [sum(ba[m] for m in eachindex(ba) if dqs[m] > dqs[k]; init=0.0) for k in eachindex(ba)]
-PanCore.PARALLEL_SITES[] = false
+soa5.parallel = false
 Pan.step!(HB, soa5, 1, ctx5)   # snapshot BAL is taken before longevity/growth (no removal here, so order unchanged)
 site = getsite(soa5, 1)
 @printf("  dq=%s\n  BAL(ref)=%s\n  BAL(plugin)=%s\n", round.(dqs; digits=2), round.(bal_ref; digits=3), round.(Float64.(site.c_bal); digits=3))
@@ -277,7 +277,7 @@ specs7 = [[(rand(rng, 1:length(eco_species_ids[1 + (i - 1) % 3])), rand(rng, 1:1
 function run7(parallel::Bool; years=25)
   soa = build_soa(specs7)
   ctx, _ = make_ctx_default(mode=:jitter)
-  PanCore.PARALLEL_SITES[] = parallel
+  soa.parallel = parallel
   for y in 1:years; Pan.step!(HB, soa, y, ctx); end
   return soa
 end
@@ -286,7 +286,6 @@ a = run7(false); b = run7(false); c = run7(true); d = run7(true)
 @printf("  hashes: serial %s %s | threaded %s %s\n", string(sig(a), base=16), string(sig(b), base=16), string(sig(c), base=16), string(sig(d), base=16))
 @check sig(a) == sig(b) && sig(c) == sig(d) && sig(a) == sig(c) "byte-identical across runs and serial/threaded"
 @printf("DETERMINISM_HASH %s (live=%d cohorts)\n", string(sig(a), base=16), sum(a.scalar.live))
-PanCore.PARALLEL_SITES[] = true
 
 # plugin-level spot checks: self-thinning keeps the stand below SDImax after 25 years of the random sites
 let soa = a, ctx = make_ctx_default(mode=:jitter)[1]
@@ -300,13 +299,11 @@ let rng = MersenneTwister(44)
   big = [[(rand(rng, 1:length(eco_species_ids[1 + (i - 1) % 3])), rand(rng, 1:150), exp(rand(rng) * 8 + 1)) for _ in 1:rand(rng, 3:12)] for i in 1:3000]
   soa = build_soa(big); ctx, _ = make_ctx_default(mode=:jitter)
   for par in (false, true)
-    PanCore.PARALLEL_SITES[] = par
-    so = deepcopy(soa); Pan.step!(HB, so, 0, ctx)   # warm-up
-    so = deepcopy(soa)
+    so = deepcopy(soa); so.parallel = par; Pan.step!(HB, so, 0, ctx)   # warm-up
+    so = deepcopy(soa); so.parallel = par
     t = @elapsed for y in 1:25; Pan.step!(HB, so, y, ctx); end
     @printf("  throughput: %d sites x 25 yr, %s (%d threads): %.3f s  = %.2f us per site-year\n", so.n, par ? "threaded" : "serial", par ? Threads.nthreads() : 1, t, 1e6 * t / (so.n * 25))
   end
-  PanCore.PARALLEL_SITES[] = true
 end
 
 # ----------------------------------------------------------------------------------------------------------
@@ -333,12 +330,12 @@ let prm = H.generate_hbad_params(hctx0, species_list, eco_list, eco_species_ids;
   @check isapprox(H.annual_prob(0.6, 8), 0.10818; atol=1e-4) "annual_prob(0.6, 8)"
   @check H.shade_class_of(0.0, (0.15, 0.3, 0.45, 0.6, 0.75)) == 0 && H.shade_class_of(0.5, (0.15, 0.3, 0.45, 0.6, 0.75)) == 3 && H.shade_class_of(1.0, (0.15, 0.3, 0.45, 0.6, 0.75)) == 5 "shade class thresholds"
 end
-PanCore.PARALLEL_SITES[] = false
+build_soa_ser(a...; kw...) = (s = build_soa(a...; kw...); s.parallel = false; s)   # sections (a)-(f): serial sites
 
 println("(a) open sites with seed rain recruit tolerant and intolerant species")
 ctxa, prma = estab_ctx(p=1.0)
 nA = 400
-soaa = estab_on!(build_soa([Tuple{Int,Int,Float64}[] for _ in 1:nA]; eco_ids=fill(1, nA)))
+soaa = estab_on!(build_soa_ser([Tuple{Int,Int,Float64}[] for _ in 1:nA]; eco_ids=fill(1, nA)))
 Pan.step!(HB, soaa, 1, ctxa)
 cnt_a = zeros(Int, 6)
 okstate = true
@@ -358,10 +355,10 @@ end
 @check all(soaa.scalar.shade_class[1:nA] .== 0) "open site -> shade class 0"
 # mature seed source required without seed rain
 ctxa2, _ = estab_ctx(p=1.0, rain=false)
-soaa2 = estab_on!(build_soa([Tuple{Int,Int,Float64}[] for _ in 1:20]; eco_ids=fill(1, 20)))
+soaa2 = estab_on!(build_soa_ser([Tuple{Int,Int,Float64}[] for _ in 1:20]; eco_ids=fill(1, 20)))
 Pan.step!(HB, soaa2, 1, ctxa2)
 @check sum(soaa2.scalar.live[1:20]) == 0 "no seed rain and no mature cohort -> no recruits"
-soaa3 = estab_on!(build_soa([[(1, 40, 3000.0), (3, 5, 20.0)] for _ in 1:40]; eco_ids=fill(1, 40)))   # PITA mature (40 >= 20), QUNI (age 5) not
+soaa3 = estab_on!(build_soa_ser([[(1, 40, 3000.0), (3, 5, 20.0)] for _ in 1:40]; eco_ids=fill(1, 40)))   # PITA mature (40 >= 20), QUNI (age 5) not
 Pan.step!(HB, soaa3, 1, ctxa2)
 rec_sp = Int[]; for i in 1:40, k in 1:Int(getsite(soaa3, i).live); getsite(soaa3, i).c_age[k] == 1 && push!(rec_sp, Int(getsite(soaa3, i).c_species[k])); end
 @check !isempty(rec_sp) && all(==(1), rec_sp) "only the species with a mature cohort (PITA) recruits (got $(unique(rec_sp)))"
@@ -369,7 +366,7 @@ rec_sp = Int[]; for i in 1:40, k in 1:Int(getsite(soaa3, i).live); getsite(soaa3
 println("(b) dense sites: shade-intolerant species never establish; tolerance 5 at most 0.5")
 ctxb, _ = estab_ctx(p=1.0)
 nB = 600
-soab = estab_on!(build_soa([[(1, 30, 9000.0), (3, 40, 6000.0), (4, 25, 4000.0), (2, 12, 2500.0)] for _ in 1:nB]; eco_ids=fill(1, nB)))
+soab = estab_on!(build_soa_ser([[(1, 30, 9000.0), (3, 40, 6000.0), (4, 25, 4000.0), (2, 12, 2500.0)] for _ in 1:nB]; eco_ids=fill(1, nB)))
 Pan.step!(HB, soab, 1, ctxb)
 cnt_b = zeros(Int, 6)
 for i in 1:nB
@@ -385,7 +382,7 @@ end
 println("(c) no duplicate age-1 cohorts")
 # direct: a cohort that becomes age 1 in this step meets the establishment of the same species -> merged
 ctxc, _ = estab_ctx(p=1.0, mode=:default, mutate=prm -> hb_with(prm, SHADE_TOL=fill(UIntType(3), length(prm.SHADE_TOL))))
-soac = estab_on!(build_soa([[(2, 0, 30.0)] for _ in 1:10]; eco_ids=fill(1, 10)))     # PIEL cohort of age 0 -> age 1 after the step
+soac = estab_on!(build_soa_ser([[(2, 0, 30.0)] for _ in 1:10]; eco_ids=fill(1, 10)))     # PIEL cohort of age 0 -> age 1 after the step
 tph_pre = Float64(getsite(soac, 1).c_tph[1]); dq_pre = Float64(getsite(soac, 1).c_dq[1])
 Pan.step!(HB, soac, 1, ctxc)
 nm = 0; allone = true
@@ -400,7 +397,7 @@ site = getsite(soac, 1); k2 = findfirst(k -> site.c_species[k] == 2 && site.c_ag
 @check allone "exactly one age-1 PIEL cohort per site after merge"
 @check site.c_tph[k2] > 750 && site.c_tph[k2] < tph_pre + 750 + 1 && site.c_dq[k2] > 1.0 "merged density adds, dq is the quadratic mean"
 # long run: no (species, age) duplicate anywhere
-soac2 = estab_on!(build_soa([Tuple{Int,Int,Float64}[] for _ in 1:30]; eco_ids=fill(1, 30)))
+soac2 = estab_on!(build_soa_ser([Tuple{Int,Int,Float64}[] for _ in 1:30]; eco_ids=fill(1, 30)))
 for y in 1:30; Pan.step!(HB, soac2, y, ctxa); end
 dup = 0
 for i in 1:30
@@ -411,7 +408,7 @@ end
 
 println("(d) allocation-free steady state with establishment ON (draws consumed, no recruit) and determinism")
 ctxd, _ = estab_ctx(p=0.0)
-soad = estab_on!(build_soa(specs3; eco_ids=[1 + (i - 1) % 3 for i in 1:40]))
+soad = estab_on!(build_soa_ser(specs3; eco_ids=[1 + (i - 1) % 3 for i in 1:40]))
 for y in 1:3; Pan.step!(HB, soad, y, ctxd); end
 nl0 = copy(soad.scalar.live)
 ald = @allocated Pan.step!(HB, soad, 4, ctxd)
@@ -423,11 +420,10 @@ alloc_site(soad, 3, ctxd); al_sd = alloc_site(soad, 3, ctxd)
 function run_estab(parallel::Bool; years=30)
   rng_ = MersenneTwister(77)
   specs = [rand(rng_) < 0.4 ? Tuple{Int,Int,Float64}[] : [(rand(rng_, 1:6), rand(rng_, 1:60), exp(rand(rng_) * 7 + 1))] for _ in 1:300]
-  soa = estab_on!(build_soa(specs; eco_ids=fill(1, 300)))
+  soa = estab_on!(build_soa_ser(specs; eco_ids=fill(1, 300)))
   ctx, _ = estab_ctx(p=0.3, mode=:jitter)
-  PanCore.PARALLEL_SITES[] = parallel
+  soa.parallel = parallel
   for y in 1:years; Pan.step!(HB, soa, y, ctx); end
-  PanCore.PARALLEL_SITES[] = false
   return soa
 end
 sigE(soa) = hash((soa.refs.cohort, soa.csr.c_species, soa.csr.c_age, soa.csr.c_bio, soa.csr.c_tph, soa.csr.c_dq, soa.csr.c_h, soa.scalar.B, soa.scalar.BA, soa.scalar.shade_class, soa.scalar.live))
@@ -437,8 +433,7 @@ ea = run_estab(false); eb = run_estab(true); ec = run_estab(true)
 @check sum(ea.scalar.live) > 300 "establishment actually produced cohorts"
 
 println("(e) plant! round trip (+ generic hook, BiomassSuccession, PnET)")
-soae = estab_on!(build_soa([[(1, 30, 3000.0)], Tuple{Int,Int,Float64}[], [(3, 10, 200.0), (4, 12, 300.0)]]; eco_ids=[1, 1, 1]))
-PanCore.PARALLEL_SITES[] = false
+soae = estab_on!(build_soa_ser([[(1, 30, 3000.0)], Tuple{Int,Int,Float64}[], [(3, 10, 200.0), (4, 12, 300.0)]]; eco_ids=[1, 1, 1]))
 Pan.step!(HB, soae, 0, estab_ctx(p=0.0, rain=false)[1])      # primes BA / SDI / RD (no establishment: p = 0)
 Pan.plant_sites!(hctx0, soae, [(1, 5, 600.0), (2, 1, 1000.0), (2, 2, 400.0), (3, 6, 250.0)])   # eco1 local species: 5 = _S_HST, 6 = _H_LST
 for (si, esp, tph_) in [(1, 5, 600.0), (2, 1, 1000.0), (2, 2, 400.0), (3, 6, 250.0)]
@@ -467,7 +462,7 @@ ctxe, _ = estab_ctx(p=0.0, rain=false)
 for y in 1:5; Pan.step!(HB, soae, y, ctxe); end
 @check all(Float64(getsite(soae, i).B) > 0 && isfinite(Float64(getsite(soae, i).B)) for i in 1:3) "stand keeps running after planting"
 # capacity guard
-soag = estab_on!(build_soa([[(1, 30, 3000.0)]]; eco_ids=[1]))
+soag = estab_on!(build_soa_ser([[(1, 30, 3000.0)]]; eco_ids=[1]))
 errg = try; HBADPlugin.plant!(hctx0, getsite(soag, 1), 2, 100.0); nothing; catch e; sprint(showerror, e); end
 @check errg !== nothing && occursin("no free cohort slot", errg) "plant! without capacity errors clearly"
 # BiomassSuccession: new cohort with LANDIS initial biomass; PnET: clear error
@@ -493,9 +488,9 @@ errp = try; Pan.plant!(pnc_, nothing, 1, 100.0); nothing; catch e; sprint(shower
 println("(f) 100-yr clear-cut trajectory with seed rain (eco 1: PITA PIEL QUNI ACRU _S_HST _H_LST; annual PROB_ESTAB default 0.108; mean of 200 replicate sites)")
 ctxf, prmf = estab_ctx(p=H.annual_prob(0.6), rain=true, mode=:default)
 nF = 200
-soaf = estab_on!(build_soa([Tuple{Int,Int,Float64}[] for _ in 1:nF]; eco_ids=fill(1, nF)))
+soaf = estab_on!(build_soa_ser([Tuple{Int,Int,Float64}[] for _ in 1:nF]; eco_ids=fill(1, nF)))
 for i in 1:nF; getsite(soaf, i).rng = Random.Xoshiro(1000 + i); end
-PanCore.PARALLEL_SITES[] = true
+soaf.parallel = true
 names6 = ["PITA", "PIEL", "QUNI", "ACRU", "_S_HST", "_H_LST"]
 @printf("  %4s %7s %7s %7s | %s | %6s %6s %6s\n", "yr", "TPA", "BA", "QMD", "BA share % " * join(lpad.(names6, 7), ""), "maxRD", "ncoh", "cls")
 traj = Tuple[]
@@ -521,7 +516,6 @@ end
 @check traj[end][3] > 5 && traj[end][3] < 55 "mean BA after 100 yr plausible (got $(traj[end][3]))"
 s1 = getsite(soaf, 1)
 @printf("  replicate 1 at yr 100: %d cohorts, BA=%.1f m2/ha, TPA=%.0f, shade class %d\n", Int(s1.live), s1.BA, sum(Float64.(s1.c_tph[1:Int(s1.live)])), Int(s1.shade_class))
-PanCore.PARALLEL_SITES[] = true
 
 println("(g) params round trip: JLD2, and upgrade of a pre-establishment JLD2 file")
 using Pan.JLD2

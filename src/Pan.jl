@@ -1670,11 +1670,7 @@ function parametrize(; cohorts_db_path::String,
              search_mode == "nsga2" ? (archive_cap=cmaes_archive_cap, nsga2_pop=nsga2_pop, nsga2_offspring=nsga2_offspring, nsga2_eta_c=nsga2_eta_c, nsga2_eta_m=nsga2_eta_m, nsga2_pc=nsga2_pc, nsga2_pm=nsga2_pm, sobol_init=nsga2_sobol_init) :
              search_mode == "cmame" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, cmame_alpha=cmame_alpha, cmame_grid=cmame_grid, cmame_reseed_explore=cmame_reseed_explore, cmame_restart_patience=cmame_restart_patience, cmame_sobol_reseed=cmame_sobol_reseed, balanced_quality=balanced_quality, cmame_mo_rank=cmame_mo_rank, archive_by_sp=archive_by_sp, bounds_by_sobol=bounds_by_sobol, top_seeds=top_seeds, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
              NamedTuple()
-  # every driver may switch site-parallelism off (candidate mode); restore the caller's setting on ANY exit (normal end, early
-  # `return search_state`, error) — the Igel early return used to leave it false for the rest of the process (B2).
-  _prev_parallel_sites = PARALLEL_SITES[]
-  _driver_result = try
-    driver(; ref_soa=ref_soa, space=space, plugin=plugin,
+  _driver_result = driver(; ref_soa=ref_soa, space=space, plugin=plugin,
       output_dir=output_dir,
       splots=splots,
       spdf_plts=spdf_plts,
@@ -1709,9 +1705,6 @@ function parametrize(; cohorts_db_path::String,
       rng=rng,
       debug=debug,
       cmaes_kw...)
-  finally
-    PARALLEL_SITES[] = _prev_parallel_sites
-  end
   POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; space, plugin, ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment))
   return _driver_result
 end
@@ -2104,7 +2097,7 @@ function _check_plan_options(plan::InjectionPlan, scoring::ScoringOptions)
   nothing
 end
 
-function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection::Union{Nothing,InjectionPlan}=nothing, injection_cohorts=nothing, t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, death_acc::Union{Nothing,DeathAcc}=nothing, cell_plots=nothing, scales::Union{Nothing,PU.LossScales}=nothing, scoring::ScoringOptions, simb::SimBOptions, plugin::PluginConfig)
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection::Union{Nothing,InjectionPlan}=nothing, injection_cohorts=nothing, t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, death_acc::Union{Nothing,DeathAcc}=nothing, cell_plots=nothing, scales::Union{Nothing,PU.LossScales}=nothing, scoring::ScoringOptions, simb::SimBOptions, plugin::PluginConfig, parallel_sites::Bool=true)
   pc = plugin.ctx   # the plugin context (data tables / priors / climate): explicit, never module state
   # `scales`: the normalisation of THIS reference (see compute_loss_scales / build_split_scales); computed here from the reference when the caller
   # has none (one-off evaluations, analysis tools). Sim B's (dual_b.scales) are derived from it the same way when absent.
@@ -2135,7 +2128,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       site_sim_years, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params; debug, search_tier=dual_b.tier,
       t4_ref=dual_b.t4_ref, cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles, seeds=b_seeds,
       injection=dual_b.injection,
-      disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb, plugin=plugin)
+      disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb, plugin=plugin, parallel_sites)
     b_losses = Float64[convert(Float64, PU.get_total_loss(r[1], loss_params)) for r in resB]
     bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep
     return [resB[bi]]
@@ -2149,9 +2142,10 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
   _mor_counts = Ref{Any}(nothing)
   resA = map(eachindex(seeds)) do ri
     soa = work_soa === nothing ? copy_and_reseed_soa(ref_soa, seeds[ri]) : reset_soa!(work_soa, ref_soa; seed=seeds[ri])
+    soa.parallel = parallel_sites   # this evaluation's site-loop parallelism (false inside a candidate-parallel batch); owned by `soa`, no process state
     if init_scales[ri] != one(FloatType)       # perturb the sim-year-0 population (not scored, only propagated)
       sc = init_scales[ri]; cap = scoring.init_perturb_cap; 
-      @maybe_threads PARALLEL_SITES[] for i in 1:soa.n     # per-site independent → parallel in SoA mode
+      @maybe_threads soa.parallel for i in 1:soa.n     # per-site independent → parallel in SoA mode
         site = getsite(soa, i)
         site.active || continue
         @inbounds for j in 1:Int(site.live)
@@ -2257,7 +2251,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     end
     for current_sim_year in starting_sim_year:max_sim_year
       #println("\ttimestep $(t)")
-      if PAN_TIMING[] && PARALLEL_SITES[]   # only in soa mode: candidate mode runs fit_params on many threads → racy _tm_sim
+      if PAN_TIMING[] && soa.parallel   # only in soa mode: candidate mode runs fit_params on many threads → racy _tm_sim
         _ts = time_ns()
         step!(SP, soa, current_sim_year, ctx)
         _tm_sim[] += time_ns() - _ts
@@ -2270,7 +2264,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       # injection (stays free regen). Unmatched disturbed cohorts (the model didn't grow them) are not applied.
       if disturbance_dict !== nothing && current_sim_year in disturbance_years
         yd = disturbance_dict[current_sim_year]
-        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
+        @maybe_threads soa.parallel for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             spd = get(yd, Int(site.mapcode), nothing)
@@ -2323,7 +2317,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       end
       (scoring.w_diag !== :none && scoring.loss_before_injection && _do_shock && current_sim_year in injection_years) && _w_diag_apply!(pc, soa, current_sim_year, injection_dict, _excl_plan, scoring)
       if search_tier == 1
-        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
+        @maybe_threads soa.parallel for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             !site.active && continue
@@ -2340,7 +2334,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       elseif search_tier == 2
-        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
+        @maybe_threads soa.parallel for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             !site.active && continue
@@ -2375,7 +2369,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       elseif search_tier == 4
-        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
+        @maybe_threads soa.parallel for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             !site.active && continue
@@ -2397,7 +2391,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       elseif search_tier == 5
         # tier 5 = tier 3 (per-measurement per-site loss) + tier 4 (per-cycle bins) in ONE sim pass.
         sites_results = Vector{PU.SiteLoss}(undef, soa.n)
-        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
+        @maybe_threads soa.parallel for i in 1:soa.n
           @inbounds begin
             site = getsite(soa, i)
             !site.active && continue
@@ -2447,7 +2441,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       else
         # tier 3: accumulate each site's per-species (W, AGB) loss straight into the calling thread's per-eco
         # accumulators via calculate_site_loss2_acc! — no per-site SiteLoss, no per-species temporaries.
-        @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
+        @maybe_threads soa.parallel for i in 1:soa.n
           @inbounds begin
             tid = Threads.threadid()
             site = getsite(soa, i)
@@ -2563,7 +2557,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     site_sim_years, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params; debug, search_tier=dual_b.tier, t4_ref=dual_b.t4_ref,
     cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles, seeds=b_seeds, injection=dual_b.injection,
     disturbance_dict=dual_b.disturbance_dict,
-    disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb, plugin=plugin)
+    disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb, plugin=plugin, parallel_sites)
   a_run, a_eco, a_idx = _agg_reps(resA, loss_params, scoring)
   b_losses = Float64[convert(Float64, PU.get_total_loss(r[1], loss_params)) for r in resB]
   bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep (robust to a lucky/unlucky draw)
@@ -4300,11 +4294,11 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
   _work_soa_val = have_val ? deepcopy(val_ref_soa) : nothing
   # candidate mode: one work SoA PER THREAD (each candidate eval runs single-threaded on its own, NUMA-local)
   _work_soa_t = PARALLEL_MODE[] == :candidate ? [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
-  _run(p; ws=_work_soa) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, dual_b=dual_b, work_soa=ws, scales=scales, scoring, simb, plugin=plugin)
-  # Candidate mode: sites go serial for EVERY eval in this driver (init population, RANKW freeze, gen loop, val),
-  # so each eval is single-threaded/deterministic and the gen loop parallelizes over candidates. Restored in `finally`.
-  _prev_parallel_sites_igel = PARALLEL_SITES[]
-  PARALLEL_MODE[] == :candidate && (PARALLEL_SITES[] = false)
+  # Candidate mode: sites go serial for EVERY eval in this driver (init population, gen loop, val), so each eval is
+  # single-threaded/deterministic and the gen loop parallelizes over candidates. The flag travels with each evaluation
+  # (fit_params `parallel_sites`), so nothing is set on the process and nothing needs restoring.
+  _sites_parallel = PARALLEL_MODE[] != :candidate
+  _run(p; ws=_work_soa) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, dual_b=dual_b, work_soa=ws, scales=scales, scoring, simb, plugin=plugin, parallel_sites=_sites_parallel)
   function _fitness(rep_results)
     run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
@@ -4434,7 +4428,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
   _val_work_t = (have_val && PARALLEL_MODE[] == :candidate) ? [deepcopy(val_ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
   val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
       _vws = _val_work_t === nothing ? _work_soa_val : _val_work_t[Threads.threadid()]
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, work_soa=_vws, scales=val_scales, scoring, simb, plugin=plugin)
+      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, work_soa=_vws, scales=val_scales, scoring, simb, plugin=plugin, parallel_sites=_sites_parallel)
       v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
     end : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
@@ -4475,7 +4469,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
       _te = time_ns()
       if PARALLEL_MODE[] == :candidate
         # candidate×rep is the parallel unit: each candidate's sim runs single-threaded on a thread-local SoA
-        # (NUMA-local, no shared-array contention). Sites are already serial (PARALLEL_SITES=false, set above).
+        # (NUMA-local, no shared-array contention). Sites are serial here (`_sites_parallel` is false in candidate mode).
         Threads.@threads :static for k in 1:igel_mu
           p = PU.u_to_params(offs[k], space, slots, bases === nothing ? bio_params : bases[k])
           off_params[k] = p
@@ -4529,7 +4523,6 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
   catch e
     caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
   finally
-    PARALLEL_SITES[] = _prev_parallel_sites_igel   # restore what this driver found (candidate mode set it false)
     stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
     try; close(_reseed_io); catch; end
     try

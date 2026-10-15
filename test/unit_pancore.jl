@@ -153,9 +153,9 @@ end
   nc = Int32[0, 2]; soa = make_bs([3, 2]); PC.readjust_soa!(soa, (cohort=nc,)); @test nc == Int32[1, 2]
   # wrong length rejected
   soa = make_bs([3, 2])
-  @test_throws AssertionError (old = PC.PARALLEL_SITES[]; PC.PARALLEL_SITES[] = false; try; PC.readjust_soa!(soa, (cohort=Int32[1],)); finally; PC.PARALLEL_SITES[] = old; end)
-  # NOTE (current behaviour): with PARALLEL_SITES[]=true the same assertion surfaces wrapped in a CompositeException (threaded with_thread_sync)
-  @test_throws CompositeException (old = PC.PARALLEL_SITES[]; PC.PARALLEL_SITES[] = true; try; PC.readjust_soa!(soa, (cohort=Int32[1],)); finally; PC.PARALLEL_SITES[] = old; end)
+  @test_throws AssertionError (soa.parallel = false; PC.readjust_soa!(soa, (cohort=Int32[1],)))
+  # NOTE (current behaviour): with soa.parallel=true the same assertion surfaces wrapped in a CompositeException (threaded with_thread_sync)
+  @test_throws CompositeException (soa.parallel = true; PC.readjust_soa!(soa, (cohort=Int32[1],)))
   # grow_only option keeps larger old counts; multiple_of_2 rounds up to a power of two
   soa = make_bs([4, 2]); PC.readjust_soa!(soa, (cohort=Int32[1, 3],), (cohort=PC.RegrowOptions(grow_only=true),)); check_layout(soa, [4, 3])
   soa = make_bs([2, 2]); PC.readjust_soa!(soa, (cohort=Int32[3, 5],), (cohort=PC.RegrowOptions(multiple_of_2=true),)); check_layout(soa, [4, 8])
@@ -213,8 +213,7 @@ end
   @test_throws ErrorException PC.csr_count_key(soa, Val(:no_such_field))
   # with_thread_sync runs f once and returns its value, in both parallel modes
   for flag in (true, false)
-    old = PC.PARALLEL_SITES[]; PC.PARALLEL_SITES[] = flag
-    try; @test PC.with_thread_sync(() -> 42) == 42; finally; PC.PARALLEL_SITES[] = old; end
+    @test PC.with_thread_sync(() -> 42, flag) == 42
   end
 end
 end # module

@@ -324,11 +324,11 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   nvis = MO ? _gd_cell_visits(spdf_plts, eco_species_ids, spinup ? 0 : 1) : nothing
   ws_t = [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()]
   dec(u) = PU.u_to_params(clamp.(u, 0.0, 1.0), space, slots, template)
-  function ev(u; ws=ws_t[Threads.threadid()])
+  function ev(u; ws=ws_t[Threads.threadid()], sites_parallel::Bool=true)
     pp = dec(u)
     dacc = USE_D ? DeathAcc(eco_species_ids) : nothing
     r = fit_params(ref_soa, pp, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params;
-      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection=injection, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales, scoring, simb, plugin=plugin)
+      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection=injection, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales, scoring, simb, plugin=plugin, parallel_sites=sites_parallel)
     _, _, k = _agg_reps(r, loss_params, scoring)
     res = _gd_losses(ix, r[k][2]; size_weight=sw, min_pairs=min_pairs)
     MO || return res
@@ -348,11 +348,9 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   function evbatch(us)
     out = Vector{Any}(undef, length(us))
     if PARALLEL_MODE[] == :candidate
-      prev = PARALLEL_SITES[]; PARALLEL_SITES[] = false
       # :static — the work SoA (and the PnET scratch pool) are indexed by threadid, which :dynamic tasks may not keep.
-      try
-        Threads.@threads :static for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[Threads.threadid()]); end
-      finally; PARALLEL_SITES[] = prev; end
+      # Each eval is sites-serial (`ev` passes parallel_sites=false in candidate mode).
+      Threads.@threads :static for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[Threads.threadid()], sites_parallel=false); end
     else
       for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[1]); end
     end

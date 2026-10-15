@@ -95,22 +95,13 @@ end
   @test Pan.plant_slot_needed(pc, s1, 1) == 1
   # step! delegates to process_plugin!(soa, BS, year; ctx=ctx.BiomassSuccession)
   age0 = copy(s1.c_age[1:2])
-  PC.PARALLEL_SITES[] = false
-  try
-    Pan.step!(P, soa, 1, ctx)
-  finally
-    PC.PARALLEL_SITES[] = true
-  end
+  soa.parallel = false
+  Pan.step!(P, soa, 1, ctx)
   s1 = PC.getsite(soa, 1)
   @test s1.live >= 1 && all(s1.c_age[1:Int(s1.live)] .>= 0)
   # step! equals calling the plugin entry point directly on an identical copy
-  a = deepcopy(soa); b = deepcopy(soa)
-  PC.PARALLEL_SITES[] = false
-  try
-    Pan.step!(P, a, 2, ctx); PC.process_plugin!(b, BS, 2; ctx=ctx.BiomassSuccession)
-  finally
-    PC.PARALLEL_SITES[] = true
-  end
+  a = deepcopy(soa); b = deepcopy(soa); a.parallel = false; b.parallel = false
+  Pan.step!(P, a, 2, ctx); PC.process_plugin!(b, BS, 2; ctx=ctx.BiomassSuccession)
   @test a.csr.c_bio == b.csr.c_bio && a.csr.c_age == b.csr.c_age && a.refs == b.refs
   # plant_sites!: reserves slots (readjust_soa!) then plants; BS needs eco_params indexed by eco_id
   n0 = PC.getsite(soa, 2).live

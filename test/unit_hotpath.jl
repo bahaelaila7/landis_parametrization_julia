@@ -210,12 +210,11 @@ function pnet_fixture(; n=20)
 end
 
 @testset "hot path: succession plugins step! / cohort writes with the plugin context" begin
-  old_par = PC.PARALLEL_SITES[]; PC.PARALLEL_SITES[] = false
-  try
+  begin
     # --- step!: concrete return type, no red flags, allocation numbers
     base = Dict(BS => (380336, 8144), HB => (0, 0), PN => (0, 0))    # bytes at years 4 / 5 measured on 7bc0995
     for (name, P, fx) in (("BiomassSuccession", BS, bs_fixture()), ("HBAD", HB, hbad_fixture()), ("PnET", PN, pnet_fixture()))
-      soa, ctx = fx.soa, fx.ctx
+      soa, ctx = fx.soa, fx.ctx; soa.parallel = false
       for y in 1:3; Pan.step!(P, soa, y, ctx); end
       a4 = @allocated Pan.step!(P, soa, 4, ctx)
       a5 = @allocated Pan.step!(P, soa, 5, ctx)
@@ -247,8 +246,6 @@ end
       @test al == 0
       @test isempty(red_flags(Tuple{typeof(Pan.set_cohort_bio!), typeof(pc), typeof(site), Int, Float32}))
     end
-  finally
-    PC.PARALLEL_SITES[] = old_par
   end
 end
 end # module

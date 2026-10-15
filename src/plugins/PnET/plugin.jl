@@ -718,7 +718,7 @@ end
 
 function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, current_time::Int; ctx::NamedTuple)
   eco = ctx.eco; cst = ctx.cst; clim = ctx.clim; pool = ctx.scratch
-  PanCore.@maybe_threads PanCore.PARALLEL_SITES[] for i in 1:soa.n
+  PanCore.@maybe_threads soa.parallel for i in 1:soa.n
     @inbounds begin
       if soa.scalar.active[i]
         scr = pool[Threads.threadid()]

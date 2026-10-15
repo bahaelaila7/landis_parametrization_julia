@@ -319,7 +319,7 @@ end
 
 function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, current_time::Int; ctx::NamedTuple)
   eco = ctx.eco; cst = ctx.cst
-  PanCore.@maybe_threads PanCore.PARALLEL_SITES[] for i in 1:soa.n
+  PanCore.@maybe_threads soa.parallel for i in 1:soa.n
     @inbounds begin
       if soa.scalar.active[i]
         site_prepare!(soa, i, eco[soa.scalar.eco_id[i]], cst)
@@ -338,7 +338,7 @@ function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, curren
     end
   end
   resize && PanCore.readjust_soa!(soa, (cohort=cnt,))
-  PanCore.@maybe_threads PanCore.PARALLEL_SITES[] for i in 1:soa.n
+  PanCore.@maybe_threads soa.parallel for i in 1:soa.n
     @inbounds if soa.scalar.active[i]
       site_commit!(soa, i, eco[soa.scalar.eco_id[i]], cst)
     end

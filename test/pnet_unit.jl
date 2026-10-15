@@ -388,8 +388,7 @@ end
   clim = make_climate(PPT)
   soa = build_multi(40; seed=5)
   ctx = mkctx(clim)
-  old = PC.PARALLEL_SITES[]
-  PC.PARALLEL_SITES[] = false
+  soa.parallel = false
   for t in 1:2; PC.process_plugin!(soa, PN.PnET, t; ctx=ctx); end   # warm-up (compilation + steady CSR capacities)
   @assert all(soa.scalar.live .== 3)
   a_serial = @allocated PC.process_plugin!(soa, PN.PnET, 3; ctx=ctx)
@@ -400,10 +399,9 @@ end
   kern(soa, ep, ctx.cst, ctx.clim, scr, 5)
   a_kernel = @allocated kern(soa, ep, ctx.cst, ctx.clim, scr, 6)
   a_readjust = @allocated PC.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
-  PC.PARALLEL_SITES[] = true
+  soa.parallel = true
   for t in 5:6; PC.process_plugin!(soa, PN.PnET, t; ctx=ctx); end
   a_thr = @allocated PC.process_plugin!(soa, PN.PnET, 7; ctx=ctx)
-  PC.PARALLEL_SITES[] = old
   println("(e) @allocated serial process_plugin! year (40 sites x 3 cohorts): $a_serial, $a_serial2 bytes; site_year! kernel loop (40 sites): $a_kernel bytes; readjust_soa! (no-change fast path): $a_readjust bytes; threaded ($(Threads.nthreads()) threads): $a_thr bytes")
   @test a_serial == 0 && a_serial2 == 0
   @test a_kernel == 0

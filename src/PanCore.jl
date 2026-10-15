@@ -1,13 +1,13 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, swap_cohort!, FloatType, UIntType, Plugins, with_thread_sync, copy_and_reseed_soa, reset_soa!, current_rss_gb, gc_and_trim!, @maybe_threads, PARALLEL_SITES
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, swap_cohort!, FloatType, UIntType, Plugins, with_thread_sync, copy_and_reseed_soa, reset_soa!, current_rss_gb, gc_and_trim!, @maybe_threads
 
-# Parallelism toggle for the site loops. PARALLEL_SITES[]=true → `@maybe_threads` threads over sites (SoA-level
-# parallelism, needed for single-eval spatial/raster runs). false → serial sites, so an OUTER driver can instead
-# parallelize over candidate×rep evals (better on NUMA; avoids nested threading). `@maybe_threads flag for …`
-# expands to BOTH a threaded and a serial copy of the loop at compile time (body inline — no closure/perf cost),
-# picked by the runtime flag.
-const PARALLEL_SITES = Ref(true)
+# Site-loop parallelism is a property of the SoA the loop runs on (`soa.parallel`, default true), not of the process: every site loop
+# is `@maybe_threads soa.parallel for i in 1:soa.n …`. true → threads over sites (SoA-level parallelism, needed for single-eval
+# spatial/raster runs). false → serial sites, so an OUTER driver can instead parallelize over candidate×rep evals (better on NUMA;
+# avoids nested threading) on thread-local work SoAs it owns. `@maybe_threads flag for …` expands to BOTH a threaded and a serial
+# copy of the loop at compile time (body inline — no closure/perf cost), picked by the runtime Bool. Nothing is shared between
+# concurrent evaluations, and there is nothing to restore after a driver returns.
 macro maybe_threads(flag, loop)
   # Interpolate the raw for-loop into a literal `@threads :static …` (so @threads sees a real for-loop, not an
   # escaped node), then escape the whole thing so flag/loop/Threads all resolve in the caller's scope.
@@ -40,6 +40,9 @@ mutable struct SiteSoA{Plugins<:Tuple,Refs<:NamedTuple,Scalars<:NamedTuple,Csr<:
   refs::Refs
   scalar::Scalars
   csr::Csr
+  parallel::Bool          # site loops over this SoA run threaded (true) or serial (false); see the header of this file
+  SiteSoA{Plugins,Refs,Scalars,Csr}(n, refs, scalar, csr; parallel::Bool=true) where {Plugins<:Tuple,Refs<:NamedTuple,Scalars<:NamedTuple,Csr<:NamedTuple} =
+    new{Plugins,Refs,Scalars,Csr}(n, refs, scalar, csr, parallel)
 end
 
 const AnySoA{P} = SiteSoA{P,<:NamedTuple,<:NamedTuple,<:NamedTuple}
@@ -51,9 +54,9 @@ end
 
 function process_plugin!(::AnySoA{P}, ::Type{<:AbstractPlugin}, ::Int; ctx::C) where {P,C<:NamedTuple} end
 
-function with_thread_sync(f::F) where {F}
+function with_thread_sync(f::F, parallel::Bool) where {F}
   local result
-  @maybe_threads PARALLEL_SITES[] for _ in 1:1     # serial in candidate mode → no nesting inside an outer @threads
+  @maybe_threads parallel for _ in 1:1     # serial in candidate mode → no nesting inside an outer @threads
     result = f()
   end
   return result
@@ -236,7 +239,7 @@ end
 function readjust_soa!(soa::SiteSoA{P,Refs,Scalars,Csr},
   new_counts::NamedTuple,
   options::NamedTuple=NamedTuple()) where {P,Refs,Scalars,Csr}
-  with_thread_sync() do
+  with_thread_sync(soa.parallel) do
 
     field_to_key = _csr_field_to_key(Val(P)) # compile-time, need to lift types
     old_refs = getfield(soa, :refs)
@@ -451,7 +454,7 @@ function reset_soa!(dst::SiteSoA, src::SiteSoA; seed=nothing)
   for k in cks                                              # sim grew/shrank these → match reference nnz first (cheap, serial)
     length(dst.csr[k]) == length(src.csr[k]) || resize!(dst.csr[k], length(src.csr[k]))
   end
-  @maybe_threads PARALLEL_SITES[] for ki in 1:length(cks)   # then overwrite the big per-cohort arrays in parallel (SoA mode)
+  @maybe_threads dst.parallel for ki in 1:length(cks)   # then overwrite the big per-cohort arrays in parallel (SoA mode)
     k = cks[ki]; copyto!(dst.csr[k], src.csr[k])
   end
   if isnothing(seed)
