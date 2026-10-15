@@ -317,6 +317,7 @@ const EXCLUDE_RECRUITS_AT_ENTRY = Ref(true)
 struct _ExclPlan
   mode::Symbol
   recruits::Bool
+  visits::Symbol
   coh::Dict{Int,Dict{Int,Vector{Tuple{UIntType,FloatType}}}}   # year → site_idx → excluded (eco_species, age)
   ref::Dict{Int,Dict{Int,PU.SPDFGroundTruth}}                  # year → site_idx → reference without those cohorts
   prev::Dict{Int,Dict{Int,Int}}                                # year → site_idx → previous visit year (absent for a site's first visit)
@@ -341,10 +342,12 @@ function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
     ys = site_years[si]; k = searchsortedfirst(ys, yr)
     py = k > 1 ? ys[k-1] : -1   # previous visit year (year 0 is a valid previous visit)
     ex = Tuple{UIntType,FloatType}[]
+    ny = k < length(ys) ? ys[k+1] : -1   # next visit year (cohlast: a cohort seen again at the next visit is scored later)
     for (sp, age, bio, drop) in cohorts
       isdist = dist_on && drop > zero(FloatType)
       isrec = rec_on && py >= 0 && !((sp, Int(age) - (yr - py)) in site_set[(si, py)])
-      (isdist || isrec) && push!(ex, (sp, age))
+      notlast = W_VISITS[] === :cohlast && ny >= 0 && ((sp, Int(age) + (ny - yr)) in site_set[(si, ny)])
+      (isdist || isrec || notlast) && push!(ex, (sp, age))
     end
     isempty(ex) && continue
     get!(coh, yr, Dict{Int,Vector{Tuple{UIntType,FloatType}}}())[si] = ex
@@ -371,13 +374,13 @@ function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
   end
   prev = Dict{Int,Dict{Int,Int}}()
   for (si, ys) in site_years, k in 2:length(ys); get!(prev, ys[k], Dict{Int,Int}())[si] = ys[k-1]; end
-  _ExclPlan(mode, rec_on, coh, ref, prev)
+  _ExclPlan(mode, rec_on, W_VISITS[], coh, ref, prev)
 end
 
 function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::_ExclPlan
   lock(_EXCL_LOCK) do
     pl = get(_EXCL_CACHE, injection_dict, nothing)
-    if pl === nothing || pl.mode !== OVERRIDE_INJECTION_DISTURBANCE[] || pl.recruits != EXCLUDE_RECRUITS_AT_ENTRY[]
+    if pl === nothing || pl.mode !== OVERRIDE_INJECTION_DISTURBANCE[] || pl.recruits != EXCLUDE_RECRUITS_AT_ENTRY[] || pl.visits !== W_VISITS[]
       pl = _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
       _EXCL_CACHE[injection_dict] = pl
     end
@@ -393,6 +396,12 @@ end
 #                          the two visits): survivor −Δt·log(1−p); natural death −log(1−(1−p)^Δt). PROB_MORT is NOT applied in the Sim A
 #                          simulation (zeroed inside fit_params when a DeathAcc is passed); it only enters the death term.
 const W_SCOPE = Ref(:all)
+# Which visits/cohorts the Sim A loss scores (experiment, 2026-10-15; docs/simAB_analysis_notes.md):
+#   :all (default) every visit · :plotlast only each site's last visit · :cohlast each cohort only at its LAST eligible observation
+#   (cohorts observed again at the next visit are excluded from both sides at T) · :plotmean every visit, each site's W weighted by
+#   1/(its scored visits). :plotlast skips the whole site-visit (W and the loss AGB term); :cohlast acts through the exclusion plan
+#   (W and the loss AGB term of those cohorts); gdigel's accuracy a_g uses its own pairs and is unaffected by all of them.
+const W_VISITS = Ref(:all)
 const DEATH_TERM = Ref(:none)
 const DEATH_PMIN = 1e-6
 const DEATH_PMAX = 0.5
@@ -2183,6 +2192,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       insite_t3 = [Vector{Bool}(undef, max_eco_nsp3) for _ in 1:nt]
       cdf_t3 = [Vector{FloatType}(undef, nbins3) for _ in 1:nt]
       agb_bins_t3 = [Vector{FloatType}(undef, nbins3) for _ in 1:nt]
+      wpre_t3 = [zeros(FloatType, n_species) for _ in 1:nt]   # w_visits :plotmean — per-thread copy of the eco W before a site-visit
     end
     for current_sim_year in starting_sim_year:max_sim_year
       #println("\ttimestep $(t)")
@@ -2383,7 +2393,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
             !site.active && continue
             spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
             sim_years = site_sim_years.sim_years[site.mapcode]
-            if current_sim_year in sim_years
+            if current_sim_year in sim_years && !(W_VISITS[] === :plotlast && current_sim_year != last(sim_years) && current_sim_year > 0)
               excluded = nothing
               if exclusion_dict !== nothing
                 yd = get(exclusion_dict, current_sim_year, nothing)
@@ -2396,9 +2406,16 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
                 ec = ycl === nothing ? nothing : get(ycl, i, nothing)
                 ec === nothing || (excl_c = ec; gt_now = _excl_plan.ref[current_sim_year][i])
               end
+              _pm = W_VISITS[] === :plotmean
+              _pm && copyto!(wpre_t3[tid], eco3_w_t[tid][eco_id])
               sag = PU.calculate_site_loss2_acc!(eco3_w_t[tid][eco_id], eco3_agb_t[tid][eco_id], current_sim_year, site,
                       n_species, eco_species_ids, gt_now, loss_params,
                       perm_t3[tid], ages_t3[tid], insite_t3[tid], cdf_t3[tid], agb_bins_t3[tid]; excluded=excluded, excl_c=excl_c)
+              if _pm   # equal weight per site: this visit's W counts 1/(the site's scored visits)
+                nv = count(>(0), sim_years); wv = nv > 0 ? one(FloatType) / FloatType(nv) : one(FloatType)
+                ew = eco3_w_t[tid][eco_id]; pw = wpre_t3[tid]
+                @inbounds for q in eachindex(ew); ew[q] = pw[q] + (ew[q] - pw[q]) * wv; end
+              end
               eco3_site_agb_t[tid][eco_id] += sag
               eco3_obs_t[tid][eco_id] += 1
               for j in 1:site.live
@@ -6220,6 +6237,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   _configure_disturbance_shock!(cfg)
   EXCLUDE_RECRUITS_AT_ENTRY[] = Bool(get_cfg("exclude_recruits_at_entry", true))
   W_SCOPE[] = Symbol(get_cfg("w_scope", "all")); W_SCOPE[] in (:all, :survivors) || error("w_scope must be all | survivors")
+  W_VISITS[] = Symbol(get_cfg("w_visits", "all")); W_VISITS[] in (:all, :plotlast, :cohlast, :plotmean) || error("w_visits must be all | plotlast | cohlast | plotmean")
   DEATH_TERM[] = Symbol(get_cfg("death_term", "none")); DEATH_TERM[] in (:none, :likelihood) || error("death_term must be none | likelihood")
   BSP.DEATH_PMORT_SIMA[] = DEATH_TERM[] === :likelihood
   OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", OVERRIDE_INJECTION_NOISE[]))
