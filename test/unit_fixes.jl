@@ -43,4 +43,12 @@ end
   end
 end
 
+
+@testset "B5 unknown search_mode is an error, not a silent LBSA run" begin
+  @test Pan._check_search_mode("igelmo") === nothing && Pan._check_search_mode("sobol") === nothing
+  @test all(m -> Pan._check_search_mode(m) === nothing, Pan.SEARCH_MODES)
+  @test_throws ErrorException Pan._check_search_mode("igel_mo")
+  @test_throws ErrorException Pan._check_search_mode("sa")
+end
+
 end

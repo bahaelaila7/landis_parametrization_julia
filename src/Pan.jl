@@ -1279,6 +1279,14 @@ function _write_split_plots(output_dir::AbstractString, eco_list, splots, sv, st
   @info "split_plots.csv: $(nrow(out)) plots → $(output_dir)"
 end
 
+# search drivers reachable from `parametrize` (sobol returns early; plot_only* are handled in run_from_yaml)
+const SEARCH_MODES = ("lbsa", "molbsa", "cmaes", "mocmaes", "igelmo", "cmame", "ccigel", "nsga2", "gdigel")
+function _check_search_mode(m::AbstractString)
+  (m in SEARCH_MODES || m == "sobol") && return nothing
+  error("unknown search_mode $(repr(m)); valid: $(join(SEARCH_MODES, ", ")), sobol, plot_only, plot_only_sobol" *
+        (m == "sa" ? " (the SA driver predates injection/tiers and is being rebuilt on the shared annealing loop; use lbsa)" : ""))
+end
+
 function parametrize(; cohorts_db_path::String,
   eco_field=:epa_l4,
   tablename::String="data_eco_cohorts_g",
@@ -1428,6 +1436,7 @@ function parametrize(; cohorts_db_path::String,
   top_seeds::Float64=0.2,
   dominance_species::String="exact",
   rng::Random.AbstractRNG)
+  _check_search_mode(search_mode)   # fail fast, before data preparation
 
   # Pin BLAS to 1 thread: the search does hundreds of tiny per-offspring covariance eigendecomps per gen —
   # multi-threaded OpenBLAS spawns all cores per call and oversubscribes catastrophically at high --threads.
@@ -1672,7 +1681,7 @@ function parametrize(; cohorts_db_path::String,
            search_mode == "cmame" ? parametrize_CMAMAE :
            search_mode == "ccigel" ? parametrize_CCIgel :
            search_mode == "nsga2" ? parametrize_NSGA2 :
-           search_mode == "gdigel" ? parametrize_GDIgel : parametrize_LBSA
+           search_mode == "gdigel" ? parametrize_GDIgel : parametrize_LBSA   # "lbsa"
   # CMA-ES-only knobs; LBSA/MOLBSA don't accept these, so only splat them for the (MO)CMA-ES drivers.
   cmaes_kw = search_mode == "molbsa" ? (archive_cap=cmaes_archive_cap, seed_archive_from=seed_archive_from) :
              search_mode == "cmaes" ? (cmaes_lambda=cmaes_lambda, cmaes_sigma0=cmaes_sigma0, ipop=ipop, ipop_stagnation=ipop_stagnation, ipop_max_barren_restarts=ipop_max_barren_restarts, integer_handling=cmaes_integer_handling, integer_std_factor=cmaes_integer_std_factor, single_cov=cmaes_single_cov) :
