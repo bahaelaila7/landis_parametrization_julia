@@ -34,14 +34,14 @@ eco_list = d.eco_list; species_list = d.species_list; eco_species_ids = d.eco_sp
 include(joinpath(@__DIR__, "calib_levers.jl"))
 gdo = cfg["gdigel"]; spinup = cfg["spinup"]
 SP = P.succession_plugin_of(d.ref_soa)
-pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=cfg["no_establishment"], fit_establishment=false)
-cur = JLD2.load_object(start); slots = PU.build_slots(pd, cur)
-cell_group, labels = P._gd_groups(pd, slots, d.eco_species_ids, d.species_list, d.eco_list; group_param=gdo["group_param"])
+sp = P.with_establishment(SP, d.space; no_establishment=cfg["no_establishment"], fit_establishment=false)   # the run's parameter space (pooling, floors)
+cur = JLD2.load_object(start); slots = sp.slots
+cell_group, labels = P._gd_groups(sp.dists, slots, d.eco_species_ids, d.species_list, d.eco_list; group_param=gdo["group_param"])
 ix = P._gd_index(d.injection_cohorts, d.splots, cell_group, labels, d.scoring; real_only=gdo["real_only"])
 groupcells = P._gd_groupcells(ix.cell_group, ix.ngroups)
 targets = Dict{String,Vector{Tuple{Int,Int}}}(labels[k] => groupcells[k] for k in 1:ix.ngroups)
 nvis = P._gd_cell_visits(d.spdf_plts, d.eco_species_ids, spinup ? 0 : 1)
-sc = P.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, per_plot_mean=d.simb.t4_per_plot_mean)   # the reference's loss scales
+sc = P.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, dom=d.scale_seed.dom, per_plot_mean=d.simb.t4_per_plot_mean)   # the reference's loss scales
 injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
 msy = d.site_sim_years.sim_years .|> maximum |> maximum
 seeds = P._fixed_seeds(P.RNGType(UInt64(cfg["seed"])), 1, d.scoring)

@@ -5,9 +5,8 @@ const P = Pan; const PU = P.PU
 cfgpath, ppath, outd = ARGS[1], ARGS[2], ARGS[3]
 function chk(d)
   SP = P.succession_plugin_of(d.ref_soa); p0 = JLD2.load_object(ppath)
-  pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=true, fit_establishment=false)
-  slots = PU.build_slots(pd, p0)
-  cg, labels = P._gd_groups(pd, slots, d.eco_species_ids, d.species_list, d.eco_list)
+  sp = P.with_establishment(SP, d.space; no_establishment=true, fit_establishment=false); slots = sp.slots   # the run's parameter space (pooling, floors) over the Sim A parameter subset
+  cg, labels = P._gd_groups(sp.dists, slots, d.eco_species_ids, d.species_list, d.eco_list)
   ix = P._gd_index(d.injection_cohorts, d.splots, cg, labels, d.scoring; real_only=true)
   injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))

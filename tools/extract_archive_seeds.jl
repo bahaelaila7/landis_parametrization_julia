@@ -1,6 +1,6 @@
 # Export the finished A-only MO-CMA-ES archive (front-1, strict-Pareto non-dominated set) as a
 # sobol-candidates DB, so the stage-B run can seed start + each IPOP restart from a front-1 candidate
-# (growth fixed at that candidate via FIX_GROWTH, establishment fit around it).
+# (growth fixed at that candidate via fix_growth, establishment fit around it).
 #   Run: ./julia_gdal.sh --project=. tools/extract_archive_seeds.jl
 using Pan, JLD2, DuckDB, DataFrames, Serialization
 const STATE = "runs/fl5_l4cover_mocmaes_Aonly_Sglobal_ipop_v2_outputs/search_state_latest.jld2"

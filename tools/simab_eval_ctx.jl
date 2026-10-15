@@ -8,8 +8,8 @@ cfg = Pan.load_config(cfgpath)
 fam_name(s) = s === :ANPP_MAX_SPP ? "ANPP_ratio" : s === :B_MAX_SPP ? "B_MAX" : String(s)
 function check(d)
   SP = P.succession_plugin_of(d.ref_soa); p = JLD2.load_object(ppath)
-  pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=cfg["no_establishment"], fit_establishment=false)
-  slots = PU.build_slots(pd, p); u = PU.params_to_u(p, pd, slots)
+  sp = P.with_establishment(SP, d.space; no_establishment=cfg["no_establishment"], fit_establishment=false); pd = sp.dists   # the run's parameter space (pooling, floors)
+  slots = sp.slots; u = PU.params_to_u(p, sp, slots)
   res = Dict{String,Any}("mode" => mode)
   # ---- 2. bound hugging per family: fraction of fitted dimensions with u <= 0.01 or >= 0.99
   fam = Dict{String,Vector{Float64}}()
@@ -57,7 +57,7 @@ function check(d)
     end
   else
     # ---- 4. establishment: data window [mult x data, 1] and share of cells pinned at the lower bound
-    fl = PU.PROB_ESTAB_FLOOR[]
+    fl = d.space.floors.prob_estab
     if fl !== nothing && hasproperty(p, :PROB_ESTAB_SPP)
       inwin = 0; pinned = 0; n = 0
       for ((e, j), f) in fl

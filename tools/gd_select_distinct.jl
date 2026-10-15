@@ -14,11 +14,11 @@ drop = length(ARGS) >= 6 ? parse(Int, ARGS[6]) : 2
 function select_hook(d)
   global anchor = P._load_params_from_path(anchor_path)
   SP = P.succession_plugin_for(anchor)
-  global pd = P.make_param_dists(SP, length(anchor.SPECIES_LIST), length(anchor.ECO_LIST), [Int.(ids) for ids in anchor.ECO_SPECIES_IDS]; no_establishment=true, fit_establishment=false)
-  global slots = PU.build_slots(pd, anchor)
+  global spc = P.with_establishment(SP, d.space; no_establishment=true, fit_establishment=false)   # the run's parameter space (pooling, floors) over the Sim A parameter subset
+  global pd = spc.dists; global slots = spc.slots
   ck = sort(filter(f -> occursin(r"^gd_state@\d+\.jld2$", f), readdir(gdd)); by=f -> parse(Int, match(r"@(\d+)", f)[1]))
   S = JLD2.load_object(joinpath(gdd, last(ck))); st = S.st
-  ua = PU.params_to_u(anchor, pd, slots)
+  ua = PU.params_to_u(anchor, spc, slots)
   # candidates: every recorded solution, the final lineage points and the behavioural archive (u + per-group losses f).
   # Behavioural = at most `drop` groups above their explore threshold tau_g (the criterion the exploration itself used;
   # the anchor has 0 by construction). Duplicates (identical u) are removed.
@@ -62,9 +62,9 @@ function select_hook(d)
       isempty(topsp[]) && (topsp[] = first.(sort(collect(ba); by=x -> -x[2]))[1:min(6, length(ba))])
       vcat(log.([agb(3), agb(6), agb(11)]), log.([tpa(6), tpa(11)]), [get(ba, s, 0.0) / tot for s in topsp[]])
     end
-    feat[0] = project(PU.u_to_params(ua, pd, slots, anchor))
+    feat[0] = project(PU.u_to_params(ua, spc, slots, anchor))
     for (i, c) in enumerate(beh)
-      feat[i] = project(PU.u_to_params(clamp.(c.u, 0, 1), pd, slots, anchor))
+      feat[i] = project(PU.u_to_params(clamp.(c.u, 0, 1), spc, slots, anchor))
       println("  projected candidate $i/$(length(beh)) ($(c.src)): ", round.(feat[i] .- feat[0]; digits=3))
     end
   end
@@ -80,13 +80,13 @@ function select_hook(d)
   end
   println("selection space: $space")
   # per parameter family: median |log(value / anchor value)| over slots
-  nva = PU.params_to_nativevec(anchor, pd, slots)
+  nva = PU.params_to_nativevec(anchor, spc, slots)
   fam = [String(pd.params[pi].name) for (pi, _) in slots]
   rows = DataFrame(alt=Int[], file=String[], source=String[], groups_above_tau=Int[], n05=Int[], n10=Int[], n20=Int[], dist_anchor=Float64[], dist_nearest=Float64[], family_change=String[])
   for (k, c) in enumerate(picks)
-    p = PU.u_to_params(clamp.(c.u, 0, 1), pd, slots, anchor)
+    p = PU.u_to_params(clamp.(c.u, 0, 1), spc, slots, anchor)
     JLD2.save_object(joinpath(outd, "alt_$(k).jld2"), p)
-    nv = PU.params_to_nativevec(p, pd, slots)
+    nv = PU.params_to_nativevec(p, spc, slots)
     fc = join(["$(f) $(round(Statistics.median([abs(log(max(nv[i], 1e-9) / max(nva[i], 1e-9))) for i in eachindex(fam) if fam[i] == f]) * 100, digits=1))%" for f in unique(fam)], "; ")
     push!(rows, (k, "alt_$(k).jld2", c.src, c.nbad, c.n05, c.n10, c.n20, round(c.dist_anchor, digits=3), round(c.dist_nearest, digits=3), fc))
   end

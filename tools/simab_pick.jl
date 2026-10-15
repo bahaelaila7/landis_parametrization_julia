@@ -60,7 +60,7 @@ elseif cmd == "seeds"
       v = isempty(sel) ? Statistics.median(skipmissing(pet.prob_estab)) : Statistics.median(skipmissing(sel))
       p.PROB_ESTAB_SPP[e][j] = Float32(clamp(v, 0.0, 1.0))
     end
-    P._seed_min_rel!(p, eco_list)
+    P._seed_min_rel!(p, eco_list, P.param_space_options(cfg))
     println("remap: growth/PROB_MORT for $nhit (eco,species) cells of Sim B, $nmiss new cells (PROB_MORT 0)")
     p
   end

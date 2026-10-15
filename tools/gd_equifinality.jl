@@ -13,9 +13,10 @@ MARGINS = [0.05, 0.1, 0.2]; mi = findfirst(==(MARGIN), MARGINS)
 include(joinpath(@__DIR__, "tost_common.jl"))
 files = sort(filter(f -> endswith(f, ".jld2"), readdir(joinpath(gdd, "solutions"); join=true)))
 SPT = P.succession_plugin_for(JLD2.load_object(files[1]))
-pd = P.make_param_dists(SPT, length(species_list), length(eco_list), eco_species_ids; no_establishment=true, fit_establishment=false)
+spc = P.param_space_from_cfg(cfg, SPT, splots, eco_list, species_list, eco_species_ids; no_establishment=true, fit_establishment=false)   # the run's parameter space (options, pooling, blocks) over the Sim A subset
+pd = spc.dists
 sols = [JLD2.load_object(f) for f in files]
-slots = PU.build_slots(pd, sols[1])
+slots = spc.slots
 # tost per solution
 srows = DF.DataFrame(file=String[], n05=Int[], n10=Int[], n20=Int[], median_abs_bias_pct=Float64[])
 passmap = Dict{Tuple{Int,String},Bool}()
@@ -30,7 +31,7 @@ CSV.write(joinpath(gdd, "equifinality_$(SPLIT)_solutions.csv"), srows)
 # slot → TOST group label (slots touching exactly one TOST group)
 cells_of(pi, t) = P._gd_slot_cells(pd.params[pi].sampler, t, eco_species_ids)
 lab(e, j) = (s = Int(eco_species_ids[e][j]); label(s, grp(s, e)))
-U = [PU.params_to_u(p, pd, slots) for p in sols]; NV = [PU.params_to_nativevec(p, pd, slots) for p in sols]
+U = [PU.params_to_u(p, spc, slots) for p in sols]; NV = [PU.params_to_nativevec(p, spc, slots) for p in sols]
 # HBAD SDIMAX is sampled in a wide box and clamped per species at decode (sdimax_range): report the EFFECTIVE value
 if SPT === P.HBADPlugin.HBAD
   for (i, (pi, t)) in enumerate(slots)

@@ -56,6 +56,6 @@ for (e, ids) in enumerate(eco_species_ids), (j, gid) in enumerate(ids)
   p.PROB_ESTAB_SPP[e][j] = Float32(clamp(v, 0.0, 1.0)); global npe += 1
 end
 println("PROB_ESTAB from data for $npe (eco,species) cells; median ", round(Statistics.median(reduce(vcat, p.PROB_ESTAB_SPP)), digits=3))
-P._seed_min_rel!(p, eco_list)
+P._seed_min_rel!(p, eco_list, P.param_space_options(cfg))
 JLD2.save_object(out, p)
 println("Sim B start: growth remapped for $nhit (eco,species) cells, $nmiss new (defaults); species $(length(species_list)), ecos $(length(eco_list)); PROB_ESTAB=$pe0 → $out")

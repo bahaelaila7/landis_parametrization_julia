@@ -5,16 +5,15 @@ const P = Pan; const PU = P.PU
 cfgpath, ppath, outd = ARGS[1], ARGS[2], ARGS[3]; extra = ARGS[4:end]
 function run(d)
   SP = P.succession_plugin_of(d.ref_soa); p0 = JLD2.load_object(ppath)
-  pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=true, fit_establishment=false)
-  slots = PU.build_slots(pd, p0)
-  cg, labels = P._gd_groups(pd, slots, d.eco_species_ids, d.species_list, d.eco_list)
+  sp = P.with_establishment(SP, d.space; no_establishment=true, fit_establishment=false); slots = sp.slots   # the run's parameter space (pooling, floors) over the Sim A parameter subset
+  cg, labels = P._gd_groups(sp.dists, slots, d.eco_species_ids, d.species_list, d.eco_list)
   ix = P._gd_index(d.injection_cohorts, d.splots, cg, labels, d.scoring; real_only=true)
   gc = P._gd_groupcells(ix.cell_group, ix.ngroups)
   injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
   nvis = P._gd_cell_visits(d.spdf_plts, d.eco_species_ids, 1)
   println("DIAG groups=$(ix.ngroups) pairs=$(length(ix.pair_group))")
-  sc = P.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, per_plot_mean=d.simb.t4_per_plot_mean)   # the reference's loss scales
+  sc = P.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, dom=d.scale_seed.dom, per_plot_mean=d.simb.t4_per_plot_mean)   # the reference's loss scales
   P.W_DIAG_CTX[] = (d.spdf_plts, d.n_species, d.eco_species_ids, d.loss_params, sc)
   function ev(p; lbi=true, mode=:none)
     fill!(P.W_DIAG_CAT, 0)
@@ -53,7 +52,7 @@ function run(d)
   # ---- 2. sensitivity
   println("DIAG ===== sensitivity (new order): components over parameter sets")
   nd_ = length(slots); rng = Random.Xoshiro(7)
-  for k in 1:4; push!(sets, "uniform_u$k" => PU.u_to_params(rand(rng, nd_), pd, slots, p0)); end
+  for k in 1:4; push!(sets, "uniform_u$k" => PU.u_to_params(rand(rng, nd_), sp, slots, p0)); end
   rows = NamedTuple[]; dead = Tuple[]
   for (nm, p) in sets
     n = ev(p; mode=:stats); o = ev(p; mode=:oracle); x = ev(p; mode=:nodeath)
