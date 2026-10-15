@@ -44,6 +44,7 @@ const ActivePlugins = (BaseSitePlugin.BaseSite, BiomassSuccessionPlugin.BiomassS
 const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 include("succession_api.jl")
 include("params_yaml.jl")
+include("config.jl")
 
 succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "biomasssuccession", "bs") ? _BS :
                                                 lowercase(name) in ("pnet", "pnet-succession") ? _PN :
@@ -52,22 +53,22 @@ succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "b
 
 # Tools/diagnostics (tools/tost_common.jl, calib_coord.jl): select and configure the succession plugin from a yaml cfg
 # exactly as `parametrize` does, and point SITE_ATTRS_FN at the plugin's site attributes (make_sites_like). Returns the type.
-function setup_plugin_from_cfg(cfg::AbstractDict, eco_list::Vector{String}; species_list=nothing, eco_species_ids=nothing)
-  g(k, d) = get(cfg, k, d); X(s) = _expandenv(String(s))
-  SUCC = succession_plugin_type(String(g("succession_plugin", "biomass")))
+function setup_plugin_from_cfg(cfg0::AbstractDict, eco_list::Vector{String}; species_list=nothing, eco_species_ids=nothing)
+  cfg = _as_config(cfg0)
+  SUCC = succession_plugin_type(cfg["succession_plugin"])
   if SUCC === PnETPlugin.PnET
-    db = X(g("cohorts_db_path", "")); tbl = String(g("tablename", ""))
-    PnETPlugin.configure!(; climate_cache=X(g("pnet_climate_cache", "")), co2_csv=X(g("pnet_co2_csv", "")),
-      generic=Dict{String,Any}(String(k) => v for (k, v) in g("pnet_generic", Dict())), db_path=db)
-    soil_map = Dict{String,String}(String(k) => String(v) for (k, v) in g("pnet_soil_texture", Dict()))
-    soil_csv = X(g("pnet_soil_csv", ""))
+    db = cfg["cohorts_db_path"]; tbl = cfg["tablename"]
+    PnETPlugin.configure!(; climate_cache=cfg["pnet_climate_cache"], co2_csv=cfg["pnet_co2_csv"],
+      generic=Dict{String,Any}(cfg["pnet_generic"]), db_path=db)
+    soil_map = Dict{String,String}(String(k) => String(v) for (k, v) in cfg["pnet_soil_texture"])
+    soil_csv = cfg["pnet_soil_csv"]
     SITE_ATTRS_FN[] = sp -> PnETPlugin.build_site_attrs(db, tbl, sp, eco_list; soil_map=soil_map, soil_csv=soil_csv)
   elseif SUCC === HBADPlugin.HBAD
     (species_list === nothing || eco_species_ids === nothing) && error("setup_plugin_from_cfg(hbad) needs species_list and eco_species_ids")
-    pc = String(g("hbad_priors_csv", "")); cc = String(g("hbad_coefs_csv", ""))
+    pc = cfg["hbad_priors_csv"]; cc = cfg["hbad_coefs_csv"]
     HBADPlugin.configure!(; species_list=species_list, eco_species_ids=eco_species_ids,
-      priors_csv=isempty(pc) ? HBADPlugin.DEFAULT_PRIORS_CSV : X(pc), coefs_csv=isempty(cc) ? HBADPlugin.DEFAULT_COEFS_CSV : X(cc))
-    _configure_hbad_estab!(; seed_rain=Bool(g("hbad_seed_rain", false)), prob_estab_csv=X(g("hbad_prob_estab_csv", "")), cycle_years=Float64(g("cycle_years", 8)))
+      priors_csv=isempty(pc) ? HBADPlugin.DEFAULT_PRIORS_CSV : pc, coefs_csv=isempty(cc) ? HBADPlugin.DEFAULT_COEFS_CSV : cc)
+    _configure_hbad_estab!(; seed_rain=cfg["hbad_seed_rain"], prob_estab_csv=cfg["hbad_prob_estab_csv"], cycle_years=cfg["cycle_years"])
     SITE_ATTRS_FN[] = sp -> nothing
   else
     SITE_ATTRS_FN[] = sp -> nothing
@@ -2856,19 +2857,19 @@ end
 # by_plot=true keeps the plot id (pairs per (plot, cycle, eco, species, bin)) — used by the plot-cluster bootstrap TOST.
 # preexist=true keeps only cohorts that existed at the plot's first visit (age > sim_year) on BOTH sides: drops simulated
 # recruits and observed cohorts younger than the run (timber-only data cannot observe recruits until they reach 5 in).
-function resim_simB_paired(cfg, params, sp, spdf_plts, site_sim_years, spinup_cohorts, loss_params,
+function resim_simB_paired(cfg0, params, sp, spdf_plts, site_sim_years, spinup_cohorts, loss_params,
                            eco_list, species_list, eco_species_ids, rng; by_plot::Bool=false, preexist::Bool=false)
-  g(k, d) = get(cfg, k, d)
+  cfg = _as_config(cfg0)
   ACTIVE_SUCCESSION[] = succession_plugin_for(params)
   DUAL_MODE[] = :b
-  SIMB_DISTURB_ONLY[] = Bool(g("simB_disturb_only", false))
-  SIMB_SPINUP[] = Bool(g("simB_spinup", true))
-  TIER_B[] = Int(g("tier_b", 4))
-  T4_PER_PLOT_MEAN[] = Bool(g("simB_per_plot_mean", false))
-  T4_MEAN_OVER_REPS[] = Bool(g("simB_rep_mean", false))
+  SIMB_DISTURB_ONLY[] = cfg["simB_disturb_only"]
+  SIMB_SPINUP[] = cfg["simB_spinup"]
+  TIER_B[] = cfg["tier_b"]
+  T4_PER_PLOT_MEAN[] = cfg["simB_per_plot_mean"]
+  T4_MEAN_OVER_REPS[] = cfg["simB_rep_mean"]
   n_species = length(species_list)
   inj = (SIMB_DISTURB_ONLY[] || OVERRIDE_INJECTION[]) ? Data.get_injection_cohorts(sp; all_cohorts=true) : nothing
-  cycle_map, n_cycles = Data.build_cycle_map(sp; cycle_years=Float64(g("cycle_years", 8)))
+  cycle_map, n_cycles = Data.build_cycle_map(sp; cycle_years=cfg["cycle_years"])
   n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
   t4_ref = [[zeros(FloatType, length(eco_species_ids[e]), n_bins) for _ in 1:n_cycles] for e in eachindex(eco_list)]
   for ((pid, eid), yd) in spdf_plts, (sy, gt) in yd
@@ -5984,82 +5985,56 @@ function _apply_frozen_growth!(cand, ref)
   cand
 end
 
-# Expand ${VAR}/$VAR (from ENV) and a leading ~ in a config path string, so yaml paths are portable across
-# machines (e.g. cohorts_db_path: "${FIADB}", output_dir: "${SCRATCH}/out", "~/data.duckdb"). Missing vars →
-# "". Plain/relative paths pass through unchanged. Same treatment the FIADB override gets, applied in-yaml.
-function _expandenv(s::AbstractString)
-  isempty(s) && return String(s)
-  out = replace(String(s), r"\$\{(\w+)\}" => m -> get(ENV, m[3:end-1], ""))   # ${VAR}
-  out = replace(out, r"\$(\w+)" => m -> get(ENV, m[2:end], ""))               # $VAR
-  return expanduser(out)
-end
-
 # ---------------------------------------------------------------------------------------------------------------
 # Single source of truth for the DATA-PREP keyword arguments (train/val/test split, region filters, site-class
 # tiers, species tiering, outlier exclusions, ...). Used by `run_from_yaml` (training) AND by the analysis scripts
 # (`prepare_from_cfg`), so a script re-derives EXACTLY the plots/split the run trained on.
 # ---------------------------------------------------------------------------------------------------------------
 
-# cfg getter: String values get ${VAR}/$VAR/~ expanded; everything else passes through.
-_cfg_getter(cfg::AbstractDict) = (key, default) -> (v = get(cfg, key, default); v isa AbstractString ? _expandenv(v) : v)
-
-# Parse the data-prep inputs from a (YAML-loaded) config into a NamedTuple whose names match `parametrize`'s kwargs.
-function _cfg_data_inputs(cfg::AbstractDict)
-  get_cfg = _cfg_getter(cfg)
-  filter_plots = NTuple{4,Int}[
-    NTuple{4,Int}([x isa AbstractString ? parse(Int, x) : Int(x) for x in p])
-    for p in get_cfg("filter_plots", [])
-  ]
-  # Plots to DROP from the loaded set (outlier exclusion). Accepts an inline `exclude_plots:` list of
-  # [statecd,unitcd,countycd,plot] and/or an `exclude_plots_csv:` file with those four columns; merged.
-  exclude_plots = NTuple{4,Int}[
-    NTuple{4,Int}([x isa AbstractString ? parse(Int, x) : Int(x) for x in p])
-    for p in get_cfg("exclude_plots", [])
-  ]
-  let epc = get_cfg("exclude_plots_csv", nothing)
-    if !(epc === nothing || epc == "null")
-      for r in eachrow(CSV.read(String(epc), DataFrame))
-        push!(exclude_plots, (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)))
-      end
+# Parse the data-prep inputs from a loaded config (`load_config`) into a NamedTuple whose names match `parametrize`'s kwargs.
+function _cfg_data_inputs(cfg0::AbstractDict)
+  cfg = _as_config(cfg0)
+  # Plots to DROP from the loaded set (outlier exclusion): the inline `exclude_plots:` list and/or the rows of an
+  # `exclude_plots_csv:` file with the four plot columns; merged (inline first).
+  exclude_plots = copy(cfg["exclude_plots"])
+  if cfg["exclude_plots_csv"] !== nothing
+    for r in eachrow(CSV.read(cfg["exclude_plots_csv"], DataFrame))
+      push!(exclude_plots, (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)))
     end
   end
-  filter_extent = get_cfg("filter_extent", nothing)
-  filter_extent = (filter_extent === nothing || filter_extent == "null") ? nothing : String(filter_extent)
-  # DB path: env FIADB wins (portable across machines); else the yaml value (get_cfg already expands ${VAR}/~).
-  db_path = get(ENV, "FIADB", "") != "" ? ENV["FIADB"] : String(get_cfg("cohorts_db_path", "../data_eco_cohorts.duckdb"))
   return (
-    cohorts_db_path=db_path,
-    filter_eco_field=get_cfg("filter_eco_field", "epa_l3"),
-    eco_field=get_cfg("eco_field", "epa_l3"),
-    tablename=get_cfg("tablename", "data_eco_cohorts"),
-    filter_ecos=String.(get_cfg("filter_ecos", String[])),
-    filter_plots=filter_plots,
+    cohorts_db_path=cfg["cohorts_db_path"],   # (the FIADB env override is applied by load_config)
+    filter_eco_field=cfg["filter_eco_field"],
+    eco_field=cfg["eco_field"],
+    tablename=cfg["tablename"],
+    filter_ecos=cfg["filter_ecos"],
+    filter_plots=cfg["filter_plots"],
     exclude_plots=exclude_plots,
-    filter_species=String.(get_cfg("filter_species", String[])),
-    skip_disturbances=get_cfg("skip_disturbances", true),
-    spinup=get_cfg("spinup", false),
-    by_subplot=get_cfg("by_subplot", false),
-    val_frac=Float64(get_cfg("val_frac", 0.0)),
-    split_seed=Int(get_cfg("split_seed", 42)),
-    n_folds=Int(get_cfg("n_folds", 1)),
-    fold_index=Int(get_cfg("fold_index", 1)),
-    test_frac=Float64(get_cfg("test_frac", 0.0)),
-    min_trees=Int(get_cfg("min_trees", 100)),
-    min_agb_frac=Float64(get_cfg("min_agb_frac", 0.05)),
-    stratify_eco_mixed=Bool(get_cfg("stratify_eco_mixed", false)),
-    single_ecoregion=Bool(get_cfg("single_ecoregion", false)),
-    stratify_landuse=Bool(get_cfg("stratify_landuse", false)),
-    site_class_strata=Bool(get_cfg("site_class_strata", false)),
-    siteclass_hi_max=Int(get_cfg("siteclass_hi_max", 4)),
-    siteclass_scheme=String(get_cfg("siteclass_scheme", "2way")),
-    shade_tier_csv=(haskey(cfg, "shade_tier_csv") ? String(get_cfg("shade_tier_csv", "")) : nothing),
-    filter_extent=filter_extent,
-    filter_states=Int.(get_cfg("filter_states", Int[])),
-    siteclass_l3s=String.(string.(get_cfg("siteclass_l3s", String[]))),
-    max_exact=Int(get_cfg("max_exact", 12)), max_group=Int(get_cfg("max_group", 4)),
-    drop_phantom=Bool(get_cfg("drop_phantom", false)),
-    train_cap=(c = get_cfg("train_cap", nothing); (c === nothing || c == "null") ? nothing : (c isa Integer ? Int(c) : String(c))),
-    train_cap_k=Float64(get_cfg("train_cap_k", 1.5)), train_cap_min=Int(get_cfg("train_cap_min", 20)),
+    filter_species=cfg["filter_species"],
+    skip_disturbances=cfg["skip_disturbances"],
+    spinup=cfg["spinup"],
+    by_subplot=cfg["by_subplot"],
+    val_frac=cfg["val_frac"],
+    split_seed=cfg["split_seed"],
+    n_folds=cfg["n_folds"],
+    fold_index=cfg["fold_index"],
+    test_frac=cfg["test_frac"],
+    min_trees=cfg["min_trees"],
+    min_agb_frac=cfg["min_agb_frac"],
+    stratify_eco_mixed=cfg["stratify_eco_mixed"],
+    single_ecoregion=cfg["single_ecoregion"],
+    stratify_landuse=cfg["stratify_landuse"],
+    site_class_strata=cfg["site_class_strata"],
+    siteclass_hi_max=cfg["siteclass_hi_max"],
+    siteclass_scheme=cfg["siteclass_scheme"],
+    shade_tier_csv=cfg["shade_tier_csv"],
+    filter_extent=cfg["filter_extent"],
+    filter_states=cfg["filter_states"],
+    siteclass_l3s=cfg["siteclass_l3s"],
+    max_exact=cfg["max_exact"], max_group=cfg["max_group"],
+    drop_phantom=cfg["drop_phantom"],
+    train_cap=cfg["train_cap"],
+    train_cap_k=cfg["train_cap_k"], train_cap_min=cfg["train_cap_min"],
   )
 end
 
@@ -6124,7 +6099,7 @@ end
 # injection only (override_injection + override_injection_sync, not replace). There the default is true; for the other
 # injection modes (append, replace) the default is the legacy order (false) and an explicit `true` is an error: those modes
 # used to score pre-injection silently, with the species-level exclusion and no recruit exclusion. Without injection the
-# flag has no effect. `g(key, default)` is a config getter (_cfg_getter / run_from_yaml's get_cfg).
+# flag has no effect. `g(key, default)` reads the already-coerced config values (called by `load_config`).
 function _resolve_loss_before_injection(g)::Bool
   v = g("loss_before_injection", nothing)
   inj = Bool(g("override_injection", false))
@@ -6134,6 +6109,55 @@ function _resolve_loss_before_injection(g)::Bool
   b && inj && !rule && error("loss_before_injection: true needs override_injection_sync (and not override_injection_replace); " *
                              "the other injection modes score in the legacy order — set loss_before_injection: false or omit it")
   return b
+end
+
+# Disturbance-shock data source (yaml `disturbance_full_removals: <parquet>`, default data/cohort_disturbance_full.parquet in the
+# repo if present). Active only with the new scoring order + sync injection; otherwise Data.DISTURBANCE_FULL_PATH[] = "" (legacy
+# behaviour byte-identical: no partial-drop attach, no shock rows).
+function _configure_disturbance_shock!(cfg0::AbstractDict)
+  cfg = _as_config(cfg0)
+  lbi = cfg["loss_before_injection"]   # resolved by load_config (_resolve_loss_before_injection)
+  dual = cfg["dual_mode"] !== :off
+  # Sim A needs sync injection; Sim B (dual mode / simB_disturb_only) uses the full removals + partial drops on its own
+  on = lbi && ((cfg["override_injection"] && cfg["override_injection_sync"]) || dual || cfg["simB_disturb_only"])
+  explicit = cfg["disturbance_full_removals"]   # nothing = default parquet | "" = disabled | path
+  default = joinpath(dirname(@__DIR__), "data", "cohort_disturbance_full.parquet")
+  path = ""
+  if on
+    if explicit === nothing
+      isfile(default) ? (path = default) : @warn "override_injection_sync with loss_before_injection: no disturbance data (set `disturbance_full_removals:` or build data/cohort_disturbance_full.parquet with tools/export_cohort_disturbance.py) — fully-removed cohorts are NOT shocked before scoring"
+    elseif explicit == ""
+      path = ""
+    else
+      path = explicit
+      isfile(path) || (@warn "disturbance_full_removals: $(path) not found — disturbance shocks disabled"; path = "")
+    end
+  end
+  Data.DISTURBANCE_FULL_PATH[] = path
+  path
+end
+
+"""
+    apply_scoring_flags!(cfg)
+
+Set every module Ref that defines the scoring rule from a loaded config: the injection mode (`override_injection[_replace|_sync|_noise|_disturbance]`),
+`loss_before_injection`, the disturbance-shock data path, `exclude_recruits_at_entry`, `w_scope` and `death_term`. `run_from_yaml` and the analysis
+tools (tost, scatter, plots) all call this one function, so a tool scores exactly the way the run was trained.
+"""
+function apply_scoring_flags!(cfg0::AbstractDict)
+  cfg = _as_config(cfg0)
+  OVERRIDE_INJECTION[] = cfg["override_injection"]
+  OVERRIDE_INJECTION_REPLACE[] = cfg["override_injection_replace"]
+  OVERRIDE_INJECTION_SYNC[] = cfg["override_injection_sync"]
+  LOSS_BEFORE_INJECTION[] = cfg["loss_before_injection"]
+  _configure_disturbance_shock!(cfg)
+  EXCLUDE_RECRUITS_AT_ENTRY[] = cfg["exclude_recruits_at_entry"]
+  W_SCOPE[] = cfg["w_scope"]; W_SCOPE[] in (:all, :survivors) || error("w_scope must be all | survivors")
+  DEATH_TERM[] = cfg["death_term"]; DEATH_TERM[] in (:none, :likelihood) || error("death_term must be none | likelihood")
+  BSP.DEATH_PMORT_SIMA[] = DEATH_TERM[] === :likelihood
+  OVERRIDE_INJECTION_NOISE[] = cfg["override_injection_noise"]
+  OVERRIDE_INJECTION_DISTURBANCE[] = cfg["override_injection_disturbance"]
+  return nothing
 end
 
 """
@@ -6147,39 +6171,12 @@ split RNG (seeded from `split_seed` when val/test/folds are used). `split_rng_se
 `rng` is the (currently unused by prepare) `RNG` argument — default is derived from `seed` without touching global RNG state.
 Per-fold scripts can override with `prepare_from_cfg(cfg; fold_index=k)`.
 """
-# Disturbance-shock data source (yaml `disturbance_full_removals: <parquet>`, default data/cohort_disturbance_full.parquet in the
-# repo if present). Active only with the new scoring order + sync injection; otherwise Data.DISTURBANCE_FULL_PATH[] = "" (legacy
-# behaviour byte-identical: no partial-drop attach, no shock rows).
-function _configure_disturbance_shock!(cfg::AbstractDict)
-  g = _cfg_getter(cfg)
-  lbi = _resolve_loss_before_injection(g)
-  dual = _parse_dual_mode(g("dual_mode", "off")) !== :off
-  # Sim A needs sync injection; Sim B (dual mode / simB_disturb_only) uses the full removals + partial drops on its own
-  on = lbi && ((Bool(g("override_injection", false)) && Bool(g("override_injection_sync", false))) || dual || Bool(g("simB_disturb_only", false)))
-  explicit = g("disturbance_full_removals", nothing)
-  default = joinpath(dirname(@__DIR__), "data", "cohort_disturbance_full.parquet")
-  path = ""
-  if on
-    if explicit === nothing
-      isfile(default) ? (path = default) : @warn "override_injection_sync with loss_before_injection: no disturbance data (set `disturbance_full_removals:` or build data/cohort_disturbance_full.parquet with tools/export_cohort_disturbance.py) — fully-removed cohorts are NOT shocked before scoring"
-    elseif explicit === false || String(explicit) in ("", "none", "off")
-      path = ""
-    else
-      path = String(explicit)
-      isfile(path) || (@warn "disturbance_full_removals: $(path) not found — disturbance shocks disabled"; path = "")
-    end
-  end
-  Data.DISTURBANCE_FULL_PATH[] = path
-  path
-end
-
-function prep_kwargs_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, rng::Union{Nothing,Random.AbstractRNG}=nothing)
+function prep_kwargs_from_cfg(cfg0::AbstractDict; split_rng_seed_override=nothing, rng::Union{Nothing,Random.AbstractRNG}=nothing)
+  cfg = _as_config(cfg0)
   _configure_disturbance_shock!(cfg)
-  get!(ENV, "PAN_DATA", "runs")
-  get!(ENV, "PAN_OUT", "runs/outputs")
   din = _cfg_data_inputs(cfg)
   split_seed = split_rng_seed_override === nothing ? din.split_seed : Int(split_rng_seed_override)
-  rng_ = rng === nothing ? RNGType(rand(Random.Xoshiro(_cfg_getter(cfg)("seed", 404)), UInt64)) : rng   # == run_from_yaml's RNGType(rand(UInt64)) after Random.seed!(seed)
+  rng_ = rng === nothing ? RNGType(rand(Random.Xoshiro(cfg["seed"]), UInt64)) : rng   # == run_from_yaml's RNGType(rand(UInt64)) after Random.seed!(seed)
   return _prep_kwargs(; din..., split_seed=split_seed, rng=rng_)
 end
 
@@ -6203,13 +6200,11 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
                                          # set PAN_DATA=<dir> on the cluster (e.g. $SCRATCH/runs/data) → one yaml, both layouts
   get!(ENV, "PAN_OUT", "runs/outputs")   # output root for a ${PAN_OUT}/... output_dir in the yaml; default local, set on cluster.
                                          # (When launched via train_resumable.sh, output_dir is overridden anyway — this is the bare-run fallback.)
-  cfg = YAML.load_file(yaml_path)
-  for (k, v) in overrides; cfg[String(k)] = v; end   # runner/CLI overrides (e.g. per-fold fold_index/output_dir)
-  # String config values get ${VAR}/$VAR/~ expanded from the environment (paths like output_dir, *_csv,
-  # cohorts_db_path become portable); non-strings and plain strings pass through unchanged.
-  get_cfg(key, default) = (v = get(cfg, key, default); v isa AbstractString ? _expandenv(v) : v)
+  # The one validated reader: unknown/retired keys are errors, values are coerced, defaults filled, ${VAR}/$VAR/~ expanded.
+  # `overrides` are runner/CLI values (e.g. per-fold fold_index/output_dir).
+  cfg = load_config(yaml_path; overrides=overrides)
 
-  seed = get_cfg("seed", 404)
+  seed = cfg["seed"]
   Random.seed!(seed)
   rng = RNGType(rand(UInt64))
 
@@ -6220,26 +6215,18 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   exclude_plots = din.exclude_plots
   isempty(exclude_plots) || @info "exclude_plots: dropping $(length(exclude_plots)) plots from the loaded set"
 
-  sw_size = get_cfg("smoothing_window_size", 0)
+  sw_size = cfg["smoothing_window_size"]
   smoothing_window = sw_size > 0 ?
-                     PU.get_smoothing_window(; smoothing_window=sw_size, smoothing_variance=FloatType(get_cfg("smoothing_variance", 1.0))) :
+                     PU.get_smoothing_window(; smoothing_window=sw_size, smoothing_variance=FloatType(cfg["smoothing_variance"])) :
                      FloatType[one(FloatType)]
 
-  resume_from = get_cfg("resume_from", nothing)
-  resume_from = (resume_from === nothing || resume_from == "null") ? nothing : String(resume_from)
-  start_from = get_cfg("start_from", nothing)
-  start_from = (start_from === nothing || start_from == "null") ? nothing : String(start_from)
-  sobol_candidates_db = get_cfg("sobol_candidates_db", nothing)
-  sobol_candidates_db = (sobol_candidates_db === nothing || sobol_candidates_db == "null") ? nothing : String(sobol_candidates_db)
-
   # K-fold: each fold writes to <output_dir>/fold_<fold_index> so the 5 fold runs don't collide.
-  _n_folds = Int(get_cfg("n_folds", 1)); _fold_index = Int(get_cfg("fold_index", 1))
-  _output_dir = String(get_cfg("output_dir", "./outputs"))
+  _n_folds = cfg["n_folds"]; _fold_index = cfg["fold_index"]
+  _output_dir = cfg["output_dir"]
   _n_folds > 1 && (_output_dir = joinpath(_output_dir, "fold_$(_fold_index)"))
   isdir(_output_dir) || mkpath(_output_dir)
 
-  # DB path: env FIADB wins (portable across machines); else the yaml value (get_cfg already expands ${VAR}/~).
-  _db_path = din.cohorts_db_path   # (FIADB env override + yaml value resolved in _cfg_data_inputs)
+  _db_path = din.cohorts_db_path   # (yaml value, with the FIADB env override applied by load_config)
 
   # Fields shared by parametrize, plot_sample, and plot_sample_sobol
   common_kw = (
@@ -6254,7 +6241,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     skip_disturbances=din.skip_disturbances,
     spinup=din.spinup,
     by_subplot=din.by_subplot,
-    no_establishment=get_cfg("no_establishment", false),
+    no_establishment=cfg["no_establishment"],
     min_trees=din.min_trees,
     min_agb_frac=din.min_agb_frac,
     stratify_eco_mixed=din.stratify_eco_mixed,
@@ -6270,46 +6257,34 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     max_exact=din.max_exact, max_group=din.max_group, drop_phantom=din.drop_phantom,
     train_cap=din.train_cap,
     train_cap_k=din.train_cap_k, train_cap_min=din.train_cap_min,
-    split_only=Bool(get_cfg("split_only", false)),
-    bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
+    split_only=cfg["split_only"],
+    bins_idx=cfg["bins_idx"],
   )
-  n_output_plots = get_cfg("n_output_plots", 0)
-  search_mode = get_cfg("search_mode", "lbsa")
+  n_output_plots = cfg["n_output_plots"]
+  search_mode = cfg["search_mode"]
 
-  # Injection-override flags (module Refs read at injection time). Default = the current Ref
-  # value, so omitting a key keeps the in-code default; set them in yaml to control a run.
-  OVERRIDE_INJECTION[] = Bool(get_cfg("override_injection", false))
-  OVERRIDE_INJECTION_REPLACE[] = Bool(get_cfg("override_injection_replace", false))
-  OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", false))
-  LOSS_BEFORE_INJECTION[] = _resolve_loss_before_injection(get_cfg)
-  _configure_disturbance_shock!(cfg)
-  EXCLUDE_RECRUITS_AT_ENTRY[] = Bool(get_cfg("exclude_recruits_at_entry", true))
-  W_SCOPE[] = Symbol(get_cfg("w_scope", "all")); W_SCOPE[] in (:all, :survivors) || error("w_scope must be all | survivors")
-  DEATH_TERM[] = Symbol(get_cfg("death_term", "none")); DEATH_TERM[] in (:none, :likelihood) || error("death_term must be none | likelihood")
-  BSP.DEATH_PMORT_SIMA[] = DEATH_TERM[] === :likelihood
-  OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", 0.0))
-  OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(get_cfg("override_injection_disturbance", "off"))
-  Data.USE_FIA_CYCLE[] = Bool(get_cfg("fia_cycle", false))   # tier-4/5 cycles from FIA `cycle` vs computed split
-  Data.FIA_CYCLE_MERGE[] = Int(get_cfg("fia_cycle_merge", 3))   # merge N consecutive FIA cycles into one group
-  DUAL_MODE[] = _parse_dual_mode(get_cfg("dual_mode", "off"))   # off (A only) | joint (A⊕B) | b (B only, seed from A)
-  TIER_B[] = Int(get_cfg("tier_b", 4))                       # Sim B's tier (A's tier = config `tier`)
-  LBSA_STRETCH_LEN[] = Int(get_cfg("lbsa_stretch_len", 150)) # LBSA stretch length
-  LBSA_STALE_RATIO[] = Float64(get_cfg("lbsa_stale_ratio", 0.95)) # LBSA freeze-detection uphill-attempt ratio
-  LBSA_TEMP_LIST_LEN[] = Int(get_cfg("lbsa_temp_list_len", 150))   # LBSA temperature-list length L
-  LBSA_REPLACE_OLDEST[] = Bool(get_cfg("lbsa_replace_oldest", true)) # false → overwrite the max each stretch (responsive temp)
-  LBSA_COOLING_ONLY[] = Bool(get_cfg("lbsa_cooling_only", false))    # true → monotone cooling → search actually freezes → reheat/restart fires
-  SIMB_SPINUP[] = Bool(get_cfg("simB_spinup", true))         # false = Sim B starts from observed cohorts (no spinup)
-  T4_PER_PLOT_MEAN[] = Bool(get_cfg("simB_per_plot_mean", false))   # tier-4: AGB as mean biomass-per-plot-by-age
-  T4_MEAN_OVER_REPS[] = Bool(get_cfg("simB_rep_mean", false))       # tier-4: score loss on the mean-over-reps sim histogram
-  SIMB_DISTURB_ONLY[] = Bool(get_cfg("simB_disturb_only", false))   # Sim B purely free (no injection); disturbance-scale on ALL plots
-  MOCMAES.USE_NDS[] = Bool(get_cfg("mocmaes_true_nds", false)) # true = MO-CMA-ES offspring ranked by NSGA-II Pareto fronts (vs default win-count)
+  apply_scoring_flags!(cfg)   # injection / scoring-rule Refs (shared with the analysis tools)
+  Data.USE_FIA_CYCLE[] = cfg["fia_cycle"]   # tier-4/5 cycles from FIA `cycle` vs computed split
+  Data.FIA_CYCLE_MERGE[] = cfg["fia_cycle_merge"]   # merge N consecutive FIA cycles into one group
+  DUAL_MODE[] = cfg["dual_mode"]   # off (A only) | joint (A⊕B) | b (B only, seed from A)
+  TIER_B[] = cfg["tier_b"]                       # Sim B's tier (A's tier = config `tier`)
+  LBSA_STRETCH_LEN[] = cfg["lbsa_stretch_len"] # LBSA stretch length
+  LBSA_STALE_RATIO[] = cfg["lbsa_stale_ratio"] # LBSA freeze-detection uphill-attempt ratio
+  LBSA_TEMP_LIST_LEN[] = cfg["lbsa_temp_list_len"]   # LBSA temperature-list length L
+  LBSA_REPLACE_OLDEST[] = cfg["lbsa_replace_oldest"] # false → overwrite the max each stretch (responsive temp)
+  LBSA_COOLING_ONLY[] = cfg["lbsa_cooling_only"]    # true → monotone cooling → search actually freezes → reheat/restart fires
+  SIMB_SPINUP[] = cfg["simB_spinup"]         # false = Sim B starts from observed cohorts (no spinup)
+  T4_PER_PLOT_MEAN[] = cfg["simB_per_plot_mean"]   # tier-4: AGB as mean biomass-per-plot-by-age
+  T4_MEAN_OVER_REPS[] = cfg["simB_rep_mean"]       # tier-4: score loss on the mean-over-reps sim histogram
+  SIMB_DISTURB_ONLY[] = cfg["simB_disturb_only"]   # Sim B purely free (no injection); disturbance-scale on ALL plots
+  MOCMAES.USE_NDS[] = cfg["mocmaes_true_nds"] # true = MO-CMA-ES offspring ranked by NSGA-II Pareto fronts (vs default win-count)
   MOCMAES.USE_NDS[] && @info "MO-CMA-ES offspring ranking: TRUE NSGA-II non-dominated sorting (Pareto fronts + crowding)"
-  BiomassSuccessionPlugin.FIXED_LONGEVITY[] = (let v = get_cfg("fix_longevity", nothing); isnothing(v) ? nothing : Float64(v) end)
-  BiomassSuccessionPlugin.LONGEVITY_TABLE[] = Bool(get_cfg("longevity_from_data", false)) ?
+  BiomassSuccessionPlugin.FIXED_LONGEVITY[] = (let v = cfg["fix_longevity"]; isnothing(v) ? nothing : Float64(v) end)
+  BiomassSuccessionPlugin.LONGEVITY_TABLE[] = cfg["longevity_from_data"] ?
     _load_longevity_table(_db_path) : nothing
   # Per-species LONGEVITY overrides from yaml (`longevity_overrides: {PIEL: 275}`) — applied on top of the
   # data table so hand corrections don't require rewriting the read-only species_longevity_ref DB table.
-  let ov = get_cfg("longevity_overrides", nothing)
+  let ov = cfg["longevity_overrides"]
     if !isnothing(ov) && !isempty(ov)
       tbl = BiomassSuccessionPlugin.LONGEVITY_TABLE[]
       isnothing(tbl) && (tbl = Dict{String,Float64}(); BiomassSuccessionPlugin.LONGEVITY_TABLE[] = tbl)
@@ -6317,33 +6292,33 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
       @info "longevity_overrides applied: $(Dict(String(k)=>Float64(v) for (k,v) in ov))"
     end
   end
-  BiomassSuccessionPlugin.SHADE_TOL_TABLE[] = Bool(get_cfg("shade_tol_from_data", false)) ?
-    _load_shade_tol_table(String(get_cfg("shade_tol_csv", "./runs/shadetol_all_species.csv"))) : nothing
-  BiomassSuccessionPlugin.PROB_ESTAB_TABLE[] = Bool(get_cfg("prob_estab_from_data", false)) ?
-    _load_prob_estab_table(String(get_cfg("prob_estab_csv", "./runs/prob_estab_from_data.csv")),
-                           String(get_cfg("prob_estab_csv_artificial", "./runs/prob_estab_from_data_artificial.csv"))) : nothing
-  BiomassSuccessionPlugin.MATURITY_TABLE[] = Bool(get_cfg("maturity_from_data", false)) ?
-    _load_maturity_table(String(get_cfg("maturity_csv", "./runs/prob_estab_all_species.csv"))) : nothing
-  BiomassSuccessionPlugin.BMAX_FLOOR_TABLE[] = Bool(get_cfg("bmax_floor_from_data", false)) ?
-    _load_bmax_floor_table(String(get_cfg("bmax_floor_csv", "./runs/bmax_floor.csv"))) : nothing
-  BiomassSuccessionPlugin.ANPP_FLOOR_TABLE[] = Bool(get_cfg("anpp_floor_from_data", false)) ?
-    _load_anpp_floor_table(String(get_cfg("anpp_floor_csv", "./runs/anpp_floor_853.csv"))) : nothing
-  IgelMOCMAES.USE_CHOLESKY[] = Bool(get_cfg("igel_cholesky", false))   # igelmo sampling sqrt: Cholesky (cheaper) vs eigen; Ref → resume-safe
-  IgelMOCMAES.RESEED_SIGMA_OVERRIDE[] = Float64(get_cfg("igel_reseed_sigma_override", -1.0))   # >=0 retunes reseed threshold on RESUME (else struct field)
-  IgelMOCMAES.MATURITY_OVERRIDE[]     = Int(get_cfg("igel_maturity_override", -1))             # >=0 retunes maturity shield on RESUME (else struct field)
-  BSP.FIX_PMORT[] = Bool(get_cfg("fix_pmort", false)); BSP.PMORT_UPPER_B[] = Float32(get_cfg("pmort_upper", 0.02)); BSP.PMORT_UPPER_A[] = Float32(get_cfg("pmort_upper_simA", 0.2))
-  BSP.FIX_GROWTH[] = Bool(get_cfg("fix_growth", false))     # stage-B: fix {D,S,ANPP_MAX,B_MAX}, fit establishment only
-  BSP.FIX_MATURITY[] = Bool(get_cfg("fix_maturity", false)) # pin MATURITY out of the search (at MATURITY_TABLE/SONA)
-  BSP.FIX_MIN_REL[] = Bool(get_cfg("fix_min_rel", false))
-  BSP.BMAX_BOUNDS[] = (12000, Int(get_cfg("bmax_upper", 35000)))                       # widen the B_MAX search box (lower stays 12000)
-  BSP.ANPP_RATIO_BOUNDS[] = Tuple(Float32.(get_cfg("anpp_ratio_bounds", [20.0, 35.0])))   # B_MAX/ANPP ratio box   # pin MIN_REL_BIOMASS out of the search (at MIN_REL_PINNED)
-  PROB_ESTAB_LOWER_BOUND[] = Bool(get_cfg("prob_estab_lower_bound", false))   # PROB_ESTAB data value as a search LOWER bound (needs prob_estab_from_data)
-  PROB_ESTAB_LOWER_MULT[] = Float64(get_cfg("prob_estab_lower_bound_mult", 1.0))   # floor = mult × data (e.g. 0.8)
+  BiomassSuccessionPlugin.SHADE_TOL_TABLE[] = cfg["shade_tol_from_data"] ?
+    _load_shade_tol_table(cfg["shade_tol_csv"]) : nothing
+  BiomassSuccessionPlugin.PROB_ESTAB_TABLE[] = cfg["prob_estab_from_data"] ?
+    _load_prob_estab_table(cfg["prob_estab_csv"],
+                           cfg["prob_estab_csv_artificial"]) : nothing
+  BiomassSuccessionPlugin.MATURITY_TABLE[] = cfg["maturity_from_data"] ?
+    _load_maturity_table(cfg["maturity_csv"]) : nothing
+  BiomassSuccessionPlugin.BMAX_FLOOR_TABLE[] = cfg["bmax_floor_from_data"] ?
+    _load_bmax_floor_table(cfg["bmax_floor_csv"]) : nothing
+  BiomassSuccessionPlugin.ANPP_FLOOR_TABLE[] = cfg["anpp_floor_from_data"] ?
+    _load_anpp_floor_table(cfg["anpp_floor_csv"]) : nothing
+  IgelMOCMAES.USE_CHOLESKY[] = cfg["igel_cholesky"]   # igelmo sampling sqrt: Cholesky (cheaper) vs eigen; Ref → resume-safe
+  IgelMOCMAES.RESEED_SIGMA_OVERRIDE[] = cfg["igel_reseed_sigma_override"]   # >=0 retunes reseed threshold on RESUME (else struct field)
+  IgelMOCMAES.MATURITY_OVERRIDE[]     = cfg["igel_maturity_override"]             # >=0 retunes maturity shield on RESUME (else struct field)
+  BSP.FIX_PMORT[] = cfg["fix_pmort"]; BSP.PMORT_UPPER_B[] = Float32(cfg["pmort_upper"]); BSP.PMORT_UPPER_A[] = Float32(cfg["pmort_upper_simA"])
+  BSP.FIX_GROWTH[] = cfg["fix_growth"]     # stage-B: fix {D,S,ANPP_MAX,B_MAX}, fit establishment only
+  BSP.FIX_MATURITY[] = cfg["fix_maturity"] # pin MATURITY out of the search (at MATURITY_TABLE/SONA)
+  BSP.FIX_MIN_REL[] = cfg["fix_min_rel"]
+  BSP.BMAX_BOUNDS[] = (12000, cfg["bmax_upper"])                       # widen the B_MAX search box (lower stays 12000)
+  BSP.ANPP_RATIO_BOUNDS[] = Tuple(Float32.(cfg["anpp_ratio_bounds"]))   # B_MAX/ANPP ratio box   # pin MIN_REL_BIOMASS out of the search (at MIN_REL_PINNED)
+  PROB_ESTAB_LOWER_BOUND[] = cfg["prob_estab_lower_bound"]   # PROB_ESTAB data value as a search LOWER bound (needs prob_estab_from_data)
+  PROB_ESTAB_LOWER_MULT[] = cfg["prob_estab_lower_bound_mult"]   # floor = mult × data (e.g. 0.8)
 
   # plot modes (B8): the plots use the training context (same data prep, splits, strata, loss and scoring flags as a search)
   plot_mode = search_mode in ("plot_only", "plot_only_sobol")
-  plot_params_path = plot_mode && search_mode == "plot_only" ? String(get_cfg("params_path", "")) : ""
-  plot_sobol_db = search_mode == "plot_only_sobol" ? String(get_cfg("sobol_candidates_db", "")) : ""
+  plot_params_path = plot_mode && search_mode == "plot_only" ? cfg["params_path"] : ""
+  plot_sobol_db = search_mode == "plot_only_sobol" ? something(cfg["sobol_candidates_db"], "") : ""
   search_mode == "plot_only" && isempty(plot_params_path) && error("search_mode=plot_only requires params_path in yaml")
   search_mode == "plot_only_sobol" && isempty(plot_sobol_db) && error("search_mode=plot_only_sobol requires sobol_candidates_db in yaml")
 
@@ -6352,131 +6327,131 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     exclude_plots=exclude_plots,
     search_mode=plot_mode ? "igelmo" : search_mode,
     context_only=plot_mode,
-    tier=get_cfg("tier", 1),
+    tier=cfg["tier"],
     smoothing_window=smoothing_window,
-    unbinned_w=Bool(get_cfg("unbinned_w", false)),   # Sim A: exact per-year EMD (no binning/age-smoothing)
-    w_count_balance=Bool(get_cfg("w_count_balance", false)),
-    w_count_balance_mode=String(get_cfg("w_count_balance_mode", "both")),
-    w_count_beta=Float64(get_cfg("w_count_beta", 0.99)),
-    w_count_pct_floor=Float64(get_cfg("w_count_pct_floor", 0.10)),
-    rankw_mode=String(get_cfg("rankw_mode", "rank")),
-    rankw_beta=Float64(get_cfg("rankw_beta", 0.999)),
-    rankw_pct_floor=Float64(get_cfg("rankw_pct_floor", 0.10)),
-    param_split_species=Dict{String,Vector{String}}(String(k) => String.(v) for (k, v) in get_cfg("param_split_species", Dict())),
-    param_pooling=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("param_pooling", Dict())),
-    succession_plugin=String(get_cfg("succession_plugin", "biomass")),
-    pnet_climate_cache=String(get_cfg("pnet_climate_cache", "")),
-    pnet_co2_csv=String(get_cfg("pnet_co2_csv", "")),
-    pnet_generic=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("pnet_generic", Dict())),
-    pnet_soil_texture=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("pnet_soil_texture", Dict())),
-    pnet_soil_csv=String(get_cfg("pnet_soil_csv", "")),
-    hbad_priors_csv=String(get_cfg("hbad_priors_csv", "")),
-    hbad_coefs_csv=String(get_cfg("hbad_coefs_csv", "")),
-    hbad_init=String(get_cfg("hbad_init", "jitter")),
-    hbad_seed_rain=Bool(get_cfg("hbad_seed_rain", false)),
-    hbad_prob_estab_csv=String(get_cfg("hbad_prob_estab_csv", "")),
-    hbad_cycle_years=Float64(get_cfg("cycle_years", 8)),
-    cmaes_blocks=String(get_cfg("cmaes_blocks", "eco")),
-    param_tier_merge=Dict{String,Any}(String(k) => Dict{String,Any}(String(sp) => Dict{String,String}(String(c) => String(g) for (c, g) in cm) for (sp, cm) in v) for (k, v) in get_cfg("param_tier_merge", Dict())),
-    TRIALS=get_cfg("trials", 1000000),
-    resume_from=resume_from,
-    start_from=start_from,
-    force_restart_from_random=get_cfg("force_restart_from_random", false),
-    sobol_n=get_cfg("sobol_n", 100),
-    saltelli=get_cfg("saltelli", false),
-    n_reps=get_cfg("n_reps", 5),
-    sobol_candidates_db=sobol_candidates_db,
-    sobol_top_frac=Float64(get_cfg("sobol_top_frac", 0.5)),
+    unbinned_w=cfg["unbinned_w"],   # Sim A: exact per-year EMD (no binning/age-smoothing)
+    w_count_balance=cfg["w_count_balance"],
+    w_count_balance_mode=cfg["w_count_balance_mode"],
+    w_count_beta=cfg["w_count_beta"],
+    w_count_pct_floor=cfg["w_count_pct_floor"],
+    rankw_mode=cfg["rankw_mode"],
+    rankw_beta=cfg["rankw_beta"],
+    rankw_pct_floor=cfg["rankw_pct_floor"],
+    param_split_species=cfg["param_split_species"],
+    param_pooling=cfg["param_pooling"],
+    succession_plugin=cfg["succession_plugin"],
+    pnet_climate_cache=cfg["pnet_climate_cache"],
+    pnet_co2_csv=cfg["pnet_co2_csv"],
+    pnet_generic=cfg["pnet_generic"],
+    pnet_soil_texture=cfg["pnet_soil_texture"],
+    pnet_soil_csv=cfg["pnet_soil_csv"],
+    hbad_priors_csv=cfg["hbad_priors_csv"],
+    hbad_coefs_csv=cfg["hbad_coefs_csv"],
+    hbad_init=cfg["hbad_init"],
+    hbad_seed_rain=cfg["hbad_seed_rain"],
+    hbad_prob_estab_csv=cfg["hbad_prob_estab_csv"],
+    hbad_cycle_years=cfg["cycle_years"],
+    cmaes_blocks=cfg["cmaes_blocks"],
+    param_tier_merge=cfg["param_tier_merge"],
+    TRIALS=cfg["trials"],
+    resume_from=cfg["resume_from"],
+    start_from=cfg["start_from"],
+    force_restart_from_random=cfg["force_restart_from_random"],
+    sobol_n=cfg["sobol_n"],
+    saltelli=cfg["saltelli"],
+    n_reps=cfg["n_reps"],
+    sobol_candidates_db=cfg["sobol_candidates_db"],
+    sobol_top_frac=cfg["sobol_top_frac"],
     n_output_plots=n_output_plots,
     val_frac=din.val_frac,
     split_seed=din.split_seed,
     n_folds=din.n_folds,
     fold_index=din.fold_index,
     test_frac=din.test_frac,
-    diagnose=get_cfg("diagnose", false),
-    cycle_years=get_cfg("cycle_years", 8),
-    loss_lambda=Float64(get_cfg("loss_lambda", 1.0)),
-    loss_alpha=Float64(get_cfg("loss_alpha", 1.0)),
-    agb_hinge=Bool(get_cfg("agb_hinge", false)),
-    agb_hinge_threshold=Float64(get_cfg("agb_hinge_threshold", 10.0)),
-    agb_hinge_pct=Float64(get_cfg("agb_hinge_pct", 0.0)),
-    agb_hinge_pct_min=Float64(get_cfg("agb_hinge_pct_min", 0.0)),
-    agb_hinge_pct_max=Float64(get_cfg("agb_hinge_pct_max", Inf)),
-    agb_hinge_l2=Bool(get_cfg("agb_hinge_l2", false)),
-    agb_hinge_p=Float64(get_cfg("agb_hinge_p", 2.0)),   # hinge exponent pen(h)=h^p, default 2 (L2)
-    agb_hinge_beta=Float64(get_cfg("agb_hinge_beta", 1.0)),
-    agb_normalize=Bool(get_cfg("agb_normalize", false)),
-    w_normalize=Bool(get_cfg("w_normalize", false)),
-    cell_normalize=Bool(get_cfg("cell_normalize", false)),
-    w_scale_factor=Float64(get_cfg("w_scale_factor", 1.0)),
-    w_smooth=Bool(get_cfg("w_smooth", false)),
-    w_smooth_band=Float64(get_cfg("w_smooth_band", 0.05)),
-    w_smooth_conc=Float64(get_cfg("w_smooth_conc", 0.5)),
-    w_smooth_beta=Float64(get_cfg("w_smooth_beta", 1.0)),
-    w_smooth_auto_knee=Bool(get_cfg("w_smooth_auto_knee", false)),
-    w_p=Float64(get_cfg("w_p", 1.0)),
-    w_hinge=Bool(get_cfg("w_hinge", false)),
-    w_hinge_pct=Float64(get_cfg("w_hinge_pct", 0.01)),
-    w_hinge_pct_min=Float64(get_cfg("w_hinge_pct_min", 2.0)),
-    w_hinge_pct_max=Float64(get_cfg("w_hinge_pct_max", 5.0)),
-    loss_piecewise=Bool(get_cfg("loss_piecewise", false)),
-    w_pivot=Float64(get_cfg("w_pivot", 1.0)),
-    agb_pivot=Float64(get_cfg("agb_pivot", 1.0)),
-    init_perturb_frac=Float64(get_cfg("init_perturb_frac", 0.0)),
-    init_perturb_cap=Float64(get_cfg("init_perturb_cap", 50.0)),
-    cmaes_lambda=(haskey(cfg, "cmaes_lambda") ? Int(get_cfg("cmaes_lambda", 0)) : nothing),
-    cmaes_sigma0=Float64(get_cfg("cmaes_sigma0", 0.3)),
-    cmaes_warmstart_seeds=Int(get_cfg("cmaes_warmstart_seeds", 20)),
-    ipop=get_cfg("ipop", false),
-    ipop_stagnation=Int(get_cfg("ipop_stagnation", 20)),
-    ipop_max_barren_restarts=Int(get_cfg("ipop_max_barren_restarts", 4)),
-    cmaes_archive_cap=Int(get_cfg("cmaes_archive_cap", 200)),
-    seed_archive_from=(let v = get_cfg("seed_archive_from", nothing); (v === nothing || v == "null") ? nothing : String(v) end),
-    cmaes_integer_handling=get_cfg("cmaes_integer_handling", false),
-    cmaes_integer_std_factor=Float64(get_cfg("cmaes_integer_std_factor", 0.3)),
-    cmaes_single_cov=Bool(get_cfg("cmaes_single_cov", false)),
-    nsga2_pop=Int(get_cfg("nsga2_pop", 48)),
-    nsga2_offspring=(let v = get_cfg("nsga2_offspring", nothing); (v === nothing || v == "null") ? nothing : Int(v) end),
-    nsga2_eta_c=Float64(get_cfg("nsga2_eta_c", 20.0)),
-    nsga2_eta_m=Float64(get_cfg("nsga2_eta_m", 20.0)),
-    nsga2_pc=Float64(get_cfg("nsga2_pc", 0.9)),
-    nsga2_pm=Float64(get_cfg("nsga2_pm", -1.0)),
-    nsga2_sobol_init=Bool(get_cfg("nsga2_sobol_init", true)),
-    igel_mu=Int(get_cfg("igel_mu", 20)),
-    igel_sigma0=Float64(get_cfg("igel_sigma0", 0.3)),
-    igel_sobol_init=get_cfg("igel_sobol_init", true),
-    igel_sobol_pool_k=Int(get_cfg("igel_sobol_pool_k", 1)),        # >1 ⇒ oversample: keep best μ·k by dominance, random-pick μ
-    igel_sobol_raw_mult=Int(get_cfg("igel_sobol_raw_mult", 2)),    # raw Sobol pool = (μ·pool_k)·raw_mult candidates evaluated
-    igel_niche_radius=Float64(get_cfg("igel_niche_radius", 0.0)),
-    igel_reseed_sigma=Float64(get_cfg("igel_reseed_sigma", 0.0)),
-    igel_reseed_random_frac=Float64(get_cfg("igel_reseed_random_frac", 0.0)),
-    igel_maturity=Int(get_cfg("igel_maturity", 0)),
-    igel_seed_maturity=Bool(get_cfg("igel_seed_maturity", false)),
-    igel_warm_start=Bool(get_cfg("igel_warm_start", false)),
-    igel_freeze_seed_growth=Bool(get_cfg("igel_freeze_seed_growth", false)),
-    cc_group_size=Int(get_cfg("cc_group_size", 2)),
-    cc_spec_gens=Int(get_cfg("cc_spec_gens", 20)),
-    cc_integ_gens=Int(get_cfg("cc_integ_gens", 20)),
-    cc_cycles=Int(get_cfg("cc_cycles", 5)),
-    cc_fix_others=Bool(get_cfg("cc_fix_others", false)),
-    gdigel=Dict{String,Any}(String(k) => v for (k, v) in get_cfg("gdigel", Dict())),
-    cmame_alpha=Float64(get_cfg("cmame_alpha", 0.02)),
-    cmame_grid=Int(get_cfg("cmame_grid", 15)),
-    cmame_reseed_explore=Float64(get_cfg("cmame_reseed_explore", 1.0)),
-    cmame_restart_patience=Int(get_cfg("cmame_restart_patience", 6)),
-    cmame_sobol_reseed=Bool(get_cfg("cmame_sobol_reseed", false)),
-    cmame_mo_rank=Bool(get_cfg("cmame_mo_rank", false)),
-    balanced_quality=Bool(get_cfg("balanced_quality", false)),
-    archive_by_sp=Bool(get_cfg("archive_by_sp", false)),
-    bounds_by_sobol=Bool(get_cfg("bounds_by_sobol", false)),
-    top_seeds=Float64(get_cfg("top_seeds", 0.2)),
-    dominance_species=String(get_cfg("dominance_species", "exact")),
+    diagnose=cfg["diagnose"],
+    cycle_years=cfg["cycle_years"],
+    loss_lambda=cfg["loss_lambda"],
+    loss_alpha=cfg["loss_alpha"],
+    agb_hinge=cfg["agb_hinge"],
+    agb_hinge_threshold=cfg["agb_hinge_threshold"],
+    agb_hinge_pct=cfg["agb_hinge_pct"],
+    agb_hinge_pct_min=cfg["agb_hinge_pct_min"],
+    agb_hinge_pct_max=cfg["agb_hinge_pct_max"],
+    agb_hinge_l2=cfg["agb_hinge_l2"],
+    agb_hinge_p=cfg["agb_hinge_p"],   # hinge exponent pen(h)=h^p, default 2 (L2)
+    agb_hinge_beta=cfg["agb_hinge_beta"],
+    agb_normalize=cfg["agb_normalize"],
+    w_normalize=cfg["w_normalize"],
+    cell_normalize=cfg["cell_normalize"],
+    w_scale_factor=cfg["w_scale_factor"],
+    w_smooth=cfg["w_smooth"],
+    w_smooth_band=cfg["w_smooth_band"],
+    w_smooth_conc=cfg["w_smooth_conc"],
+    w_smooth_beta=cfg["w_smooth_beta"],
+    w_smooth_auto_knee=cfg["w_smooth_auto_knee"],
+    w_p=cfg["w_p"],
+    w_hinge=cfg["w_hinge"],
+    w_hinge_pct=cfg["w_hinge_pct"],
+    w_hinge_pct_min=cfg["w_hinge_pct_min"],
+    w_hinge_pct_max=cfg["w_hinge_pct_max"],
+    loss_piecewise=cfg["loss_piecewise"],
+    w_pivot=cfg["w_pivot"],
+    agb_pivot=cfg["agb_pivot"],
+    init_perturb_frac=cfg["init_perturb_frac"],
+    init_perturb_cap=cfg["init_perturb_cap"],
+    cmaes_lambda=cfg["cmaes_lambda"],
+    cmaes_sigma0=cfg["cmaes_sigma0"],
+    cmaes_warmstart_seeds=cfg["cmaes_warmstart_seeds"],
+    ipop=cfg["ipop"],
+    ipop_stagnation=cfg["ipop_stagnation"],
+    ipop_max_barren_restarts=cfg["ipop_max_barren_restarts"],
+    cmaes_archive_cap=cfg["cmaes_archive_cap"],
+    seed_archive_from=cfg["seed_archive_from"],
+    cmaes_integer_handling=cfg["cmaes_integer_handling"],
+    cmaes_integer_std_factor=cfg["cmaes_integer_std_factor"],
+    cmaes_single_cov=cfg["cmaes_single_cov"],
+    nsga2_pop=cfg["nsga2_pop"],
+    nsga2_offspring=cfg["nsga2_offspring"],
+    nsga2_eta_c=cfg["nsga2_eta_c"],
+    nsga2_eta_m=cfg["nsga2_eta_m"],
+    nsga2_pc=cfg["nsga2_pc"],
+    nsga2_pm=cfg["nsga2_pm"],
+    nsga2_sobol_init=cfg["nsga2_sobol_init"],
+    igel_mu=cfg["igel_mu"],
+    igel_sigma0=cfg["igel_sigma0"],
+    igel_sobol_init=cfg["igel_sobol_init"],
+    igel_sobol_pool_k=cfg["igel_sobol_pool_k"],        # >1 ⇒ oversample: keep best μ·k by dominance, random-pick μ
+    igel_sobol_raw_mult=cfg["igel_sobol_raw_mult"],    # raw Sobol pool = (μ·pool_k)·raw_mult candidates evaluated
+    igel_niche_radius=cfg["igel_niche_radius"],
+    igel_reseed_sigma=cfg["igel_reseed_sigma"],
+    igel_reseed_random_frac=cfg["igel_reseed_random_frac"],
+    igel_maturity=cfg["igel_maturity"],
+    igel_seed_maturity=cfg["igel_seed_maturity"],
+    igel_warm_start=cfg["igel_warm_start"],
+    igel_freeze_seed_growth=cfg["igel_freeze_seed_growth"],
+    cc_group_size=cfg["cc_group_size"],
+    cc_spec_gens=cfg["cc_spec_gens"],
+    cc_integ_gens=cfg["cc_integ_gens"],
+    cc_cycles=cfg["cc_cycles"],
+    cc_fix_others=cfg["cc_fix_others"],
+    gdigel=cfg["gdigel"],
+    cmame_alpha=cfg["cmame_alpha"],
+    cmame_grid=cfg["cmame_grid"],
+    cmame_reseed_explore=cfg["cmame_reseed_explore"],
+    cmame_restart_patience=cfg["cmame_restart_patience"],
+    cmame_sobol_reseed=cfg["cmame_sobol_reseed"],
+    cmame_mo_rank=cfg["cmame_mo_rank"],
+    balanced_quality=cfg["balanced_quality"],
+    archive_by_sp=cfg["archive_by_sp"],
+    bounds_by_sobol=cfg["bounds_by_sobol"],
+    top_seeds=cfg["top_seeds"],
+    dominance_species=cfg["dominance_species"],
     rng=rng)
   plot_mode || return _res
   return search_mode == "plot_only" ?
     plot_sample(_res; params_path=plot_params_path, n_output_plots=max(1, n_output_plots), rng_seed=seed) :
     plot_sample_sobol(_res; sobol_candidates_db=plot_sobol_db, n_output_plots=max(1, n_output_plots),
-                      n_sobol_params_to_plot=max(1, get_cfg("n_sobol_params_to_plot", 5)), rng_seed=seed)
+                      n_sobol_params_to_plot=max(1, cfg["n_sobol_params_to_plot"]), rng_seed=seed)
 end
 
 function main()

@@ -53,7 +53,7 @@ end
 
 
 @testset "B14 loss_before_injection is defined by the injection mode" begin
-  r(d) = Pan._resolve_loss_before_injection(Pan._cfg_getter(Dict{String,Any}(d)))
+  r(d) = (dd = Dict{String,Any}(d); Pan._resolve_loss_before_injection((k, dflt) -> get(dd, k, dflt)))   # the resolver on raw values (load_config calls it; see unit_config_reader.jl)
   sync = ("override_injection" => true, "override_injection_sync" => true)
   @test r([sync...]) === true                                            # the 2026-10-15 rule
   @test r([sync..., "loss_before_injection" => false]) === false         # legacy order on request

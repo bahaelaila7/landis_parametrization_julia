@@ -1,6 +1,8 @@
-# Pan._expandenv and Pan._cfg_data_inputs on small Dict configs (no DB access).
+# Pan._expandenv and Pan._cfg_data_inputs on small Dict configs (no DB access). The reader itself is tested in unit_config_reader.jl.
 module UnitConfig
 using Test, Pan
+
+din(d) = Pan._cfg_data_inputs(Pan.load_config(d))   # raw Dict -> validated PanConfig -> data-prep inputs
 
 withenv_(f, kv...) = withenv(f, kv...)
 
@@ -23,19 +25,9 @@ withenv_(f, kv...) = withenv(f, kv...)
   end
 end
 
-@testset "_cfg_getter" begin
-  withenv("PAN_T_A" => "/data/x") do
-    g = Pan._cfg_getter(Dict{String,Any}("p" => "\${PAN_T_A}/q", "n" => 3, "v" => ["\${PAN_T_A}"]))
-    @test g("p", "dflt") == "/data/x/q"            # strings expanded
-    @test g("n", 0) == 3 && g("missing", "d") == "d"
-    @test g("v", nothing) == ["\${PAN_T_A}"]        # non-strings pass through un-expanded (lists are NOT expanded)
-    @test g("missing", "\${PAN_T_A}") == "/data/x"        # string DEFAULTS are expanded too (expansion is applied to the resolved value)
-  end
-end
-
 @testset "_cfg_data_inputs defaults" begin
   withenv("FIADB" => nothing) do
-    d = Pan._cfg_data_inputs(Dict{String,Any}())
+    d = din(Dict{String,Any}())
     @test d isa NamedTuple
     @test d.cohorts_db_path == "../data_eco_cohorts.duckdb"
     @test d.tablename == "data_eco_cohorts"
@@ -70,7 +62,7 @@ end
       "val_frac" => 1, "split_seed" => 7.0, "n_folds" => 5.0,                       # numeric coercions
       "filter_extent" => "null", "train_cap" => "null", "skip_disturbances" => false, "spinup" => true,
       "shade_tier_csv" => "\${PAN_T_DIR}/t.csv")
-    d = Pan._cfg_data_inputs(cfg)
+    d = din(cfg)
     @test d.tablename == "curated_cohorts_landis" && d.eco_field == "land_use" && d.filter_eco_field == "epa_l2"
     @test d.cohorts_db_path == "/scratch/db.duckdb"
     @test d.filter_plots == [(12, 1, 3, 4), (13, 2, 5, 6)] && eltype(d.filter_plots) == NTuple{4,Int}
@@ -83,38 +75,38 @@ end
     @test d.skip_disturbances === false && d.spinup === true
     @test d.shade_tier_csv == "/scratch/t.csv"
     # train_cap: integer stays Int, string stays String (e.g. "auto"), float is a type error? -> check the actual behaviour
-    @test Pan._cfg_data_inputs(Dict{String,Any}("train_cap" => 30)).train_cap === 30
-    @test Pan._cfg_data_inputs(Dict{String,Any}("train_cap" => "auto")).train_cap == "auto"
-    @test Pan._cfg_data_inputs(Dict{String,Any}("filter_extent" => "FL")).filter_extent == "FL"
-    # shade_tier_csv present-but-null: haskey -> String(get_cfg(...)) (string "null" is NOT mapped to nothing here)
-    @test Pan._cfg_data_inputs(Dict{String,Any}("shade_tier_csv" => "null")).shade_tier_csv == "null"
-    # numeric keys are NOT parsed from strings (only filter_plots/exclude_plots entries are): Int("7") -> MethodError
-    @test_throws MethodError Pan._cfg_data_inputs(Dict{String,Any}("split_seed" => "7"))
-    @test_throws InexactError Pan._cfg_data_inputs(Dict{String,Any}("split_seed" => 7.5))
+    @test din(Dict{String,Any}("train_cap" => 30)).train_cap === 30
+    @test din(Dict{String,Any}("train_cap" => "auto")).train_cap == "auto"
+    @test din(Dict{String,Any}("filter_extent" => "FL")).filter_extent == "FL"
+    # CHANGED (Step 2): shade_tier_csv is a nullable path, so "null" / null mean unset like every other nullable key
+    @test din(Dict{String,Any}("shade_tier_csv" => "null")).shade_tier_csv === nothing
+    # CHANGED (Step 2): Int accepts numeric strings; a non-integral number is a ConfigError (was MethodError / InexactError)
+    @test din(Dict{String,Any}("split_seed" => "7")).split_seed === 7
+    @test_throws Pan.ConfigError din(Dict{String,Any}("split_seed" => 7.5))
     # a malformed plot spec fails loudly
-    @test_throws Exception Pan._cfg_data_inputs(Dict{String,Any}("filter_plots" => Any[[1, 2, 3]]))
-    @test_throws Exception Pan._cfg_data_inputs(Dict{String,Any}("filter_plots" => Any[["a", 2, 3, 4]]))
+    @test_throws Exception din(Dict{String,Any}("filter_plots" => Any[[1, 2, 3]]))
+    @test_throws Exception din(Dict{String,Any}("filter_plots" => Any[["a", 2, 3, 4]]))
   end
 end
 
 @testset "_cfg_data_inputs: FIADB env + exclude_plots_csv" begin
   # env FIADB wins over the yaml value
   withenv("FIADB" => "/env/fiadb.duckdb") do
-    @test Pan._cfg_data_inputs(Dict{String,Any}("cohorts_db_path" => "/yaml/x.duckdb")).cohorts_db_path == "/env/fiadb.duckdb"
-    @test Pan._cfg_data_inputs(Dict{String,Any}()).cohorts_db_path == "/env/fiadb.duckdb"
+    @test din(Dict{String,Any}("cohorts_db_path" => "/yaml/x.duckdb")).cohorts_db_path == "/env/fiadb.duckdb"
+    @test din(Dict{String,Any}()).cohorts_db_path == "/env/fiadb.duckdb"
   end
   withenv("FIADB" => "") do                               # empty FIADB is treated as unset
-    @test Pan._cfg_data_inputs(Dict{String,Any}("cohorts_db_path" => "/yaml/x.duckdb")).cohorts_db_path == "/yaml/x.duckdb"
+    @test din(Dict{String,Any}("cohorts_db_path" => "/yaml/x.duckdb")).cohorts_db_path == "/yaml/x.duckdb"
   end
   mktempdir() do dir
     csv = joinpath(dir, "ex.csv")
     write(csv, "statecd,unitcd,countycd,plot\n12,1,5,9\n13,2,6,10\n")
     withenv("FIADB" => nothing) do
-      d = Pan._cfg_data_inputs(Dict{String,Any}("exclude_plots" => Any[[1, 2, 3, 4]], "exclude_plots_csv" => csv))
+      d = din(Dict{String,Any}("exclude_plots" => Any[[1, 2, 3, 4]], "exclude_plots_csv" => csv))
       @test d.exclude_plots == [(1, 2, 3, 4), (12, 1, 5, 9), (13, 2, 6, 10)]          # inline list first, then CSV rows appended
-      d = Pan._cfg_data_inputs(Dict{String,Any}("exclude_plots_csv" => "null"))
+      d = din(Dict{String,Any}("exclude_plots_csv" => "null"))
       @test d.exclude_plots == NTuple{4,Int}[]
-      @test_throws Exception Pan._cfg_data_inputs(Dict{String,Any}("exclude_plots_csv" => joinpath(dir, "nope.csv")))
+      @test_throws Exception din(Dict{String,Any}("exclude_plots_csv" => joinpath(dir, "nope.csv")))
     end
   end
 end

@@ -278,23 +278,24 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing,
     start_from::Union{Nothing,String}=nothing, n_reps::Int=1, no_establishment::Bool=false, injection_cohorts=nothing,
     gd_opts::AbstractDict=Dict{String,Any}(), kw...)
-  o(k, d) = get(gd_opts, k, d)
-  mu = Int(o("mu", 8)); σ0 = Float64(o("sigma0", 0.15)); σstop = Float64(o("sigma_stop", 0.004)); σmin = Float64(o("sigma_min", 0.002))
-  patience = Int(o("patience", 40)); sw = Float64(o("size_weight", 0.5)); real_only = Bool(o("real_only", true))
-  include_start = Bool(o("include_start", false)); ckpt_every = Int(o("ckpt_every", 10)); min_pairs = Int(o("min_pairs", 20))
-  arch_frac = Float64(o("archive_min_pass_frac", 0.8))
-  objective = Symbol(String(o("objective", "bias"))); objective in (:bias, :mo) || error("gdigel: objective must be bias | mo")
+  gd = resolve_gdigel(gd_opts)   # validated against GDIGEL_LIST, defaults filled (idempotent for a resolved dict)
+  o(k) = gd[k]
+  mu = o("mu"); σ0 = o("sigma0"); σstop = o("sigma_stop"); σmin = o("sigma_min")
+  patience = o("patience"); sw = o("size_weight"); real_only = o("real_only")
+  include_start = o("include_start"); ckpt_every = o("ckpt_every"); min_pairs = o("min_pairs")
+  arch_frac = o("archive_min_pass_frac")
+  objective = Symbol(o("objective")); objective in (:bias, :mo) || error("gdigel: objective must be bias | mo")
   MO = objective === :mo
-  M_OBJ = Int(o("m", 2)); M_OBJ in (2, 3) || error("gdigel: m must be 2 or 3")
-  DEATH_FOLD = Bool(o("death_fold", false))
+  M_OBJ = o("m"); M_OBJ in (2, 3) || error("gdigel: m must be 2 or 3")
+  DEATH_FOLD = o("death_fold")
   M3 = MO && M_OBJ == 3
   USE_D = M3 || DEATH_FOLD
   USE_D && DEATH_TERM[] !== :likelihood && error("gdigel: m=3 / death_fold need yaml death_term: likelihood")
   USE_D && !(OVERRIDE_INJECTION_SYNC[] && LOSS_BEFORE_INJECTION[]) && error("gdigel: the death term needs override_injection_sync + loss_before_injection")
   (M3 && DEATH_FOLD) && error("gdigel: death_fold (m=2) and m=3 are exclusive")
   kappa = Ref(0.0)   # death_fold: w'_g = w_g + κ d_g,  κ = W_ref/D_ref (fixed after the start points are evaluated)
-  MO && String(o("mode", "optimize")) == "explore" && error("gdigel: objective mo is not available in mode explore")
-  MO && Bool(o("single_block", false)) && @warn "gdigel mo: single_block ablation uses the total A, W of all groups as the one block"
+  MO && o("mode") == "explore" && error("gdigel: objective mo is not available in mode explore")
+  MO && o("single_block") && @warn "gdigel mo: single_block ablation uses the total A, W of all groups as the one block"
   DUAL_MODE[] == :off || error("gdigel: Sim A only (dual_mode must be off)")
   isnothing(injection_cohorts) && error("gdigel needs override injection cohorts (Sim A)")
   mkpath(output_dir)
@@ -302,7 +303,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   pd = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=false)
   template = !isnothing(start_from) ? _load_params_from_path(start_from) : generate_params(SP, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
   slots = PU.build_slots(pd, template); nd = length(slots)
-  cell_group, labels = _gd_groups(pd, slots, eco_species_ids, species_list, eco_list; group_param=String(o("group_param", "")))
+  cell_group, labels = _gd_groups(pd, slots, eco_species_ids, species_list, eco_list; group_param=o("group_param"))
   ix = _gd_index(injection_cohorts, splots, cell_group, labels; real_only=real_only)
   # blocks: u-coordinates grouped by the set of groups they affect
   bmap = Dict{Vector{Int},Vector{Int}}()
@@ -311,7 +312,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     push!(get!(bmap, resp, Int[]), i)
   end
   bdefs = [GDIgel.BlockDef(idx, resp) for (resp, idx) in sort!(collect(bmap); by=kv -> first(kv[2]))]
-  if Bool(o("single_block", false))   # ablation: no decomposition — one (1+1)-CMA over all u-dims judged by the TOTAL loss
+  if o("single_block")   # ablation: no decomposition — one (1+1)-CMA over all u-dims judged by the TOTAL loss
     bdefs = [GDIgel.BlockDef(collect(1:nd), collect(1:ix.ngroups))]
   end
   @info "gdigel: $nd u-dims → $(length(bdefs)) blocks (sizes $(sort(length.(getfield.(bdefs, :idx)))) ); $(ix.ngroups) groups; $(length(ix.pair_group)) pairs ($(real_only ? "real-only" : "all"))"
@@ -360,7 +361,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     end
     out
   end
-  archive = NamedTuple[]; cap = Int(o("archive_cap", 2000))
+  archive = NamedTuple[]; cap = o("archive_cap")
   amin = Ref(typemax(Int))   # set from the first evaluation: archive_min_pass_frac × groups with data
   function offer!(u, r, gen, lid)
     amin[] == typemax(Int) && (amin[] = ceil(Int, arch_frac * count(!isnan, r.m)))
@@ -392,8 +393,8 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     st_ref[] = st
     @info "gdigel: resumed $(basename(resume_from)) at gen $(st.gen), $(st.n_evals) evals, $(length(st.solutions)) solutions"
   else
-    mode = Symbol(String(o("mode", "optimize")))
-    lams = !MO ? Float64[] : M3 ? GDIgel.simplex_weights(Int(o("weights", 4))) : GDIgel.mo_lambdas(Int(o("weights", 8)))
+    mode = Symbol(o("mode"))
+    lams = !MO ? Float64[] : M3 ? GDIgel.simplex_weights(o("weights")) : GDIgel.mo_lambdas(o("weights"))
     # :explore (anchor-and-explore, docs/cmaes_gdigel.md §4): behavioural threshold tau from the tolerated bias
     u_anchor = start_from === nothing ? nothing : PU.params_to_u(template, pd, slots)
     mode === :explore && u_anchor === nothing && error("gdigel mode explore needs start_from (the anchor parameter set)")
@@ -401,17 +402,17 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     # behavioural by construction, and groups the anchor already fits well get the absolute tolerance
     tau = Float64[]
     if mode === :explore
-      fa = only(evbatch([u_anchor])).f; t0 = log1p(Float64(o("explore_bias", 0.07)))^2; sl = Float64(o("explore_slack", 1.5))
+      fa = only(evbatch([u_anchor])).f; t0 = log1p(o("explore_bias"))^2; sl = o("explore_slack")
       tau = [isnan(v) ? Inf : max(t0, sl * v) for v in fa]
       @info "gdigel explore: anchor total $(round(GDIgel._tot(fa), sigdigits=4)); tau_abs $(round(t0, sigdigits=3)), slack $sl; groups at the absolute tolerance: $(count(==(t0), tau))/$(count(isfinite, tau))"
     end
-    st = GDIgel.GDState(bdefs, nd; sigma0=σ0, sigma_stop=σstop, sigma_min=σmin, patience=patience, rel_tol=Float64(o("rel_tol", 1e-3)), seed=Int(o("seed", 1)),
+    st = GDIgel.GDState(bdefs, nd; sigma0=σ0, sigma_stop=σstop, sigma_min=σmin, patience=patience, rel_tol=o("rel_tol"), seed=o("seed"),
                         mode=mode, tau=tau, anchors=(mode === :explore ? [u_anchor] : Vector{Float64}[]),
-                        restart_sigma=Float64(o("explore_start_sigma", 0.02)), obj=objective, G=ix.ngroups, lams=lams, m=(M3 ? 3 : 2))
+                        restart_sigma=o("explore_start_sigma"), obj=objective, G=ix.ngroups, lams=lams, m=(M3 ? 3 : 2))
     st_ref[] = st
     starts = Vector{Vector{Float64}}()
     if mode === :explore   # every lineage starts at the anchor, slightly perturbed
-      while length(starts) < mu; push!(starts, clamp.(u_anchor .+ Float64(o("explore_start_sigma", 0.02)) .* randn(st.rng, nd), 0.0, 1.0)); end
+      while length(starts) < mu; push!(starts, clamp.(u_anchor .+ o("explore_start_sigma") .* randn(st.rng, nd), 0.0, 1.0)); end
     else
       include_start && start_from !== nothing && push!(starts, u_anchor)
     end
@@ -421,7 +422,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       if DEATH_FOLD   # κ = W_ref/D_ref from the raw (unfolded) sums of the start points (or the anchor), fixed for the run
         rr = start_from !== nothing ? [only(evbatch([u_anchor]))] : r0
         Wr = Statistics.median([GDIgel.mo_sums(vcat(r.a, r.w), ix.ngroups)[2] for r in rr]); Dr = Statistics.median([sum(filter(!isnan, r.d)) for r in rr])
-        kappa[] = Wr / Dr; haskey(gd_opts, "kappa") && (kappa[] = Float64(gd_opts["kappa"]))
+        kappa[] = Wr / Dr; o("kappa") === nothing || (kappa[] = o("kappa"))
         write(joinpath(output_dir, "kappa.txt"), string(kappa[]))
         @info "gdigel mo (death_fold): κ = W_ref/D_ref = $(round(Wr, sigdigits=5))/$(round(Dr, sigdigits=5)) = $(round(kappa[], sigdigits=5))"
       end
@@ -431,7 +432,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       else
         st.aref = Statistics.median([x[1] for x in sums]); st.wref = Statistics.median([x[2] for x in sums]); M3 && (st.dref = Statistics.median([x[3] for x in sums]))
       end
-      haskey(gd_opts, "aref") && (st.aref = Float64(gd_opts["aref"])); haskey(gd_opts, "wref") && (st.wref = Float64(gd_opts["wref"])); haskey(gd_opts, "dref") && (st.dref = Float64(gd_opts["dref"]))
+      o("aref") === nothing || (st.aref = o("aref")); o("wref") === nothing || (st.wref = o("wref")); o("dref") === nothing || (st.dref = o("dref"))
       @info "gdigel mo$(M3 ? " (m=3)" : DEATH_FOLD ? " (death folded)" : ""): A_ref = $(round(st.aref, sigdigits=5)), W_ref = $(round(st.wref, sigdigits=5))$(M3 ? ", D_ref = $(round(st.dref, sigdigits=5))" : ""); weight grid $(M3 ? "simplex lattice, $(length(st.lams)) points" : "λ " * string(round.(st.lams, digits=3))) over $mu lineages"
     end
     for k in 1:mu; GDIgel.add_lineage!(st, starts[k], fvec(r0[k])); offer!(starts[k], r0[k], 0, k); MO && offer_nd!(starts[k], r0[k], 0, k, st.lineages[k].lam); end
