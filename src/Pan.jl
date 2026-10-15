@@ -7606,6 +7606,7 @@ function landis_main()
   )
 end
 
+include("tandem.jl")
 include("gdigel_driver.jl")
 
 include("climate_scenario.jl")

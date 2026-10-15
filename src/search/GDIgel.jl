@@ -95,13 +95,16 @@ end
 # Chebyshev scalarization with a fixed weight λ per lineage:  F = max(λ·A/A_ref, (1−λ)·W/W_ref),  A = Σ a_g, W = Σ w_g.
 "The weight grid: k points uniformly on [0, 1] (k = 1 → 0.5)."
 mo_lambdas(k::Int) = k <= 1 ? [0.5] : [(i - 1) / (k - 1) for i in 1:k]
-@inline _cheb(st::GDState, lam, A, W) = max(lam * A / st.aref, (1 - lam) * W / st.wref)
+# Augmented Chebyshev (experiment, 2026-10-16): F + ρ·Σ weighted terms. ρ = 0 (default) is the plain Chebyshev. With plain max, a block
+# accepts only steps that lower its ACTIVE term, so the other objective is invisible (docs/simAB_analysis_notes.md, chain §3).
+const CHEB_RHO = Ref(0.0)
+@inline _cheb(st::GDState, lam, A, W) = (a = lam * A / st.aref; w = (1 - lam) * W / st.wref; max(a, w) + CHEB_RHO[] * (a + w))
 "Weight vectors of the uniform simplex lattice with H divisions for m=3: all (i,j,l)/H with i+j+l = H ((H+1)(H+2)/2 points; H=4 → 15)."
 function simplex_weights(H::Int)
   H >= 1 || return [[1/3, 1/3, 1/3]]
   [[i / H, j / H, (H - i - j) / H] for i in 0:H for j in 0:(H-i)]
 end
-@inline _cheb3(st::GDState, wv, A, W, D) = max(wv[1] * A / st.aref, wv[2] * W / st.wref, wv[3] * D / st.dref)
+@inline _cheb3(st::GDState, wv, A, W, D) = (a = wv[1] * A / st.aref; w = wv[2] * W / st.wref; d = wv[3] * D / st.dref; max(a, w, d) + CHEB_RHO[] * (a + w + d))
 "Σ a_g, Σ w_g, Σ d_g of an m=3 :mo vector (finite entries)."
 function mo_sums3(f::AbstractVector, G::Int)
   A = 0.0; W = 0.0; D = 0.0
