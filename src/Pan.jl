@@ -2014,6 +2014,12 @@ function _set_rankw!(agb::Matrix{FloatType}, eco_species_ids; split_size::Union{
     isempty(ids) && continue
     if cbal
       β = PU.RANKW_BETA[]; nc = PU.CELL_NCOH[]; tot = sum(nc[gsp, e] for gsp in ids); totw = 0.0
+      # a stratum without training cohorts carries no loss; its class-balanced weight would be (1-β)/(1-β^0) = Inf → Inf/Inf = NaN,
+      # which poisons the aggregate (NaN·0). Weight 0 instead (B7).
+      if tot == 0
+        sw[e] = split_size === nothing ? 1.0 : log10(1.0 + Float64(split_size[e]))
+        continue
+      end
       qf = round(Int, 1 / PU.RANKW_PCT_FLOOR[])                              # grid steps (10/20/50 for 0.10/0.05/0.02); mirrors _set_cbal_weights!
       for gsp in ids
         pct = tot > 0 ? max(round(qf * nc[gsp, e] / tot) / qf, 1 / qf) : 1 / qf  # count-share on a 1/qf grid, floored at 1/qf (=rankw_pct_floor); qf=10 ≡ old round(10·share)/10 ⌊0.10⌋
