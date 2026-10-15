@@ -3539,7 +3539,7 @@ end
 # (rep × W/AGB/total), cv_front_plots.csv (per-plot sim vs ref AGB, for TOST) and cv_eco_map.csv.
 function _dump_cv_front(search_state, output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
     val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
-    inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, val_injection_cohorts)
+    inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, val_injection_cohorts, plugin)
   arch = collect(search_state.archive)
   isempty(arch) && (@warn "cv dump: empty archive"; return)
   wtot(c) = sum(@view c.fx.objectives[1:2:end]); atot(c) = sum(@view c.fx.objectives[2:2:end])   # ΣW (odd) / ΣAGB (even)
@@ -3588,7 +3588,7 @@ const SKIP_VAL = Ref(false)      # env PAN_SKIP_VAL=1: skip ALL held-out val re-
 # knee, "median", best_aggregate} on each archive's VAL front. Writes cv_reselect_metrics.csv (10 rows, val + train objectives).
 function _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
     val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
-    inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, species_list)
+    inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, species_list, plugin)
   ckpts = Tuple{Int,Any}[]
   for f in readdir(output_dir; join=true)
     m = match(r"search_state@(\d+)\.jld2$", f); isnothing(m) && continue
@@ -3768,6 +3768,7 @@ mutable struct MOGenIO
   val_scales::Any                   # LossScales of the val reference (RANKW = the train one); nothing when !have_val
   val_dual_b::Any                   # val Sim B (carries its own .scales) or nothing
   val_fit::Any                      # x -> (run_result, cached_sites, eco_losses) on the val split (nothing when !have_val)
+  plugin::PluginConfig              # the run's plugin (diagnostic simulate_and_test)
   last_ckpt_sig::UInt
   val_cache::Dict{Any,NTuple{4,Float64}}
   rep_val_loss::Float64
@@ -3809,12 +3810,12 @@ end
 # and stamp the initial archive signature. `state` is the fully-built search_state; `val_fit` may be nothing.
 function mo_gen_open(state; output_dir, writer_ch, losses_db, resuming::Bool, splots, eco_list, species_list,
     eco_species_ids, n_species, site_sim_years, loss_params, no_establishment, n_reps, rng, have_val,
-    n_output_plots, sampled_ids, sampled_ids_val, emp_sample, emp_sample_val, val_fit, val_scales=nothing, val_dual_b=nothing)
+    n_output_plots, sampled_ids, sampled_ids_val, emp_sample, emp_sample_val, val_fit, plugin::PluginConfig, val_scales=nothing, val_dual_b=nothing)
   metrics_io = open(joinpath(output_dir, "metrics.csv"), resuming ? "a" : "w")
   resuming || println(metrics_io, "iteration,best_train_loss,best_val_loss,pop_size,archive_size")
   gio = MOGenIO(output_dir, writer_ch, losses_db, metrics_io, splots, eco_list, species_list, eco_species_ids,
     n_species, site_sim_years, loss_params, no_establishment, n_reps, rng, have_val, n_output_plots,
-    sampled_ids, sampled_ids_val, emp_sample, emp_sample_val, val_scales, val_dual_b, val_fit, _mo_archive_sig(state),
+    sampled_ids, sampled_ids_val, emp_sample, emp_sample_val, val_scales, val_dual_b, val_fit, plugin, _mo_archive_sig(state),
     resuming ? _load_val_cache(output_dir, losses_db) : Dict{Any,NTuple{4,Float64}}(), Inf, Inf)   # RESUME: keep the pre-resume val cache (CSV, or losses.duckdb mirror if the CSV is gone)
   if have_val && val_fit !== nothing
     try
@@ -3867,7 +3868,7 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
       try
         test_df = simulate_and_test(; splots=gio.splots, bio_params=state.representative.x, eco_list=gio.eco_list,
           species_list=gio.species_list, eco_species_ids=gio.eco_species_ids, loss_params=gio.loss_params,
-          site_sim_years=gio.site_sim_years, M=gio.n_reps, no_establishment=gio.no_establishment, rng=gio.rng, plugin=plugin)
+          site_sim_years=gio.site_sim_years, M=gio.n_reps, no_establishment=gio.no_establishment, rng=gio.rng, plugin=gio.plugin)
         println("Train stats:"); show(test_df; allrows=true, allcols=true); println()
       catch e; @warn "simulate_and_test (train) failed" exception=(e, catch_backtrace()); end
     end
@@ -4012,7 +4013,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
     have_val || (@warn "CV_RESELECT set but no val split — nothing to do"; return)
     _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
       val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
-      inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, species_list)
+      inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, species_list, plugin)
     return
   end
 
@@ -4155,7 +4156,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
     eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
     no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b)
+    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b, plugin=plugin)
   evals_done = search_state.n_evals
   est_gens = max(1, cld(TRIALS - evals_done, search_state.lambda))
   try
@@ -4241,7 +4242,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
   have_val && try   # CV: held-out front metrics under THIS fold's live (train-frozen) loss — see _dump_cv_front
     _dump_cv_front(search_state, output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
       val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
-      inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, val_injection_cohorts)
+      inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, val_injection_cohorts, plugin)
   catch e; @error "cv front dump failed" exception = (e, catch_backtrace()); end
 
   return search_state
@@ -4440,7 +4441,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
     eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
     no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b)
+    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b, plugin=plugin)
   caused_by_interrupt(e) = e isa InterruptException ? true :
     e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
     e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
@@ -4653,7 +4654,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
     eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
     no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=nothing)
+    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=nothing, plugin=plugin)
   caused_by_interrupt(e) = e isa InterruptException ? true :
     e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
     e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
@@ -4883,7 +4884,7 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
     eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
     no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=nothing)
+    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=nothing, plugin=plugin)
   caused_by_interrupt(e) = e isa InterruptException ? true :
     e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
     e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
@@ -5094,7 +5095,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     resuming=false, splots=splots, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids,
     n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params, no_establishment=no_establishment,
     n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots, sampled_ids=sampled_ids,
-    sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b)
+    sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b, plugin=plugin)
   caused_by_interrupt(e) = e isa InterruptException ? true :
     e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
     e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
@@ -5547,7 +5548,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
     eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
     no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b)
+    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b, plugin=plugin)
 
   caused_by_interrupt(e) =
     e isa InterruptException ? true :
