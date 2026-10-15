@@ -14,6 +14,13 @@ const FIX_MATURITY = Ref{Bool}(false)
 # 0.625, 0.80], seeded via _seed_min_rel! in Pan.jl). Set from the `fix_min_rel` yaml knob.
 const FIX_MIN_REL = Ref{Bool}(false)
 # Search boxes (yaml bmax_bounds / anpp_ratio_bounds); defaults = the historical [12000,35000] and [20,35].
+# Sim A with death_term: fit PROB_MORT_SPP (eco×species, bounds [0,0.2]) although no_establishment; it is score-only there (zeroed in the Sim A simulation)
+const DEATH_PMORT_SIMA = Ref{Bool}(false)
+# Sim B: PIN PROB_MORT out of the search (its value comes from the seed/base params, i.e. frozen from Sim A like the growth). yaml `fix_pmort`.
+const FIX_PMORT = Ref{Bool}(false)
+# Upper bound of the PROB_MORT_SPP box in Sim A (death term) and Sim B (yaml `pmort_upper`; default keeps the historical 0.02 in Sim B, 0.2 in Sim A).
+const PMORT_UPPER_B = Ref{Float32}(0.02f0)
+const PMORT_UPPER_A = Ref{Float32}(0.2f0)
 const BMAX_BOUNDS = Ref((12000, 35000))
 const ANPP_RATIO_BOUNDS = Ref((20.0f0, 35.0f0))
 using ..Parametrization
@@ -48,7 +55,7 @@ function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species
     (FIX_GROWTH[] ? () : (MutableParam(:S, Uniform(0.01f0, 1.0f0), (0.01f0, 1.0f0), 0.01f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),))...,   # PER-(eco,species): only param_split_species vary by eco, rest pooled (like B_MAX/ANPP)
     (FIX_GROWTH[] ? () : (MutableParam(:B_MAX_SPP, DiscreteUniform(BMAX_BOUNDS[]...), BMAX_BOUNDS[], 1000, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); quantum=100, group=:growth_biomass),))...,   # window widened 15000→12000 lower / 30000→35000 upper; per-(eco,species) data floor applied at decode via PU.BMAX_FLOOR. DECODED BEFORE ANPP so the ratio reparam reads the floored B_MAX.
     (FIX_GROWTH[] ? () : (MutableParam(:ANPP_MAX_SPP, Uniform(ANPP_RATIO_BOUNDS[]...), ANPP_RATIO_BOUNDS[], 1.0f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),))...,   # FITTED AS the B_MAX/ANPP ratio ∈ [20,35] (per eco×species); the ANPP_MAX_SPP FIELD stores the DERIVED ANPP = B_MAX_SPP/ratio (see u_to_params/params_to_u special-case). Enforces the eco ~25-30× relationship — no high-B_MAX/low-ANPP combos. Plugin unchanged (still reads ANPP_MAX_SPP).
-    (no_establishment ? () : (MutableParam(:PROB_MORT_SPP, Uniform(0.0f0, 0.02f0), (0.0f0, 0.02f0), 0.005f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),))...,   # bound 0.05→0.02: mortality was the overfit lever (cranked to ceiling to sculpt age-dist)
+    (no_establishment ? (DEATH_PMORT_SIMA[] ? (MutableParam(:PROB_MORT_SPP, Uniform(0.0f0, PMORT_UPPER_A[]), (0.0f0, PMORT_UPPER_A[]), 0.01f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),) : ()) : (FIX_PMORT[] ? () : (MutableParam(:PROB_MORT_SPP, Uniform(0.0f0, PMORT_UPPER_B[]), (0.0f0, PMORT_UPPER_B[]), 0.005f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),)))...,   # bound 0.05→0.02: mortality was the overfit lever (cranked to ceiling to sculpt age-dist)
     (est ? (MutableParam(:PROB_ESTAB_SPP, Uniform(0.2f0, 1.0f0), (0.2f0, 1.0f0), 0.1f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),) : ())...,   # floor 0.2: only sampled over present eco×lu×sp (absent ones aren't optimized → 0)
     (est && !FIX_MIN_REL[] ? (MutableParam(:MIN_REL_BIOMASS, Uniform(0.05f0, 0.2f0), (0.05f0, 0.2f0), 1f0, FloatType, EcoSampler(), GradientApplier(0.175f0); group=:min_rel),) : ())...,   # base ∈ [0.05,0.2], 0.175 spacing → last bucket 0.75–0.90
   ]

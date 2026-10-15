@@ -38,7 +38,7 @@ mutable struct Lineage
   born::Int                   # generation of the (re)start
   best_tot::Float64           # best total seen by this lineage
   last_improve::Int           # generation of the last ≥ rel_tol improvement of best_tot
-  lam::Float64                # objective :mo — this lineage's fixed Chebyshev weight λ (unused / 0.5 for :bias)
+  lam::Union{Float64,Vector{Float64}}   # objective :mo — this lineage's fixed Chebyshev weight: λ (m=2) or the weight vector (m=3); 0.5 for :bias
 end
 
 struct BlockDef
@@ -75,7 +75,9 @@ mutable struct GDState
   G::Int                            # :mo — number of groups (length(f) = 2G)
   aref::Float64                     # :mo — reference totals (fixed per run): A_ref, W_ref
   wref::Float64
-  lams::Vector{Float64}             # :mo — weight grid; lineage slot i gets lams[mod1(i, k)]
+  lams::Vector{Any}                 # :mo — weight grid (λ's for m=2, weight vectors for m=3); lineage slot i gets lams[mod1(i, k)]
+  m::Int                            # :mo — number of objectives: 2 (A, W) or 3 (A, W, D); f = vcat(a, w[, d])
+  dref::Float64                     # :mo m=3 — reference total of the third objective (D_ref)
 end
 
 _tot(f) = (s = 0.0; for v in f; isnan(v) || (s += v); end; s)
@@ -84,9 +86,9 @@ _fresh_bs(b::BlockDef, σ0) = BlockState(σ0, b.p_target, Matrix{Float64}(LA.I, 
 
 function GDState(blocks::Vector{BlockDef}, n::Int; sigma0=0.15, sigma_stop=0.004, sigma_min=0.002, patience=40, rel_tol=1e-3, seed=1,
                  mode::Symbol=:optimize, tau::Vector{Float64}=Float64[], anchors=Vector{Float64}[], restart_sigma::Float64=0.02,
-                 obj::Symbol=:bias, G::Int=0, aref::Float64=1.0, wref::Float64=1.0, lams::Vector{Float64}=Float64[])
+                 obj::Symbol=:bias, G::Int=0, aref::Float64=1.0, wref::Float64=1.0, lams::AbstractVector=Float64[], m::Int=2, dref::Float64=1.0)
   GDState(blocks, Lineage[], n, sigma0, sigma_stop, sigma_min, patience, rel_tol, 0, 0, 1, Sobol.SobolSeq(n), Random.Xoshiro(seed),
-    NamedTuple[], Any[], mode, tau, Vector{Vector{Float64}}(anchors), restart_sigma, obj, G, aref, wref, lams)
+    NamedTuple[], Any[], mode, tau, Vector{Vector{Float64}}(anchors), restart_sigma, obj, G, aref, wref, Vector{Any}(lams), m, dref)
 end
 
 # --- objective :mo (docs/mo_gdigel.md). Per-group values are stored as f = vcat(a, w) (length 2G, NaN = no data).
@@ -94,6 +96,18 @@ end
 "The weight grid: k points uniformly on [0, 1] (k = 1 → 0.5)."
 mo_lambdas(k::Int) = k <= 1 ? [0.5] : [(i - 1) / (k - 1) for i in 1:k]
 @inline _cheb(st::GDState, lam, A, W) = max(lam * A / st.aref, (1 - lam) * W / st.wref)
+"Weight vectors of the uniform simplex lattice with H divisions for m=3: all (i,j,l)/H with i+j+l = H ((H+1)(H+2)/2 points; H=4 → 15)."
+function simplex_weights(H::Int)
+  H >= 1 || return [[1/3, 1/3, 1/3]]
+  [[i / H, j / H, (H - i - j) / H] for i in 0:H for j in 0:(H-i)]
+end
+@inline _cheb3(st::GDState, wv, A, W, D) = max(wv[1] * A / st.aref, wv[2] * W / st.wref, wv[3] * D / st.dref)
+"Σ a_g, Σ w_g, Σ d_g of an m=3 :mo vector (finite entries)."
+function mo_sums3(f::AbstractVector, G::Int)
+  A = 0.0; W = 0.0; D = 0.0
+  for g in 1:G; v = f[g]; isnan(v) || (A += v); v = f[G+g]; isnan(v) || (W += v); v = f[2G+g]; isnan(v) || (D += v); end
+  A, W, D
+end
 "Σ a_g and Σ w_g of an :mo vector (finite entries)."
 function mo_sums(f::AbstractVector, G::Int)
   A = 0.0; W = 0.0
@@ -101,19 +115,25 @@ function mo_sums(f::AbstractVector, G::Int)
   A, W
 end
 "Scalar objective of a whole point: :bias → Σ f_g ; :mo → F(λ)."
-function lineage_total(st::GDState, lam::Float64, f)
+function lineage_total(st::GDState, lam, f)
   st.obj === :mo || return _tot(f)
+  st.m == 3 && return (r = mo_sums3(f, st.G); _cheb3(st, lam, r[1], r[2], r[3]))
   A, W = mo_sums(f, st.G); _cheb(st, lam, A, W)
 end
 "Score of a block (smaller is better): :bias → Σ of the losses of its groups ; :mo → Chebyshev of the block's A_b, W_b."
-function block_score(st::GDState, lam::Float64, f, resp)
+function block_score(st::GDState, lam, f, resp)
   st.obj === :mo || return _score(f, resp)
+  if st.m == 3
+    A = 0.0; W = 0.0; D = 0.0
+    for g in resp; v = f[g]; isnan(v) || (A += v); v = f[st.G+g]; isnan(v) || (W += v); v = f[2st.G+g]; isnan(v) || (D += v); end
+    return _cheb3(st, lam, A, W, D)
+  end
   A = 0.0; W = 0.0
   for g in resp; v = f[g]; isnan(v) || (A += v); v = f[st.G+g]; isnan(v) || (W += v); end
   _cheb(st, lam, A, W)
 end
 "True iff none of the block's groups has data (no a_g / w_g)."
-_nodata(st::GDState, f, resp) = st.obj === :mo ? all(g -> isnan(f[g]) && isnan(f[st.G+g]), resp) : all(g -> isnan(f[g]), resp)
+_nodata(st::GDState, f, resp) = st.obj === :mo ? (st.m == 3 ? all(g -> isnan(f[g]) && isnan(f[st.G+g]) && isnan(f[2st.G+g]), resp) : all(g -> isnan(f[g]) && isnan(f[st.G+g]), resp)) : all(g -> isnan(f[g]), resp)
 
 # :explore helpers — a block is behavioural iff every group it affects (with data) has f_g ≤ tau; its novelty is the
 # distance (block coordinates, u-space) to the nearest OTHER lineage or anchor/solution.
@@ -127,7 +147,7 @@ end
 
 """Add a lineage at u-point x with evaluated group losses f."""
 function add_lineage!(st::GDState, x::Vector{Float64}, f::Vector{Float64})
-  lam = isempty(st.lams) ? 0.5 : st.lams[mod1(length(st.lineages) + 1, length(st.lams))]
+  lam = isempty(st.lams) ? (st.m == 3 ? [1/3, 1/3, 1/3] : 0.5) : st.lams[mod1(length(st.lineages) + 1, length(st.lams))]
   t = lineage_total(st, lam, f)
   push!(st.lineages, Lineage(st.next_id, copy(x), copy(f), t, [_fresh_bs(b, st.sigma0) for b in st.blocks], st.gen, t, st.gen, lam))
   push!(st.pending, nothing); st.next_id += 1
@@ -230,7 +250,7 @@ function finish!(st::GDState, fxps::Vector{Any}, restart_eval)
       st.mode === :explore && push!(st.anchors, copy(L.x))
       x0 = st.mode === :explore && !isempty(st.anchors) ?
            clamp.(st.anchors[1] .+ st.restart_sigma .* randn(st.rng, st.n), 0.0, 1.0) : next_start!(st)
-      f0 = hasmethod(restart_eval, Tuple{Vector{Float64},Float64}) ? restart_eval(x0, L.lam) : restart_eval(x0); st.n_evals += 1
+      f0 = hasmethod(restart_eval, Tuple{Vector{Float64},Union{Float64,Vector{Float64}}}) ? restart_eval(x0, L.lam) : restart_eval(x0); st.n_evals += 1
       t0 = lineage_total(st, L.lam, f0)
       st.lineages[k] = Lineage(st.next_id, x0, f0, t0, [_fresh_bs(b, st.sigma0) for b in st.blocks], st.gen, t0, st.gen, L.lam)
       st.next_id += 1

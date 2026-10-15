@@ -319,6 +319,7 @@ struct _ExclPlan
   recruits::Bool
   coh::Dict{Int,Dict{Int,Vector{Tuple{UIntType,FloatType}}}}   # year → site_idx → excluded (eco_species, age)
   ref::Dict{Int,Dict{Int,PU.SPDFGroundTruth}}                  # year → site_idx → reference without those cohorts
+  prev::Dict{Int,Dict{Int,Int}}                                # year → site_idx → previous visit year (absent for a site's first visit)
 end
 const _EXCL_CACHE = IdDict{Any,_ExclPlan}()
 const _EXCL_LOCK = ReentrantLock()
@@ -368,7 +369,9 @@ function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
     gt === nothing && (gt = PU.SPDFGroundTruth(keys=falses(nsp), records=Dict{UIntType,PU.SPDFRecord}()))
     get!(ref, yr, Dict{Int,PU.SPDFGroundTruth}())[si] = gt
   end
-  _ExclPlan(mode, rec_on, coh, ref)
+  prev = Dict{Int,Dict{Int,Int}}()
+  for (si, ys) in site_years, k in 2:length(ys); get!(prev, ys[k], Dict{Int,Int}())[si] = ys[k-1]; end
+  _ExclPlan(mode, rec_on, coh, ref, prev)
 end
 
 function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::_ExclPlan
@@ -380,6 +383,81 @@ function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::
     end
     pl
   end
+end
+
+# ---- Sim A scoring modes for the natural-death part (docs/simAB_options_experiment.md) ------------------------------------
+# W_SCOPE[]   :all       — W on every simulated cohort (sim-only natural deaths included; current behaviour)
+#             :survivors — W on cohorts present in both sim and obs at T: sim cohorts absent from the observed set are removed before scoring
+#                          (the sync injection removes them right after anyway). Needs the new order + sync.
+# DEATH_TERM[] :none | :likelihood — per-cohort survive/die negative log-likelihood given PROB_MORT p over the interval Δt (years between
+#                          the two visits): survivor −Δt·log(1−p); natural death −log(1−(1−p)^Δt). PROB_MORT is NOT applied in the Sim A
+#                          simulation (zeroed inside fit_params when a DeathAcc is passed); it only enters the death term.
+const W_SCOPE = Ref(:all)
+const DEATH_TERM = Ref(:none)
+const DEATH_PMIN = 1e-6
+const DEATH_PMAX = 0.5
+const DEATH_MAXDT = 80
+"Per-cell (eco e, local species j) survivor/death statistics: surv_dt = Σ_survivors Δt, n_surv, dhist[k] = # natural deaths with Δt = k."
+struct DeathAcc
+  surv_dt::Vector{Vector{Float64}}
+  n_surv::Vector{Vector{Int}}
+  dhist::Vector{Vector{Vector{Int}}}
+end
+DeathAcc(eco_species_ids) = DeathAcc([zeros(length(ids)) for ids in eco_species_ids], [zeros(Int, length(ids)) for ids in eco_species_ids],
+                                      [[zeros(Int, DEATH_MAXDT) for _ in ids] for ids in eco_species_ids])
+@inline _pclamp(p) = clamp(Float64(p), DEATH_PMIN, DEATH_PMAX)
+"Negative log-likelihood of one cohort-interval outcome."
+@inline death_nll_survivor(p, dt) = -dt * log1p(-_pclamp(p))
+@inline death_nll_death(p, dt) = -log(-expm1(dt * log1p(-_pclamp(p))))     # −log(1−(1−p)^Δt)
+"Per-cell (Σ NLL, # cohorts) given the cell's p."
+function death_cell(acc::DeathAcc, e::Int, j::Int, p)
+  n = acc.n_surv[e][j]; s = death_nll_survivor(p, 1.0) * acc.surv_dt[e][j]
+  for k in 1:DEATH_MAXDT
+    c = acc.dhist[e][j][k]; c > 0 && (s += c * death_nll_death(p, Float64(k)); n += c)
+  end
+  s, n
+end
+
+# Collect survive/die statistics at year T (before survivors-only removal). Survivor = sim cohort present in obs at T; natural death = sim
+# cohort absent from obs at T (disturbance-removed cohorts were already removed by the shock; excluded cohorts are skipped).
+function _death_collect!(acc::DeathAcc, soa, year, injection_dict, plan)
+  pv = get(plan.prev, year, nothing); pv === nothing && return
+  for (si, cohorts) in injection_dict[year]
+    site = getsite(soa, si); site.active || continue
+    py = get(pv, si, -1); py < 0 && continue
+    dt = min(year - py, DEATH_MAXDT)
+    exl = (yd = get(plan.coh, year, nothing); yd === nothing ? nothing : get(yd, si, nothing))
+    e = Int(site.eco_id); csp = site.c_species; cage = site.c_age
+    for j in 1:Int(site.live)
+      sp = csp[j]; age = cage[j]
+      exl !== nothing && any(t -> t[1] == sp && t[2] == age, exl) && continue
+      inobs = false
+      for (osp, oage, _, _) in cohorts; (osp == sp && oage == age) && (inobs = true; break); end
+      if inobs; acc.surv_dt[e][Int(sp)] += dt; acc.n_surv[e][Int(sp)] += 1
+      else; acc.dhist[e][Int(sp)][dt] += 1; end
+    end
+  end
+  nothing
+end
+
+# Survivors-only scoring: remove sim cohorts absent from the observed set at T (see W_SCOPE).
+function _survivors_only!(soa, year, injection_dict)
+  for (si, cohorts) in injection_dict[year]
+    site = getsite(soa, si); site.active || continue
+    csp = site.c_species; cage = site.c_age; n0 = Int(site.live)
+    j = 1
+    while j <= Int(site.live)
+      inobs = false
+      for (sp, age, _, _) in cohorts; (csp[j] == sp && cage[j] == age) && (inobs = true; break); end
+      inobs ? (j += 1) : _shock_remove_cohort!(site, j)
+    end
+    if Int(site.live) != n0
+      o = zero(UIntType)
+      for q in 1:Int(site.live); cage[q] > one(FloatType) && (o += one(UIntType)); end
+      site.old = o
+    end
+  end
+  nothing
 end
 
 # DIAGNOSTIC ONLY (default :none = no effect). W_DIAG[] at a measurement year, new order, just before scoring:
@@ -1957,7 +2035,7 @@ function _set_rankw!(agb::Matrix{FloatType}, eco_species_ids; split_size::Union{
   PU.RANKW[] = R
 end
 
-function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, shock_dict=nothing, cell_plots=nothing)
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, shock_dict=nothing, death_acc::Union{Nothing,DeathAcc}=nothing, cell_plots=nothing)
   PU.SCALES_LOCKED[] || _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species; cell_plots=cell_plots)
   search_tier == 4 && T4_PER_PLOT_MEAN[] && !isempty(get(ENV, "PAN_LOG_CELLPLOTS", "")) && @info "tier-4 per-plot-mean cell plots: Σ = $(sum(sum, something(cell_plots, T4_CELL_PLOTS[], [Int[]]))) ($(cell_plots === nothing ? "legacy global" : "explicit dual_b.cell_plots"); the legacy global currently holds Σ = $(T4_CELL_PLOTS[] === nothing ? 0 : sum(sum, T4_CELL_PLOTS[])))"   # global ratio-of-sums or per-cell denominators (skipped inside a candidate-parallel batch — set once serially by the caller)
   # Disturbance exclude-modes derive a (year → site_idx → excluded eco_species) lookup from the
@@ -2014,7 +2092,9 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       end
     end
     SP = succession_plugin_of(ref_soa)
-    eco_params = generate_eco_params(SP, bio_params)
+    # death_acc !== nothing ⇒ Sim A with a death term: PROB_MORT is a fitted score-only parameter, NOT applied in the (deterministic) simulation
+    eco_params = generate_eco_params(SP, death_acc === nothing || !hasproperty(bio_params, :PROB_MORT_SPP) ? bio_params :
+      PU.Setfield.@set(bio_params.PROB_MORT_SPP = [zero.(v) for v in bio_params.PROB_MORT_SPP]))
     ctx = make_ctx(SP, eco_params)
     years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
     starting_sim_year = 1
@@ -2165,6 +2245,10 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       end
       if !LOSS_BEFORE_INJECTION[] && !isnothing(injection_dict) && current_sim_year in injection_years   # legacy order: inject, then score
         _inject_observed_cohorts!(soa, injection_dict[current_sim_year]; override=OVERRIDE_INJECTION[], replace=OVERRIDE_INJECTION_REPLACE[], sync=OVERRIDE_INJECTION_SYNC[])
+      end
+      if _do_shock && current_sim_year in injection_years
+        death_acc === nothing || _death_collect!(death_acc, soa, current_sim_year, injection_dict, _excl_plan)
+        W_SCOPE[] === :survivors && _survivors_only!(soa, current_sim_year, injection_dict)
       end
       (W_DIAG[] !== :none && LOSS_BEFORE_INJECTION[] && _do_shock && current_sim_year in injection_years) && _w_diag_apply!(soa, current_sim_year, injection_dict, _excl_plan, W_DIAG[])
       if search_tier == 1
@@ -6126,6 +6210,10 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))
   LOSS_BEFORE_INJECTION[] = Bool(get_cfg("loss_before_injection", true))
   _configure_disturbance_shock!(cfg)
+  EXCLUDE_RECRUITS_AT_ENTRY[] = Bool(get_cfg("exclude_recruits_at_entry", true))
+  W_SCOPE[] = Symbol(get_cfg("w_scope", "all")); W_SCOPE[] in (:all, :survivors) || error("w_scope must be all | survivors")
+  DEATH_TERM[] = Symbol(get_cfg("death_term", "none")); DEATH_TERM[] in (:none, :likelihood) || error("death_term must be none | likelihood")
+  BSP.DEATH_PMORT_SIMA[] = DEATH_TERM[] === :likelihood
   OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", OVERRIDE_INJECTION_NOISE[]))
   OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(get_cfg("override_injection_disturbance", String(OVERRIDE_INJECTION_DISTURBANCE[])))
   Data.USE_FIA_CYCLE[] = Bool(get_cfg("fia_cycle", false))   # tier-4/5 cycles from FIA `cycle` vs computed split
@@ -6172,6 +6260,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   IgelMOCMAES.USE_CHOLESKY[] = Bool(get_cfg("igel_cholesky", false))   # igelmo sampling sqrt: Cholesky (cheaper) vs eigen; Ref → resume-safe
   IgelMOCMAES.RESEED_SIGMA_OVERRIDE[] = Float64(get_cfg("igel_reseed_sigma_override", -1.0))   # >=0 retunes reseed threshold on RESUME (else struct field)
   IgelMOCMAES.MATURITY_OVERRIDE[]     = Int(get_cfg("igel_maturity_override", -1))             # >=0 retunes maturity shield on RESUME (else struct field)
+  BSP.FIX_PMORT[] = Bool(get_cfg("fix_pmort", false)); BSP.PMORT_UPPER_B[] = Float32(get_cfg("pmort_upper", 0.02)); BSP.PMORT_UPPER_A[] = Float32(get_cfg("pmort_upper_simA", 0.2))
   BSP.FIX_GROWTH[] = Bool(get_cfg("fix_growth", false))     # stage-B: fix {D,S,ANPP_MAX,B_MAX}, fit establishment only
   BSP.FIX_MATURITY[] = Bool(get_cfg("fix_maturity", false)) # pin MATURITY out of the search (at MATURITY_TABLE/SONA)
   BSP.FIX_MIN_REL[] = Bool(get_cfg("fix_min_rel", false))

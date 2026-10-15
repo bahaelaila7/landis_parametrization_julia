@@ -99,3 +99,33 @@ held-out evaluation). Evaluation protocol (fixed in advance): **val selects** am
 with `tools/tost_select.jl <cfg> <jld2 list> K val`; **test reports** the val-selected point(s) with `tools/tost_select.jl … test`. TOST on train is
 never used for any choice. `tools/gd_equifinality.jl` still applies to the gdigel `solutions/`.
 Budget guidance: see the smoke timings in the commit/report (s per generation per plugin; ≈ 2 simulations per lineage per generation).
+
+## 6. Natural-death scoring modes and m objectives (Sim A/B options experiment)
+Design and pass criteria: `docs/simAB_options_experiment.md`. All of this needs the new scoring order (`loss_before_injection: true`) with
+`override_injection_sync`.
+* **`w_scope: all | survivors`** (default `all` = unchanged). `survivors` removes, before scoring at T, the sim cohorts that are absent from the observed set
+  (`_survivors_only!`; the sync removes them right after anyway), so W compares cohorts present in both. It is the production version of the
+  `W_DIAG :nodeath` diagnostic (GA+FL start point: ΣW 11.3 → 6.9).
+* **`death_term: none | likelihood`** (default `none`). Per cohort-interval negative log-likelihood given `p` = PROB_MORT (eco × species, clamped to
+  [1e-6, 0.5]) and Δt = years between the two visits of the plot: survivor `−Δt·log(1−p)`; natural death `−log(1−(1−p)^Δt)`. A *survivor* is a sim cohort
+  that is also observed at T; a *natural death* is a sim cohort absent from the observed set at T that was neither removed by the disturbance shock nor
+  excluded (partial-disturbance / recruit exclusion). `d_g` = Σ NLL / # cohort-intervals over the group's cells (NaN without cohorts).
+  `PROB_MORT_SPP` becomes a fitted slot in Sim A (box [0, `pmort_upper_simA` = 0.2], eco × species) but is **zeroed inside the Sim A simulation** (`fit_params(...; death_acc)`),
+  so Sim A stays deterministic; Sim B (`dual_mode: b`) applies it as before (box `pmort_upper`, default 0.02; `fix_pmort: true` pins it to the seed's value).
+  The survive/die classification does not depend on p, so a candidate's d_g costs one pass of bookkeeping (histograms per cell and Δt, `DeathAcc`).
+* **m objectives** (`gdigel: {objective: mo, m: 2|3}`). `m: 2` (default) is the A–W scalarisation of §3, byte-for-byte the same arithmetic
+  (the m=2 smoke reproduces the previous run to ~1e-9 in the logged sums). `m: 3`: objective vector per group `(a_g, w_g, d_g)`, Chebyshev `F = max_i w_i·S_i/S_i,ref`
+  with `S = (ΣA, ΣW, ΣD)`; weights = uniform simplex lattice with `weights: H` divisions per edge — all `(i, j, l)/H`, `i+j+l = H`, `(H+1)(H+2)/2` points
+  (H = 4 → 15); lineages cycle the grid. References `D_ref` like `A_ref`, `W_ref` (median of the μ start points or the `start_from` point; `dref` overrides).
+  ND archive over (ΣA, ΣW, ΣD); when it exceeds `archive_cap` the point with the smallest nearest-neighbour distance (in ref-normalised objectives; the three
+  per-objective minima are protected) is dropped. **Knee (m=3)** = the archive point minimising the Chebyshev distance to the ideal point after dividing
+  each objective by its reference: `max_i (S_i/ref_i − min_j S_j,i/ref_i)`; roles `min_A`, `min_W`, `min_D`, `knee`. Output `mo_archive.csv` has `sumD`, `D_rel`, `weights`.
+* **`death_fold: true`** (m = 2): `w'_g = w_g + κ·d_g` with `κ = W_ref/D_ref` (medians of the start points' ΣW and ΣD, written to `kappa.txt`; gdigel option `kappa` overrides),
+  so both terms have the same scale at the start; the archive/knee are those of m=2 on `(ΣA, Σw')`.
+* **`tools/calib_coord.jl … minimize`** understands the same objectives: `CALIB_M=3` (+ `CALIB_WEIGHTS="w1,w2,w3"`, `CALIB_DREF`) or `CALIB_DEATH_FOLD=true` (+ `CALIB_KAPPA`);
+  the scoring flags of the refined run come from `CALIB_W_SCOPE` / `CALIB_DEATH_TERM`. Levers `pmort` / `pmort~` (box [0, 0.2], d-only) are available for `death_term: likelihood`.
+  Group objective `max_i w_i·o_i/o_ref,g`, total F as above; the round is reverted if the total F worsens.
+* **Evaluation / campaign**: `tools/simab_eval.jl` (criteria 1–6; helper processes `simab_eval_tost.jl`, `simab_eval_ctx.jl`), `tools/simab_pick.jl` (knee, Sim B seed DB, Sim B pick),
+  `tools/simab_runB.jl`, `configs/region4/simab_B.yml`, `runs_local/simab_campaign.sh` (resumable per step, not executed by the implementation work).
+* Caveat of the decomposition: a block of coordinates is judged by the Chebyshev of its groups' sums, so a coordinate that only moves d (PROB_MORT) is
+  invisible while another objective is the max; the per-group refinement (`pmort` lever) does not have this problem.
