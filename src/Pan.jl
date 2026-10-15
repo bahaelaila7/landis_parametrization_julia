@@ -1465,8 +1465,8 @@ function parametrize(; cohorts_db_path::String,
   INIT_PERTURB_CAP[] = FloatType(init_perturb_cap)   # cap on |absolute biomass change| per cohort
   init_perturb_frac > 0 && @info "Initial-condition perturbation: ±$(round(100*init_perturb_frac;digits=2))% over $(n_reps) reps (best-of), shared seed; perturbed = max(2, bio + clamp(bio·pct, ±$(init_perturb_cap))) [max deviation $(init_perturb_cap), floor 2]"
   # unbinned_w (Sim A): per-year age grid (1:400) + no age-smoothing → W₁ is the EXACT per-year EMD.
-  # Setting the bins at the SOURCE means W_SOFTPLUS_BETA (_set_loss_scales!) and the cell-norm W_SCALE
-  # (_set_cell_scales!) both recompute on this same grid — W₁, its normalization, and the softplus knee
+  # Setting the bins at the SOURCE means the softplus β and the cell-norm W scales
+  # (compute_loss_scales) both recompute on this same grid — W₁, its normalization, and the softplus knee
   # stay consistent (no per-year-W₁ ÷ stale-binned-scale mismatch). bins_idx then only governs Sim B (tier-4).
   # The ONE place the loss options are read: every loss knob of the run lives in this immutable LossParams (and the per-reference,
   # data-derived normalisation in LossScales, see compute_loss_scales). No module-level loss state.
@@ -1532,7 +1532,7 @@ function parametrize(; cohorts_db_path::String,
   # count-balance reweight: build per-agebin W1 weights ONCE from the TRAIN reference (frozen), on the COARSE
   # age_idx bins; Sim A (per-year) looks them up via CBAL_COARSE. Applied in calculate_species_loss!.
   # RANKW mode: :rank (default, 1/√ln(rank) by AGB) or :cbal_pct (percentile-floored class-balanced by cohort
-  # count — species play the role of age-bins in _set_cbal_weights!; 10% floor caps rare/empty cells).
+  # count — species play the role of age-bins in build_cbal_tables; 10% floor caps rare/empty cells).
   # The run-wide TRAIN tables the reference scales are built from: per-cell cohort counts (rankw_mode = :cbal_pct) and the count-balance
   # weights. They travel as `scale_seed` (a LossScales holding only these) to every search driver, which derives the scales of each reference.
   _nc = zeros(Int, 0, 0)
@@ -2803,7 +2803,7 @@ end
 # dual_b. Errors attribute to the process each param governs (growth←A, introduction←B).
 const DUAL_MODE = Ref{Symbol}(:off)   # :off (Sim A only) · :joint (A⊕B) · :b (Sim B only, seed from A)
 # The primary simulation is scored at tier 4 (dual_mode b, or tier 4 without a dual): its per-cell loss scales live in the B slots
-# (W_SCALE_B / AGB_SCALE_B, set by _set_cell_scales! for tier 4), so _mo_objectives must normalise group 0 with them. Before this,
+# (the tier-4 LossScales of dual_b / the primary reference, see _group_scales), so _mo_objectives must normalise group 0 with them. Before this,
 # group 0 always used the A (tier-3) scales: Sim B objectives were divided by the Sim A reference's scales and the tier-4 scales
 # were unused; tier-4-only runs read empty A matrices (raw losses, zero rank weights).
 const T4_PRIMARY = Ref{Bool}(false)
@@ -2844,7 +2844,7 @@ const _tm_sim    = Ref(UInt64(0))   # ns in process_plugin! (sim), accumulated w
 const _tm_io     = Ref(UInt64(0))   # ns BLOCKED on the writer put! within the current generation
 _tsec(ns) = round(max(0, signed(UInt64(ns))) / 1e9, digits=3)   # signed+clamp: never throws on an underflowed diff
 # Per-(eco,cycle) distinct-plot counts for the tier-4 ref, computed once in _build_dual_b. Read by BOTH
-# the AGB scale (_set_cell_scales!) and the loss (calculate_t4_loss) so per-plot-mean stays consistent.
+# the AGB scale (_cell_scales) and the loss (calculate_t4_loss) so per-plot-mean stays consistent.
 const T4_CELL_PLOTS = Ref{Union{Nothing,Vector{Vector{Int}}}}(nothing)
 # Build Sim B's dual_b NamedTuple: free-process SoA + injection restricted to artificial ecos (natural
 # plots run free), sharing A's t4_ref/cycle bins (Sim B is tier-4).
