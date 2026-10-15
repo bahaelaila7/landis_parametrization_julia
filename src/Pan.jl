@@ -2741,6 +2741,11 @@ end
 # handed in for artificial plots) whose tier-4 per-eco losses are stacked after Sim A's via fit_params'
 # dual_b. Errors attribute to the process each param governs (growth←A, introduction←B).
 const DUAL_MODE = Ref{Symbol}(:off)   # :off (Sim A only) · :joint (A⊕B) · :b (Sim B only, seed from A)
+# The primary simulation is scored at tier 4 (dual_mode b, or tier 4 without a dual): its per-cell loss scales live in the B slots
+# (W_SCALE_B / AGB_SCALE_B, set by _set_cell_scales! for tier 4), so _mo_objectives must normalise group 0 with them. Before this,
+# group 0 always used the A (tier-3) scales: Sim B objectives were divided by the Sim A reference's scales and the tier-4 scales
+# were unused; tier-4-only runs read empty A matrices (raw losses, zero rank weights).
+const T4_PRIMARY = Ref{Bool}(false)
 const TIER_B = Ref{Int}(4)            # Sim B's tier (yaml tier_b; A's tier is the config `tier`)
 const LBSA_STRETCH_LEN = Ref{Int}(150)  # LBSA stretch length (yaml lbsa_stretch_len); shorter → faster freeze detection
 const LBSA_STALE_RATIO = Ref{Float64}(0.95)  # LBSA up_attempt_stale_ratio (yaml lbsa_stale_ratio); lower → freezes/reheats sooner
@@ -2862,6 +2867,7 @@ function resim_simB_paired(cfg0, params, sp, spdf_plts, site_sim_years, spinup_c
   cfg = _as_config(cfg0)
   ACTIVE_SUCCESSION[] = succession_plugin_for(params)
   DUAL_MODE[] = :b
+  T4_PRIMARY[] = true
   SIMB_DISTURB_ONLY[] = cfg["simB_disturb_only"]
   SIMB_SPINUP[] = cfg["simB_spinup"]
   TIER_B[] = cfg["tier_b"]
@@ -4348,6 +4354,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
     np = length(pool_params); pool_fx = Vector{Any}(undef, np)
     if PARALLEL_MODE[] == :candidate     # candidate-parallelize the eval (sites already serial here)
       _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)  # SERIAL: freeze RANKW + set scales before the parallel batch (no race on the scale/RANKW globals)
+      dual_b === nothing || _set_loss_scales!(dual_b.tier, dual_b.spdf_plts, dual_b.t4_ref, dual_b.loss_params, eco_species_ids, n_species; cell_plots=dual_b.cell_plots)  # ...and the TRAIN Sim B (tier-4) scales: the batch is locked, so the inner B evals cannot set them
       PU.SCALES_LOCKED[] = true
       try
         Threads.@threads :static for k in 1:np
@@ -4480,6 +4487,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
         # candidate×rep is the parallel unit: each candidate's sim runs single-threaded on a thread-local SoA
         # (NUMA-local, no shared-array contention). Sites are already serial (PARALLEL_SITES=false, set above).
         _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)  # SERIAL: set TRAIN scales before the batch (no race on scale globals)
+        dual_b === nothing || _set_loss_scales!(dual_b.tier, dual_b.spdf_plts, dual_b.t4_ref, dual_b.loss_params, eco_species_ids, n_species; cell_plots=dual_b.cell_plots)  # ...and the TRAIN Sim B (tier-4) scales: the batch is locked, so the inner B evals cannot set them
         PU.SCALES_LOCKED[] = true
         try
           Threads.@threads :static for k in 1:igel_mu
@@ -5243,8 +5251,8 @@ function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector
       # then sum into the group. A and B keep separate scales; RANKW is shared. NOTE: the AGB exponent is
       # applied ONCE, per-cohort in calculate_species_loss! (_agb_pow on each hinged excess) — do NOT
       # re-apply it here or it double-powers for p≠1 (W's power stays here since W is not pre-powered).
-      Ws = g == 0 ? PU.W_SCALE_A[] : PU.W_SCALE_B[]
-      As = g == 0 ? PU.AGB_SCALE_A[] : PU.AGB_SCALE_B[]
+      Ws = (g == 0 && !T4_PRIMARY[]) ? PU.W_SCALE_A[] : PU.W_SCALE_B[]
+      As = (g == 0 && !T4_PRIMARY[]) ? PU.AGB_SCALE_A[] : PU.AGB_SCALE_B[]
       Rw = PU.RANKW[]
       @inbounds for gsp in eco_species_ids[e]
         _dom_included(gsp) || continue
@@ -5276,8 +5284,8 @@ function _mo_objectives_species(eco_losses::Vector{PU.SiteLoss}, eco_species_ids
     g = (idx - 1) ÷ ne
     e = (idx - 1) % ne + 1
     if cell
-      Ws = g == 0 ? PU.W_SCALE_A[] : PU.W_SCALE_B[]
-      As = g == 0 ? PU.AGB_SCALE_A[] : PU.AGB_SCALE_B[]
+      Ws = (g == 0 && !T4_PRIMARY[]) ? PU.W_SCALE_A[] : PU.W_SCALE_B[]
+      As = (g == 0 && !T4_PRIMARY[]) ? PU.AGB_SCALE_A[] : PU.AGB_SCALE_B[]
       Rw = PU.RANKW[]
       @inbounds for gsp in eco_species_ids[e]
         gsp == target_gsp || continue
@@ -6268,6 +6276,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   Data.FIA_CYCLE_MERGE[] = cfg["fia_cycle_merge"]   # merge N consecutive FIA cycles into one group
   DUAL_MODE[] = cfg["dual_mode"]   # off (A only) | joint (A⊕B) | b (B only, seed from A)
   TIER_B[] = cfg["tier_b"]                       # Sim B's tier (A's tier = config `tier`)
+  T4_PRIMARY[] = DUAL_MODE[] === :b || (DUAL_MODE[] === :off && cfg["tier"] == 4)   # see T4_PRIMARY
   LBSA_STRETCH_LEN[] = cfg["lbsa_stretch_len"] # LBSA stretch length
   LBSA_STALE_RATIO[] = cfg["lbsa_stale_ratio"] # LBSA freeze-detection uphill-attempt ratio
   LBSA_TEMP_LIST_LEN[] = cfg["lbsa_temp_list_len"]   # LBSA temperature-list length L
