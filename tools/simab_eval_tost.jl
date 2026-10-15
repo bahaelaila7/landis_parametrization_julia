@@ -1,8 +1,8 @@
 # Held-out evaluation for tools/simab_eval.jl: group TOST (Sim A: per-pair TOST; Sim B: plot-cluster bootstrap on log Σsim/Σobs) on val and test
 # with the UNCHANGED tools/tost_common.jl, plus (Sim B) the total-AGB bias per FIA cycle.
 #   ./julia_gdal.sh --project=. tools/simab_eval_tost.jl <config.yml> <params.jld2> <out.jld2>
-import YAML
-cfg = YAML.load_file(ARGS[1]); params_path = ARGS[2]; out = ARGS[3]
+using Pan
+cfg = Pan.load_config(ARGS[1]); params_path = ARGS[2]; out = ARGS[3]
 SPLIT = "val+test"; MARGINS = [0.05, 0.1, 0.2]
 include(joinpath(@__DIR__, "tost_common.jl"))
 p = JLD2.load_object(params_path)

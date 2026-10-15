@@ -2,14 +2,13 @@
 # exactly as in training (all flags of the config active), then the checks run in the POST_SEARCH_HOOK.
 #   ./julia_gdal.sh --project=. tools/simab_eval_ctx.jl <A|B> <config.yml> <params.jld2> <out.jld2> [archive_dir]
 using Pan, JLD2, CSV, DataFrames, Statistics
-import YAML
 const P = Pan; const PU = P.PU
 mode, cfgpath, ppath, outp = ARGS[1], ARGS[2], ARGS[3], ARGS[4]; arch_dir = length(ARGS) >= 5 ? ARGS[5] : ""
-cfg = YAML.load_file(cfgpath)
+cfg = Pan.load_config(cfgpath)
 fam_name(s) = s === :ANPP_MAX_SPP ? "ANPP_ratio" : s === :B_MAX_SPP ? "B_MAX" : String(s)
 function check(d)
   SP = P.succession_plugin_of(d.ref_soa); p = JLD2.load_object(ppath)
-  pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=Bool(get(cfg, "no_establishment", false)), fit_establishment=false)
+  pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=cfg["no_establishment"], fit_establishment=false)
   slots = PU.build_slots(pd, p); u = PU.params_to_u(p, pd, slots)
   res = Dict{String,Any}("mode" => mode)
   # ---- 2. bound hugging per family: fraction of fitted dimensions with u <= 0.01 or >= 0.99

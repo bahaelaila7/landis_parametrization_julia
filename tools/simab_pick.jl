@@ -4,7 +4,6 @@
 #                                  each REMAPPED BY NAME into Sim B's own species/eco lists (as tools/seed_simB_start.jl: Sim A and Sim B tables tier species differently)
 #   simab_pick.jl pickB <B_dir> <out.jld2>                         → knee of the Sim-B archive on (ΣB_W, ΣB_AGB) (latest search_state@N.jld2)
 using Pan, JLD2, CSV, DataFrames, Statistics, DuckDB, Serialization
-import YAML
 cmd = ARGS[1]
 if cmd == "knee"
   adir, outd = ARGS[2], ARGS[3]; mkpath(outd)
@@ -26,12 +25,11 @@ elseif cmd == "seeds"
   pick = isempty(others) ? Int[] : others[unique(round.(Int, range(1, length(others); length=min(mu - 1, length(others)))))]
   raw = vcat([(JLD2.load_object(refined), A.sumA[kn], A.sumW[kn])], [(JLD2.load_object(joinpath(adir, "mo_archive", A.file[i])), A.sumA[i], A.sumW[i]) for i in pick])
   # ---- Sim B context (own species/eco lists) and the remap of tools/seed_simB_start.jl
-  P = Pan; BSP = P.BiomassSuccessionPlugin; cfg = YAML.load_file(cfgBp)
-  g(k, d) = get(cfg, k, d); X(s) = P._expandenv(String(s))
+  P = Pan; BSP = P.BiomassSuccessionPlugin; cfg = P.load_config(cfgBp)
   _, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
-  BSP.SHADE_TOL_TABLE[] = P._load_shade_tol_table(X(g("shade_tol_csv", "")))
-  BSP.MATURITY_TABLE[] = P._load_maturity_table(X(g("maturity_csv", "")))
-  pet = isfile(X(g("maturity_csv", ""))) ? CSV.read(X(g("maturity_csv", "")), DataFrame) : nothing
+  BSP.SHADE_TOL_TABLE[] = P._load_shade_tol_table(cfg["shade_tol_csv"])
+  BSP.MATURITY_TABLE[] = P._load_maturity_table(cfg["maturity_csv"])
+  pet = isfile(cfg["maturity_csv"]) ? CSV.read(cfg["maturity_csv"], DataFrame) : nothing
   function remap(simA)
     p = BSP.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)), no_establishment=false)
     ai = Dict((simA.ECO_LIST[e], simA.SPECIES_LIST[Int(gid)]) => (e, j) for (e, ids) in enumerate(simA.ECO_SPECIES_IDS) for (j, gid) in enumerate(ids))

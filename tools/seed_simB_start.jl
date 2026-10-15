@@ -4,14 +4,13 @@
 # SHADE_TOL (shade_tol_csv; catch-all groups by tier: *_HST→4, *_LST→2, else 3), MATURITY (maturity_csv),
 # PROB_ESTAB_SPP flat (default 0.10, calibrated afterwards), MIN_REL_BIOMASS = pinned data default.
 #   ./julia_gdal.sh --project=. tools/seed_simB_start.jl <simB_config.yml> <simA_params.jld2> <out.jld2> [pestab0=0.10]
-using Pan; import YAML, JLD2
+using Pan; import JLD2
 const P = Pan; const BSP = P.BiomassSuccessionPlugin
-cfg = YAML.load_file(ARGS[1]); simA = JLD2.load_object(ARGS[2]); out = ARGS[3]
+cfg = Pan.load_config(ARGS[1]); simA = JLD2.load_object(ARGS[2]); out = ARGS[3]
 pe0 = length(ARGS) >= 4 ? parse(Float32, ARGS[4]) : 0.10f0
-g(k, d) = get(cfg, k, d); X(s) = P._expandenv(String(s))
 splots, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
-BSP.SHADE_TOL_TABLE[] = P._load_shade_tol_table(X(g("shade_tol_csv", "")))
-BSP.MATURITY_TABLE[] = P._load_maturity_table(X(g("maturity_csv", "")))
+BSP.SHADE_TOL_TABLE[] = P._load_shade_tol_table(cfg["shade_tol_csv"])
+BSP.MATURITY_TABLE[] = P._load_maturity_table(cfg["maturity_csv"])
 rng = P.RNGType(UInt64(1))
 p = P.BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=false)
 # --- remap Sim A growth by name
@@ -45,7 +44,7 @@ P._seed_maturity!(p, species_list)
 # PROB_ESTAB from data (prob_estab_all_species.csv: species, category, l3, …, prob_estab): match (category==name, l3),
 # else (species==name, l3), else the species' median over L3s, else the global median; pe0 only if the table is absent.
 import CSV, DataFrames, Statistics
-pet = isfile(X(g("maturity_csv", ""))) ? CSV.read(X(g("maturity_csv", "")), DataFrames.DataFrame) : nothing
+pet = isfile(cfg["maturity_csv"]) ? CSV.read(cfg["maturity_csv"], DataFrames.DataFrame) : nothing
 npe = 0
 for (e, ids) in enumerate(eco_species_ids), (j, gid) in enumerate(ids)
   if pet === nothing || length(ARGS) >= 4; p.PROB_ESTAB_SPP[e][j] = pe0; continue; end   # explicit pe0 arg = flat override

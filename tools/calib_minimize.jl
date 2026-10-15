@@ -15,9 +15,7 @@
 # training context is prepared by run_from_yaml (so every loss flag of the config is active), CALIB_SPLIT must be train.
 # Train TOST pass counts (approximate normal-CI version) are logged for information only and never used.
 using Pan, JLD2, CSV, DataFrames, Statistics, Random
-import YAML
 const P = Pan; const PU = P.PU
-g(k, d) = get(cfg, k, d)
 LAM = parse(Float64, get(ENV, "CALIB_LAMBDA", "0.5")); (0.0 <= LAM <= 1.0) || error("CALIB_LAMBDA must be in [0,1]")
 get(ENV, "CALIB_SPLIT", "train") == "train" || error("CALIB_MODE=minimize works on the train split only")
 MOBJ = parse(Int, get(ENV, "CALIB_M", "2")); MOBJ in (2, 3) || error("CALIB_M must be 2 or 3")
@@ -34,18 +32,18 @@ P.run_from_yaml(ARGS[1]; overrides=ov)
 d = CTX[]; d === nothing && error("training context was not captured")
 eco_list = d.eco_list; species_list = d.species_list; eco_species_ids = d.eco_species_ids
 include(joinpath(@__DIR__, "calib_levers.jl"))
-gdo = get(cfg, "gdigel", Dict()); spinup = Bool(g("spinup", false))
+gdo = cfg["gdigel"]; spinup = cfg["spinup"]
 SP = P.succession_plugin_of(d.ref_soa)
-pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=Bool(g("no_establishment", false)), fit_establishment=false)
+pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=cfg["no_establishment"], fit_establishment=false)
 cur = JLD2.load_object(start); slots = PU.build_slots(pd, cur)
-cell_group, labels = P._gd_groups(pd, slots, d.eco_species_ids, d.species_list, d.eco_list; group_param=String(get(gdo, "group_param", "")))
-ix = P._gd_index(d.injection_cohorts, d.splots, cell_group, labels; real_only=Bool(get(gdo, "real_only", true)))
+cell_group, labels = P._gd_groups(pd, slots, d.eco_species_ids, d.species_list, d.eco_list; group_param=gdo["group_param"])
+ix = P._gd_index(d.injection_cohorts, d.splots, cell_group, labels; real_only=gdo["real_only"])
 groupcells = P._gd_groupcells(ix.cell_group, ix.ngroups)
 targets = Dict{String,Vector{Tuple{Int,Int}}}(labels[k] => groupcells[k] for k in 1:ix.ngroups)
 nvis = P._gd_cell_visits(d.spdf_plts, d.eco_species_ids, spinup ? 0 : 1)
 idict = P._build_injection_dict(d.injection_cohorts, d.ref_soa); iyears = Set(Int.(d.injection_cohorts.sim_year))
 msy = d.site_sim_years.sim_years .|> maximum |> maximum
-seeds = P._fixed_seeds(P.RNGType(UInt64(Int(g("seed", 1)))), 1)
+seeds = P._fixed_seeds(P.RNGType(UInt64(cfg["seed"])), 1)
 function ev(p)
   dacc = USED ? P.DeathAcc(d.eco_species_ids) : nothing
   r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, spinup, d.spinup_cohorts, d.loss_params;

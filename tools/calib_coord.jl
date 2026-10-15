@@ -6,8 +6,8 @@
 # region-level pooling of configs/region4/gafl_A.yml. Bounds/floors enforced as in u_to_params: S∈[0.01,1];
 # ratio=B_MAX/ANPP∈[20,35]; B_MAX∈[floor,35000]; ANPP≥data floor.
 #   ./julia_gdal.sh --project=. --threads=N tools/calib_coord.jl <config.yml> <start.jld2> <out_dir> [schedule=S,ratio,S,ratio] [mode=root|minimize]
-import YAML
-cfg = YAML.load_file(ARGS[1]); start = ARGS[2]; outd = ARGS[3]; mkpath(outd)
+using Pan
+cfg = Pan.load_config(ARGS[1]); start = ARGS[2]; outd = ARGS[3]; mkpath(outd)
 SCHED = length(ARGS) >= 4 ? String.(split(ARGS[4], ",")) : ["S", "ratio", "S", "ratio"]
 SPLIT = get(ENV, "CALIB_SPLIT", "train"); MARGINS = [0.05, 0.1, 0.2]   # e.g. CALIB_SPLIT=train+val (D6)
 # CALIB_MODE (env, or 5th argument): "root" (default, the TOST-bias root-finding below) | "minimize" (docs/mo_gdigel.md: per-group

@@ -4,8 +4,8 @@
 # Writes tost_select_<split>.csv (per candidate) + tost_select_<split>_groups.csv next to the candidates and saves the top
 # candidate (most passes at the first margin; ties → more passes at the 2nd, then smaller median |bias|) to selected_<split>/.
 # TOST_DUMP=<dir> also writes the matched pairs of every candidate.
-import YAML
-cfg = YAML.load_file(ARGS[1]); run_dir = ARGS[2]
+using Pan
+cfg = Pan.load_config(ARGS[1]); run_dir = ARGS[2]
 K = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 16
 SPLIT = length(ARGS) >= 4 ? ARGS[4] : "val"
 MARGINS = length(ARGS) >= 5 ? parse.(Float64, split(ARGS[5], ",")) : [0.05, 0.1, 0.2]

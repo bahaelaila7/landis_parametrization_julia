@@ -6,8 +6,8 @@
 #    parameter slot that affects only that group (e.g. S, B_MAX, ANPP for Biomass Succession; FolN for PnET; G_MULT, M_MULT
 #    for HBAD), and the number of DISTINCT parameterizations (greedy clusters, L∞ distance > 0.1 in the search's u-space).
 # Writes <gd_out_dir>/equifinality_<split>.csv (per group × param) and equifinality_<split>_solutions.csv.
-import YAML
-cfg = YAML.load_file(ARGS[1]); gdd = ARGS[2]
+using Pan
+cfg = Pan.load_config(ARGS[1]); gdd = ARGS[2]
 SPLIT = length(ARGS) >= 3 ? ARGS[3] : "train"; MARGIN = length(ARGS) >= 4 ? parse(Float64, ARGS[4]) : 0.1
 MARGINS = [0.05, 0.1, 0.2]; mi = findfirst(==(MARGIN), MARGINS)
 include(joinpath(@__DIR__, "tost_common.jl"))

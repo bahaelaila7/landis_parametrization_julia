@@ -1,9 +1,9 @@
 # Deterministic PnET start for a config: plant-functional-type defaults (params.jl pft_spec, no jitter), TOwood 0.01,
 # RD_MULT 1, LONGEVITY copied by species name from a BiomassSuccession parameter set (same data-derived longevity).
 #   ./julia_gdal.sh --project=. tools/seed_pnet_start.jl <pnet_config.yml> <bs_params.jld2> <out.jld2>
-using Pan; import YAML, JLD2
+using Pan; import JLD2
 const P = Pan; const PN = P.PnETPlugin
-cfg = YAML.load_file(ARGS[1]); bs = JLD2.load_object(ARGS[2]); out = ARGS[3]
+cfg = Pan.load_config(ARGS[1]); bs = JLD2.load_object(ARGS[2]); out = ARGS[3]
 splots, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
 p = PN.generate_pnet_params(species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)))
 for i in eachindex(species_list)

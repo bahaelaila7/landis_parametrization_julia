@@ -5,9 +5,9 @@
 # Selection: farthest-point sampling in the search's u-space (L2, every dimension in [0,1]) seeded with the anchor, so each
 # pick is the behavioural candidate farthest from everything already chosen. Writes <out_dir>/alt_<k>.jld2 + selection.csv
 # (distance to anchor and to the nearest other pick, pass counts, per-parameter-family median |log ratio| vs the anchor).
-using Pan, JLD2, DataFrames, CSV, Statistics, YAML
+using Pan, JLD2, DataFrames, CSV, Statistics
 const P = Pan; const PU = P.PU
-cfg = YAML.load_file(ARGS[1]); gdd = ARGS[2]; anchor_path = ARGS[3]; K = parse(Int, ARGS[4]); outd = ARGS[5]; mkpath(outd)
+cfg = P.load_config(ARGS[1]); gdd = ARGS[2]; anchor_path = ARGS[3]; K = parse(Int, ARGS[4]); outd = ARGS[5]; mkpath(outd)
 drop = length(ARGS) >= 6 ? parse(Int, ARGS[6]) : 2
 # the u-space layout depends on the run's parameter pooling, which is configured by the data preparation — so decode
 # inside the same preparation path (POST_SEARCH_HOOK after a 1-trial run), exactly like the search did

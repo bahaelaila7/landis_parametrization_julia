@@ -2,9 +2,9 @@
 # docs/gafl_calibration_log.md D2/D4): S 0.5, D 15, B_MAX 23,500, ANPP = B_MAX / 27.5, PROB_MORT 0, LONGEVITY copied by
 # species name from a reference set (else 275). tools/calib_coord.jl applies the data floors on load.
 #   ./julia_gdal.sh --project=. tools/seed_center_bs.jl <config.yml> <ref_params.jld2> <out.jld2>
-using Pan; import YAML, JLD2
+using Pan; import JLD2
 const P = Pan
-cfg = YAML.load_file(ARGS[1]); ref = JLD2.load_object(ARGS[2]); out = ARGS[3]
+cfg = Pan.load_config(ARGS[1]); ref = JLD2.load_object(ARGS[2]); out = ARGS[3]
 splots, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
 p = P.BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)), no_establishment=true)
 for (e, ids) in enumerate(eco_species_ids), j in eachindex(ids)
