@@ -4128,7 +4128,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
         cands[k] = cand
         fxs[k] = fx_k
         evals_done += 1
-        if k == 1 || fx_k.aggregate < gen_best_agg   # k==1 guarantees gb_* are always defined
+        if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined; isless ⇒ NaN ranks worst
           gen_best_agg = fx_k.aggregate
           gb_idx = k
           gb_run = run_k
@@ -4449,7 +4449,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
         finally; PU.SCALES_LOCKED[] = false; end
         evals_done += igel_mu
         for k in 1:igel_mu                              # serial best-pick (gen argmin aggregate)
-          off_fxs[k].aggregate < gen_best_agg && (gen_best_agg = off_fxs[k].aggregate; gb_idx = k)
+          (k == 1 || isless(off_fxs[k].aggregate, gen_best_agg)) && (gen_best_agg = off_fxs[k].aggregate; gb_idx = k)
         end
         gb_run = off_run[gb_idx]; gb_eco = off_eco[gb_idx]  # already computed in the parallel batch (identical to a re-sim: fixed seeds) — no serial full-sim
         gb_cached = n_output_plots > 0 ? _median_rep_cached(_run(off_params[gb_idx]; ws=_work_soa_t[1])) : nothing  # cohort cache only feeds output plots; unused otherwise
@@ -4458,7 +4458,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
           p = PU.u_to_params(offs[k], param_dists, slots, bases === nothing ? bio_params : bases[k])
           rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
           off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
-          if fx_k.aggregate < gen_best_agg
+          if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
             gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results)
           end
         end
@@ -4639,7 +4639,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
       rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
       off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
-      if fx_k.aggregate < gen_best_agg
+      if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
         gen_best_agg = fx_k.aggregate; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results)
       end
     end
@@ -4872,7 +4872,7 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splot
         p = PU.u_to_params(offs[k], param_dists, slots, bio_params)
         rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
         off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
-        if fx_k.aggregate < gen_best_agg
+        if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
           gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results)
         end
       end
@@ -5108,7 +5108,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splo
         else
           m = CMAMAE.measure(fx_k); meas[k] = (Float64(m[1]), Float64(m[2]))
         end
-        if fx_k.aggregate < gen_best_agg
+        if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
           gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results)
         end
       end
