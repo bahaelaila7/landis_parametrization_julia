@@ -704,7 +704,27 @@ end
   return site_agb_loss
 end
 
-function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; lp::FloatType=one(FloatType), debug::Bool=false, excluded::Union{Nothing,Set{UIntType}}=nothing)::SiteLoss
+# Cohort-level exclusion (disturbance exclude-modes / recruits at entry, new scoring order): fill `perm` with the indices of the
+# site's live cohorts that are NOT in excl_c (a list of (eco_species, age)), sorted by species; returns the count. The matching
+# observed cohorts are removed from the reference by Pan._build_excl_plan (alternative SPDFGroundTruth for that site-year).
+function _excl_perm!(perm::Vector{Int}, site, excl_c)::Int
+  live = Int(site.live); resize!(perm, live); n = 0
+  csp = site.c_species; cage = site.c_age
+  @inbounds for j in 1:live
+    ex = false
+    for (esp, age) in excl_c
+      if csp[j] == esp && cage[j] == age
+        ex = true; break
+      end
+    end
+    ex || (n += 1; perm[n] = j)
+  end
+  resize!(perm, n)
+  sort!(perm; by=j -> (@inbounds csp[j]), alg=MergeSort)
+  n
+end
+
+function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; lp::FloatType=one(FloatType), debug::Bool=false, excluded::Union{Nothing,Set{UIntType}}=nothing, excl_c::Union{Nothing,Vector{Tuple{UIntType,FloatType}}}=nothing)::SiteLoss
   # `excluded`: eco-species (local sp index) to SKIP from this site's loss at this year — used by the
   # disturbance exclude-modes (a partially-disturbed cohort the growth model can't fairly reproduce).
   _excl(sp) = excluded !== nothing && UIntType(sp) in excluded
@@ -723,7 +743,8 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
   sp_agb_loss = zeros(FloatType, n_species)
   site_agb_loss = zero(FloatType)
 
-  if site.live > 0
+  p0 = excl_c === nothing ? nothing : (pp = Int[]; _excl_perm!(pp, site, excl_c); pp)
+  if site.live > 0 && (p0 === nothing || !isempty(p0))
 
     c_species = @view site.c_species[1:site.live]
     max_age = UIntType(ceil(maximum(@view site.c_age[1:site.live])))
@@ -731,7 +752,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
     #get indices of species sorted
     # traversing c_species[p[1..end]] is equivalent to traversing sorted_c_species[1..end]
     # but now useful so that I don't need to sort c_age, c_bio
-    p = sortperm(c_species)
+    p = p0 === nothing ? sortperm(c_species) : p0
     @debug c_species
     @debug p
 
@@ -931,7 +952,7 @@ end
 function calculate_site_loss2_acc!(w_acc::Vector{FloatType}, agb_acc::Vector{FloatType}, current_year::Int, site::SiteView,
     n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams,
     perm::Vector{Int}, ages::Vector{FloatType}, insite::Vector{Bool}, cdf::Vector{FloatType}, agb_bins::Vector{FloatType};
-    lp::FloatType=one(FloatType), excluded::Union{Nothing,Set{UIntType}}=nothing)::FloatType
+    lp::FloatType=one(FloatType), excluded::Union{Nothing,Set{UIntType}}=nothing, excl_c::Union{Nothing,Vector{Tuple{UIntType,FloatType}}}=nothing)::FloatType
   _excl(sp) = excluded !== nothing && UIntType(sp) in excluded
   eco_n_species = length(site.sp_mature)
   species_id_map = eco_species_ids[site.eco_id]
@@ -939,12 +960,15 @@ function calculate_site_loss2_acc!(w_acc::Vector{FloatType}, agb_acc::Vector{Flo
   fill!(insite, false)
   site_agb_loss = zero(FloatType)
 
-  if site.live > 0
+  nkeep = excl_c === nothing ? Int(site.live) : _excl_perm!(perm, site, excl_c)
+  if site.live > 0 && nkeep > 0
     c_species = @view site.c_species[1:site.live]
     max_age = UIntType(ceil(maximum(@view site.c_age[1:site.live])))
     max_age += UIntType(length(loss_params.smoothing_weights) >> 1)
-    resize!(perm, site.live)
-    sortperm!(perm, c_species)
+    if excl_c === nothing
+      resize!(perm, site.live)
+      sortperm!(perm, c_species)
+    end
     resize!(ages, max_age)
     p = perm
     sp_start_idx = 1

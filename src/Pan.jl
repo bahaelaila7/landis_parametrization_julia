@@ -254,6 +254,12 @@ const OVERRIDE_INJECTION_REPLACE = Ref(false)
 # survivors' sim biomass untouched, so the simulator fits their biomass deterministically.
 # Requires OVERRIDE_INJECTION[]; mutually exclusive with REPLACE (REPLACE takes precedence).
 const OVERRIDE_INJECTION_SYNC = Ref(false)
+# LOSS_BEFORE_INJECTION[] = true (default on branch mo-gdigel): at a measurement year the loss (every search tier) is computed
+# on the SIMULATED state — i.e. BEFORE the observed cohorts are injected for the next interval. The previous order (inject,
+# then score) compared a state whose cohort SET had already been forced to the observed one (sync: unobserved sim cohorts
+# removed, missing observed cohorts added with observed biomass), so the age-structure (Wasserstein) term largely scored
+# observed against observed. `loss_before_injection: false` reproduces the previous behaviour (and earlier results).
+const LOSS_BEFORE_INJECTION = Ref(true)
 
 # Partial-disturbance handling in SYNC mode. Each observed cohort carries a disturbance_drop_pct
 # (from curation). Modes:
@@ -266,13 +272,185 @@ const OVERRIDE_INJECTION_SYNC = Ref(false)
 #   :exclude_noscale  — leave the sim biomass and EXCLUDE the cohort from the site loss at that year.
 const OVERRIDE_INJECTION_DISTURBANCE = Ref(:off)
 
+# Disturbance SHOCK (new scoring order, LOSS_BEFORE_INJECTION[] = true + override sync). Applied at every measurement year T
+# AFTER the growth step and BEFORE scoring, on the simulated state:
+#   (a) sim cohorts matching (eco_species, age) of a cohort FULLY removed by disturbance in (T_prev→T) are removed;
+#   (b) :scale — matched partially-disturbed survivors (observed drop > 0) are scaled by (1-drop).
+# Undisturbed cohorts (including ones that died naturally in the data: the sim must kill them) are untouched and scored as simulated.
+# Data: plot-level full removals from Data._plot_shocks! (tools/export_cohort_disturbance.py parquet).
+const _SiteShockYear = Vector{Tuple{Int,Vector{Tuple{UIntType,FloatType}}}}
+const _SiteShockDict = Dict{Int,_SiteShockYear}
+# diagnostics (tools/shock_stats.jl): [full-removal rows tried, matched+removed sim cohorts, partial (drop>0) cohorts, matched+scaled]
+const SHOCK_STATS = [Threads.Atomic{Int}(0) for _ in 1:4]
+# Registry: the shock dict built next to an injection dict (same lifetime), so every fit_params caller that passes the
+# injection dict gets the shocks without extra plumbing (train, val, test, dual-B).
+const _SHOCK_REGISTRY = IdDict{Any,_SiteShockDict}()
+
+function _build_shock_dict(shock_rows::DataFrame, ref_soa)::_SiteShockDict
+  plot_to_site = Dict{Int,Int}(Int(getsite(ref_soa, i).ref_cn) => i for i in 1:ref_soa.n)
+  by_year = _SiteShockDict()
+  pos = Dict{Tuple{Int,Int},Int}()
+  for row in eachrow(shock_rows)
+    site_idx = get(plot_to_site, Int(row.plot_id), 0)
+    site_idx == 0 && continue
+    year = Int(row.sim_year)
+    yl = get!(by_year, year, _SiteShockYear())
+    p = get(pos, (site_idx, year), 0)
+    if p == 0
+      push!(yl, (site_idx, Tuple{UIntType,FloatType}[]))
+      p = length(yl); pos[(site_idx, year)] = p
+    end
+    push!(yl[p][2], (UIntType(row.eco_species_id), FloatType(row.age_calc)))
+  end
+  by_year
+end
+
+# ---- cohort-level exclusion at a measurement year (new order; replaces the species-level exclusion_dict) ----------------------
+# A cohort (eco_species, age) at (site, T) is EXCLUDED from the loss on BOTH sides when it is
+#   * partially disturbed (drop > 0) and the mode is :exclude_overwrite / :exclude_noscale, or
+#   * a RECRUIT at entry (EXCLUDE_RECRUITS_AT_ENTRY[]): observed at T but with no record of the same cohort (species, age-(T-T_prev))
+#     at the previous visit of that plot — Sim A has no establishment, so it cannot produce it; it enters via the sync afterwards.
+# Sim side: the cohort is skipped (PU._excl_perm!). Reference side: an alternative SPDFGroundTruth for that site-year is built from the
+# observed cohorts WITHOUT the excluded ones (same smoothing/binning code: PU.smoothen_ref_years). A species left with no cohort on
+# either side contributes nothing (no "missing species" penalty).
+const EXCLUDE_RECRUITS_AT_ENTRY = Ref(true)
+struct _ExclPlan
+  mode::Symbol
+  recruits::Bool
+  coh::Dict{Int,Dict{Int,Vector{Tuple{UIntType,FloatType}}}}   # year → site_idx → excluded (eco_species, age)
+  ref::Dict{Int,Dict{Int,PU.SPDFGroundTruth}}                  # year → site_idx → reference without those cohorts
+end
+const _EXCL_CACHE = IdDict{Any,_ExclPlan}()
+const _EXCL_LOCK = ReentrantLock()
+
+function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::_ExclPlan
+  mode = OVERRIDE_INJECTION_DISTURBANCE[]; rec_on = EXCLUDE_RECRUITS_AT_ENTRY[]
+  dist_on = mode in (:exclude_overwrite, :exclude_noscale)
+  site_years = Dict{Int,Vector{Int}}()
+  site_set = Dict{Tuple{Int,Int},Set{Tuple{UIntType,Int}}}()
+  for (yr, sites) in injection_dict, (si, cohorts) in sites
+    push!(get!(site_years, si, Int[]), yr)
+    site_set[(si, yr)] = Set{Tuple{UIntType,Int}}((sp, Int(age)) for (sp, age, _, _) in cohorts)
+  end
+  for v in values(site_years); sort!(v); end
+  coh = Dict{Int,Dict{Int,Vector{Tuple{UIntType,FloatType}}}}()
+  rows = DataFrame(plot_id=UIntType[], eco_id=UIntType[], measdate=Dates.Date[], start_measdate=Dates.Date[], eco_species_id=UIntType[], age_calc=Int[], agb_sum=FloatType[])
+  d0 = Dates.Date(2000, 1, 1)
+  for yr in sort!(collect(keys(injection_dict))), (si, cohorts) in injection_dict[yr]
+    ys = site_years[si]; k = searchsortedfirst(ys, yr)
+    py = k > 1 ? ys[k-1] : 0
+    ex = Tuple{UIntType,FloatType}[]
+    for (sp, age, bio, drop) in cohorts
+      isdist = dist_on && drop > zero(FloatType)
+      isrec = rec_on && py > 0 && !((sp, Int(age) - (yr - py)) in site_set[(si, py)])
+      (isdist || isrec) && push!(ex, (sp, age))
+    end
+    isempty(ex) && continue
+    get!(coh, yr, Dict{Int,Vector{Tuple{UIntType,FloatType}}}())[si] = ex
+    eco = UIntType(getsite(ref_soa, si).eco_id)
+    for (sp, age, bio, _) in cohorts
+      (sp, age) in ex && continue
+      push!(rows, (UIntType(si), eco, d0 + Dates.Day(round(Int, yr * 365.25)), d0, sp, Int(age), bio))
+    end
+  end
+  ref = Dict{Int,Dict{Int,PU.SPDFGroundTruth}}()
+  alt = Dict{Tuple{Int,Int},PU.SPDFGroundTruth}()
+  if nrow(rows) > 0
+    max_age = maximum(rows.age_calc)
+    sp = PU.smoothen_ref_years(rows, loss_params, max_age)
+    for ((pid, eco), byyr) in Data.make_spdf_dict(sp, eco_species_ids), (yr, gt) in byyr
+      alt[(Int(pid), yr)] = gt
+    end
+  end
+  for (yr, d) in coh, si in keys(d)
+    nsp = length(eco_species_ids[Int(getsite(ref_soa, si).eco_id)])
+    gt = get(alt, (si, yr), nothing)
+    gt === nothing && (gt = PU.SPDFGroundTruth(keys=falses(nsp), records=Dict{UIntType,PU.SPDFRecord}()))
+    get!(ref, yr, Dict{Int,PU.SPDFGroundTruth}())[si] = gt
+  end
+  _ExclPlan(mode, rec_on, coh, ref)
+end
+
+function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::_ExclPlan
+  lock(_EXCL_LOCK) do
+    pl = get(_EXCL_CACHE, injection_dict, nothing)
+    if pl === nothing || pl.mode !== OVERRIDE_INJECTION_DISTURBANCE[] || pl.recruits != EXCLUDE_RECRUITS_AT_ENTRY[]
+      pl = _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
+      _EXCL_CACHE[injection_dict] = pl
+    end
+    pl
+  end
+end
+
+# Swap-remove sim cohort i (same mechanics as the sync's Pass A).
+@inline function _shock_remove_cohort!(site, i::Int)
+  cbio = site.c_bio
+  site.B -= cbio[i]
+  lastidx = Int(site.live)
+  i != lastidx && PanCore.swap_cohort!(site, i, lastidx)
+  site.live -= one(UIntType)
+  nothing
+end
+
+function _apply_disturbance_shock!(soa, shock_year::Union{Nothing,_SiteShockYear}, site_cohorts::Union{Nothing,_SiteInjectionYear})
+  SP = succession_plugin_of(soa)
+  if shock_year !== nothing
+    for (site_idx, lst) in shock_year
+      site = getsite(soa, site_idx)
+      site.active || continue
+      csp = site.c_species; cage = site.c_age
+      removed = false
+      for (sp, age) in lst
+        Threads.atomic_add!(SHOCK_STATS[1], 1)
+        @inbounds for j in 1:Int(site.live)
+          if csp[j] == sp && cage[j] == age
+            _shock_remove_cohort!(site, j)
+            Threads.atomic_add!(SHOCK_STATS[2], 1)
+            removed = true
+            break
+          end
+        end
+      end
+      if removed
+        o = zero(UIntType)
+        for j in 1:Int(site.live)
+          cage[j] > one(FloatType) && (o += one(UIntType))
+        end
+        site.old = o
+        site._new_cohort_counts = Int(site.live)
+      end
+    end
+  end
+  if site_cohorts !== nothing && OVERRIDE_INJECTION_DISTURBANCE[] === :scale
+    for (site_idx, cohorts) in site_cohorts
+      site = getsite(soa, site_idx)
+      site.active || continue
+      csp = site.c_species; cage = site.c_age; cbio = site.c_bio
+      for (sp, age, _bio, drop) in cohorts
+        drop > zero(FloatType) || continue
+        Threads.atomic_add!(SHOCK_STATS[3], 1)
+        @inbounds for j in 1:Int(site.live)
+          if csp[j] == sp && cage[j] == age
+            Threads.atomic_add!(SHOCK_STATS[4], 1)
+            newb = cbio[j] * (one(FloatType) - drop)
+            site.B += newb - cbio[j]
+            set_cohort_bio!(SP, site, j, newb)
+            break
+          end
+        end
+      end
+    end
+  end
+  nothing
+end
+
 # Only touches the sites that actually have injections (typically << n_sites).
 # _new_cohort_counts is already == site.live for all other sites after process_plugin!.
 # override=false (default): append every listed cohort as a new cohort — unchanged.
 # override=true: for each observed cohort, overwrite the biomass of the matching
 #   (species, age) cohort in place; add it only if no match exists. Sim cohorts with
 #   no observed counterpart are left untouched; capacity grows only by the unmatched count.
-function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; override::Bool=false, replace::Bool=false, sync::Bool=false)
+function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; override::Bool=false, replace::Bool=false, sync::Bool=false, skip_scale::Bool=false)
   SP = succession_plugin_of(soa)
   if !override
     for (site_idx, cohorts) in site_cohorts
@@ -350,7 +528,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
     #   :exclude_overwrite— biomass := observed survivor biomass; cohort EXCLUDED from loss (loss side).
     #   :exclude_noscale  — biomass unchanged; cohort EXCLUDED from loss (loss side).
     let dmode = OVERRIDE_INJECTION_DISTURBANCE[]
-      if dmode === :scale || dmode === :exclude_overwrite
+      if (dmode === :scale && !skip_scale) || dmode === :exclude_overwrite   # skip_scale: the (1-drop) shock was already applied before scoring
         for (site_idx, cohorts) in site_cohorts
           site = getsite(soa, site_idx)
           site.active || continue
@@ -497,6 +675,9 @@ function _build_injection_dict(injection_cohorts::DataFrame, ref_soa)::_SiteInje
     end
     drop = hasproperty(injection_cohorts, :disturbance_drop_pct) ? FloatType(row.disturbance_drop_pct) : zero(FloatType)
     push!(year_list[pos][2], (UIntType(row.eco_species_id), FloatType(row.age_calc), FloatType(row.agb_sum), drop))
+  end
+  if "disturbance_shock" in metadatakeys(injection_cohorts)
+    _SHOCK_REGISTRY[by_year] = _build_shock_dict(metadata(injection_cohorts, "disturbance_shock"), ref_soa)
   end
   by_year
 end
@@ -1696,12 +1877,17 @@ function _set_rankw!(agb::Matrix{FloatType}, eco_species_ids; split_size::Union{
   PU.RANKW[] = R
 end
 
-function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing)
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, shock_dict=nothing)
   PU.SCALES_LOCKED[] || _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)   # global ratio-of-sums or per-cell denominators (skipped inside a candidate-parallel batch — set once serially by the caller)
   # Disturbance exclude-modes derive a (year → site_idx → excluded eco_species) lookup from the
   # injection cohorts with drop>0, so those (site, species) are skipped from the loss at that year.
+  # Disturbance shock (new order only): needs the sync injection (the observed set defines which cohorts were disturbed).
+  _do_shock = LOSS_BEFORE_INJECTION[] && OVERRIDE_INJECTION[] && OVERRIDE_INJECTION_SYNC[] && !OVERRIDE_INJECTION_REPLACE[] && injection_dict !== nothing
+  _shock = _do_shock ? (shock_dict === nothing ? get(_SHOCK_REGISTRY, injection_dict, nothing) : shock_dict) : nothing
+  _skip_scale = _do_shock
+  _excl_plan = _do_shock ? _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params) : nothing   # cohort-level exclusion (new order)
   exclusion_dict = nothing
-  if OVERRIDE_INJECTION_DISTURBANCE[] in (:exclude_overwrite, :exclude_noscale) && injection_dict !== nothing
+  if _excl_plan === nothing && OVERRIDE_INJECTION_DISTURBANCE[] in (:exclude_overwrite, :exclude_noscale) && injection_dict !== nothing   # legacy: species-level
     exclusion_dict = Dict{Int,Dict{Int,Set{UIntType}}}()
     for (yr, sites) in injection_dict
       sd = Dict{Int,Set{UIntType}}()
@@ -1857,16 +2043,31 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
             site = getsite(soa, i)
             spd = get(yd, Int(site.mapcode), nothing)
             spd === nothing && continue
-            for j in 1:site.live
+            j = 1; removed = false
+            while j <= Int(site.live)
               d = get(spd, (site.c_species[j], UIntType(round(site.c_age[j]))), zero(FloatType))
-              if d > zero(FloatType)
+              if d >= one(FloatType)        # FULL removal by disturbance (export): the cohort is gone, stop growing it
+                _shock_remove_cohort!(site, j); removed = true
+                continue                    # slot j now holds the swapped-in cohort
+              elseif d > zero(FloatType)
                 drop = site.c_bio[j] * d
                 set_cohort_bio!(SP, site, j, site.c_bio[j] - drop)
                 site.B -= drop
               end
+              j += 1
+            end
+            if removed
+              o = zero(UIntType)
+              for q in 1:Int(site.live); site.c_age[q] > one(FloatType) && (o += one(UIntType)); end
+              site.old = o
             end
           end
         end
+      end
+      if _do_shock                              # disturbance shock: removals + (:scale) partial drops, BEFORE the preinject snapshot and all scoring
+        _shy = _shock === nothing ? nothing : get(_shock, current_sim_year, nothing)
+        _inj = current_sim_year in injection_years ? injection_dict[current_sim_year] : nothing
+        (_shy === nothing && _inj === nothing) || _apply_disturbance_shock!(soa, _shy, _inj)
       end
       if cache_preinject                       # snapshot pure model prediction BEFORE any injection/override
         for i in 1:soa.n
@@ -1881,7 +2082,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       end
-      if !isnothing(injection_dict) && current_sim_year in injection_years
+      if !LOSS_BEFORE_INJECTION[] && !isnothing(injection_dict) && current_sim_year in injection_years   # legacy order: inject, then score
         _inject_observed_cohorts!(soa, injection_dict[current_sim_year]; override=OVERRIDE_INJECTION[], replace=OVERRIDE_INJECTION_REPLACE[], sync=OVERRIDE_INJECTION_SYNC[])
       end
       if search_tier == 1
@@ -1977,7 +2178,13 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
                 yd = get(exclusion_dict, current_sim_year, nothing)
                 yd === nothing || (excluded = get(yd, i, nothing))
               end
-              sites_results[i] = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params; debug=debug, excluded=excluded)
+              gt_now = spdf_plt[current_sim_year]; excl_c = nothing
+              if _excl_plan !== nothing
+                ycl = get(_excl_plan.coh, current_sim_year, nothing)
+                ec = ycl === nothing ? nothing : get(ycl, i, nothing)
+                ec === nothing || (excl_c = ec; gt_now = _excl_plan.ref[current_sim_year][i])
+              end
+              sites_results[i] = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, gt_now, loss_params; debug=debug, excluded=excluded, excl_c=excl_c)
               for j in 1:site.live
                 push!(sites_data[i], (site.ref_cn, current_sim_year, site.c_species[j], UIntType(site.c_age[j]), site.c_bio[j]))
               end
@@ -2017,9 +2224,15 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
                 yd === nothing || (excluded = get(yd, i, nothing))
               end
               eco_id = Int(site.eco_id)
+              gt_now = spdf_plt[current_sim_year]; excl_c = nothing
+              if _excl_plan !== nothing
+                ycl = get(_excl_plan.coh, current_sim_year, nothing)
+                ec = ycl === nothing ? nothing : get(ycl, i, nothing)
+                ec === nothing || (excl_c = ec; gt_now = _excl_plan.ref[current_sim_year][i])
+              end
               sag = PU.calculate_site_loss2_acc!(eco3_w_t[tid][eco_id], eco3_agb_t[tid][eco_id], current_sim_year, site,
-                      n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params,
-                      perm_t3[tid], ages_t3[tid], insite_t3[tid], cdf_t3[tid], agb_bins_t3[tid]; excluded=excluded)
+                      n_species, eco_species_ids, gt_now, loss_params,
+                      perm_t3[tid], ages_t3[tid], insite_t3[tid], cdf_t3[tid], agb_bins_t3[tid]; excluded=excluded, excl_c=excl_c)
               eco3_site_agb_t[tid][eco_id] += sag
               eco3_obs_t[tid][eco_id] += 1
               for j in 1:site.live
@@ -2031,6 +2244,9 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
             end
           end
         end
+      end
+      if LOSS_BEFORE_INJECTION[] && !isnothing(injection_dict) && current_sim_year in injection_years   # score the simulated state first, then inject for the next interval
+        _inject_observed_cohorts!(soa, injection_dict[current_sim_year]; override=OVERRIDE_INJECTION[], replace=OVERRIDE_INJECTION_REPLACE[], sync=OVERRIDE_INJECTION_SYNC[], skip_scale=_skip_scale)
       end
     end
     if search_tier == 1
@@ -2404,6 +2620,18 @@ function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params
       den > 0 || continue
       sd = get!(get!(ddict, yr, Dict{Int,Dict{Tuple{UIntType,UIntType},FloatType}}()), si, Dict{Tuple{UIntType,UIntType},FloatType}())
       sd[(sp, age)] = num / den
+    end
+    # Plot-level FULL removals by disturbance (Data._plot_shocks!, carried as metadata of the injection cohorts): drop = 1 ⇒ the free-sim
+    # cohort (species, age) is removed at that year by the apply loop. Same artificial/natural rule as above.
+    if "disturbance_shock" in metadatakeys(injection_cohorts)
+      nfull_b = 0
+      for r in eachrow(metadata(injection_cohorts, "disturbance_shock"))
+        (!SIMB_DISTURB_ONLY[] && Int(r.plot_id) in art_plots) && continue
+        si = get(plot_to_site, Int(r.plot_id), 0); si == 0 && continue
+        sd = get!(get!(ddict, Int(r.sim_year), Dict{Int,Dict{Tuple{UIntType,UIntType},FloatType}}()), si, Dict{Tuple{UIntType,UIntType},FloatType}())
+        sd[(UIntType(r.eco_species_id), UIntType(r.age_calc))] = one(FloatType); nfull_b += 1
+      end
+      @info "Sim B: $(nfull_b) full-removal disturbance entries"
     end
   end
   @info "Sim B dual_b: $(ref_b.n) sites, $(length(art_plots)) artificial plots | injection=$(idict_b === nothing ? "OFF" : "ON ($(length(iyears_b)) yrs, artificial)") | disturbance-scale=$(isempty(ddict) ? "OFF" : "ON ($(length(ddict)) yrs, $(SIMB_DISTURB_ONLY[] ? "ALL plots" : "natural only"))") | establishment=ON"
@@ -5677,7 +5905,34 @@ split RNG (seeded from `split_seed` when val/test/folds are used). `split_rng_se
 `rng` is the (currently unused by prepare) `RNG` argument — default is derived from `seed` without touching global RNG state.
 Per-fold scripts can override with `prepare_from_cfg(cfg; fold_index=k)`.
 """
+# Disturbance-shock data source (yaml `disturbance_full_removals: <parquet>`, default data/cohort_disturbance_full.parquet in the
+# repo if present). Active only with the new scoring order + sync injection; otherwise Data.DISTURBANCE_FULL_PATH[] = "" (legacy
+# behaviour byte-identical: no partial-drop attach, no shock rows).
+function _configure_disturbance_shock!(cfg::AbstractDict)
+  g = _cfg_getter(cfg)
+  lbi = Bool(g("loss_before_injection", true))
+  dm = g("dual_mode", "off"); dual = !(dm === false || String(dm) in ("off", "false"))
+  # Sim A needs sync injection; Sim B (dual mode / simB_disturb_only) uses the full removals + partial drops on its own
+  on = lbi && ((Bool(g("override_injection", OVERRIDE_INJECTION[])) && Bool(g("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))) || dual || Bool(g("simB_disturb_only", false)))
+  explicit = g("disturbance_full_removals", nothing)
+  default = joinpath(dirname(@__DIR__), "data", "cohort_disturbance_full.parquet")
+  path = ""
+  if on
+    if explicit === nothing
+      isfile(default) ? (path = default) : @warn "override_injection_sync with loss_before_injection: no disturbance data (set `disturbance_full_removals:` or build data/cohort_disturbance_full.parquet with tools/export_cohort_disturbance.py) — fully-removed cohorts are NOT shocked before scoring"
+    elseif explicit === false || String(explicit) in ("", "none", "off")
+      path = ""
+    else
+      path = String(explicit)
+      isfile(path) || (@warn "disturbance_full_removals: $(path) not found — disturbance shocks disabled"; path = "")
+    end
+  end
+  Data.DISTURBANCE_FULL_PATH[] = path
+  path
+end
+
 function prep_kwargs_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, rng::Union{Nothing,Random.AbstractRNG}=nothing)
+  _configure_disturbance_shock!(cfg)
   get!(ENV, "PAN_DATA", "runs")
   get!(ENV, "PAN_OUT", "runs/outputs")
   din = _cfg_data_inputs(cfg)
@@ -5787,6 +6042,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   OVERRIDE_INJECTION[] = Bool(get_cfg("override_injection", OVERRIDE_INJECTION[]))
   OVERRIDE_INJECTION_REPLACE[] = Bool(get_cfg("override_injection_replace", OVERRIDE_INJECTION_REPLACE[]))
   OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", OVERRIDE_INJECTION_SYNC[]))
+  LOSS_BEFORE_INJECTION[] = Bool(get_cfg("loss_before_injection", true))
+  _configure_disturbance_shock!(cfg)
   OVERRIDE_INJECTION_NOISE[] = Float64(get_cfg("override_injection_noise", OVERRIDE_INJECTION_NOISE[]))
   OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(get_cfg("override_injection_disturbance", String(OVERRIDE_INJECTION_DISTURBANCE[])))
   Data.USE_FIA_CYCLE[] = Bool(get_cfg("fia_cycle", false))   # tier-4/5 cycles from FIA `cycle` vs computed split

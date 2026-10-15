@@ -30,7 +30,38 @@ train split, pre-injection simulation).
     the loss across species; they are not part of a group's accuracy).
   * otherwise: `w_g = Σ_cells sp_w_loss / (# scored visits with a reference record for those cells)` (plain visit mean).
   A cell where the species is absent from the simulation but present in the reference contributes the full reference CDF (as in the main loss).
-  Caveat: with `override_injection_sync` the *cohort set* at a measurement year is set to the observed one (surviving cohorts keep
+  **Rule at each measurement year T** (`loss_before_injection: true`, default on this branch; `false` = previous inject-then-score order with
+  the species-level exclusion, byte-identical to earlier runs, no shock step). Growth/decay step first, then per cohort (needs
+  `override_injection` + `override_injection_sync`):
+  1. FULLY removed by disturbance in the interval (export: `full_removal`, drop = 1): the matching sim cohort (species, age) is removed from the
+     site BEFORE scoring at T (`_apply_disturbance_shock!`, swap-remove as in the sync's Pass A) — nothing to compare at >= T.
+  2. PARTIALLY disturbed, mode `scale`: the matched sim cohort is scaled by (1 - drop) BEFORE scoring and IS scored; the sync does not scale again
+     (`skip_scale`), so exactly once.
+  3. PARTIALLY disturbed, mode `exclude_overwrite` / `exclude_noscale`: exclude ONLY THAT COHORT (species, age) at T, on BOTH sides of the loss: the sim
+     cohort is skipped when building the species' age CDF / AGB bins (`PU._excl_perm!`, kwarg `excl_c` of `calculate_site_loss2(_acc!)`), and the
+     observed reference of that site-year is rebuilt without the cohort (`_build_excl_plan`: alternative `SPDFGroundTruth` via the same
+     `smoothen_ref_years`). A species left with no cohort on either side contributes nothing (no "missing species" penalty). The overwrite of
+     `exclude_overwrite` happens after scoring, in the sync. (Legacy order: whole species excluded - unchanged.)
+  4. FULLY removed NOT by disturbance (natural death): still in the sim at scoring, so it is scored and surplus survival is penalised.
+  5. RECRUITS / in-growth: an observed cohort at T with no record of the same cohort (species, age - (T - T_prev)) at the previous visit of that plot
+     cannot be produced by Sim A (no establishment): excluded from the reference (and the sim) at T, cohort-level as in 3; it enters the sim through
+     the sync. yaml `exclude_recruits_at_entry` (default true).
+  6. Then the existing sync injection for the next interval.
+  The a_g pre-injection cache is taken after the shock (step 1/2), before scoring.
+  Data: `tools/export_cohort_disturbance.py` writes `data/cohort_disturbance_full.parquet` (partial AND full removals per
+  subplot cohort and visit; reuses the logic of FIA_DATA_PREP/cohort_disturbance.py, which drops full removals). yaml
+  `disturbance_full_removals: <parquet>` (default `data/cohort_disturbance_full.parquet` of the repo if present; `false` disables;
+  a warning if sync + new order are on and no file exists). `Data.make_splots` maps rows to plot level with the same species tiering /
+  eco / plot_id / sim_year mapping as `get_injection_cohorts` (train, val and test): a plot-level (species, age) cohort is "fully
+  removed" only if NO subplot part of it is observed at T, otherwise it is partial and its drop is replaced by the agb-weighted
+  plot-level share (removed subplot parts converted from tree-trajectory weight to cohort agb by 1/4046.86). When the cohort table
+  carries no `disturbance_drop_pct` (the GA+FL `curated_cohorts_landis_stdorg` does not), the partial drops are attached from the
+  same parquet (otherwise the table's column is used). a_g pairs (`_gd_index`): drop>0 records are excluded for `exclude_overwrite`
+  (as before) and, in the new order, also `exclude_noscale`; for `scale` the pair is kept and compared with the scaled sim.
+  Sim B (dual_mode b / joint, simB_disturb_only): the same full removals feed `_build_dual_b`'s disturbance dict with drop = 1; at the disturbance year the
+  matching free-sim cohort (species, age) is REMOVED (partial scaling unchanged), so harvested cohorts stop growing in the free run.
+  Diagnostics: `tools/shock_stats.jl` (counts of shock entries / matches / cohort-level exclusions at a params set).
+  Not covered: tools/tost_common.jl keeps its own pair logic (drop-based exclusion only).
   their simulated biomass), so w_g measures the biomass-by-age shape of the survivors; the AGB/accuracy side (a_g) uses the
   pre-injection cache and is not circular.
 * Block / lineage totals: `A_b = Σ_{g∈groups(b)} a_g`, `W_b = Σ w_g`; `A = Σ_g a_g`, `W = Σ_g w_g`.

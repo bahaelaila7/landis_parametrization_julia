@@ -147,6 +147,63 @@ end
 _median(v) = (w = sort(v); n = length(w); isodd(n) ? Float64(w[(n+1)÷2]) : (w[n÷2] + w[n÷2+1]) / 2)
 const LAST_SPLIT_DOM = Ref{Union{Nothing,DataFrame}}(nothing)
 const LAST_SPECIES_MAP = Ref{Union{Nothing,DataFrame}}(nothing)   # species_symbol → effective_species (this run's tiering)   # id_cols + eco_id + dom + set (for split_plots.csv)
+
+# ---- disturbance shock data (tools/export_cohort_disturbance.py) ---------------------------------------------
+# Parquet of per-(subplot, species, visit T, age) disturbance rows (partial AND full removals). Empty path = off.
+# Set by Pan.run_from_yaml (`disturbance_full_removals`); only used with the new scoring order (loss_before_injection).
+const DISTURBANCE_FULL_PATH = Ref("")
+const _K0_W_TO_AGB = 1.0 / 4046.86     # tree_trajectories w = drybio_g*tpa  →  curated cohort `agb` (g/m²): agb = w / 4046.86
+
+function _load_disturbance_rows(path::AbstractString)::DataFrame
+  con = DuckDB.connect(DuckDB.DB())
+  DuckDB.execute(con, "SELECT statecd, unitcd, countycd, plot, subp, species_symbol, CAST(measdate AS DATE) AS measdate, age_calc, disturbance_drop_pct, would_be, full_removal FROM read_parquet('$(path)')") |> DataFrame
+end
+
+# Plot-level full removals + plot-level partial-drop update, for ONE split's aggregated `sp` (same plot_id / sim_year /
+# eco_species_id / age_calc keys as get_injection_cohorts). A plot-level cohort (species, age) at visit T is FULLY removed
+# only if no subplot part of it is observed at T in `sp`; if some parts survive, it is partial and `sp.disturbance_drop_pct`
+# is replaced by the agb-weighted plot-level share  1 - Σagb / (Σ agb/(1-drop) + Σ removed would-be·K0).
+function _plot_shocks!(sp::DataFrame, sh::DataFrame, sym2sid::Dict{String,Int}, esp_map)::DataFrame
+  out = DataFrame(plot_id=UIntType[], sim_year=Int[], eco_species_id=UIntType[], age_calc=UIntType[])
+  isempty(sh) && return out
+  pinfo = Dict{NTuple{4,Int},Tuple{UIntType,Int,Dates.Date}}()
+  for r in eachrow(unique(select(sp, [:statecd, :unitcd, :countycd, :plot, :plot_id, :eco_id, :start_measdate])))
+    pinfo[(Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot))] = (UIntType(r.plot_id), Int(r.eco_id), Dates.Date(r.start_measdate))
+  end
+  acc = Dict{NTuple{4,Int},Float64}()
+  for r in eachrow(sh)
+    r.full_removal === true || continue
+    pi = get(pinfo, (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)), nothing); pi === nothing && continue
+    sid = get(sym2sid, String(r.species_symbol), 0); sid == 0 && continue
+    esp = get(esp_map, (pi[2], sid), 0); esp == 0 && continue
+    (ismissing(r.measdate) || ismissing(r.age_calc)) && continue
+    sy = round(Int, Dates.value(Dates.Day(Dates.Date(r.measdate) - pi[3])) / 365.25)
+    (sy > 0 && r.age_calc >= 0) || continue
+    k = (Int(pi[1]), sy, Int(esp), Int(r.age_calc))
+    acc[k] = get(acc, k, 0.0) + Float64(r.would_be) * _K0_W_TO_AGB
+  end
+  rows_by_key = Dict{NTuple{4,Int},Vector{Int}}()
+  for i in 1:nrow(sp)
+    k = (Int(sp.plot_id[i]), Int(sp.sim_year[i]), Int(sp.eco_species_id[i]), Int(sp.age_calc[i]))
+    haskey(acc, k) && push!(get!(rows_by_key, k, Int[]), i)
+  end
+  nfull = 0; npart = 0
+  for k in sort!(collect(keys(acc)))
+    rem = acc[k]
+    idx = get(rows_by_key, k, nothing)
+    if idx === nothing
+      push!(out, (UIntType(k[1]), k[2], UIntType(k[3]), UIntType(k[4]))); nfull += 1
+    else
+      a = sum(Float64(sp.agb_sum[i]) for i in idx)
+      wb = sum(Float64(sp.agb_sum[i]) / (1.0 - clamp(Float64(sp.disturbance_drop_pct[i]), 0.0, 0.999)) for i in idx)
+      nd = Float32(1.0 - a / (wb + rem))
+      for i in idx; sp.disturbance_drop_pct[i] = nd; end
+      npart += 1
+    end
+  end
+  println("disturbance shocks: $(nfull) plot-level full removals; $(npart) plot-level cohorts partial (some subplot parts survive) → drop updated")
+  out
+end
 function _cap_train_sites(df::DataFrame, id_cols::Vector{Symbol}, parts, three_way::Bool;
   train_cap::Union{Int,String}, train_cap_k::Float64, train_cap_min::Int)
   tr = vcat([let t = p[3], n = nrow(p[3])
@@ -325,8 +382,22 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   df.age_calc = df.age_calc .|> UIntType
   # Per-cohort partial-disturbance biomass-drop fraction (from curation; 0 where absent/un-attached).
   # The override-sync scales matched cohorts by (1-drop) at the disturbance year.
-  df.disturbance_drop_pct = hasproperty(df, :disturbance_drop_pct) ?
-    Float32.(coalesce.(df.disturbance_drop_pct, 0.0)) : zeros(Float32, nrow(df))
+  shock_rows = isempty(DISTURBANCE_FULL_PATH[]) ? nothing : _load_disturbance_rows(DISTURBANCE_FULL_PATH[])
+  if hasproperty(df, :disturbance_drop_pct)
+    df.disturbance_drop_pct = Float32.(coalesce.(df.disturbance_drop_pct, 0.0))
+  elseif shock_rows !== nothing
+    # the cohort table carries no partial drop: attach it from the export's partial rows (same key as cohort_disturbance.py --attach)
+    pd = Dict{Tuple{Int,Int,Int,Int,Int,String,Dates.Date,Int},Float32}()
+    for r in eachrow(shock_rows)
+      r.full_removal === true && continue
+      pd[(Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot), Int(r.subp), String(r.species_symbol), Dates.Date(r.measdate), Int(r.age_calc))] = Float32(r.disturbance_drop_pct)
+    end
+    df.disturbance_drop_pct = Float32[get(pd, (Int(a), Int(b), Int(c), Int(d), Int(e), String(f), Dates.Date(g), Int(h)), 0f0)
+      for (a, b, c, d, e, f, g, h) in zip(df.statecd, df.unitcd, df.countycd, df.plot, df.subp, df.species_symbol, df.measdate, df.age_calc)]
+    println("disturbance_drop_pct attached from $(basename(DISTURBANCE_FULL_PATH[])): $(sum(df.disturbance_drop_pct .> 0)) / $(nrow(df)) cohort rows > 0")
+  else
+    df.disturbance_drop_pct = zeros(Float32, nrow(df))
+  end
   # phantom-backfill share (FIA_DATA_PREP cohorts_landis: synthetic pre-debut rows, intro_type = "phantom_backfill");
   # aggregated AGB-weighted into splots.phantom_frac — evaluation-only (not read by the simulator or the loss).
   df._phantom = hasproperty(df, :intro_type) ? Float32[coalesce(t, "") == "phantom_backfill" ? 1f0 : 0f0 for t in df.intro_type] : zeros(Float32, nrow(df))
@@ -378,6 +449,18 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   splots_train = _agg(df_train)
   splots_val = isnothing(df_val_raw) ? nothing : _agg(df_val_raw)
   splots_test = isnothing(df_test_raw) ? nothing : _agg(df_test_raw)
+  if shock_rows !== nothing
+    if by_subplot
+      @warn "disturbance_full_removals: ignored with by_subplot=true (plot-level aggregation only)"
+    else
+      sym2sid = Dict{String,Int}(String(r.species_symbol) => species_symbol_map_dict[r.effective_species] for r in eachrow(LAST_SPECIES_MAP[]) if haskey(species_symbol_map_dict, r.effective_species))
+      for (nm, spx) in (("train", splots_train), ("val", splots_val), ("test", splots_test))
+        spx === nothing && continue
+        println("  [$(nm)]")
+        metadata!(spx, "disturbance_shock", _plot_shocks!(spx, shock_rows, sym2sid, eco_species_id_map); style=:note)
+      end
+    end
+  end
   return splots_train, eco_vals, species_symbol_map_vals, ddf.species_ids, splots_val, splots_test
 end
 
@@ -409,6 +492,13 @@ const _INJECT_COLS = [:plot_id, :sim_year, :eco_species_id, :age_calc, :agb_sum,
 _inject_cols(df) = hasproperty(df, :phantom_frac) ? vcat(_INJECT_COLS, [:phantom_frac]) : _INJECT_COLS   # + evaluation-only phantom share
 
 function get_injection_cohorts(splots::DataFrame; all_cohorts::Bool=false)::DataFrame
+  r = _get_injection_cohorts(splots; all_cohorts=all_cohorts)
+  # carry the plot-level full-removal shock rows (Data._plot_shocks!) alongside the injection cohorts
+  "disturbance_shock" in metadatakeys(splots) && metadata!(r, "disturbance_shock", metadata(splots, "disturbance_shock"); style=:note)
+  r
+end
+
+function _get_injection_cohorts(splots::DataFrame; all_cohorts::Bool=false)::DataFrame
   # all_cohorts=true: return the FULL observed state at every measurement year
   # (one row per observed cohort), so the caller can override the simulator
   # entirely — replacing each measured site's cohorts with the empirical ones.

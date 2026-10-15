@@ -71,6 +71,7 @@ function _gd_index(injection_cohorts, splots, cell_group, labels; real_only::Boo
   dr = hasproperty(inj, :disturbance_drop_pct) ? Float64.(coalesce.(inj.disturbance_drop_pct, 0.0)) : zeros(nrow(inj))
   pid = Int.(inj.plot_id); sy = Int.(inj.sim_year); esp = Int.(inj.eco_species_id); age = Int.(inj.age_calc); ob = Float64.(inj.agb_sum)
   phmap = Dict{NTuple{4,Int},Float64}(); obs = Dict{NTuple{4,Int},Float64}(); drop = Dict{NTuple{4,Int},Float64}()
+  seen = Set{NTuple{4,Int}}((pid[i], sy[i], esp[i], age[i]) for i in eachindex(pid))   # every observed cohort incl. year 0 (recruit test)
   years = Dict{Int,Vector{Int}}()
   for i in eachindex(pid)
     k = (pid[i], sy[i], esp[i], age[i])
@@ -82,10 +83,17 @@ function _gd_index(injection_cohorts, splots, cell_group, labels; real_only::Boo
   prevyr = Dict{Tuple{Int,Int},Int}()
   for (p, ys) in years; u = sort(unique(ys)); for k in 2:length(u); prevyr[(p, u[k])] = u[k-1]; end; end
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(select(splots, [:plot_id, :eco_id]))))
-  excl = OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite
+  # legacy order: only :exclude_overwrite drops partially-disturbed pairs. New order (loss_before_injection): also :exclude_noscale (its
+  # sim is NOT scaled/overwritten, so a disturbed observation is not comparable); :scale compares against the (1-drop)-scaled sim and
+  # keeps the pair; fully removed cohorts have no observed record at all.
+  excl = OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite || (LOSS_BEFORE_INJECTION[] && OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_noscale)
   key2rec = Dict{NTuple{4,Int},Int}(); rec_pair = Int[]; rec_obs = Float64[]; pairid = Dict{NTuple{3,Int},Int}(); pair_group = Int[]
   for (k, o) in obs
     (excl && drop[k] > 0) && continue
+    if LOSS_BEFORE_INJECTION[] && EXCLUDE_RECRUITS_AT_ENTRY[]   # recruits at entry have no sim counterpart (no establishment): not scored (as in the loss)
+      py0 = get(prevyr, (k[1], k[2]), nothing)
+      py0 !== nothing && !((k[1], py0, k[3], k[4] - (k[2] - py0)) in seen) && continue
+    end
     if real_only
       phmap[k] >= 0.5 && continue
       py = get(prevyr, (k[1], k[2]), nothing)
