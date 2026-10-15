@@ -657,6 +657,13 @@ end
   return site_agb_loss
 end
 
+# Sort `perm` (a permutation of cohort indices) by species, ties by index — the unique stable order, so it equals `sortperm(species)` and a stable
+# sort of an ascending index list. In-place QuickSort on the (species, index) key: no scratch buffer, so the site accumulator allocates nothing.
+@inline function _sort_perm_by_species!(perm::AbstractVector{Int}, csp)
+  sort!(perm; alg=QuickSort, lt=(a, b) -> @inbounds(csp[a] < csp[b] || (csp[a] == csp[b] && a < b)))
+  return perm
+end
+
 # Cohort-level exclusion (disturbance exclude-modes / recruits at entry, new scoring order): fill `perm` with the indices of the
 # site's live cohorts that are NOT in excl_c (a list of (eco_species, age)), sorted by species; returns the count. The matching
 # observed cohorts are removed from the reference by Pan._build_excl_plan (alternative SPDFGroundTruth for that site-year).
@@ -673,7 +680,7 @@ function _excl_perm!(perm::Vector{Int}, site, excl_c)::Int
     ex || (n += 1; perm[n] = j)
   end
   resize!(perm, n)
-  sort!(perm; by=j -> (@inbounds csp[j]), alg=MergeSort)
+  _sort_perm_by_species!(perm, csp)
   n
 end
 
@@ -861,7 +868,8 @@ end
 # are per-thread bin-sized scratch. Mirrors calculate_species_loss! exactly.
 @inline function calculate_species_loss_acc!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, scales,
     w_acc, agb_acc, site_agb_loss, cdf, agb_bins, lp::FloatType=one(FloatType))
-  sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
+  sim_agb_sum = zero(FloatType)   # left fold over the species' cohorts (== sum of the indexed view, without materialising the index vector)
+  @inbounds for a in @view p[sp_start_idx:sp_end_idx]; sim_agb_sum += site.c_bio[a]; end
   agb_val = sim_agb_sum
   w_val = zero(FloatType)
   site_agb_loss += sim_agb_sum
@@ -920,7 +928,8 @@ function calculate_site_loss2_acc!(w_acc::Vector{FloatType}, agb_acc::Vector{Flo
     max_age += UIntType(length(loss_params.smoothing_weights) >> 1)
     if excl_c === nothing
       resize!(perm, site.live)
-      sortperm!(perm, c_species)
+      @inbounds for i in eachindex(perm); perm[i] = i; end
+      _sort_perm_by_species!(perm, c_species)
     end
     resize!(ages, max_age)
     p = perm

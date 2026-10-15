@@ -6,6 +6,7 @@ using Test, Pan
   @testset "unit_pancore" begin include("unit_pancore.jl") end
   @testset "unit_params" begin include("unit_params.jl") end
   @testset "unit_loss" begin include("unit_loss.jl") end
+  @testset "unit_hotpath" begin include("unit_hotpath.jl") end
   @testset "unit_api" begin include("unit_api.jl") end
   @testset "unit_config" begin include("unit_config.jl") end
   @testset "unit_config_reader" begin include("unit_config_reader.jl") end
