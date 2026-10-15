@@ -282,9 +282,13 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     out = Vector{Any}(undef, length(us))
     if PARALLEL_MODE[] == :candidate
       prev = PARALLEL_SITES[]; PARALLEL_SITES[] = false
+      # SERIAL first: set the reference-derived loss scales / freeze RANKW once, then lock them for the batch (no race on the scale globals,
+      # as in the Igel driver). :static — the work SoA (and the PnET scratch pool) are indexed by threadid, which :dynamic tasks may not keep.
+      _set_loss_scales!(search_tier, spdf_plts, nothing, loss_params, eco_species_ids, n_species)
+      PU.SCALES_LOCKED[] = true
       try
-        Threads.@threads :dynamic for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[Threads.threadid()]); end
-      finally; PARALLEL_SITES[] = prev; end
+        Threads.@threads :static for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[Threads.threadid()]); end
+      finally; PU.SCALES_LOCKED[] = false; PARALLEL_SITES[] = prev; end
     else
       for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[1]); end
     end

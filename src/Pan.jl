@@ -1740,7 +1740,7 @@ end
 # CDF is computed per (eco, cycle, species); cycles are summed into one SiteLoss per eco
 # (num_obs = total measurements in the eco, so get_total_loss is per-measurement-averaged W1).
 const CAPTURE_T4SIM = Ref{Any}(nothing)   # diagnostics: set non-nothing → next calculate_t4_loss stashes (sim,ref,n_cycles)
-function calculate_t4_loss(t4_sim, t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles)
+function calculate_t4_loss(t4_sim, t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=nothing)
   CAPTURE_T4SIM[] === nothing || (CAPTURE_T4SIM[] = (sim=deepcopy(t4_sim), ref=t4_ref, n_cycles=n_cycles, site_counts=deepcopy(t4_site_counts)))
   eco_losses = Vector{PU.SiteLoss}(undef, length(eco_species_ids))
   for eco_id in eachindex(eco_species_ids)
@@ -1755,8 +1755,9 @@ function calculate_t4_loss(t4_sim, t4_ref, loss_params, n_species, eco_species_i
       # per-plot-mean: divide the AGB level by the # of distinct plots in this (eco,cycle) so the loss is
       # mean biomass-per-plot-by-age (invariant to plot count). W is CDF-normalized → pcinv cancels there.
       # Uses the SAME T4_CELL_PLOTS the AGB scale divides by, so numerator/denominator stay consistent.
-      pcinv = (T4_PER_PLOT_MEAN[] && T4_CELL_PLOTS[] !== nothing) ?
-        one(FloatType) / FloatType(max(1, T4_CELL_PLOTS[][eco_id][cyc])) : one(FloatType)
+      _cpl = cell_plots !== nothing ? cell_plots : T4_CELL_PLOTS[]
+      pcinv = (T4_PER_PLOT_MEAN[] && _cpl !== nothing) ?
+        one(FloatType) / FloatType(max(1, _cpl[eco_id][cyc])) : one(FloatType)
       for sp_eco in eachindex(sp_map)
         gsp = sp_map[sp_eco]
         sim_row = @view sim_c[sp_eco, :]
@@ -1799,7 +1800,7 @@ end
 # Set the GLOBAL loss-normalization denominators from the reference of THIS evaluation (ratio-of-sums):
 # AGB_SCALE = Σ observed AGB; W_SCALE = Σ per-reference-max W1 (Σ bw·max(cdf_ref,1−cdf_ref)). tier-4 reads
 # the aggregated t4_ref; all other tiers read the per-measurement spdf records. No-op unless a flag is on.
-function _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)
+function _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species; cell_plots=nothing)
   bw = loss_params.age_bins.bin_widths
   if PU.W_SOFTPLUS[]
     if !PU.W_SMOOTH_AUTO_KNEE[]
@@ -1844,7 +1845,7 @@ function _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_spec
       end
     end
   end
-  PU.CELL_NORM[] && return _set_cell_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)
+  PU.CELL_NORM[] && return _set_cell_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species; cell_plots=cell_plots)
   (PU.W_NORMALIZE[] || PU.AGB_NORMALIZE[]) || return
   wsum = 0.0; asum = 0.0
   if search_tier == 4 && t4_ref !== nothing
@@ -1869,7 +1870,7 @@ end
 # (tier≠4) reads the per-plot spdf records → A tables (+ sets the shared RANKW by AGB); Sim B (tier 4)
 # reads the aggregated t4_ref → B tables (sets RANKW only if A hasn't, i.e. B-only). RANKW[gsp,e] =
 # (1/log(rank+1))/Σ over dominance-included cells, rank by observed AGB descending.
-function _set_cell_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)
+function _set_cell_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species; cell_plots=nothing)
   # Scales are recomputed every eval from the CURRENT split's reference — they're intensive ratio-of-sums
   # (Σ|sim−obs|/Σobs), so train and val are on the same scale by construction (no plot-count deflation).
   # Only the RANK is frozen after the first (train) eval, so train and val weight the same cells the same way.
@@ -1878,7 +1879,8 @@ function _set_cell_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_spec
   W = zeros(FloatType, n_species, ne); A = zeros(FloatType, n_species, ne)
   if search_tier == 4 && t4_ref !== nothing
     useB = PU.CBAL_ON[] && PU.CBAL_MODE[] !== :a && !isempty(PU.CBAL_W[])   # reweight the ref-scale to match calculate_t4_loss (Sim B): direct cbw[k]
-    cp = (T4_PER_PLOT_MEAN[] && T4_CELL_PLOTS[] !== nothing) ? T4_CELL_PLOTS[] : nothing
+    _cpl = cell_plots !== nothing ? cell_plots : T4_CELL_PLOTS[]   # explicit per-split counts (dual_b.cell_plots) win over the legacy global
+    cp = (T4_PER_PLOT_MEAN[] && _cpl !== nothing) ? _cpl : nothing
     for (e, eco) in enumerate(t4_ref)
       sp_map = eco_species_ids[e]
       for (cyc, cycmat) in enumerate(eco), sp in 1:size(cycmat, 1)
@@ -1955,8 +1957,9 @@ function _set_rankw!(agb::Matrix{FloatType}, eco_species_ids; split_size::Union{
   PU.RANKW[] = R
 end
 
-function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, shock_dict=nothing)
-  PU.SCALES_LOCKED[] || _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)   # global ratio-of-sums or per-cell denominators (skipped inside a candidate-parallel batch — set once serially by the caller)
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, shock_dict=nothing, cell_plots=nothing)
+  PU.SCALES_LOCKED[] || _set_loss_scales!(search_tier, spdf_plts, t4_ref, loss_params, eco_species_ids, n_species; cell_plots=cell_plots)
+  search_tier == 4 && T4_PER_PLOT_MEAN[] && !isempty(get(ENV, "PAN_LOG_CELLPLOTS", "")) && @info "tier-4 per-plot-mean cell plots: Σ = $(sum(sum, something(cell_plots, T4_CELL_PLOTS[], [Int[]]))) ($(cell_plots === nothing ? "legacy global" : "explicit dual_b.cell_plots"); the legacy global currently holds Σ = $(T4_CELL_PLOTS[] === nothing ? 0 : sum(sum, T4_CELL_PLOTS[])))"   # global ratio-of-sums or per-cell denominators (skipped inside a candidate-parallel batch — set once serially by the caller)
   # Disturbance exclude-modes derive a (year → site_idx → excluded eco_species) lookup from the
   # injection cohorts with drop>0, so those (site, species) are skipped from the loss at that year.
   # Disturbance shock (new order only): needs the sync injection (the observed set defines which cohorts were disturbed).
@@ -1983,7 +1986,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       site_sim_years, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params; debug, search_tier=dual_b.tier,
       t4_ref=dual_b.t4_ref, cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles, seeds=b_seeds,
       injection_dict=dual_b.injection_dict, injection_years=dual_b.injection_years,
-      disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, dual_b=nothing)
+      disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots)
     b_losses = Float64[convert(Float64, PU.get_total_loss(r[1])) for r in resB]
     bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep
     return [resB[bi]]
@@ -2349,7 +2352,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       end
-      eco_losses = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles)
+      eco_losses = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots)
       run_result = sum(eco_losses)
       if _mor_hist !== nothing   # accumulate this rep's sim histogram for the mean-over-reps pass
         for eco_id in eachindex(eco_species_ids), cyc in 1:n_cycles
@@ -2365,7 +2368,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       for tid in 2:Threads.maxthreadid(), eco_id in eachindex(eco_species_ids), cyc in 1:n_cycles
         t4_sim_t[1][eco_id][cyc] .+= t4_sim_t[tid][eco_id][cyc]
       end
-      eco_losses_4 = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles)
+      eco_losses_4 = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots)
       run_result = sum(PU.skipundef(years_results)) + sum(eco_losses_4)
       eco_losses = vcat(eco_losses_3, eco_losses_4)
     else
@@ -2396,7 +2399,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       _mor_hist[e][cyc] ./= ns
     end
     sc, oc = _mor_counts[]
-    eco_losses_m = calculate_t4_loss(_mor_hist, t4_ref, loss_params, n_species, eco_species_ids, sc, oc, n_cycles)
+    eco_losses_m = calculate_t4_loss(_mor_hist, t4_ref, loss_params, n_species, eco_species_ids, sc, oc, n_cycles; cell_plots=cell_plots)
     resA = [(sum(eco_losses_m), _median_rep_cached(resA), eco_losses_m)]
   end
   dual_b === nothing && return resA
@@ -2405,7 +2408,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     site_sim_years, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params; debug, search_tier=dual_b.tier, t4_ref=dual_b.t4_ref,
     cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles, seeds=b_seeds, injection_dict=dual_b.injection_dict,
     injection_years=dual_b.injection_years, disturbance_dict=dual_b.disturbance_dict,
-    disturbance_years=dual_b.disturbance_years, dual_b=nothing)
+    disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots)
   a_run, a_eco, a_idx = _agg_reps(resA)
   b_losses = Float64[convert(Float64, PU.get_total_loss(r[1])) for r in resB]
   bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep (robust to a lucky/unlucky draw)
@@ -2717,7 +2720,7 @@ function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params
   return (ref_soa=ref_b, spdf_plts=spdf_plts, loss_params=loss_params, t4_ref=t4_ref,
     cycle_map=cycle_map, n_cycles=n_cycles, injection_dict=idict_b, injection_years=iyears_b,
     spinup=SIMB_SPINUP[], spinup_cohorts=spinup_cohorts, b_only=b_only, tier=TIER_B[],
-    disturbance_dict=(isempty(ddict) ? nothing : ddict), disturbance_years=Set(keys(ddict)))
+    disturbance_dict=(isempty(ddict) ? nothing : ddict), disturbance_years=Set(keys(ddict)), cell_plots=cell_plots)
 end
 
 # ANALYSIS helper: re-simulate ONE params set through the FREE Sim-B path (dual_mode:b) EXACTLY as the run
