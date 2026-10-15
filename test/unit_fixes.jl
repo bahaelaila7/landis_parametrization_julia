@@ -73,4 +73,13 @@ end
   @test_throws ErrorException Pan._cell(zeros(FT, 0, 0), 1, 1)
 end
 
+
+@testset "B12 per-run caches are cleared and keyed on every input" begin
+  Pan._EXCL_CACHE[(Dict(), 1, 2)] = Pan._ExclPlan(:off, false, Dict(), Dict(), Dict())
+  Pan._clear_run_caches!()
+  @test isempty(Pan._EXCL_CACHE) && isempty(Pan._SHOCK_REGISTRY)
+  src = read(joinpath(pkgdir(Pan), "src", "Pan.jl"), String)
+  @test occursin("key = (injection_dict, ref_soa, loss_params)", src)
+end
+
 end

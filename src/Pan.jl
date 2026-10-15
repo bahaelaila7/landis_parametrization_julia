@@ -321,8 +321,18 @@ struct _ExclPlan
   ref::Dict{Int,Dict{Int,PU.SPDFGroundTruth}}                  # year → site_idx → reference without those cohorts
   prev::Dict{Int,Dict{Int,Int}}                                # year → site_idx → previous visit year (absent for a site's first visit)
 end
-const _EXCL_CACHE = IdDict{Any,_ExclPlan}()
+const _EXCL_CACHE = IdDict{Any,_ExclPlan}()   # key (injection_dict, ref_soa, loss_params) — every input of the plan (B12)
 const _EXCL_LOCK = ReentrantLock()
+
+# Per-run caches keyed by object identity; cleared at the start of every `parametrize` so a long-lived process (tools, REPL)
+# does not keep every previous run's injection dicts and plans alive (B12).
+function _clear_run_caches!()
+  lock(_EXCL_LOCK) do
+    empty!(_EXCL_CACHE)
+  end
+  empty!(_SHOCK_REGISTRY)
+  nothing
+end
 
 function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::_ExclPlan
   mode = OVERRIDE_INJECTION_DISTURBANCE[]; rec_on = EXCLUDE_RECRUITS_AT_ENTRY[]
@@ -376,10 +386,11 @@ end
 
 function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::_ExclPlan
   lock(_EXCL_LOCK) do
-    pl = get(_EXCL_CACHE, injection_dict, nothing)
+    key = (injection_dict, ref_soa, loss_params)
+    pl = get(_EXCL_CACHE, key, nothing)
     if pl === nothing || pl.mode !== OVERRIDE_INJECTION_DISTURBANCE[] || pl.recruits != EXCLUDE_RECRUITS_AT_ENTRY[]
       pl = _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
-      _EXCL_CACHE[injection_dict] = pl
+      _EXCL_CACHE[key] = pl
     end
     pl
   end
@@ -1437,6 +1448,7 @@ function parametrize(; cohorts_db_path::String,
   dominance_species::String="exact",
   rng::Random.AbstractRNG)
   _check_search_mode(search_mode)   # fail fast, before data preparation
+  _clear_run_caches!()
 
   # Pin BLAS to 1 thread: the search does hundreds of tiny per-offspring covariance eigendecomps per gen —
   # multi-threaded OpenBLAS spawns all cores per call and oversubscribes catastrophically at high --threads.
