@@ -165,3 +165,67 @@ The references are rebuilt from cohort subsets. Sanity check: the rebuilt refere
 - What remains in every scheme is drift growth with time (later visits have diverged further).
 - Recommendation: if the scoring is made flexible in the refactor, implement plot-level averaging of W as an option. cohlast is still
   available as a variant, but it is not better here.
+
+## Why the age-structure objective W adds little to the search: the chain (V1, gdigel mo m=2, survivors scope)
+
+### 1. W's signal is small but real
+- The attainable W improvement is about 13 % from the start point (W_rel 1.00 → 0.87); A's is about 30 % (→ 0.70).
+- It ranks solutions reproducibly (train↔val Spearman 0.98).
+
+### 2. Model coupling: W can only be improved through S, which A also needs
+- Hybrids of the two archive ends, evaluated on train with gdigel's A = Σa_g and W = Σw_g:
+
+  | point | A | W |
+  |---|---|---|
+  | min_A | 25.43 | 6.668 |
+  | min_W | 35.20 | 6.076 |
+  | min_A with min_W's S | 34.04 | 6.168 |
+  | min_A with min_W's B_MAX | 27.01 | 6.642 |
+  | min_A with min_W's D | 25.69 | 6.652 |
+  | min_A with min_W's ANPP ratio | 26.48 | 6.700 |
+  | u-interpolation t = 0.5 | 30.13 | 6.474 (the front has W ≈ 6.34 at that A) |
+
+- Nearly all of W's gain comes from S, the Biomass Succession growth-curve shape: anpp = ANPP_MAX·comp·f(x), x = bio/b_pot,
+  f = y·e^(1−y), y = x^S.
+- S sets how growth depends on a cohort's relative size, which is exactly the within-plot age differentiation W measures. It also
+  sets the growth level that A measures.
+- The min_W end has lower S (median u 0.24 → 0.09).
+- Interpolation does not beat the front, so the trade-off is genuine. It is a structural coupling in BS: one parameter for two
+  roles.
+
+### 3. Scalarization: each lineage optimises ONE objective in almost every block
+- The block score is max(λ·A_b/A_ref, (1−λ)·W_b/W_ref) with GLOBAL references. A step is accepted only if that max falls, so
+  the inactive objective is invisible.
+- Active term per block at the final state (gd_state@200):
+
+  | λ | blocks W-active (of 61) | blocks A-active |
+  |---|---|---|
+  | 0–0.14 | 60 | 1 |
+  | 0.29–0.43 | 52–56 | 5–9 |
+  | 0.57 | 22–26 | 35–39 |
+  | 0.71–1 | 0–4 | 57–61 |
+
+- No lineage trades A against W inside a block. Per-lineage trajectories show it:
+  - W-active lineages (λ ≤ 0.43) cut W by 8–15 % and leave A at the start (ΔA −0.07…+0.15);
+  - A-active lineages cut A by 23–30 % and W by 3–8 % as a side effect.
+- The λ = 0 and 0.14 lineages contribute no archive points: their A drifted up.
+
+### 4. Archive and knee
+- The front is the union of A-only and W-only optimisers.
+- The chord knee on range-normalised objectives picks a λ = 0.43 point whose A was never optimised (A_rel 0.87).
+
+### 5. Refinement
+- calib minimize at λ = 0.5 uses the same per-group Chebyshev. At those reference ratios, 45 of 58 groups are W-active, so A
+  improvements in those groups are rejected (refined knee A_rel 0.84).
+
+### 6. Box limit on A
+- At min_A the ANPP ratio sits at u 0.975, i.e. against the upper bound B_MAX/ANPP = 35. A wants less growth than the box allows.
+  This is criterion-2 bound hugging, and it caps A.
+
+### What would make W contribute
+1. **Search side.** Use augmented Chebyshev (+ρ·Σ normalised terms) or a per-block weighted sum, so both objectives count in every
+   acceptance. Normalise per block (A_ref_b, W_ref_b) so λ means the same in every block. Or use an ε-constraint (min A s.t.
+   W ≤ (1+ε)·W_min).
+2. **Model side.** S couples growth level and size-differentiation. Decoupling them, e.g. a second shape parameter or an age/size
+   term on competition, would let W and A be fitted without conflict.
+3. **Box.** Widen anpp_ratio_bounds above 35; the A-optimum is pinned there.
