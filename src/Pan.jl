@@ -1337,6 +1337,7 @@ function parametrize(; cohorts_db_path::String,
   cmaes_blocks::String="eco",                          # CMA-ES covariance blocks: "eco" (per cell, legacy) | "l3" (per L3 + tail)
   spinup::Bool=true,
   search_mode::String="lbsa",
+  context_only::Bool=false,   # prepare the training context exactly as a search would, hand it to POST_SEARCH_HOOK, skip the search
   tier::Int=3,
   TRIALS::Int=30000,
   resume_from::Union{Nothing,String}=nothing,
@@ -1686,6 +1687,11 @@ function parametrize(; cohorts_db_path::String,
   _build_bmax_floor!(eco_list, species_list, eco_species_ids)   # per-(eco,species) B_MAX data floor → PU.BMAX_FLOOR (nothing if off)
   _build_anpp_floor!(eco_list, species_list, eco_species_ids)   # per-(eco,species) ANPP data floor → PU.ANPP_FLOOR (nothing if off)
   _build_prob_estab_floor!(eco_list, species_list, eco_species_ids)   # per-(eco,species) PROB_ESTAB data LOWER bound → PU.PROB_ESTAB_FLOOR (nothing if off)
+  if context_only   # plot_only / plot_only_sobol and context tools: the training context, no search
+    ctx = (; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment)
+    POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[](ctx)
+    return ctx
+  end
   driver = search_mode == "molbsa" ? parametrize_MOLBSA :
            search_mode == "cmaes" ? parametrize_CMAES :
            search_mode == "mocmaes" ? parametrize_MOCMAES :
@@ -1743,7 +1749,7 @@ function parametrize(; cohorts_db_path::String,
   finally
     PARALLEL_SITES[] = _prev_parallel_sites
   end
-  POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, injection_cohorts, spinup_cohorts, output_dir, n_species, tier))
+  POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment))
   return _driver_result
 end
 function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params::PU.LossParams, scratch_perm::Vector{Int}, scratch_ages::Vector{FloatType})
@@ -6268,9 +6274,6 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     bins_idx=Int.(get_cfg("bins_idx", vcat(10:10:40, 60:20:120))),
   )
   n_output_plots = get_cfg("n_output_plots", 0)
-  sw_kw = (smoothing_window_size=get_cfg("smoothing_window_size", 0),
-    smoothing_variance=Float64(get_cfg("smoothing_variance", 1.2)))
-
   search_mode = get_cfg("search_mode", "lbsa")
 
   # Injection-override flags (module Refs read at injection time). Default = the current Ref
@@ -6337,29 +6340,18 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   PROB_ESTAB_LOWER_BOUND[] = Bool(get_cfg("prob_estab_lower_bound", false))   # PROB_ESTAB data value as a search LOWER bound (needs prob_estab_from_data)
   PROB_ESTAB_LOWER_MULT[] = Float64(get_cfg("prob_estab_lower_bound_mult", 1.0))   # floor = mult × data (e.g. 0.8)
 
-  if search_mode == "plot_only"
-    params_path = String(get_cfg("params_path", ""))
-    isempty(params_path) && error("search_mode=plot_only requires params_path in yaml")
-    return plot_sample(; common_kw..., sw_kw...,
-      params_path=params_path,
-      n_output_plots=max(1, n_output_plots),
-      rng_seed=seed)
-  end
+  # plot modes (B8): the plots use the training context (same data prep, splits, strata, loss and scoring flags as a search)
+  plot_mode = search_mode in ("plot_only", "plot_only_sobol")
+  plot_params_path = plot_mode && search_mode == "plot_only" ? String(get_cfg("params_path", "")) : ""
+  plot_sobol_db = search_mode == "plot_only_sobol" ? String(get_cfg("sobol_candidates_db", "")) : ""
+  search_mode == "plot_only" && isempty(plot_params_path) && error("search_mode=plot_only requires params_path in yaml")
+  search_mode == "plot_only_sobol" && isempty(plot_sobol_db) && error("search_mode=plot_only_sobol requires sobol_candidates_db in yaml")
 
-  if search_mode == "plot_only_sobol"
-    sobol_db = String(get_cfg("sobol_candidates_db", ""))
-    isempty(sobol_db) && error("search_mode=plot_only_sobol requires sobol_candidates_db in yaml")
-    return plot_sample_sobol(; common_kw..., sw_kw...,
-      sobol_candidates_db=sobol_db,
-      n_output_plots=max(1, n_output_plots),
-      n_sobol_params_to_plot=max(1, get_cfg("n_sobol_params_to_plot", 5)),
-      rng_seed=seed)
-  end
-
-  parametrize(;
+  _res = parametrize(;
     common_kw...,
     exclude_plots=exclude_plots,
-    search_mode=search_mode,
+    search_mode=plot_mode ? "igelmo" : search_mode,
+    context_only=plot_mode,
     tier=get_cfg("tier", 1),
     smoothing_window=smoothing_window,
     unbinned_w=Bool(get_cfg("unbinned_w", false)),   # Sim A: exact per-year EMD (no binning/age-smoothing)
@@ -6480,6 +6472,11 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     top_seeds=Float64(get_cfg("top_seeds", 0.2)),
     dominance_species=String(get_cfg("dominance_species", "exact")),
     rng=rng)
+  plot_mode || return _res
+  return search_mode == "plot_only" ?
+    plot_sample(_res; params_path=plot_params_path, n_output_plots=max(1, n_output_plots), rng_seed=seed) :
+    plot_sample_sobol(_res; sobol_candidates_db=plot_sobol_db, n_output_plots=max(1, n_output_plots),
+                      n_sobol_params_to_plot=max(1, get_cfg("n_sobol_params_to_plot", 5)), rng_seed=seed)
 end
 
 function main()
@@ -6569,62 +6566,14 @@ function _load_params_from_path(params_path::String)
   end
 end
 
-struct PlotContext
-  splots::DataFrame
-  species_list::Vector{String}
-  eco_species_ids::Vector{Vector{Int}}
-  site_sim_years
-  spinup_cohorts::DataFrame
-  spdf_plts
-  loss_params::PU.LossParams
-  max_sim_year::Int
-  no_establishment::Bool
-  injection_cohorts::Union{Nothing,DataFrame}
-end
-
-# Shared data-loading boilerplate used by both plot functions.
-function _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
-  skip_disturbances, spinup, by_subplot=false, no_establishment=false, filter_eco_field,
-  filter_ecos, filter_plots, filter_species,
-  min_trees=100, min_agb_frac=0.05, stratify_eco_mixed=false, filter_extent=nothing,
-  bins_idx, smoothing_window_size, smoothing_variance, rng)
-  smoothing_window = smoothing_window_size > 0 ?
-                     PU.get_smoothing_window(; smoothing_window=smoothing_window_size,
-    smoothing_variance=FloatType(smoothing_variance)) :
-                     FloatType[one(FloatType)]
-  loss_params = PU.LossParams(
-    age_bins=PU.AgeBins(bins_idx=bins_idx .|> Int, last_bin_open=true),
-    smoothing_weights=smoothing_window,
-  )
-  splots, _, species_list, eco_species_ids, _ =
-    Data.prepare_parametrization_data(;
-      cohorts_db_path, eco_field, tablename, output_dir,
-      skip_disturbances, spinup, by_subplot, filter_eco_field,
-      filter_ecos, filter_plots, filter_species, min_trees, min_agb_frac,
-      stratify_eco_mixed, filter_extent, RNG=rng)
-  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate .- splots.start_measdate)) ./ 365.25 .|> round .|> Int
-  max_sim_year = maximum(splots.sim_year)
-  max_age = Int(maximum(splots.age_calc))
-  site_sim_years = Data.get_site_sim_years(splots)
-  spinup_cohorts = Data.get_spinup_cohorts(splots)
-  spdf = PU.smoothen_ref_years(splots, loss_params, max_age; debug=false)
-  spdf_plts = Data.make_spdf_dict(spdf, eco_species_ids)
-  PlotContext(splots, species_list, eco_species_ids, site_sim_years,
-    spinup_cohorts, spdf_plts, loss_params, max_sim_year,
-    no_establishment,
-    (no_establishment || OVERRIDE_INJECTION[]) ? Data.get_injection_cohorts(splots; all_cohorts=OVERRIDE_INJECTION[]) : nothing)
-end
-
-function _run_and_plot(bio_params, label, ctx::PlotContext;
-  sampled_ids, emp_sample, output_dir, spinup, rng)
-  ref_soa = make_sites_like(succession_plugin_for(bio_params), ctx.splots, ctx.eco_species_ids; rng, spinup, no_establishment=ctx.no_establishment)
-  inj_dict = isnothing(ctx.injection_cohorts) ? nothing : _build_injection_dict(ctx.injection_cohorts, ref_soa)
+# One simulation of `bio_params` on the training context `ctx` (parametrize(context_only=true)), then the sampled plots' figures.
+function _run_and_plot(bio_params, label, ctx; sampled_ids, emp_sample, output_dir, rng)
+  inj_dict = isnothing(ctx.injection_cohorts) ? nothing : _build_injection_dict(ctx.injection_cohorts, ctx.ref_soa)
   inj_years = isnothing(ctx.injection_cohorts) ? Set{Int}() : Set(Int.(ctx.injection_cohorts.sim_year))
-  result = only(fit_params(ref_soa, bio_params, ctx.max_sim_year,
-    length(ctx.species_list), ctx.eco_species_ids,
-    ctx.spdf_plts, ctx.site_sim_years, spinup,
-    ctx.spinup_cohorts, ctx.loss_params;
-    debug=false, search_tier=3, seeds=[rand(rng, UInt64)],
+  max_sim_year = maximum(maximum.(filter(!isempty, ctx.site_sim_years.sim_years)))
+  result = only(fit_params(ctx.ref_soa, bio_params, max_sim_year, ctx.n_species, ctx.eco_species_ids,
+    ctx.spdf_plts, ctx.site_sim_years, ctx.spinup, ctx.spinup_cohorts, ctx.loss_params;
+    debug=false, search_tier=3, seeds=[rand(rng, UInt64)], cache_preinject=!isnothing(inj_dict),
     injection_dict=inj_dict, injection_years=inj_years))
   loss = convert(Float64, PU.get_total_loss(result[1]))
   sim_sample = _filter_cached_to_df(result[2], sampled_ids)
@@ -6636,42 +6585,14 @@ end
 plot_sample — run one simulation with given params and plot n_output_plots forest plots.
 Accepts best_params@X.jld2, search_state@X.jld2, or sobol_results@X.jld2.
 """
-function plot_sample(;
-  cohorts_db_path::String,
-  params_path::String,
-  output_dir::String="./outputs",
-  filter_eco_field::String="epa_l3",
-  eco_field::String="epa_l3",
-  tablename::String="curated_cohorts_landis",
-  filter_ecos::Vector{String}=String[],
-  filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[],
-  filter_species::Vector{String}=String[],
-  skip_disturbances::Bool=true,
-  spinup::Bool=false,
-  by_subplot::Bool=false,
-  no_establishment::Bool=false,
-  bins_idx::Vector{Int64}=vcat(10:10:40, 60:20:120) .|> Int64,
-  smoothing_window_size::Int=0,
-  smoothing_variance::Float64=1.2,
-  min_trees::Int=100,
-  min_agb_frac::Float64=0.05,
-  stratify_eco_mixed::Bool=false,
-  filter_extent::Union{Nothing,String}=nothing,
-  n_output_plots::Int=20,
-  rng_seed::Int=1337,
-)
-  mkpath(output_dir)
+function plot_sample(ctx; params_path::String, n_output_plots::Int=20, rng_seed::Int=1337)
+  output_dir = ctx.output_dir; mkpath(output_dir)
   rng = RNGType(UInt64(rng_seed))
   bio_params = _load_params_from_path(params_path)
-  ctx = _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
-    skip_disturbances, spinup, by_subplot, no_establishment, filter_eco_field,
-    filter_ecos, filter_plots, filter_species,
-    min_trees, min_agb_frac, stratify_eco_mixed, filter_extent,
-    bins_idx, smoothing_window_size, smoothing_variance, rng)
   all_ids = UIntType.(unique(ctx.splots.plot_id))
   sampled_ids = _sample_plot_ids(all_ids, n_output_plots, rng; injection_cohorts=ctx.injection_cohorts)
   emp_sample = _make_emp_df(ctx.splots, sampled_ids)
-  _run_and_plot(bio_params, "plot_only", ctx; sampled_ids, emp_sample, output_dir, spinup, rng)
+  _run_and_plot(bio_params, "plot_only", ctx; sampled_ids, emp_sample, output_dir, rng)
 end
 
 """
@@ -6679,31 +6600,8 @@ plot_sample_sobol — load saved sobol results and plot a stratified sample of p
 Selection: 1 absolute top + 60% of remaining from top half + rest from bottom half.
 All param sets are visualised on the same fixed set of n_output_plots forest plots.
 """
-function plot_sample_sobol(;
-  sobol_candidates_db::String,
-  cohorts_db_path::String,
-  output_dir::String="./outputs",
-  filter_eco_field::String="epa_l3",
-  eco_field::String="epa_l3",
-  tablename::String="curated_cohorts_landis",
-  filter_ecos::Vector{String}=String[],
-  filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[],
-  filter_species::Vector{String}=String[],
-  skip_disturbances::Bool=true,
-  spinup::Bool=false,
-  by_subplot::Bool=false,
-  no_establishment::Bool=false,
-  bins_idx::Vector{Int64}=vcat(10:10:40, 60:20:120) .|> Int64,
-  smoothing_window_size::Int=0,
-  smoothing_variance::Float64=1.2,
-  min_trees::Int=100,
-  min_agb_frac::Float64=0.05,
-  stratify_eco_mixed::Bool=false,
-  filter_extent::Union{Nothing,String}=nothing,
-  n_output_plots::Int=10,              # fixed forest-plot sample size
-  n_sobol_params_to_plot::Int=5,               # sobol param sets to simulate
-  rng_seed::Int=1337,
-)
+function plot_sample_sobol(ctx; sobol_candidates_db::String, n_output_plots::Int=10, n_sobol_params_to_plot::Int=5, rng_seed::Int=1337)
+  output_dir = ctx.output_dir
   mkpath(output_dir)
   rng = RNGType(UInt64(rng_seed))
 
@@ -6730,11 +6628,6 @@ function plot_sample_sobol(;
   )
   @info "plot_sample_sobol: plotting $(length(selected)) param sets from $N sobol results"
 
-  ctx = _load_plot_context(; cohorts_db_path, eco_field, tablename, output_dir,
-    skip_disturbances, spinup, by_subplot, no_establishment, filter_eco_field,
-    filter_ecos, filter_plots, filter_species,
-    min_trees, min_agb_frac, stratify_eco_mixed, filter_extent,
-    bins_idx, smoothing_window_size, smoothing_variance, rng)
   all_ids = UIntType.(unique(ctx.splots.plot_id))
   sampled_ids = _sample_plot_ids(all_ids, n_output_plots, rng; injection_cohorts=ctx.injection_cohorts)
   emp_sample = _make_emp_df(ctx.splots, sampled_ids)
@@ -6742,7 +6635,7 @@ function plot_sample_sobol(;
   for (rank, res) in enumerate(selected)
     label = rank == 1 ? "sobol_rank1_loss$(round(res.mean_loss,digits=4))" :
             "sobol_rank$(rank)_loss$(round(res.mean_loss,digits=4))"
-    _run_and_plot(res.params, label, ctx; sampled_ids, emp_sample, output_dir, spinup, rng)
+    _run_and_plot(res.params, label, ctx; sampled_ids, emp_sample, output_dir, rng)
   end
 end
 
