@@ -14,10 +14,10 @@ if name == "bs_plot_only"
   over["params_path"] = joinpath(src, last(sort(ck; by=f -> parse(Int, match(r"@(\d+)", f)[1]))))
 end
 include(joinpath(@__DIR__, isdefined(Pan, :POST_SEARCH_HOOK) ? "probe_v0.jl" : "probe_v1.jl"))
-install_probe!(merge(cfg, over), sdir)
+hook = install_probe!(merge(cfg, over), sdir)   # v0: sets the global hook and returns nothing; v1: the hook to pass
 t0 = time()
 status = try
-  Pan.run_from_yaml(base; overrides=over); "OK"
+  hook === nothing ? Pan.run_from_yaml(base; overrides=over) : Pan.run_from_yaml(base; overrides=over, post_search_hook=hook); "OK"
 catch e
   msg = sprint(showerror, e, catch_backtrace())
   open(io -> println(io, msg), joinpath(sdir, "error_full.txt"), "w")

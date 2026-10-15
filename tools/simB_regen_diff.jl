@@ -2,7 +2,7 @@
 # MAPE = |mean(simB over REPS) − ref| / ref, with error bars = std(simB)/ref. NATURAL/regen strata only.
 # Two phases: (1) SIMULATE — run REPS Sim-B evals/candidate, CACHE the raw t4_sim arrays; (2) PLOT from
 # the cache (fast). Pass --resim (or change REPS) to re-simulate; otherwise the cache is reused so metric
-# tweaks re-plot in seconds. Drives the real Sim B via fit_params + Pan.CAPTURE_T4SIM.
+# tweaks re-plot in seconds. Drives the real Sim B via fit_params(...; capture_t4=Pan.T4Capture()).
 #   Run: ./julia_gdal.sh --project=. tools/simB_regen_diff.jl runs/...stageB_joint.yml [REPS=50] [--resim]
 using Pan, DataFrames, JLD2, CairoMakie, Statistics
 const P = Pan; const D = P.Data; const PU = P.PU; const BSP = P.BiomassSuccessionPlugin
@@ -61,13 +61,13 @@ else
   for (ci, c) in enumerate(arch)
     reps = Vector{Any}(undef, REPS)
     for rep in 1:REPS
-      P.CAPTURE_T4SIM[] = :want
+      cap_t4 = P.T4Capture()
       P.fit_params(dual_b.ref_soa, c.x, msy, n_species, eco_species_ids, dual_b.spdf_plts, ssy, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params;
         debug=false, search_tier=4, t4_ref=dual_b.t4_ref, cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles,
         seeds=[rand(rng, UInt64)], injection=dual_b.injection,
-        disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, scoring, simb, plugin=P.bs_plugin())
-      cap = P.CAPTURE_T4SIM[]; P.CAPTURE_T4SIM[] = nothing
-      cap === :want && error("candidate $ci rep $rep: no t4_sim captured")
+        disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, scoring, simb, plugin=P.bs_plugin(), capture_t4=cap_t4)
+      cap = cap_t4.data
+      cap === nothing && error("candidate $ci rep $rep: no t4_sim captured")
       reps[rep] = [[Float32.(m) for m in eco] for eco in cap.sim]
     end
     allsims[ci] = reps; println("  candidate $ci: $REPS reps done")

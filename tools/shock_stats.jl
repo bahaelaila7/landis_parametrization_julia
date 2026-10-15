@@ -19,5 +19,4 @@ function chk(d)
   pl = injection.excl
   println("STATS cohort-level exclusions: ", sum(length(v) for y in values(pl.coh) for v in values(y)), " cohorts in ", sum(length(y) for y in values(pl.coh)), " site-years")
 end
-P.POST_SEARCH_HOOK[] = chk
-P.run_from_yaml(cfgpath; overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false, "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))
+P.run_from_yaml(cfgpath; post_search_hook=chk, overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false, "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))

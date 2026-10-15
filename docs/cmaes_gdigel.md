@@ -4,7 +4,7 @@ Date 2026-10-13. Branch `cmaes-gafl` (on top of `hbad`: all three succession plu
 (`configs/region4/gafl_A.yml`, `gafl_pnet.yml`, `gafl_hbad.yml`).
 
 ## 1. Diagnosis — "too noisy" is not simulation noise
-`tools/cmaes_diag.jl <config> <params> <out>` prepares the training context exactly like a search (run_from_yaml + POST_SEARCH_HOOK)
+`tools/cmaes_diag.jl <config> <params> <out>` prepares the training context exactly like a search (run_from_yaml + its post_search_hook)
 and, around the calibrated parameter set of each plugin, measures (A) repeat-evaluation noise, (B) 1-D slices of the
 objectives along random u-directions at coarse (|t| ≤ 0.08) and fine (|t| ≤ 0.004) scale, (C) offspring clouds at
 σ ∈ {0.08, 0.02, 0.005} — Δ of the training objectives [ΣW, ΣAGB] vs Δ of the per-species bias loss (what the TOST tables

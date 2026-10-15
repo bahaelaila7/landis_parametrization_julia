@@ -10,7 +10,7 @@ const P = Pan; const PU = P.PU
 cfg = P.load_config(ARGS[1]); gdd = ARGS[2]; anchor_path = ARGS[3]; K = parse(Int, ARGS[4]); outd = ARGS[5]; mkpath(outd)
 drop = length(ARGS) >= 6 ? parse(Int, ARGS[6]) : 2
 # the u-space layout depends on the run's parameter pooling, which is configured by the data preparation — so decode
-# inside the same preparation path (POST_SEARCH_HOOK after a 1-trial run), exactly like the search did
+# inside the same preparation path (post_search_hook of a 1-trial run), exactly like the search did
 function select_hook(d)
   global anchor = P._load_params_from_path(anchor_path)
   global spc = P.with_establishment(d.plugin.ctx, d.space; no_establishment=true, fit_establishment=false)   # the run's parameter space (pooling, floors) over the Sim A parameter subset
@@ -93,6 +93,5 @@ function select_hook(d)
   println(rows)
 
 end
-P.POST_SEARCH_HOOK[] = select_hook
-P.run_from_yaml(ARGS[1]; overrides=Dict{String,Any}("output_dir" => joinpath(outd, "_prep"), "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false,
+P.run_from_yaml(ARGS[1]; post_search_hook=select_hook, overrides=Dict{String,Any}("output_dir" => joinpath(outd, "_prep"), "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false,
   "search_mode" => "igelmo", "n_reps" => 1, "start_from" => anchor_path))

@@ -16,5 +16,4 @@ function chk(d)
   for g in 1:ix.ngroups; @printf("GDCHK %-24s n=%5d bias=%7.2f%%\n", labels[g], L.n[g], 100 * expm1(L.m[g])); end
   @printf("GDCHK pass05=%d pass10=%d pass20=%d\n", P._gd_pass(L.m, L.se, 0.05), P._gd_pass(L.m, L.se, 0.1), P._gd_pass(L.m, L.se, 0.2))
 end
-P.POST_SEARCH_HOOK[] = chk
-P.run_from_yaml(cfgpath; overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false, "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))
+P.run_from_yaml(cfgpath; post_search_hook=chk, overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false, "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))

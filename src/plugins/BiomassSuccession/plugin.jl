@@ -164,7 +164,9 @@ end
   site.c_age[site.live] = age
   site.c_bio[site.live] = trunc(biomass)
 end
-function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Vector{BiomassSuccessionEcoParams})
+# `capture`: optional diagnostic callback `capture(current_year::Int, soa)` invoked at the end of every spinup year (the back-cast, sim_year < 0) so a
+# caller can record the per-year stand state (tools/plot_spinup_process.jl). `nothing` (default) = no behaviour change and no cost.
+function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Vector{BiomassSuccessionEcoParams}; capture=nothing)
   #show(spinup_cohorts.year_deficit)
   # year deficit is establisment year.
   # however, I cannot add with age = 0, therefore it'll have to show up the year after with age=1
@@ -185,7 +187,7 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
     while current_year < year_deficit + 1
       #println("current_year, $(current_year), year_deficit+1, $(year_deficit + 1), succession: $(current_year < year_deficit+1) ")
       #@debug ("year $(current_year), before recounting $((soa.refs.cohort))")
-      Threads.@threads :static for i in 1:soa.n
+      PanCore.@maybe_threads soa.parallel for i in 1:soa.n
         @inbounds site = getsite(soa, i)
         @assert Int(site.mapcode) == Int(i)
         if i == 18
@@ -200,13 +202,13 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
         PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
       #end
       @debug ("sprouting")
-      Threads.@threads :static for i in 1:soa.n
+      PanCore.@maybe_threads soa.parallel for i in 1:soa.n
         @inbounds site = getsite(soa, i)
         #sprouting_step!(current_year, site, eco_params[site.eco_id])
         reproduction_commit_step!(current_year, site, eco_params[site.eco_id])
       end
       @debug ("succession")
-      Threads.@threads :static for i in 1:soa.n
+      PanCore.@maybe_threads soa.parallel for i in 1:soa.n
         @inbounds site = getsite(soa, i)
         succession_step!(current_year, site, eco_params[site.eco_id])
         reproduction_check_step!(current_year, site, eco_params[site.eco_id])
@@ -226,7 +228,7 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
       #        reproduction_step!(current_year, site, eco_params)
       #    end
       #end
-      SPINUP_CAPTURE[] === nothing || SPINUP_CAPTURE[](current_year, soa)
+      capture === nothing || capture(current_year, soa)
       current_year += 1
     end
     @debug ("Done catching up $(current_year)")
@@ -235,7 +237,7 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
     plots = combine(groupby(rows, [:plot_id, :eco_id], sort=false)) do rs
       (; eco_species_ids=[rs.eco_species_id])
     end
-    Threads.@threads :static for row in eachrow(plots)
+    PanCore.@maybe_threads soa.parallel for row in eachrow(plots)
       site = PanCore.getsite(soa, Int(row.plot_id))
       site.active = true
       for sp in row.eco_species_ids
@@ -296,28 +298,28 @@ function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, e
   # reach the correct age at sim year 0. In the usual multi-plot case current_year is already -1, so
   # this runs exactly one iteration (commit, then break) — identical to the previous final block.
   while current_year <= -1
-    Threads.@threads :static for i in 1:soa.n
+    PanCore.@maybe_threads soa.parallel for i in 1:soa.n
       @inbounds site = getsite(soa, i)
       @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
     end
     @debug ("year $(current_year), final after recounting $((soa.refs.cohort))")
     @debug (soa.scalar._new_cohort_counts)
     soa = PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
-    Threads.@threads :static for i in 1:soa.n
+    PanCore.@maybe_threads soa.parallel for i in 1:soa.n
       @inbounds site = getsite(soa, i)
       reproduction_commit_step!(current_year, site, eco_params[site.eco_id])
     end
     if current_year == -1
-      SPINUP_CAPTURE[] === nothing || SPINUP_CAPTURE[](current_year, soa)
+      capture === nothing || capture(current_year, soa)
       break
     end
-    Threads.@threads :static for i in 1:soa.n
+    PanCore.@maybe_threads soa.parallel for i in 1:soa.n
       @inbounds site = getsite(soa, i)
       succession_step!(current_year, site, eco_params[site.eco_id])
       reproduction_check_step!(current_year, site, eco_params[site.eco_id])
       @inbounds site._new_cohort_counts = sum(site.sp_sprout) + site.live
     end
-    SPINUP_CAPTURE[] === nothing || SPINUP_CAPTURE[](current_year, soa)
+    capture === nothing || capture(current_year, soa)
     current_year += 1
   end
   #update(pbar)
@@ -672,188 +674,3 @@ function sort_cohorts!(site::SiteView)
   end
   return
 end
-
-# Per-cohort calibration print mirroring LANDIS CalibrateMode. Enable with
-# BiomassSuccessionPlugin.CALIBRATE[] = true; optionally pin one site via
-# CALIBRATE_SITE[] = <mapcode> (0 = all sites). Run single-threaded (THREADS=1)
-# so the per-cohort lines don't interleave across threads.
-const CALIBRATE = Ref(true)
-const CALIBRATE_SITE = Ref(1)
-# Diagnostic hook: when set to a function f(current_year::Int, soa), spinup_cohorts! calls it at the end
-# of every spinup year so callers can record the per-year stand state (the back-cast). Default nothing =
-# no behaviour change. Mirrors the CAPTURE_T4SIM pattern used for the tier-4 loss.
-const SPINUP_CAPTURE = Ref{Any}(nothing)
-
-function succession_step1!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
-  site.active || return
-
-  cbio = site.c_bio       # hoist views once (storage isn't resized during succession)
-  cage = site.c_age
-  csp = site.c_species
-  mature = site.sp_mature
-
-  # 1) site-biomass snapshot == LANDIS TotalBiomass = NonYoungBiomass.
-  #    With successionTimestep==1 every cohort counts. Taken BEFORE longevity
-  #    removal (LANDIS snapshots before GrowCohort prunes) and held FIXED all year.
-  B = zero(FloatType)
-  @inbounds for i in 1:site.live
-    B += cbio[i]
-  end
-
-  # 2) order old → young (no pruning — longevity removal is interleaved below)
-  sort_cohorts!(site)
-
-  capacityReduction = one(FloatType) - site.harvestCapacityReduction
-  new_B = zero(FloatType)
-  AGNPP = zero(FloatType)
-  M_TOT = zero(FloatType)
-  B_ACT = zero(FloatType)
-  mature .= false
-
-  cmt = site.c_m_tot
-  ccp = site.c_comp
-
-  calib = CALIBRATE[] && current_time > 0 &&
-          (CALIBRATE_SITE[] == 0 || Int(site.mapcode) == CALIBRATE_SITE[])
-
-  live = site.live
-  i = live
-  @inbounds while i >= 1
-    sp = csp[i]
-
-    # --- longevity: checked on the PRE-increment age; remove + short-circuit (no growth).
-    #     CohortMortality event (litter) — forest floor omitted; just drop the cohort.
-    #     Iterating oldest→youngest from the back, the live boundary holds an ALREADY-
-    #     processed cohort; copying it over slot i never reorders a younger one. ---
-    if cage[i] >= params.LONGEVITY[sp]
-      if i != live
-        csp[i] = csp[live]
-        cage[i] = cage[live]
-        cbio[i] = cbio[live]
-        cmt[i] = cmt[live]
-        ccp[i] = ccp[live]
-      end
-      live -= 1
-      i -= 1
-      continue
-    end
-
-    cage[i] += one(FloatType)                 # survives → age, then grow
-    age = cage[i]
-    bio = cbio[i]                             # this cohort not grown yet
-
-    # --- order-dependent competition: B_PM = comp_i / Σ_j comp_j over the CURRENT live set
-    #     (1..live). j > i are older & already grown this pass; j < i are younger & pre-growth.
-    #     A cohort that will be longevity-removed later still counts until the loop reaches it. ---
-    comp_i = bio^FloatType(0.95f0)
-    comp_i < one(FloatType) && (comp_i = one(FloatType))
-    C = zero(FloatType)
-    for j in 1:live
-      cj = cbio[j]^FloatType(0.95f0)
-      cj < one(FloatType) && (cj = one(FloatType))
-      C += cj
-    end
-    B_PM = comp_i / C
-
-    # --- age mortality (on incremented age) ---
-    m_age = bio
-    max_age = params.LONGEVITY[sp]
-    if age < max_age
-      f_age = exp(params.D[sp] * (age / max_age - one(FloatType)))
-      current_time <= 0 && (f_age += params.SPINUP_MORTALITY_FRACTION)
-      f_age < one(FloatType) && (m_age = bio * f_age)
-    end
-
-    # --- actual ANPP. b_pot uses the FIXED snapshot B, NOT the running biomass. ---
-    b_max = params.B_MAX_SPP[sp] * capacityReduction
-    b_pot = trunc(b_max - B + bio)
-    b_pot < one(FloatType) && (b_pot = one(FloatType))
-    (capacityReduction >= one(FloatType) && b_pot < site.prevYearMortality) && (b_pot = site.prevYearMortality)
-    b_ap = bio / b_pot
-    b_ap_s = b_ap^params.S[sp]
-    anpp_max = params.ANPP_MAX_SPP[sp] * B_PM          # == maxANPP·B_PM (your old anpp_max_c)
-    anpp_act = b_ap_s * exp(one(FloatType) - b_ap_s)
-    anpp_act > one(FloatType) && (anpp_act = one(FloatType))
-    anpp_act *= anpp_max
-    site.growthReduction > zero(FloatType) && (anpp_act *= one(FloatType) - site.growthReduction)
-
-    anpp_gross = anpp_act   # gross actualANPP, before the age-mortality discount (for calibration)
-    if calib
-      println("Yr=$(current_time). Calculate ANPPactual...")
-      println("Yr=$(current_time).     Spp=$(Int(sp)), Age=$(Int(round(age))).")
-      println("Yr=$(current_time).     MaxANPP=$(round(params.ANPP_MAX_SPP[sp];digits=1)), MaxB=$(round(b_max;digits=1)), Bsite=$(round(B;digits=1)), Bcohort=$(round(bio;digits=1)).")
-      println("Yr=$(current_time).     B_PM=$(round(B_PM;digits=4)), B_AP=$(round(b_ap;digits=4)), actualANPP=$(round(anpp_gross;digits=1)), capacityReduction=$(round(capacityReduction;digits=2)).")
-    end
-
-    AGNPP += anpp_act                        # current-year gross (LANDIS books prev year; output only)
-
-    anpp_act -= m_age
-    anpp_act < one(FloatType) && (anpp_act = one(FloatType))
-
-    # --- growth mortality ---
-    m_bio = anpp_max
-    b_ap <= one(FloatType) && (m_bio *= (FloatType(2.0f0) * b_ap) / (one(FloatType) + b_ap))
-    m_bio > bio && (m_bio = bio)
-    m_bio > anpp_max && (m_bio = anpp_max)
-    site.growthReduction > zero(FloatType) && (m_bio *= one(FloatType) - site.growthReduction)
-    m_bio -= m_age
-    m_bio < zero(FloatType) && (m_bio = zero(FloatType))
-    m_bio > anpp_act && (m_bio = anpp_act)
-
-    m_tot = m_age + m_bio
-    m_tot > bio && (m_tot = bio)
-    (current_time > 0 && rand(site.rng, FloatType) < params.PROB_MORT_SPP[sp]) && (m_tot = bio)
-
-    M_TOT += m_tot
-    nbio = bio + trunc(anpp_act - m_tot)
-    cbio[i] = nbio                           # in-place: younger cohorts see this grown value in competition
-
-    if calib
-      println("Yr=$(current_time). Calculate Delta Biomass...")
-      println("Yr=$(current_time).    Spp=$(Int(sp)), Age=$(Int(round(age))).")
-      println("Yr=$(current_time).    ANPPact=$(round(anpp_act;digits=1)), Mtotal=$(round(m_tot;digits=1)).")   # litter omitted (forest floor not tracked)
-      println("Yr=$(current_time).    DeltaB=$(round(nbio - bio;digits=1)), CohortB=$(round(bio;digits=1)), Bsite=$(round(B;digits=1))")
-    end
-
-    # --- biomass-based removal (cohort.Biomass <= 0). Dead in practice (nbio ≥ 1); kept for parity. ---
-    if nbio <= FloatType(1.0f-8)
-      if i != live
-        csp[i] = csp[live]
-        cage[i] = cage[live]
-        cbio[i] = cbio[live]
-        cmt[i] = cmt[live]
-        ccp[i] = ccp[live]
-      end
-      live -= 1
-      i -= 1
-      continue
-    end
-
-    new_B += nbio
-    age > FloatType(5.0f0) && (B_ACT += nbio)
-    age >= params.MATURITY[sp] && (mature[sp] = true)
-    i -= 1
-  end
-  site.live = live
-
-  # --- shade class ---
-  site_b_pot = params.B_MAX_ECO - site.prevYearMortality
-  B_ACT > site_b_pot && (B_ACT = site_b_pot)
-  b_am = B_ACT / params.B_MAX_ECO
-  shade_class = zero(UIntType)
-  for thr in params.MIN_REL_BIOMASS
-    if b_am > thr
-      shade_class += one(UIntType)
-    else
-      break
-    end
-  end
-
-  site.old = site.live
-  site.B = new_B
-  site.AGNPP = AGNPP
-  site.prevYearMortality = 0.0 #M_TOT
-  site.shade_class = shade_class
-  return
-end
-

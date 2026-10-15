@@ -42,10 +42,9 @@ function diag(d)
   println("DIAG: wrote ", joinpath(outd, "pnet_diag_last_measurement.csv"))
 end
 
-P.POST_SEARCH_HOOK[] = diag
 ov = Dict{String,Any}()
 for a in ARGS[2:end]
   k, v = split(a, '='; limit=2)
   ov[k] = something(tryparse(Int, v), tryparse(Float64, v), v)
 end
-P.run_from_yaml(ARGS[1]; overrides=ov)
+P.run_from_yaml(ARGS[1]; post_search_hook=diag, overrides=ov)

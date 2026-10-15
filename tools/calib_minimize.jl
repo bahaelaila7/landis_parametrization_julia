@@ -23,12 +23,11 @@ FOLD = lowercase(get(ENV, "CALIB_DEATH_FOLD", "false")) == "true"
 USED = MOBJ == 3 || FOLD
 WV = MOBJ == 3 ? parse.(Float64, split(get(ENV, "CALIB_WEIGHTS", "0.3333333,0.3333333,0.3333334"), ",")) : [LAM, 1 - LAM]
 CTX = Ref{Any}(nothing)
-P.POST_SEARCH_HOOK[] = d -> (CTX[] = d; nothing)
 ov = Dict{String,Any}("output_dir" => joinpath(outd, "_ctx"), "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false,
   "search_mode" => "igelmo", "n_reps" => 1, "start_from" => start)
 haskey(ENV, "CALIB_W_SCOPE") && (ov["w_scope"] = ENV["CALIB_W_SCOPE"])        # the scoring flags of the Sim A run being refined
 haskey(ENV, "CALIB_DEATH_TERM") && (ov["death_term"] = ENV["CALIB_DEATH_TERM"])
-P.run_from_yaml(ARGS[1]; overrides=ov)
+P.run_from_yaml(ARGS[1]; post_search_hook=(d -> (CTX[] = d; nothing)), overrides=ov)
 d = CTX[]; d === nothing && error("training context was not captured")
 eco_list = d.eco_list; species_list = d.species_list; eco_species_ids = d.eco_species_ids
 include(joinpath(@__DIR__, "calib_levers.jl"))

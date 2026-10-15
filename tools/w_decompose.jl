@@ -14,17 +14,17 @@ function run(d)
   nvis = P._gd_cell_visits(d.spdf_plts, d.eco_species_ids, 1)
   println("DIAG groups=$(ix.ngroups) pairs=$(length(ix.pair_group))")
   sc = P.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, dom=d.scale_seed.dom, per_plot_mean=d.simb.t4_per_plot_mean)   # the reference's loss scales
-  P.W_DIAG_CTX[] = (d.spdf_plts, d.n_species, d.eco_species_ids, d.loss_params, sc)
+  wd = P.WDiag(ctx=(d.spdf_plts, d.n_species, d.eco_species_ids, d.loss_params, sc))   # collector of the per-year cohort-set statistics
   function ev(p; lbi=true, mode=:none)
-    fill!(P.W_DIAG_CAT, 0)
-    sco = P.with_options(d.scoring; loss_before_injection=lbi, w_diag=mode); fill!(P.W_DIAG_STATS, 0)
+    fill!(wd.cat, 0)
+    sco = P.with_options(d.scoring; loss_before_injection=lbi, w_diag=mode); fill!(wd.stats, 0)
     r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=true, scales=sc, scoring=sco, simb=d.simb, plugin=d.plugin)
+      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=true, scales=sc, scoring=sco, simb=d.simb, plugin=d.plugin, w_diag=wd)
     L = P._gd_losses(ix, r[1][2])
     num, den = P._gd_cell_w(r[1][3], d.eco_species_ids, nvis, d.loss_params, sc)
     w = P._gd_group_w(num, den, gc, d.loss_params)
     raw = sum(sum(num[e]) for e in eachindex(num)); dn = sum(sum(den[e]) for e in eachindex(den))
-    (A=sum(filter(!isnan, L.a)), W=sum(filter(!isnan, w)), rawnum=raw, den=dn, stats=copy(P.W_DIAG_STATS), cat=copy(P.W_DIAG_CAT))
+    (A=sum(filter(!isnan, L.a)), W=sum(filter(!isnan, w)), rawnum=raw, den=dn, stats=copy(wd.stats), cat=copy(wd.cat))
   end
   function show(tag, r); @printf("DIAG %-34s SumA=%8.3f SumW=%9.3f  rawW=%11.2f  Wscale=%9.2f\n", tag, r.A, r.W, r.rawnum, r.den); end
   # ---- 1. decomposition at the start point (p0) and at the first archive point of the v2 smoke
@@ -68,5 +68,4 @@ function run(d)
   bs = [r.rawW - r.rawW_nodeath for r in rows]; cds = [r.rawW_nodeath - r.rawW_oracle for r in rows]
   @printf("DIAG spread b(natural death) min=%.2f max=%.2f ; c+d min=%.2f max=%.2f\n", minimum(bs), maximum(bs), minimum(cds), maximum(cds))
 end
-P.POST_SEARCH_HOOK[] = run
-P.run_from_yaml(cfgpath; overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false, "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))
+P.run_from_yaml(cfgpath; post_search_hook=run, overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false, "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))

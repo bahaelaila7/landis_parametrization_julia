@@ -122,9 +122,6 @@ function setup_plugin_from_cfg(cfg0::AbstractDict, eco_list::Vector{String}; spe
     hbad_prob_estab_csv=cfg["hbad_prob_estab_csv"], hbad_cycle_years=cfg["cycle_years"])
 end
 
-# Optional diagnostic hook: called with the prepared training data right after the search driver returns (used by test/pnet_smoke_diag.jl).
-const POST_SEARCH_HOOK = Ref{Any}(nothing)
-
 # SoA type for a given succession plugin P (BaseSite + P). For BiomassSuccession this is exactly `ActiveSoA`.
 soa_type(::Type{P}) where {P} = SiteSoA{Tuple{BaseSitePlugin.BaseSite,P}}
 
@@ -475,15 +472,23 @@ function _survivors_only!(soa, year, injection_dict)
 end
 
 # DIAGNOSTIC ONLY (default :none = no effect). ScoringOptions.w_diag at a measurement year, new order, just before scoring:
-#   :stats   — accumulate cohort-set statistics sim-vs-obs into W_DIAG_STATS (no state change)
+#   :stats   — accumulate cohort-set statistics sim-vs-obs into the WDiag collector (no state change)
 #   :nodeath — additionally REMOVE sim cohorts that are absent from the observed set (oracle natural deaths)
 #   :oracle  — run the sync injection BEFORE scoring (sim set := obs set; matched keep sim biomass): the shape-only W
-const W_DIAG_STATS = zeros(Float64, 16)
-const W_DIAG_CAT = zeros(Float64, 6, 2)   # rows: 1 both-exact 2 both-mismatched 3 ref-only(missing species) 4 both-but-nothing-matched; cols: ΣW, count
-const W_DIAG_CTX = Ref{Any}(nothing)      # (spdf_plts, n_species, eco_species_ids, loss_params, scales) set by tools/w_decompose.jl
-function _w_diag_apply!(pc, soa, year, injection_dict, plan, opts::ScoringOptions)
+# The statistics are collected into a `WDiag` that the caller passes to fit_params(...; w_diag=WDiag(...)) and reads afterwards (tools/w_decompose.jl);
+# without one, the :nodeath / :oracle state changes still apply and the statistics go to a throw-away collector.
+#   stats: 16 counters (see the S[...] updates below); cat: rows 1 both-exact 2 both-mismatched 3 ref-only(missing species) 4 both-but-nothing-matched
+#   5/6 ref-only without / with a previous visit; cols ΣW, count. ctx (optional, for the per-species W categories of :stats):
+#   (spdf_plts, n_species, eco_species_ids, loss_params, scales).
+struct WDiag{C}
+  stats::Vector{Float64}
+  cat::Matrix{Float64}
+  ctx::C
+end
+WDiag(; ctx=nothing) = WDiag(zeros(Float64, 16), zeros(Float64, 6, 2), ctx)
+function _w_diag_apply!(pc, soa, year, injection_dict, plan, opts::ScoringOptions, wd::WDiag)
   mode = opts.w_diag
-  S = W_DIAG_STATS
+  S = wd.stats
   for (si, cohorts) in injection_dict[year]
     site = getsite(soa, si); site.active || continue
     exl = plan === nothing ? nothing : (yd = get(plan.coh, year, nothing); yd === nothing ? nothing : get(yd, si, nothing))
@@ -514,8 +519,8 @@ function _w_diag_apply!(pc, soa, year, injection_dict, plan, opts::ScoringOption
     end
     for (sp, age, bio, _) in cohorts; isex(sp, age) && continue; sp in sim_sp || (S[8] += 1; S[9] += bio); end
     for j in 1:Int(site.live); isex(csp[j], cage[j]) && continue; csp[j] in obs_sp || (S[10] += 1; S[11] += cbio[j]); end
-    if W_DIAG_CTX[] !== nothing && mode === :stats
-      (spdf_plts, n_species, esids, lpar, lsc) = W_DIAG_CTX[]
+    if wd.ctx !== nothing && mode === :stats
+      (spdf_plts, n_species, esids, lpar, lsc) = wd.ctx
       gt = spdf_plts[(site.ref_cn, site.eco_id)][year]; ecl = nothing
       if exl !== nothing; gt = plan.ref[year][si]; ecl = exl; end
       sl = PU.calculate_site_loss2(year, site, n_species, esids, gt, lpar, lsc; excl_c=ecl)
@@ -526,15 +531,15 @@ function _w_diag_apply!(pc, soa, year, injection_dict, plan, opts::ScoringOption
         simset = Set{Float64}(Float64(cage[j]) for j in 1:Int(site.live) if csp[j] == spj && !isex(csp[j], cage[j]))
         obsset = Set{Float64}(Float64(a) for (sp, a, _, _) in cohorts if sp == spj && !isex(sp, a))
         c = isempty(simset) ? 3 : (simset == obsset ? 1 : (isempty(intersect(simset, obsset)) ? 4 : 2))
-        W_DIAG_CAT[c, 1] += w; W_DIAG_CAT[c, 2] += 1
+        wd.cat[c, 1] += w; wd.cat[c, 2] += 1
         if c == 3   # why is the species absent in the sim? look at the site's previous observed visit
           py = -1
           for (y2, lst) in injection_dict; y2 < year && y2 > py && any(t -> t[1] == si, lst) && (py = y2); end
-          if py < 0; W_DIAG_CAT[5, 2] += 1; W_DIAG_CAT[5, 1] += w   # no previous visit
+          if py < 0; wd.cat[5, 2] += 1; wd.cat[5, 1] += w   # no previous visit
           else
             prev = first(t[2] for t in injection_dict[py] if t[1] == si)
-            if any(t -> t[1] == spj, prev); W_DIAG_CAT[6, 2] += 1; W_DIAG_CAT[6, 1] += w   # species WAS observed at the previous visit
-            else; W_DIAG_CAT[2, 1] += 0; end
+            if any(t -> t[1] == spj, prev); wd.cat[6, 2] += 1; wd.cat[6, 1] += w   # species WAS observed at the previous visit
+            else; wd.cat[2, 1] += 0; end
           end
         end
       end
@@ -1335,7 +1340,8 @@ function parametrize(; cohorts_db_path::String,
   cmaes_blocks::String="eco",                          # CMA-ES covariance blocks: "eco" (per cell, legacy) | "l3" (per L3 + tail)
   spinup::Bool=true,
   search_mode::String="lbsa",
-  context_only::Bool=false,   # prepare the training context exactly as a search would, hand it to POST_SEARCH_HOOK, skip the search
+  context_only::Bool=false,   # prepare the training context exactly as a search would, hand it to `post_search_hook` (if any), skip the search
+  post_search_hook=nothing,   # optional diagnostic callback `f(ctx)`: called with the prepared training context right after the search driver returns (tools, test/pnet_smoke_diag.jl); nothing ⇒ no call
   tier::Int=3,
   TRIALS::Int=30000,
   resume_from::Union{Nothing,String}=nothing,
@@ -1651,7 +1657,7 @@ function parametrize(; cohorts_db_path::String,
   space = PU.with_floors(space, build_param_floors(bs_tables(plugin), space_opts, eco_list, species_list, eco_species_ids))
   if context_only   # plot_only / plot_only_sobol and context tools: the training context, no search
     ctx = (; space, plugin, ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment)
-    POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[](ctx)
+    post_search_hook === nothing || post_search_hook(ctx)
     return ctx
   end
   driver = search_mode == "molbsa" ? parametrize_MOLBSA :
@@ -1709,7 +1715,7 @@ function parametrize(; cohorts_db_path::String,
       exec=exec,
       search=search,
       cmaes_kw...)
-  POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; space, plugin, ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment))
+  post_search_hook === nothing || post_search_hook((; space, plugin, ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment))
   return _driver_result
 end
 function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params::PU.LossParams, scratch_perm::Vector{Int}, scratch_ages::Vector{FloatType})
@@ -1811,9 +1817,14 @@ end
 # (summed across the plots measured in that calendar cycle). Wasserstein-1 on the biomass-by-age
 # CDF is computed per (eco, cycle, species); cycles are summed into one SiteLoss per eco
 # (num_obs = total measurements in the eco, so get_total_loss is per-measurement-averaged W1).
-const CAPTURE_T4SIM = Ref{Any}(nothing)   # diagnostics: set non-nothing → next calculate_t4_loss stashes (sim,ref,n_cycles)
-function calculate_t4_loss(t4_sim, t4_ref, loss_params::PU.LossParams, scales::PU.LossScales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=nothing, per_plot_mean::Bool)
-  CAPTURE_T4SIM[] === nothing || (CAPTURE_T4SIM[] = (sim=deepcopy(t4_sim), ref=t4_ref, n_cycles=n_cycles, site_counts=deepcopy(t4_site_counts)))
+# Diagnostics: fit_params(...; capture_t4=T4Capture()) → every calculate_t4_loss of that call stashes `(sim, ref, n_cycles, site_counts)` into `.data`
+# (the last one wins: Sim B's when a dual_b follows Sim A). tools/simB_regen_diff.jl.
+mutable struct T4Capture
+  data::Union{Nothing,NamedTuple}
+end
+T4Capture() = T4Capture(nothing)
+function calculate_t4_loss(t4_sim, t4_ref, loss_params::PU.LossParams, scales::PU.LossScales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=nothing, per_plot_mean::Bool, capture::Union{Nothing,T4Capture}=nothing)
+  capture === nothing || (capture.data = (sim=deepcopy(t4_sim), ref=t4_ref, n_cycles=n_cycles, site_counts=deepcopy(t4_site_counts)))
   eco_losses = Vector{PU.SiteLoss}(undef, length(eco_species_ids))
   for eco_id in eachindex(eco_species_ids)
     sp_w_loss = zeros(FloatType, n_species)
@@ -2101,7 +2112,7 @@ function _check_plan_options(plan::InjectionPlan, scoring::ScoringOptions)
   nothing
 end
 
-function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection::Union{Nothing,InjectionPlan}=nothing, injection_cohorts=nothing, t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, death_acc::Union{Nothing,DeathAcc}=nothing, cell_plots=nothing, scales::Union{Nothing,PU.LossScales}=nothing, scoring::ScoringOptions, simb::SimBOptions, plugin::PluginConfig, parallel_sites::Bool=true, timer::Union{Nothing,RunTimer}=nothing)
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection::Union{Nothing,InjectionPlan}=nothing, injection_cohorts=nothing, t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, death_acc::Union{Nothing,DeathAcc}=nothing, cell_plots=nothing, scales::Union{Nothing,PU.LossScales}=nothing, scoring::ScoringOptions, simb::SimBOptions, plugin::PluginConfig, parallel_sites::Bool=true, timer::Union{Nothing,RunTimer}=nothing, w_diag::Union{Nothing,WDiag}=nothing, capture_t4::Union{Nothing,T4Capture}=nothing)
   pc = plugin.ctx   # the plugin context (data tables / priors / climate): explicit, never module state
   # `scales`: the normalisation of THIS reference (see compute_loss_scales / build_split_scales); computed here from the reference when the caller
   # has none (one-off evaluations, analysis tools). Sim B's (dual_b.scales) are derived from it the same way when absent.
@@ -2132,7 +2143,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       site_sim_years, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params; debug, search_tier=dual_b.tier,
       t4_ref=dual_b.t4_ref, cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles, seeds=b_seeds,
       injection=dual_b.injection,
-      disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb, plugin=plugin, parallel_sites, timer)
+      disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb, plugin=plugin, parallel_sites, timer, w_diag, capture_t4)
     b_losses = Float64[convert(Float64, PU.get_total_loss(r[1], loss_params)) for r in resB]
     bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep
     return [resB[bi]]
@@ -2319,7 +2330,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
         death_acc === nothing || _death_collect!(death_acc, soa, current_sim_year, injection_dict, _excl_plan)
         scoring.w_scope === :survivors && _survivors_only!(soa, current_sim_year, injection_dict)
       end
-      (scoring.w_diag !== :none && scoring.loss_before_injection && _do_shock && current_sim_year in injection_years) && _w_diag_apply!(pc, soa, current_sim_year, injection_dict, _excl_plan, scoring)
+      (scoring.w_diag !== :none && scoring.loss_before_injection && _do_shock && current_sim_year in injection_years) && _w_diag_apply!(pc, soa, current_sim_year, injection_dict, _excl_plan, scoring, w_diag === nothing ? WDiag() : w_diag)
       if search_tier == 1
         @maybe_threads soa.parallel for i in 1:soa.n
           @inbounds begin
@@ -2505,7 +2516,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       end
-      eco_losses = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, scales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean)
+      eco_losses = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, scales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean, capture=capture_t4)
       run_result = sum(eco_losses)
       if _mor_hist !== nothing   # accumulate this rep's sim histogram for the mean-over-reps pass
         for eco_id in eachindex(eco_species_ids), cyc in 1:n_cycles
@@ -2521,7 +2532,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       for tid in 2:Threads.maxthreadid(), eco_id in eachindex(eco_species_ids), cyc in 1:n_cycles
         t4_sim_t[1][eco_id][cyc] .+= t4_sim_t[tid][eco_id][cyc]
       end
-      eco_losses_4 = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, scales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean)
+      eco_losses_4 = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, scales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean, capture=capture_t4)
       run_result = sum(PU.skipundef(years_results)) + sum(eco_losses_4)
       eco_losses = vcat(eco_losses_3, eco_losses_4)
     else
@@ -2552,7 +2563,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       _mor_hist[e][cyc] ./= ns
     end
     sc, oc = _mor_counts[]
-    eco_losses_m = calculate_t4_loss(_mor_hist, t4_ref, loss_params, scales, n_species, eco_species_ids, sc, oc, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean)
+    eco_losses_m = calculate_t4_loss(_mor_hist, t4_ref, loss_params, scales, n_species, eco_species_ids, sc, oc, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean, capture=capture_t4)
     resA = [(sum(eco_losses_m), _median_rep_cached(resA, loss_params, scoring), eco_losses_m)]
   end
   dual_b === nothing && return resA
@@ -2561,7 +2572,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     site_sim_years, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params; debug, search_tier=dual_b.tier, t4_ref=dual_b.t4_ref,
     cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles, seeds=b_seeds, injection=dual_b.injection,
     disturbance_dict=dual_b.disturbance_dict,
-    disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb, plugin=plugin, parallel_sites, timer)
+    disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb, plugin=plugin, parallel_sites, timer, w_diag, capture_t4)
   a_run, a_eco, a_idx = _agg_reps(resA, loss_params, scoring)
   b_losses = Float64[convert(Float64, PU.get_total_loss(r[1], loss_params)) for r in resB]
   bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep (robust to a lucky/unlucky draw)
@@ -6082,7 +6093,7 @@ function prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw
   return Data.prepare_parametrization_data(; prep_kwargs_from_cfg(cfg; split_rng_seed_override=split_rng_seed_override)..., kw...)
 end
 
-function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}(), exec::Union{Nothing,ExecOptions}=nothing)
+function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}(), exec::Union{Nothing,ExecOptions}=nothing, post_search_hook=nothing)
   exec = exec === nothing ? exec_options_from_env() : exec   # env PAN_TIMING / PAN_SKIP_VAL / PAN_PARALLEL / PAN_NEWBEST_STATS, read once for the whole run
   get!(ENV, "PAN_DATA", "runs")          # data dir for ${PAN_DATA}/*.csv|*.duckdb in the yaml; default = repo runs/ (local),
                                          # set PAN_DATA=<dir> on the cluster (e.g. $SCRATCH/runs/data) → one yaml, both layouts
@@ -6293,6 +6304,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     dominance_species=cfg["dominance_species"],
     exec=exec,
     search=search,
+    post_search_hook=post_search_hook,
     rng=rng)
   plot_mode || return _res
   return search_mode == "plot_only" ?

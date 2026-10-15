@@ -222,6 +222,14 @@ end
       @test a4 <= base[P][1] && a5 <= base[P][2]
       @test Base.return_types(Pan.step!, (Type{P}, typeof(soa), Int, typeof(ctx)))[1] === Nothing
       @test isempty(red_flags(Tuple{typeof(Pan.step!), Type{P}, typeof(soa), Int, typeof(ctx)}))
+      # step 3e: the site-loop parallelism is a plain Bool field of the SoA (no process global): the threaded branch is as stable as the serial one
+      @test fieldtype(typeof(soa), :parallel) === Bool && !isdefined(PC, :PARALLEL_SITES)
+      soa.parallel = true
+      for y in 6:7; Pan.step!(P, soa, y, ctx); end
+      a_thr = @allocated Pan.step!(P, soa, 8, ctx)
+      println("  $name step! (threaded, $(Threads.nthreads()) threads): $a_thr bytes (task spawn overhead only)")
+      @test a_thr < 100_000 + 5_000 * soa.n                                     # no per-site/cohort allocation in the threaded loop either
+      soa.parallel = false
       m = which(PC.process_plugin!, Tuple{typeof(soa),Type{P},Int}); bf = Base.bodyfunction(m)
       cx = getfield(ctx, only(keys(ctx)))
       @test isempty(red_flags(Tuple{typeof(cx),typeof(bf),typeof(soa),Type{P},Int}))

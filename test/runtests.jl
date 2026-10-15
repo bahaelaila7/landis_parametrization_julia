@@ -8,6 +8,7 @@ using Test, Pan
   @testset "unit_loss" begin include("unit_loss.jl") end
   @testset "unit_hotpath" begin include("unit_hotpath.jl") end
   @testset "unit_api" begin include("unit_api.jl") end
+  @testset "unit_exec" begin include("unit_exec.jl") end
   @testset "unit_config" begin include("unit_config.jl") end
   @testset "unit_config_reader" begin include("unit_config_reader.jl") end
   @testset "unit_fixes" begin include("unit_fixes.jl") end

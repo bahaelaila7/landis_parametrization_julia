@@ -1,5 +1,5 @@
 # Context-based checks for tools/simab_eval.jl (bounds, mortality, establishment, identifiability). The data context is prepared by run_from_yaml
-# exactly as in training (all flags of the config active), then the checks run in the POST_SEARCH_HOOK.
+# exactly as in training (all flags of the config active), then the checks run in the post_search_hook.
 #   ./julia_gdal.sh --project=. tools/simab_eval_ctx.jl <A|B> <config.yml> <params.jld2> <out.jld2> [archive_dir]
 using Pan, JLD2, CSV, DataFrames, Statistics
 const P = Pan; const PU = P.PU
@@ -70,6 +70,5 @@ function check(d)
   JLD2.save_object(outp, res)
   println("ctx($mode) done → $outp")
 end
-P.POST_SEARCH_HOOK[] = check
-P.run_from_yaml(cfgpath; overrides=Dict{String,Any}("output_dir" => joinpath(dirname(outp), "_ctx_$(mode)"), "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false,
+P.run_from_yaml(cfgpath; post_search_hook=check, overrides=Dict{String,Any}("output_dir" => joinpath(dirname(outp), "_ctx_$(mode)"), "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false,
   "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))

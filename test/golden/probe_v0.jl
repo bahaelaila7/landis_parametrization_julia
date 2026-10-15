@@ -56,4 +56,4 @@ install_probe!(cfg, outdir) = (Pan.POST_SEARCH_HOOK[] = d -> try
     golden_probe(d, cfg, outdir)
   catch e
     open(io -> println(io, "PROBE_ERROR ", sprint(showerror, e)[1:min(end, 400)]), joinpath(outdir, "probe_error.txt"), "w")
-  end)
+  end; nothing)   # global hook: nothing to pass to run_from_yaml

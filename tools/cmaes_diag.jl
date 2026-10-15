@@ -1,6 +1,6 @@
 # Landscape / noise diagnostic for the CMA-ES training objective, around a parameter set (any succession plugin).
 #   PAN_DATA=... PAN_OUT=... ./julia_gdal.sh --project=. --threads=8 tools/cmaes_diag.jl <config.yml> <params.jld2> <out_dir>
-# Prepares the training context exactly as a search would (run_from_yaml, trials=1, then POST_SEARCH_HOOK) and measures:
+# Prepares the training context exactly as a search would (run_from_yaml, trials=1, then its post_search_hook) and measures:
 #  A. repeat-evaluation noise of the MO objectives [ΣW, ΣAGB] (same seed twice; 3 different seeds);
 #  B. 1-D slices u0 + t·z (z ~ N(0, I) in the search's u-space, as a CMA offspring with σ = t) for coarse and fine t:
 #     roughness = residual SD around a quadratic fit in t, vs the slope signal;
@@ -93,6 +93,5 @@ function diag(d)
   println("DIAG_DONE → ", joinpath(outd, "cmaes_diag.csv"))
 end
 
-P.POST_SEARCH_HOOK[] = diag
-P.run_from_yaml(cfgpath; overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false,
+P.run_from_yaml(cfgpath; post_search_hook=diag, overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false,
   "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))

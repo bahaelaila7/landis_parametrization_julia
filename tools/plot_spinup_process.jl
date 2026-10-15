@@ -2,7 +2,7 @@
 # it goes back in time to the oldest cohort's birth year, plants a young (age-1) cohort each time the clock
 # hits an observed cohort's birth year, and grows everything with model dynamics until sim_year 0 — then the
 # simulation continues forward to the plot's LAST measurement year. We capture the per-year stand via the
-# BSP.SPINUP_CAPTURE hook (back-cast, sim_year < 0) + our own forward loop (sim_year ≥ 0), and draw each
+# spinup_cohorts!(...; capture=) hook (back-cast, sim_year < 0) + our own forward loop (sim_year ≥ 0), and draw each
 # cohort's AGB trajectory vs sim_year, coloured by species, with observed cohorts overlaid as dots and a
 # DASHED VERTICAL LINE at sim_year = 0 marking the end of the spinup (back-cast) years.
 #   Run: [PAN_PLOT=409] [PAN_PARAMS=params.jld2] ./julia_gdal.sh --project=. tools/plot_spinup_process.jl <config.yml>
@@ -88,9 +88,7 @@ record!(yr, soa) = (s = P.getsite(soa, pid);                  # mapcode == site 
 eco_params = BSP.generate_eco_params(best)
 soa = P.make_sites(sp, eco_species_ids; rng=P.RNGType(1), spinup=true, no_establishment=false)
 spinup_all = D.get_spinup_cohorts(sp)
-BSP.SPINUP_CAPTURE[] = record!                                # capture the back-cast years (sim_year < 0)
-soa = BSP.spinup_cohorts!(soa, spinup_all, eco_params)
-BSP.SPINUP_CAPTURE[] = nothing
+soa = BSP.spinup_cohorts!(soa, spinup_all, eco_params; capture=record!)   # capture the back-cast years (sim_year < 0)
 for y in 0:last_meas                                          # forward sim (sim_year ≥ 0), as in fit_params
   P.PanCore.process_plugin!(soa, BSP.BiomassSuccession, y; ctx=(eco_params=eco_params,))
   record!(y, soa)

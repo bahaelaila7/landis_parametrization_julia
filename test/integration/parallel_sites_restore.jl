@@ -8,9 +8,7 @@ include(joinpath(@__DIR__, "..", "golden", "scenarios.jl"))
 base, ov, _ = SCENARIOS["bs_igelmo"]
 over = merge(common(), ov, Dict{String,Any}("output_dir" => ARGS[1], "trials" => 1, "igel_mu" => 2))
 ctx = Ref{Any}(nothing)
-Pan.POST_SEARCH_HOOK[] = d -> (ctx[] = d)
-Pan.run_from_yaml(base; overrides=over)
-Pan.POST_SEARCH_HOOK[] = nothing
+Pan.run_from_yaml(base; overrides=over, post_search_hook=d -> (ctx[] = d))
 d = ctx[]
 @test !isdefined(Pan, :PARALLEL_SITES) && !isdefined(Pan.PanCore, :PARALLEL_SITES)
 @test d.ref_soa.parallel === true                          # the driver never touched the caller's reference

@@ -12,7 +12,7 @@ and a handful of evaluations.
   - the run outputs: losses.duckdb, CSVs, best_params JSON;
   - a probe: one fixed parameter set evaluated at tier 3 on the training context. It records the per-(eco × species) losses, the u
     round trip and the pre-injection cohort state.
-- `probe_v0.jl` is the adapter for the pre-refactor API (`Pan.POST_SEARCH_HOOK`). `probe_v1.jl` (written in Step 3) produces the same
-  files through the refactored API.
+- `probe_v0.jl` is the adapter for the pre-refactor API (`Pan.POST_SEARCH_HOOK`, a global). `probe_v1.jl` produces the same files through
+  the explicit `run_from_yaml(...; post_search_hook=)` of Step 3e; `run_scenario.jl` picks the adapter by `isdefined(Pan, :POST_SEARCH_HOOK)`.
 - Recorded goldens live outside the repo: /workspace/pan_refactor/golden_out/pre_refactor (tag `pre-refactor`).
 - The data comes from /workspace/landis_region4/data_r4 (PAN_DATA).
