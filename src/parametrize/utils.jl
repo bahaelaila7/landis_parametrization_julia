@@ -1,5 +1,5 @@
 using ..PanCore
-export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples, saltelli_design, wasserstein1d, find_age_bin, build_slots, u_to_params, params_to_u
+export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, LossScales, CbalTables, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples, saltelli_design, wasserstein1d, find_age_bin, build_slots, u_to_params, params_to_u
 
 import Setfield
 import Sobol
@@ -209,11 +209,94 @@ struct AgeBins
   end
 end
 
+"""
+    LossParams
+
+Everything that defines the loss and is constant for a run: the age bins, the smoothing window, the AGB weight `lambda`, and the loss
+OPTIONS (set once from the config by `Pan.parametrize`). Field defaults equal the former module-level `Ref` defaults, so a hand-built
+`LossParams(age_bins=…, smoothing_weights=…)` is the plain unnormalised loss. The per-reference, data-derived normalisation lives in
+[`LossScales`](@ref) (one per reference set), never here.
+"""
 Base.@kwdef struct LossParams
   age_bins::AgeBins
   smoothing_weights::Vector{FloatType}
   lambda::FloatType = FloatType(1.0f0)   # weight of the AGB-level (sqrt-difference) term vs the shape W1
   EPS::FloatType = FloatType(1.0f-7)
+  # Global weight on the Wasserstein (shape) term in the optimized scalar (0 keeps only the L2/AGB-level term).
+  loss_alpha::FloatType = one(FloatType)
+  # AGB-level loss form: agb_hinge=true replaces the gentle sqrt-difference AGB term with a HINGE: a tolerance band below which AGB
+  # differences are not penalized (threshold flat, or `pct` of the observed AGB clamped to [pct_min, pct_max] when pct > 0). The hinge is
+  # softplus-smoothed (sharpness agb_hinge_beta, <=0 ⇒ hard ReLU) and raised to agb_hinge_p AFTER the ÷scale (squared ratio, comparable to W).
+  agb_hinge::Bool = false
+  agb_hinge_threshold::FloatType = FloatType(10.0)
+  agb_hinge_pct::FloatType = zero(FloatType)
+  agb_hinge_pct_min::FloatType = zero(FloatType)
+  agb_hinge_pct_max::FloatType = FloatType(Inf)
+  agb_hinge_p::FloatType = FloatType(2.0)
+  agb_hinge_beta::FloatType = FloatType(1.0)
+  # GLOBAL ratio-of-sums normalisation (divide by Σ observed AGB / Σ per-reference-max W1 of the reference: see LossScales.agb_global/w_global).
+  agb_normalize::Bool = false
+  w_normalize::Bool = false
+  # PER-CELL (eco×lu×sp) normalisation: the per-cell loss keeps the RAW shape/level error (softplus-W and hinge-AGB kept); the per-cell ÷scale,
+  # the power and the RANKW rescale are applied at aggregation (`Pan._mo_objectives`). Overrides the global normalisation.
+  cell_norm::Bool = false
+  w_scale_factor::FloatType = FloatType(1.0)   # multiplies the W scales (<1 shrinks the divisor → amplifies ΣW vs AGB)
+  # Softplus smoothing of the per-term W1. w_smooth_auto_knee=false: fixed β = w_smooth_beta; true: β derived per cell from band·conc·wmax.
+  w_softplus::Bool = false
+  w_smooth_band::FloatType = FloatType(0.05)
+  w_smooth_conc::FloatType = FloatType(0.5)
+  w_smooth_beta::FloatType = FloatType(1.0)
+  w_smooth_auto_knee::Bool = false
+  w_p::FloatType = FloatType(1.0)              # exponent on the (normalised) W term
+  # W "benefit of the doubt" (Sim A only): forgive each sim cohort's binned biomass toward the observed by a pct/min/max band before the CDF.
+  w_hinge::Bool = false
+  w_hinge_pct::FloatType = FloatType(0.01)
+  w_hinge_pct_min::FloatType = FloatType(2.0)
+  w_hinge_pct_max::FloatType = FloatType(5.0)
+  # Median-pivoted piecewise on the aggregate ΣW, ΣAGB (get_total_loss): sqrt(x/m) below the pivot m, (x/m)^2 above.
+  loss_piecewise::Bool = false
+  w_pivot::FloatType = FloatType(1.0)
+  agb_pivot::FloatType = FloatType(1.0)
+  # Per-stratum RANKW weights: :rank (1/√ln(rank) by AGB) or :cbal_pct (percentile-floored class-balanced by cohort count).
+  rankw_mode::Symbol = :rank
+  rankw_beta::Float64 = 0.999
+  rankw_pct_floor::Float64 = 0.10
+  # COUNT-BALANCE reweight of the per-agebin W1 (counteracts survivorship): cbal_mode ∈ :a (Sim A) / :b (Sim B) / :both.
+  cbal_on::Bool = false
+  cbal_mode::Symbol = :both
+  cbal_beta::Float64 = 0.99
+  cbal_pct_floor::Float64 = 0.10
+end
+
+"""
+    CbalTables
+
+Count-balance weights built once from the TRAIN reference (`Pan.build_cbal_tables`) and shared by every reference of the run:
+`w[gsp,eco]` = weight per COARSE age bin, `coarse[k]` = the coarse bin of Sim-A per-year bin k.
+"""
+struct CbalTables
+  w::Matrix{Vector{FloatType}}
+  coarse::Vector{Int}
+end
+const NO_CBAL = CbalTables(Matrix{Vector{FloatType}}(undef, 0, 0), Int[])
+
+"""
+    LossScales
+
+The normalisation derived from ONE reference set (train Sim A, train Sim B, val Sim A, …), computed by `Pan.compute_loss_scales` and
+passed explicitly to `fit_params` / `_mo_objectives`. Defaults are neutral (no normalisation), so a hand-built `LossScales()` is valid.
+`rankw` and `cbal` are the run-wide TRAIN tables, shared (same object) by every reference including val.
+"""
+Base.@kwdef struct LossScales
+  w_global::FloatType = one(FloatType)           # Σ per-reference-max W1 (agb/w_normalize)
+  agb_global::FloatType = one(FloatType)         # Σ observed AGB
+  w_cell::Matrix{FloatType} = zeros(FloatType, 0, 0)    # [gsp,eco] cell-norm W scale (× w_scale_factor)
+  agb_cell::Matrix{FloatType} = zeros(FloatType, 0, 0)  # [gsp,eco] cell-norm AGB scale
+  rankw::Matrix{FloatType} = zeros(FloatType, 0, 0)     # [gsp,eco] stratum×species weights, Σ=1 (frozen from the train reference)
+  softplus_beta::FloatType = zero(FloatType)
+  softplus_beta_cell::Matrix{FloatType} = zeros(FloatType, 0, 0)  # [gsp,eco] reweight-aware β (auto-knee); empty ⇒ use the scalar
+  cbal::CbalTables = NO_CBAL
+  ncoh::Matrix{Int} = zeros(Int, 0, 0)                   # per-(species,eco) TRAIN cohort counts (input of rankw_mode = :cbal_pct)
 end
 
 Base.@kwdef struct SPDFRecord
@@ -256,162 +339,68 @@ function Base.sum(losses::AbstractVector{SiteLoss})
   end
   SiteLoss(sp_w_loss=sp_w, sp_agb_loss=sp_agb, site_agb_loss=site_agb, num_sites=n_sites, num_obs=n_obs)
 end
-# Global weight on the Wasserstein (shape) term in the optimized scalar. Set to 0 to keep only
-# the L2/AGB-level term (sp_w_loss is still computed — it drives loss-weighted sampling and the
-# per-species breakdown). Wired from `loss_alpha` (yaml / parametrize).
-const LOSS_ALPHA = Ref{FloatType}(one(FloatType))
-# AGB-level loss form. AGB_HINGE[]=true replaces the gentle sqrt-difference AGB term with a HINGE-L1:
-# loss = lambda * max(0, |sim_agb - obs_agb| - threshold) — a tolerance band below which AGB differences
-# are not penalized; threshold 0 ⇒ plain L1. Wired from agb_hinge / agb_hinge_threshold.
-const AGB_HINGE = Ref{Bool}(false)
-const AGB_HINGE_THRESHOLD = Ref{FloatType}(FloatType(10.0))
-# Percentage tolerance: when AGB_HINGE_PCT[] > 0 the band is a fraction of the OBSERVED AGB,
-# clamped to [AGB_HINGE_PCT_MIN, AGB_HINGE_PCT_MAX] — e.g. pct=0.04, min=10, max=200 ⇒
-# threshold = clamp(obs*0.04, 10, 200). pct ≤ 0 ⇒ fall back to the flat AGB_HINGE_THRESHOLD.
-const AGB_HINGE_PCT = Ref{FloatType}(zero(FloatType))
-const AGB_HINGE_PCT_MIN = Ref{FloatType}(zero(FloatType))
-const AGB_HINGE_PCT_MAX = Ref{FloatType}(FloatType(Inf))
-# Per-observation hinge tolerance for an observed AGB level `obs`.
-@inline _agb_hinge_thresh(obs::FloatType)::FloatType =
-  AGB_HINGE_PCT[] > zero(FloatType) ?
-    clamp(obs * AGB_HINGE_PCT[], AGB_HINGE_PCT_MIN[], AGB_HINGE_PCT_MAX[]) :
-    AGB_HINGE_THRESHOLD[]
-# Hinge penalty exponent p: pen(h) = h^p, applied to the (softplus) hinge excess. Default p=2 (L2/MSE);
-# p=1 ⇒ L1. Wired from agb_hinge_p. (AGB_HINGE_L2 is legacy, kept only for back-compat default mapping.)
-const AGB_HINGE_L2 = Ref{Bool}(false)
-const AGB_HINGE_P = Ref{FloatType}(FloatType(2.0))
-# Exponent on the NORMALIZED AGB relative error (applied AFTER ÷scale, so it's (excess/scale)^p — a
-# squared RATIO that stays comparable to W's (W1/scale)^p; applying it to the raw excess pre-norm would
-# reintroduce the scale gap). _agb_hinge_pen kept as an alias for back-compat.
-@inline _agb_pow(x::FloatType)::FloatType =
-  AGB_HINGE_P[] == FloatType(2) ? x * x : AGB_HINGE_P[] == one(FloatType) ? x : x^AGB_HINGE_P[]
-@inline _agb_hinge_pen(h::FloatType)::FloatType = h   # identity now (power moved outside _agb_norm)
-# GLOBAL ratio-of-sums normalization: divide the ABSOLUTE per-term error by a single global constant
-# (set once per evaluation from the reference). Because the divisor is a fixed total, every relative
-# magnitude is preserved → cohort SIZE is respected (a 100× bigger cohort contributes 100× more error),
-# while the objective lands at O(1) comparable to W. NOT per-term (that neutralizes size) and NOT min-max
-# (that amplifies the tame measure's noise). AGB_SCALE = Σ observed AGB; W_SCALE = Σ per-reference-max W1.
-const AGB_NORMALIZE = Ref{Bool}(false)
-const AGB_SCALE = Ref{FloatType}(FloatType(1.0))
-@inline _agb_norm(term::FloatType)::FloatType =
-  (AGB_NORMALIZE[] && AGB_SCALE[] > zero(FloatType)) ? term / AGB_SCALE[] : term
-const W_NORMALIZE = Ref{Bool}(false)
-const W_SCALE = Ref{FloatType}(FloatType(1.0))
-@inline _w_norm(term::FloatType)::FloatType =
-  (W_NORMALIZE[] && W_SCALE[] > zero(FloatType)) ? term / W_SCALE[] : term
-# Softplus smoothing of the per-term W1 (de-weights small shape errors smoothly). β set per run from the
-# bins (W_SOFTPLUS_BETA, computed in _set_loss_scales!): knee ≈ W_SMOOTH_BAND·W_SMOOTH_CONC·(Σbw−bw_N).
-# Pedestal-subtracted so a perfect match (s=0) → 0; for s>0, slope ramps 0.5→1 over the knee. Applied to
-# RAW W1 before _w_norm (constant ÷ after preserves the shape, same as the AGB softplus).
-# REWEIGHT-AWARE: when the count-balance reweight is on, the per-term W1 that reaches here is the REWEIGHTED
-# sum Σ CBAL_W·bw·|ΔF|, whose theoretical max is Σ CBAL_W·bw (per species×eco cell), NOT Σbw. So the knee
-# is calibrated per-cell via W_SOFTPLUS_BETA_CELL[gsp,eco]; the scalar W_SOFTPLUS_BETA is the fallback
-# (no reweight, or cells with no reference). Both computed in _set_loss_scales!.
-const W_SOFTPLUS = Ref{Bool}(false)
-const W_SOFTPLUS_BETA = Ref{FloatType}(zero(FloatType))
-const W_SOFTPLUS_BETA_CELL = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))  # [gsp,eco] reweight-aware β; empty ⇒ use scalar
-const W_SMOOTH_BAND = Ref{FloatType}(FloatType(0.05))   # smoothing region = this fraction of the realistic range (auto-knee only)
-const W_SMOOTH_CONC = Ref{FloatType}(FloatType(0.5))    # realistic range = this fraction of the theoretical max (auto-knee only)
-const W_SMOOTH_BETA = Ref{FloatType}(FloatType(1.0))    # FIXED β for the W softplus when auto-knee is OFF (the default)
-const W_SMOOTH_AUTO_KNEE = Ref{Bool}(false)             # false (default): use W_SMOOTH_BETA; true: derive β from band·conc·wmax (reweight-aware per-cell). AGB hinge is unaffected either way.
-@inline function _w_smooth(s::FloatType, gsp::Int, eco::Int)::FloatType
-  W_SOFTPLUS[] || return s
-  βc = W_SOFTPLUS_BETA_CELL[]
-  β = !isempty(βc) ? (@inbounds βc[gsp, eco]) : W_SOFTPLUS_BETA[]
+# ── Loss kernels. They read the run's options from `lp::LossParams` and the reference's normalisation from `sc::LossScales`; there is no
+# module-level loss state. All are `@inline`, branch on immutable fields, and allocate nothing.
+
+# Per-observation AGB hinge tolerance for an observed AGB level `obs`: pct > 0 ⇒ clamp(obs*pct, pct_min, pct_max), else the flat threshold.
+@inline _agb_hinge_thresh(lp::LossParams, obs::FloatType)::FloatType =
+  lp.agb_hinge_pct > zero(FloatType) ?
+    clamp(obs * lp.agb_hinge_pct, lp.agb_hinge_pct_min, lp.agb_hinge_pct_max) :
+    lp.agb_hinge_threshold
+# Exponent on the NORMALIZED AGB relative error (applied AFTER ÷scale, so it is (excess/scale)^p — a squared RATIO that stays comparable to
+# W's (W1/scale)^p; applying it to the raw excess pre-norm would reintroduce the scale gap).
+@inline _agb_pow(lp::LossParams, x::FloatType)::FloatType =
+  lp.agb_hinge_p == FloatType(2) ? x * x : lp.agb_hinge_p == one(FloatType) ? x : x^lp.agb_hinge_p
+# GLOBAL ratio-of-sums normalization: divide the ABSOLUTE per-term error by a single constant of the reference (Σ observed AGB; Σ per-reference-max W1).
+@inline _agb_norm(lp::LossParams, sc::LossScales, term::FloatType)::FloatType =
+  (lp.agb_normalize && sc.agb_global > zero(FloatType)) ? term / sc.agb_global : term
+@inline _w_norm(lp::LossParams, sc::LossScales, term::FloatType)::FloatType =
+  (lp.w_normalize && sc.w_global > zero(FloatType)) ? term / sc.w_global : term
+# Softplus smoothing of the per-term W1 (de-weights small shape errors smoothly), pedestal-subtracted so a perfect match (s=0) → 0. β is the
+# reweight-aware per-cell one when the reference has it (`sc.softplus_beta_cell`), else the scalar.
+@inline function _w_smooth(lp::LossParams, sc::LossScales, s::FloatType, gsp::Int, eco::Int)::FloatType
+  lp.w_softplus || return s
+  βc = sc.softplus_beta_cell
+  β = !isempty(βc) ? (@inbounds βc[gsp, eco]) : sc.softplus_beta
   β > zero(FloatType) || return s
   s + log1p(exp(-β * s)) / β - log(FloatType(2)) / β   # softplus_β(s) − log2/β  (0 at s=0, ≤ s)
 end
-# Exponent on the (normalized) W term — square it for aggression (W_P=2 ⇒ (W1/scale)²). Default 1 (L1).
-const W_P = Ref{FloatType}(FloatType(1.0))
-@inline _w_pow(x::FloatType)::FloatType = W_P[] == FloatType(2) ? x * x : (W_P[] == one(FloatType) ? x : x^W_P[])
+# Exponent on the (normalized) W term — square it for aggression (w_p=2 ⇒ (W1/scale)²). Default 1 (L1).
+@inline _w_pow(lp::LossParams, x::FloatType)::FloatType = lp.w_p == FloatType(2) ? x * x : (lp.w_p == one(FloatType) ? x : x^lp.w_p)
+# W "benefit of the doubt" tolerance for an observed binned biomass `obs`.
+@inline _w_hinge_thresh(lp::LossParams, obs::FloatType)::FloatType = clamp(obs * lp.w_hinge_pct, lp.w_hinge_pct_min, lp.w_hinge_pct_max)
+# Per-term finishers: with cell_norm the per-cell loss stores the RAW (softplus-W / hinge-AGB) error and the ÷scale, power and rank apply at
+# aggregation (`Pan._mo_objectives`); otherwise the global ÷scale and the power are applied here.
+@inline _w_finish(lp::LossParams, sc::LossScales, s::FloatType, gsp::Int, eco::Int)::FloatType =
+  lp.cell_norm ? _w_smooth(lp, sc, s, gsp, eco) : _w_pow(lp, _w_norm(lp, sc, _w_smooth(lp, sc, s, gsp, eco)))
+@inline _agb_finish(lp::LossParams, sc::LossScales, h::FloatType)::FloatType = lp.cell_norm ? h : _agb_pow(lp, _agb_norm(lp, sc, h))
 
-# W "benefit of the doubt" (Sim A only): BEFORE the age CDF, forgive each sim cohort's binned biomass TOWARD
-# the observed by up to _w_hinge_thresh(obs_i) g/m² — i.e. sim_i -= clamp(sim_i − obs_i, −t_i, +t_i), so inside
-# the band sim_i := obs_i and small per-cohort biomass errors don't perturb the age SHAPE. Threshold has the
-# same pct/min/max form as the AGB hinge. W_HINGE off ⇒ plain CDF (unchanged).
-const W_HINGE = Ref{Bool}(false)
-const W_HINGE_PCT = Ref{FloatType}(FloatType(0.01))       # default 1% of obs cohort biomass
-const W_HINGE_PCT_MIN = Ref{FloatType}(FloatType(2.0))    # floored at 2 g/m²
-const W_HINGE_PCT_MAX = Ref{FloatType}(FloatType(5.0))    # capped at 5 g/m²
-@inline _w_hinge_thresh(obs::FloatType)::FloatType = clamp(obs * W_HINGE_PCT[], W_HINGE_PCT_MIN[], W_HINGE_PCT_MAX[])
-
-# PER-CELL (eco×lu×sp) normalization. When on, the per-site/per-cell loss stores the RAW shape/level
-# error (softplus-W and hinge-AGB kept — they smooth per observation — but NOT the global ÷scale or the
-# power); the per-cell ÷scale, the power, and a rank rescale are applied at aggregation (_mo_objectives).
-# Each cell is normalized by its OWN reference magnitude (W: Σ per-ref-max W1; AGB: Σ observed AGB), so
-# every (eco,lu,sp) cell is judged on its own terms — but that makes a tiny catch-all cell as influential
-# as a dominant one, so each cell is then rescaled by RANKW = 1/log(rank+1) (rank by observed AGB across
-# all cells, normalized Σ=1): errors from more common species count more, noisy _GRP/_H/_S less.
-# Tables are [gsp, eco]; A and B keep separate scales (different references); RANKW is shared.
-const CELL_NORM   = Ref{Bool}(false)
-# Set true after the first (train) eval populates the RANK. The scales recompute per split (intensive
-# ratio-of-sums, so train/val share a scale anyway), but the rank is frozen from TRAIN so train and val
-# weight the same eco×lu×sp cells the same way (val is otherwise free to re-rank on its thinner split).
-const CELL_NORM_FREEZE = Ref{Bool}(false)
-# When true, fit_params SKIPS its per-eval _set_loss_scales! (the caller has set the reference-derived loss scales
-# once, serially). Candidate-parallel batches set this so concurrent evals don't race on the W_SCALE/AGB_SCALE/
-# RANKW globals (those scales are candidate-independent, so one serial computation before the batch is correct).
-const SCALES_LOCKED = Ref{Bool}(false)
-const W_SCALE_A   = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # Sim A: Σ per-ref-max W1
-const AGB_SCALE_A = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # Sim A: Σ observed AGB
-const W_SCALE_FACTOR = Ref{FloatType}(FloatType(1.0))                # multiplies W_SCALE_{A,B} (yaml w_scale_factor); <1 shrinks the divisor → amplifies the ΣW objective (rebalance vs AGB)
-const W_SCALE_B   = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # Sim B (tier-4 ref)
-const AGB_SCALE_B = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))
-const RANKW       = Ref{Matrix{FloatType}}(zeros(FloatType, 0, 0))   # 1/log(rank+1), Σ=1, rank by AGB
-const RANKW_MODE  = Ref{Symbol}(:rank)                               # :rank (1/√ln(rank) by AGB) or :cbal_pct (percentile-floored class-balanced by cohort count)
-const RANKW_BETA  = Ref{Float64}(0.999)                              # β for :cbal_pct RANKW (effective-number temper)
-const RANKW_PCT_FLOOR = Ref{Float64}(0.10)                           # cohort-count-share floor+grid for :cbal_pct RANKW (yaml rankw_pct_floor); species×strata twin of w_count_pct_floor
-const CELL_NCOH   = Ref{Matrix{Int}}(zeros(Int, 0, 0))               # per-(species,stratum) TRAIN cohort counts, for :cbal_pct RANKW
-
-# --- COUNT-BALANCE reweight: per-agebin W1 weight ∝ 1/effective-number-of-samples of the cohort COUNT in
-# that bin, to counteract survivorship (old bins are under-REPRESENTED, not under-massed). The count is
-# bucketed into deciles-of-total so n=1 vs n=2 (noise) don't split; the decile is the ENS exponent d, and
-# w = (1−β)/(1−β^d). Computed once from the TRAIN reference on the COARSE (age_idx) bins, frozen. Applied to
-# the W1 term WITHOUT changing the binning — Sim A (per-year grid) looks up the coarse bin via CBAL_COARSE.
-const CBAL_ON     = Ref{Bool}(false)                                 # yaml w_count_balance
-const CBAL_MODE   = Ref{Symbol}(:both)                               # :a (Sim A) / :b (Sim B) / :both
-const CBAL_BETA   = Ref{Float64}(0.99)                               # ENS temper; →1 ≈ 1/n, →0 ≈ uniform
-const CBAL_W      = Ref{Matrix{Vector{FloatType}}}(Matrix{Vector{FloatType}}(undef, 0, 0))  # [gsp,eco]→weight per coarse bin
-const CBAL_COARSE = Ref{Vector{Int}}(Int[])                          # Sim-A per-year bin k → coarse (age_idx) bin
-@inline _w_finish(s::FloatType, gsp::Int, eco::Int)::FloatType = CELL_NORM[] ? _w_smooth(s, gsp, eco) : _w_pow(_w_norm(_w_smooth(s, gsp, eco)))
-@inline _agb_finish(h::FloatType)::FloatType = CELL_NORM[] ? h            : _agb_pow(_agb_norm(h))
-
-# Median-pivoted piecewise (applied to the AGGREGATE ΣW, ΣAGB in get_total_loss): f(x) = sqrt(x/m) if
-# x<m else (x/m)². Pivot m = per-objective median (W_PIVOT/AGB_PIVOT). Lifts better-than-typical (sqrt,
-# avoids suppressing small) and aggressively penalizes worse-than-typical (square); both objectives
-# centered at 1 ⇒ comparable. LOSS_PIECEWISE toggles it.
-const LOSS_PIECEWISE = Ref{Bool}(false)
-const W_PIVOT = Ref{FloatType}(FloatType(1.0))
-const AGB_PIVOT = Ref{FloatType}(FloatType(1.0))
+# Median-pivoted piecewise (applied to the AGGREGATE ΣW, ΣAGB in get_total_loss): f(x) = sqrt(x/m) if x<m else (x/m)². Pivot m = per-objective
+# median (w_pivot/agb_pivot). Lifts better-than-typical (sqrt, avoids suppressing small) and aggressively penalizes worse-than-typical (square).
 @inline function _piecewise(x::FloatType, m::FloatType)::FloatType
   m <= zero(FloatType) && return x
   r = x / m
   r < one(FloatType) ? sqrt(r) : r * r
 end
-# Softplus (smooth ReLU) replacing the hard hinge max(0,x), so the loss surface isn't sharp at the band
-# edge: the hinge max(0, |sim-obs| - thresh(obs))^p becomes softplus(|sim-obs| - thresh(obs))^p. β is a
-# CONSTANT sharpness (it does NOT depend on the threshold); the knee LOCATION is set by the argument
-# x = |sim-obs| - thresh(obs), so it sits at deviation = thresh. In-band leakage is ≈ e^(-β·thresh)/β,
-# negligible for thresh ≳ a few. Knee width ~1/β (AGB units). β ≤ 0 ⇒ the hard ReLU. Stable form.
-const AGB_HINGE_BETA = Ref{FloatType}(FloatType(1.0))
-@inline function _hinge_relu(x::FloatType)::FloatType
-  β = AGB_HINGE_BETA[]
+# Softplus (smooth ReLU) replacing the hard hinge max(0,x), so the loss surface isn't sharp at the band edge: max(0, |sim-obs| - thresh(obs))^p
+# becomes softplus(|sim-obs| - thresh(obs))^p. β is a CONSTANT sharpness (agb_hinge_beta); β ≤ 0 ⇒ the hard ReLU. Stable form.
+@inline function _hinge_relu(lp::LossParams, x::FloatType)::FloatType
+  β = lp.agb_hinge_beta
   β <= zero(FloatType) && return max(zero(FloatType), x)
   return max(zero(FloatType), x) + log1p(exp(-β * abs(x))) / β
 end
 
-@inline function get_total_loss(loss::SiteLoss, alpha::FloatType=LOSS_ALPHA[], beta::FloatType=FloatType(1.0f0))::FloatType
+@inline function get_total_loss(loss::SiteLoss, lp::LossParams, beta::FloatType=FloatType(1.0f0))::FloatType
+  alpha = lp.loss_alpha
   # sp_w_loss = age-distribution SHAPE (W1, AGB-invariant); sp_agb_loss = AGB LEVEL.
   # When normalizing, each sp_* term is already ÷ its global scale → the sum IS the intensive ratio-of-sums
   # (Σabs/Σref), so skip the /num_obs averaging; otherwise average per measurement as before.
-  if LOSS_PIECEWISE[]   # median-pivoted piecewise on the aggregates → W & AGB centered at 1, comparable
-    return alpha * _piecewise(sum(loss.sp_w_loss), W_PIVOT[]) + beta * _piecewise(sum(loss.sp_agb_loss), AGB_PIVOT[])
+  if lp.loss_piecewise   # median-pivoted piecewise on the aggregates → W & AGB centered at 1, comparable
+    return alpha * _piecewise(sum(loss.sp_w_loss), lp.w_pivot) + beta * _piecewise(sum(loss.sp_agb_loss), lp.agb_pivot)
   end
-  denom = (W_NORMALIZE[] || AGB_NORMALIZE[]) ? one(FloatType) : FloatType(loss.num_obs)
+  denom = (lp.w_normalize || lp.agb_normalize) ? one(FloatType) : FloatType(loss.num_obs)
   return (alpha * sum(loss.sp_w_loss) + beta * sum(loss.sp_agb_loss)) / denom
 end
-@inline Base.convert(::Type{Float64}, a::SiteLoss) = Float64(get_total_loss(a))
-#@inline Base.promote_rule(::Type{SiteLoss}, ::Type{Float64}) = Float64
 
 #StructTypes.StructType(::Type{SAState}) = StructTypes.Struct()
 #StructTypes.StructType(::Type{SACandidate}) = StructTypes.Struct()
@@ -448,10 +437,10 @@ end
 # bin (sim_i -= clamp(sim_i − obs_i, −t, t)), THEN cumsum + normalize → CDF. obs_bin = rec.sp_age_agb (absolute
 # binned obs). Uses raw (unsmoothed) binning so the ±band stays in absolute g/m² — for smoothing_window_size=1
 # (this config) that equals smoothen_bin_cdf's binning; with age-smoothing on, the forgiveness path stays unsmoothed.
-@inline function smoothen_bin_cdf_forgive(p, obs_bin; age_bins::AgeBins)::Vector{FloatType}
+@inline function smoothen_bin_cdf_forgive(p, obs_bin, lp::LossParams; age_bins::AgeBins)::Vector{FloatType}
   pc_bin = bin_ages(p; age_bins=age_bins.bins_idx, last_bin_open=age_bins.last_bin_open)
   @inbounds for i in eachindex(pc_bin)
-    t = _w_hinge_thresh(obs_bin[i])
+    t = _w_hinge_thresh(lp, obs_bin[i])
     pc_bin[i] -= clamp(pc_bin[i] - obs_bin[i], -t, t)
     pc_bin[i] < zero(FloatType) && (pc_bin[i] = zero(FloatType))
   end
@@ -550,12 +539,12 @@ end
 
 
 # Weighted W1(L1) sum over bins. `sim_cdf===nothing` ⇒ sim absent (|0−ref| = ref). Applies the count-balance
-# weight for Sim A (tier-3) when enabled and MODE∈{:a,:both}: per-year bin k → coarse bin CBAL_COARSE[k].
-@inline function _w1_sum(ref_cdf, sim_cdf, bw, gsp::Int, eco::Int)::FloatType
-  use = CBAL_ON[] && CBAL_MODE[] !== :b && !isempty(CBAL_W[])
+# weight for Sim A (tier-3) when enabled and MODE∈{:a,:both}: per-year bin k → coarse bin sc.cbal.coarse[k].
+@inline function _w1_sum(lp::LossParams, sc::LossScales, ref_cdf, sim_cdf, bw, gsp::Int, eco::Int)::FloatType
+  use = lp.cbal_on && lp.cbal_mode !== :b && !isempty(sc.cbal.w)
   s = zero(FloatType)
   if use
-    w = @inbounds CBAL_W[][gsp, eco]; coarse = CBAL_COARSE[]
+    w = @inbounds sc.cbal.w[gsp, eco]; coarse = sc.cbal.coarse
     @inbounds for k in eachindex(bw)
       d = sim_cdf === nothing ? ref_cdf[k] : abs(sim_cdf[k] - ref_cdf[k])
       s += w[coarse[k]] * bw[k] * d
@@ -569,9 +558,9 @@ end
   return s
 end
 
-# Build CBAL_W (per gsp×eco weight over COARSE age_idx bins) + CBAL_COARSE (per-year→coarse map) from the
-# TRAIN reference cohort records. Frozen after this call (call once at setup, like RANKW).
-function _set_cbal_weights!(splots, coarse_bins::AgeBins, per_year_bins::AgeBins, eco_species_ids, n_species::Int; beta::Float64, pct_floor::Float64=0.10)
+# Build the count-balance tables (per gsp×eco weight over COARSE age_idx bins + per-year→coarse map) from the TRAIN reference cohort records.
+# Returns a CbalTables, built once at setup and shared (frozen) by every reference of the run.
+function build_cbal_tables(splots, coarse_bins::AgeBins, per_year_bins::AgeBins, eco_species_ids, n_species::Int; beta::Float64, pct_floor::Float64=0.10)::CbalTables
   ne = length(eco_species_ids)
   nb = length(coarse_bins.bins_idx) + (coarse_bins.last_bin_open ? 1 : 0)
   counts = [zeros(Int, nb) for _ in 1:n_species, _ in 1:ne]
@@ -601,13 +590,12 @@ function _set_cbal_weights!(splots, coarse_bins::AgeBins, per_year_bins::AgeBins
     end
     W[gsp, eco] = w
   end
-  CBAL_W[] = W
   # map each Sim-A W bin k to its coarse age_idx bin via the bin's upper age edge (works for per-year OR coarse)
-  CBAL_COARSE[] = [find_age_bin(per_year_bins.bins_idx[k] - 1, coarse_bins) for k in eachindex(per_year_bins.bin_widths)]
-  return nothing
+  coarse = [find_age_bin(per_year_bins.bins_idx[k] - 1, coarse_bins) for k in eachindex(per_year_bins.bin_widths)]
+  return CbalTables(W, coarse)
 end
 
-@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, sp_w_loss, sp_agb_loss, site_agb_loss, lp::FloatType=one(FloatType), debug::Bool=false)
+@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, scales, sp_w_loss, sp_agb_loss, site_agb_loss, lp::FloatType=one(FloatType), debug::Bool=false)
   sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
   #log_diff = log10(1 + sim_agb_sum) #+ loss_params.EPS)
   sp_agb_loss[gsp] = sim_agb_sum
@@ -618,15 +606,15 @@ end
     for a in @view p[sp_start_idx:sp_end_idx]
       ages[UIntType(site.c_age[a])] += site.c_bio[a]
     end
-    sim_age_cdf = W_HINGE[] ?   # ±band "benefit of the doubt": forgive sim toward obs before the CDF (Sim A)
-      smoothen_bin_cdf_forgive(ages, rec.sp_age_agb; age_bins=loss_params.age_bins) :
+    sim_age_cdf = loss_params.w_hinge ?   # ±band "benefit of the doubt": forgive sim toward obs before the CDF (Sim A)
+      smoothen_bin_cdf_forgive(ages, rec.sp_age_agb, loss_params; age_bins=loss_params.age_bins) :
       smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
     #@assert !any(isnan.(sim_age_cdf)) "cdf NaN"
     #@assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
     let bw = loss_params.age_bins.bin_widths
       # W1 (L1) on the NORMALIZED age CDF → distribution SHAPE only (÷ global W_SCALE), optionally
       # count-balance-reweighted per coarse age bin (CBAL) to counteract survivorship under-representation.
-      sp_w_loss[gsp] = _w_finish(_w1_sum(rec.sp_age_cdf, sim_age_cdf, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))
+      sp_w_loss[gsp] = _w_finish(loss_params, scales, _w1_sum(loss_params, scales, rec.sp_age_cdf, sim_age_cdf, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))
     end
     #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
     # PER-COHORT AGB term (weighted by lambda): for each age bin i, softplus_β(|sim_i − obs_i| − thresh_i)^p,
@@ -635,11 +623,11 @@ end
     # ^p is identity, so the per-bin _agb_pow and the downstream one are both no-ops). Fallback = Σ_i sqrt-diff².
     sim_agb_bins = bin_ages(ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
     agb_acc = zero(FloatType)
-    if AGB_HINGE[]
+    if loss_params.agb_hinge
       @inbounds for i in eachindex(rec.sp_age_agb)
-        agb_acc += _agb_pow(_hinge_relu(abs(sim_agb_bins[i] - rec.sp_age_agb[i]) - _agb_hinge_thresh(rec.sp_age_agb[i])))
+        agb_acc += _agb_pow(loss_params, _hinge_relu(loss_params, abs(sim_agb_bins[i] - rec.sp_age_agb[i]) - _agb_hinge_thresh(loss_params, rec.sp_age_agb[i])))
       end
-      sp_agb_loss[gsp] = loss_params.lambda * _agb_finish(agb_acc)
+      sp_agb_loss[gsp] = loss_params.lambda * _agb_finish(loss_params, scales, agb_acc)
     else
       @inbounds for i in eachindex(rec.sp_age_agb)
         agb_acc += (sqrt(max(sim_agb_bins[i], zero(FloatType))) - sqrt(max(rec.sp_age_agb[i], zero(FloatType))))^2
@@ -689,7 +677,7 @@ function _excl_perm!(perm::Vector{Int}, site, excl_c)::Int
   n
 end
 
-function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams; lp::FloatType=one(FloatType), debug::Bool=false, excluded::Union{Nothing,Set{UIntType}}=nothing, excl_c::Union{Nothing,Vector{Tuple{UIntType,FloatType}}}=nothing)::SiteLoss
+function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams, scales::LossScales; lp::FloatType=one(FloatType), debug::Bool=false, excluded::Union{Nothing,Set{UIntType}}=nothing, excl_c::Union{Nothing,Vector{Tuple{UIntType,FloatType}}}=nothing)::SiteLoss
   # `excluded`: eco-species (local sp index) to SKIP from this site's loss at this year — used by the
   # disturbance exclude-modes (a partially-disturbed cohort the growth model can't fairly reproduce).
   _excl(sp) = excluded !== nothing && UIntType(sp) in excluded
@@ -744,7 +732,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
         if !_excl(prev_sp)
           site_agb_loss = calculate_species_loss!(; sp=prev_sp, gsp=species_id_map[prev_sp],
             site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-            spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
+            spdf_plt=spdf_plt, loss_params=loss_params, scales=scales, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
         end
         prev_sp = sp
         sp_start_idx = i
@@ -757,7 +745,7 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
         if !_excl(sp)
           site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
             site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-            spdf_plt=spdf_plt, loss_params=loss_params, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
+            spdf_plt=spdf_plt, loss_params=loss_params, scales=scales, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
         end
       end
     end
@@ -770,14 +758,14 @@ function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int,
     # Species present in REF but absent in SIM: sim CDF = 0, sim AGB = 0.
     # Shape penalty = full ref CDF²; level penalty = (sqrt(ref AGB))² = ref AGB (sim sqrt = 0).
     let bw = loss_params.age_bins.bin_widths
-      sp_w_loss[gsp] = _w_finish(_w1_sum(rec.sp_age_cdf, nothing, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))  # sim absent → |0−ref|=ref
+      sp_w_loss[gsp] = _w_finish(loss_params, scales, _w1_sum(loss_params, scales, rec.sp_age_cdf, nothing, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))  # sim absent → |0−ref|=ref
     end
-    if AGB_HINGE[]   # per-cohort, sim_i = 0 ⇒ |sim_i − obs_i| = obs_i = rec.sp_age_agb[i]
+    if loss_params.agb_hinge   # per-cohort, sim_i = 0 ⇒ |sim_i − obs_i| = obs_i = rec.sp_age_agb[i]
       agb_acc0 = zero(FloatType)
       @inbounds for i in eachindex(rec.sp_age_agb)
-        agb_acc0 += _agb_pow(_hinge_relu(rec.sp_age_agb[i] - _agb_hinge_thresh(rec.sp_age_agb[i])))
+        agb_acc0 += _agb_pow(loss_params, _hinge_relu(loss_params, rec.sp_age_agb[i] - _agb_hinge_thresh(loss_params, rec.sp_age_agb[i])))
       end
-      sp_agb_loss[gsp] = loss_params.lambda * _agb_finish(agb_acc0)
+      sp_agb_loss[gsp] = loss_params.lambda * _agb_finish(loss_params, scales, agb_acc0)
     else
       sp_agb_loss[gsp] = loss_params.lambda * rec.sp_agb_sum   # Σ_i (√obs_i)² = Σ_i obs_i = ref total
     end
@@ -856,10 +844,10 @@ end
 
 # In-place smoothen_bin_cdf_forgive: bins `p` into `cdf`, applies the ±band forgiveness toward `obs_bin`, then
 # turns it into a normalized CDF in place. Bit-identical to smoothen_bin_cdf_forgive.
-@inline function smoothen_bin_cdf_forgive!(cdf::Vector{FloatType}, p::AbstractVector{FloatType}, obs_bin; age_bins::AgeBins)
+@inline function smoothen_bin_cdf_forgive!(cdf::Vector{FloatType}, p::AbstractVector{FloatType}, obs_bin, lp::LossParams; age_bins::AgeBins)
   bin_ages!(cdf, p; age_bins=age_bins.bins_idx, last_bin_open=age_bins.last_bin_open)
   @inbounds for i in eachindex(cdf)
-    t = _w_hinge_thresh(obs_bin[i])
+    t = _w_hinge_thresh(lp, obs_bin[i])
     cdf[i] -= clamp(cdf[i] - obs_bin[i], -t, t)
     cdf[i] < zero(FloatType) && (cdf[i] = zero(FloatType))
   end
@@ -871,7 +859,7 @@ end
 # Accumulating per-species loss: adds this species' (W, AGB) loss into w_acc[gsp]/agb_acc[gsp] and returns the
 # updated running site_agb_loss. `ages` (site-level, length max_age) is zeroed and refilled here; `cdf`/`agb_bins`
 # are per-thread bin-sized scratch. Mirrors calculate_species_loss! exactly.
-@inline function calculate_species_loss_acc!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params,
+@inline function calculate_species_loss_acc!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, scales,
     w_acc, agb_acc, site_agb_loss, cdf, agb_bins, lp::FloatType=one(FloatType))
   sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
   agb_val = sim_agb_sum
@@ -883,21 +871,21 @@ end
     @inbounds for a in @view p[sp_start_idx:sp_end_idx]
       ages[UIntType(site.c_age[a])] += site.c_bio[a]
     end
-    if W_HINGE[]   # ±band "benefit of the doubt" (Sim A) — allocation-free forgive path
-      sim_age_cdf = smoothen_bin_cdf_forgive!(cdf, ages, rec.sp_age_agb; age_bins=loss_params.age_bins)
+    if loss_params.w_hinge   # ±band "benefit of the doubt" (Sim A) — allocation-free forgive path
+      sim_age_cdf = smoothen_bin_cdf_forgive!(cdf, ages, rec.sp_age_agb, loss_params; age_bins=loss_params.age_bins)
     else           # non-hinge path is rare (config uses w_hinge) — keep the allocating helper
       sim_age_cdf = smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
     end
     let bw = loss_params.age_bins.bin_widths
-      w_val = _w_finish(_w1_sum(rec.sp_age_cdf, sim_age_cdf, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))
+      w_val = _w_finish(loss_params, scales, _w1_sum(loss_params, scales, rec.sp_age_cdf, sim_age_cdf, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))
     end
     bin_ages!(agb_bins, ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
     acc = zero(FloatType)
-    if AGB_HINGE[]
+    if loss_params.agb_hinge
       @inbounds for i in eachindex(rec.sp_age_agb)
-        acc += _agb_pow(_hinge_relu(abs(agb_bins[i] - rec.sp_age_agb[i]) - _agb_hinge_thresh(rec.sp_age_agb[i])))
+        acc += _agb_pow(loss_params, _hinge_relu(loss_params, abs(agb_bins[i] - rec.sp_age_agb[i]) - _agb_hinge_thresh(loss_params, rec.sp_age_agb[i])))
       end
-      agb_val = loss_params.lambda * _agb_finish(acc)
+      agb_val = loss_params.lambda * _agb_finish(loss_params, scales, acc)
     else
       @inbounds for i in eachindex(rec.sp_age_agb)
         acc += (sqrt(max(agb_bins[i], zero(FloatType))) - sqrt(max(rec.sp_age_agb[i], zero(FloatType))))^2
@@ -915,7 +903,7 @@ end
 # w_acc/agb_acc, and returns this site's |site_agb_loss| (the caller adds it to eco3_site_agb and bumps obs).
 # `perm`/`ages`/`insite`/`cdf`/`agb_bins` are per-thread scratch (resized in place). Mirrors calculate_site_loss2.
 function calculate_site_loss2_acc!(w_acc::Vector{FloatType}, agb_acc::Vector{FloatType}, current_year::Int, site::SiteView,
-    n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams,
+    n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams, scales::LossScales,
     perm::Vector{Int}, ages::Vector{FloatType}, insite::Vector{Bool}, cdf::Vector{FloatType}, agb_bins::Vector{FloatType};
     lp::FloatType=one(FloatType), excluded::Union{Nothing,Set{UIntType}}=nothing, excl_c::Union{Nothing,Vector{Tuple{UIntType,FloatType}}}=nothing)::FloatType
   _excl(sp) = excluded !== nothing && UIntType(sp) in excluded
@@ -946,7 +934,7 @@ function calculate_site_loss2_acc!(w_acc::Vector{FloatType}, agb_acc::Vector{Flo
         if !_excl(prev_sp)
           site_agb_loss = calculate_species_loss_acc!(; sp=prev_sp, gsp=species_id_map[prev_sp],
             site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-            spdf_plt=spdf_plt, loss_params=loss_params, w_acc=w_acc, agb_acc=agb_acc,
+            spdf_plt=spdf_plt, loss_params=loss_params, scales=scales, w_acc=w_acc, agb_acc=agb_acc,
             site_agb_loss=site_agb_loss, cdf=cdf, agb_bins=agb_bins, lp=lp)
         end
         prev_sp = sp
@@ -957,7 +945,7 @@ function calculate_site_loss2_acc!(w_acc::Vector{FloatType}, agb_acc::Vector{Flo
         if !_excl(sp)
           site_agb_loss = calculate_species_loss_acc!(; sp=sp, gsp=species_id_map[sp],
             site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-            spdf_plt=spdf_plt, loss_params=loss_params, w_acc=w_acc, agb_acc=agb_acc,
+            spdf_plt=spdf_plt, loss_params=loss_params, scales=scales, w_acc=w_acc, agb_acc=agb_acc,
             site_agb_loss=site_agb_loss, cdf=cdf, agb_bins=agb_bins, lp=lp)
         end
       end
@@ -971,14 +959,14 @@ function calculate_site_loss2_acc!(w_acc::Vector{FloatType}, agb_acc::Vector{Flo
     rec = spdf_plt.records[UIntType(sp)]
     gsp = species_id_map[sp]
     let bw = loss_params.age_bins.bin_widths
-      w_acc[gsp] += _w_finish(_w1_sum(rec.sp_age_cdf, nothing, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))
+      w_acc[gsp] += _w_finish(loss_params, scales, _w1_sum(loss_params, scales, rec.sp_age_cdf, nothing, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))
     end
-    if AGB_HINGE[]
+    if loss_params.agb_hinge
       agb_acc0 = zero(FloatType)
       for i in eachindex(rec.sp_age_agb)
-        agb_acc0 += _agb_pow(_hinge_relu(rec.sp_age_agb[i] - _agb_hinge_thresh(rec.sp_age_agb[i])))
+        agb_acc0 += _agb_pow(loss_params, _hinge_relu(loss_params, rec.sp_age_agb[i] - _agb_hinge_thresh(loss_params, rec.sp_age_agb[i])))
       end
-      agb_acc[gsp] += loss_params.lambda * _agb_finish(agb_acc0)
+      agb_acc[gsp] += loss_params.lambda * _agb_finish(loss_params, scales, agb_acc0)
     else
       agb_acc[gsp] += loss_params.lambda * rec.sp_agb_sum
     end

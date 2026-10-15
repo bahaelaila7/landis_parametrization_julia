@@ -54,8 +54,8 @@ gt_obs = let d0 = Date(2000, 1, 1)
   P.Data.make_spdf_dict(PU.smoothen_ref_years(df, lp, 60), esids)[(UI(1), UI(1))][5]
 end
 soa_all = site_with([(1, 40, 100.0), (1, 20, 70.0)]); soa_surv = site_with([(1, 40, 100.0)])
-w_all = PU.calculate_site_loss2(5, P.getsite(soa_all, 1), 2, esids, gt_obs, lp).sp_w_loss[1]
-w_surv = PU.calculate_site_loss2(5, P.getsite(soa_surv, 1), 2, esids, gt_obs, lp).sp_w_loss[1]
+w_all = PU.calculate_site_loss2(5, P.getsite(soa_all, 1), 2, esids, gt_obs, lp, PU.LossScales()).sp_w_loss[1]
+w_surv = PU.calculate_site_loss2(5, P.getsite(soa_surv, 1), 2, esids, gt_obs, lp, PU.LossScales()).sp_w_loss[1]
 @check w_all > 1e-3 && abs(w_surv) < 1e-6 "W with the natural-death cohort = $w_all > 0; survivors only = $w_surv ≈ 0"
 # simplex lattice
 g4 = GD.simplex_weights(4)

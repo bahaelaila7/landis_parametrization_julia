@@ -42,16 +42,16 @@ bw = lp.age_bins.bin_widths
 ref = cdf_of([(15, 100.0), (35, 300.0), (75, 200.0)])
 same = cdf_of([(15, 100.0), (35, 300.0), (75, 200.0)])
 shifted = cdf_of([(35, 100.0), (55, 300.0), (115, 200.0)])
-w_same = PU._w1_sum(ref, same, bw, 1, 1); w_shift = PU._w1_sum(ref, shifted, bw, 1, 1); w_absent = PU._w1_sum(ref, nothing, bw, 1, 1)
+sc = PU.LossScales()
+w_same = PU._w1_sum(lp, sc, ref, same, bw, 1, 1); w_shift = PU._w1_sum(lp, sc, ref, shifted, bw, 1, 1); w_absent = PU._w1_sum(lp, sc, ref, nothing, bw, 1, 1)
 @check w_same == 0 "W1 = 0 when the sim age structure equals the reference"
 @check w_shift > 0 && w_absent > 0 "W1 > 0 when the age distribution shifts / the species is absent ($w_shift, $w_absent)"
 
-# group aggregation (ratio of sums over the group's cells; non-CELL_NORM: / visits)
-PU.CELL_NORM[] = false
+# group aggregation (ratio of sums over the group's cells; non-cell_norm: / visits)
 num = [[0.0, 2.0], [4.0]]; den = [[2.0, 2.0], [4.0]]
-w = P._gd_group_w(num, den, [[(1, 1), (1, 2)], [(2, 1)], Tuple{Int,Int}[]])
+w = P._gd_group_w(num, den, [[(1, 1), (1, 2)], [(2, 1)], Tuple{Int,Int}[]], lp)
 @check isapprox(w[1], 0.5) && isapprox(w[2], 1.0) && isnan(w[3]) "group W = Σnum/Σden over the group's cells (NaN without visits): $w"
-@check all(P._gd_group_w([[0.0, 0.0], [0.0]], den, [[(1, 1), (1, 2)], [(2, 1)]]) .== 0.0) "group W = 0 when every cell's W1 is 0"
+@check all(P._gd_group_w([[0.0, 0.0], [0.0]], den, [[(1, 1), (1, 2)], [(2, 1)]], lp) .== 0.0) "group W = 0 when every cell's W1 is 0"
 
 # ---- GDIgel scalarization / block score / weights ----
 @check GD.mo_lambdas(5) == [0.0, 0.25, 0.5, 0.75, 1.0] && GD.mo_lambdas(1) == [0.5] "uniform λ grid"

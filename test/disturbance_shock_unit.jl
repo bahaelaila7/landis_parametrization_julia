@@ -71,7 +71,7 @@ function full_ref(rows)    # rows = [(sp, age, agb)] observed at sim_year 5 -> S
 end
 wloss(soa, gt, excl_c) = begin
   site = P.getsite(soa, 1)
-  PU.calculate_site_loss2(5, site, 2, esids, gt, lp; excl_c=excl_c).sp_w_loss[1]
+  PU.calculate_site_loss2(5, site, 2, esids, gt, lp, PU.LossScales(); excl_c=excl_c).sp_w_loss[1]
 end
 # observed at T=5: (sp1,40) 100 undisturbed, (sp1,20) 80 partially disturbed (drop .3). Sim: (40) matches obs, (20) is far off.
 P.OVERRIDE_INJECTION_DISTURBANCE[] = :exclude_overwrite
@@ -99,7 +99,7 @@ soa_b = site_with([(2, 30, 400.0)])
 # the acc! (tier-3) variant agrees
 let site = P.getsite(soa, 1), nsp = 2
   wacc = zeros(FT, nsp); aacc = zeros(FT, nsp)
-  PU.calculate_site_loss2_acc!(wacc, aacc, 5, site, nsp, esids, gt_alt, lp, Int[], FT[], Bool[], zeros(FT, 401), zeros(FT, 401); excl_c=plan.coh[5][1])
+  PU.calculate_site_loss2_acc!(wacc, aacc, 5, site, nsp, esids, gt_alt, lp, PU.LossScales(), Int[], FT[], Bool[], zeros(FT, 401), zeros(FT, 401); excl_c=plan.coh[5][1])
   @check abs(wacc[1]) < 1e-6 "tier-3 (acc!) cohort-level exclusion agrees: $(wacc[1])"
 end
 # recruits at entry: visit at year 2 has (sp1, age 37) only; at year 5: (sp1,40) [= 37 + 3 yr] and (sp1,20) [new] -> only (20) is a recruit

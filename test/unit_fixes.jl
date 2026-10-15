@@ -26,21 +26,14 @@ end
 
 @testset "B7 cbal_pct RANKW: a stratum without training cohorts gets weight 0, not NaN" begin
   PU = Pan.PU; FT = Pan.PanCore.FloatType
-  saved = (PU.RANKW_MODE[], PU.CELL_NCOH[], PU.RANKW[])
-  try
-    PU.RANKW_MODE[] = :cbal_pct
-    nc = zeros(Int, 4, 3); nc[1, 1] = 40; nc[2, 1] = 5; nc[3, 3] = 12   # eco 2 has species but no cohorts
-    PU.CELL_NCOH[] = nc
-    esids = [[1, 2], [1, 4], [3]]
-    Pan._set_rankw!(zeros(FT, 4, 3), esids; split_size=[10, 0, 4])
-    R = PU.RANKW[]
-    @test !any(isnan, R)
-    @test all(iszero, R[:, 2])
-    @test R[1, 1] > 0 && R[2, 1] > 0 && R[3, 3] > 0
-    @test sum(R) ≈ 1
-  finally
-    PU.RANKW_MODE[], PU.CELL_NCOH[], PU.RANKW[] = saved
-  end
+  lp = PU.LossParams(age_bins=PU.AgeBins(bins_idx=[10, 20], last_bin_open=true), smoothing_weights=FT[1], rankw_mode=:cbal_pct)
+  nc = zeros(Int, 4, 3); nc[1, 1] = 40; nc[2, 1] = 5; nc[3, 3] = 12   # eco 2 has species but no cohorts
+  esids = [[1, 2], [1, 4], [3]]
+  R = Pan._rankw(lp, zeros(FT, 4, 3), esids; split_size=[10, 0, 4], ncoh=nc)
+  @test !any(isnan, R)
+  @test all(iszero, R[:, 2])
+  @test R[1, 1] > 0 && R[2, 1] > 0 && R[3, 3] > 0
+  @test sum(R) ≈ 1
 end
 
 

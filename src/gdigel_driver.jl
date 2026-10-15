@@ -141,7 +141,7 @@ end
 # of the per-species W1 age-CDF distance (calculate_species_loss_acc!: `_w_finish(_w1_sum(...))`). One (eco, eco-species) CELL
 # is one (e, j) with gsp = eco_species_ids[e][j]; a group is a set of cells (`cell_group`). The group value is the
 # ratio-of-sums with the SAME normalisation the main loss applies per cell:
-#   CELL_NORM (cell_normalize: true; GA+FL configs): w_g = _w_pow( Σ_cells sp_w_loss / Σ_cells W_SCALE_A )   (W_SCALE_A[gsp,e] =
+#   cell_norm (cell_normalize: true; GA+FL configs): w_g = _w_pow( Σ_cells sp_w_loss / Σ_cells W_cell )   (LossScales.w_cell[gsp,e] =
 #       Σ over the cell's reference visits of the per-reference-max W1 × w_scale_factor, i.e. what `_mo_objectives` divides by;
 #       the RANKW stratum weights are NOT applied — they weight the loss, not the accuracy of a group)
 #   otherwise: w_g = Σ_cells sp_w_loss / (# scored visits with a reference record for the cells)  (the plain visit mean)
@@ -155,9 +155,9 @@ function _gd_cell_visits(spdf_plts, eco_species_ids, first_year::Int)
   end
   nv
 end
-"Per-cell (numerator, denominator) of the W term for ONE evaluation: num[e][j] = sp_w_loss, den[e][j] = W_SCALE_A or visit count."
-function _gd_cell_w(eco_losses, eco_species_ids, nvis)
-  ne = length(eco_species_ids); cell = PU.CELL_NORM[]; Ws = PU.W_SCALE_A[]
+"Per-cell (numerator, denominator) of the W term for ONE evaluation: num[e][j] = sp_w_loss, den[e][j] = the reference's W cell scale or visit count."
+function _gd_cell_w(eco_losses, eco_species_ids, nvis, lp::PU.LossParams, scales::PU.LossScales)
+  ne = length(eco_species_ids); cell = lp.cell_norm; Ws = scales.w_cell
   num = [zeros(length(ids)) for ids in eco_species_ids]; den = [zeros(length(ids)) for ids in eco_species_ids]
   for e in 1:ne, (j, gsp) in enumerate(eco_species_ids[e])
     num[e][j] = Float64(eco_losses[e].sp_w_loss[gsp])
@@ -166,14 +166,14 @@ function _gd_cell_w(eco_losses, eco_species_ids, nvis)
   num, den
 end
 "Group values w_g from per-cell (num, den) — `groupcells[g]` is the vector of (e, j) cells of group g; NaN when the group has no reference visits."
-function _gd_group_w(num, den, groupcells::AbstractVector)
+function _gd_group_w(num, den, groupcells::AbstractVector, lp::PU.LossParams)
   w = fill(NaN, length(groupcells))
   for (g, cs) in enumerate(groupcells)
     nn = 0.0; dd = 0.0
     for (e, j) in cs; nn += num[e][j]; dd += den[e][j]; end
     dd > 0 || continue
     r = nn / dd
-    w[g] = PU.CELL_NORM[] ? Float64(PU._w_pow(FloatType(r))) : r
+    w[g] = lp.cell_norm ? Float64(PU._w_pow(lp, FloatType(r))) : r
   end
   w
 end
@@ -277,7 +277,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool,
     TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing,
     start_from::Union{Nothing,String}=nothing, n_reps::Int=1, no_establishment::Bool=false, injection_cohorts=nothing,
-    gd_opts::AbstractDict=Dict{String,Any}(), kw...)
+    gd_opts::AbstractDict=Dict{String,Any}(), scale_seed::PU.LossScales=PU.LossScales(), kw...)
   gd = resolve_gdigel(gd_opts)   # validated against GDIGEL_LIST, defaults filled (idempotent for a resolved dict)
   o(k) = gd[k]
   mu = o("mu"); σ0 = o("sigma0"); σstop = o("sigma_stop"); σmin = o("sigma_min")
@@ -320,6 +320,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   n_species = length(species_list)
   fixed_seeds = _fixed_seeds(rng, n_reps)
+  scales, _ = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, nothing, eco_species_ids, n_species)   # the TRAIN (Sim A) reference scales
   groupcells = _gd_groupcells(ix.cell_group, ix.ngroups)
   nvis = MO ? _gd_cell_visits(spdf_plts, eco_species_ids, spinup ? 0 : 1) : nothing
   ws_t = [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()]
@@ -328,12 +329,12 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     pp = dec(u)
     dacc = USE_D ? DeathAcc(eco_species_ids) : nothing
     r = fit_params(ref_soa, pp, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params;
-      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, work_soa=ws, cache_preinject=true, death_acc=dacc)
+      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales)
     _, _, k = _agg_reps(r)
     res = _gd_losses(ix, r[k][2]; size_weight=sw, min_pairs=min_pairs)
     MO || return res
-    num, den = _gd_cell_w(r[k][3], eco_species_ids, nvis)
-    w = _gd_group_w(num, den, groupcells)
+    num, den = _gd_cell_w(r[k][3], eco_species_ids, nvis, loss_params, scales)
+    w = _gd_group_w(num, den, groupcells, loss_params)
     if USE_D
       d = _gd_group_d(dacc, pp.PROB_MORT_SPP, eco_species_ids, groupcells)
       return merge(res, (w=w, d=d, fx=vcat(res.a, w)))
@@ -349,13 +350,10 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     out = Vector{Any}(undef, length(us))
     if PARALLEL_MODE[] == :candidate
       prev = PARALLEL_SITES[]; PARALLEL_SITES[] = false
-      # SERIAL first: set the reference-derived loss scales / freeze RANKW once, then lock them for the batch (no race on the scale globals,
-      # as in the Igel driver). :static — the work SoA (and the PnET scratch pool) are indexed by threadid, which :dynamic tasks may not keep.
-      _set_loss_scales!(search_tier, spdf_plts, nothing, loss_params, eco_species_ids, n_species)
-      PU.SCALES_LOCKED[] = true
+      # :static — the work SoA (and the PnET scratch pool) are indexed by threadid, which :dynamic tasks may not keep.
       try
         Threads.@threads :static for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[Threads.threadid()]); end
-      finally; PU.SCALES_LOCKED[] = false; PARALLEL_SITES[] = prev; end
+      finally; PARALLEL_SITES[] = prev; end
     else
       for k in eachindex(us); out[k] = ev(us[k]; ws=ws_t[1]); end
     end

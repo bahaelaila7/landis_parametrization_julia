@@ -10,21 +10,7 @@ const BaseSite = Pan.Plugins.BaseSitePlugin.BaseSite
 const BS = Pan.Plugins.BiomassSuccessionPlugin.BiomassSuccession
 const SoaBS = PC.SiteSoA{Tuple{BaseSite,BS}}
 
-# every option global the loss functions read; saved/restored around each combination
-const GLOBALS = (PU.LOSS_ALPHA, PU.AGB_HINGE, PU.AGB_HINGE_THRESHOLD, PU.AGB_HINGE_PCT, PU.AGB_HINGE_PCT_MIN, PU.AGB_HINGE_PCT_MAX, PU.AGB_HINGE_P, PU.AGB_HINGE_BETA,
-  PU.AGB_NORMALIZE, PU.AGB_SCALE, PU.W_NORMALIZE, PU.W_SCALE, PU.W_SOFTPLUS, PU.W_SOFTPLUS_BETA, PU.W_SOFTPLUS_BETA_CELL, PU.W_P, PU.W_HINGE, PU.W_HINGE_PCT,
-  PU.W_HINGE_PCT_MIN, PU.W_HINGE_PCT_MAX, PU.CELL_NORM, PU.LOSS_PIECEWISE, PU.W_PIVOT, PU.AGB_PIVOT, PU.CBAL_ON, PU.CBAL_MODE, PU.CBAL_W, PU.CBAL_COARSE)
-function with_opts(f; kw...)
-  saved = map(r -> r[], GLOBALS)
-  try
-    for (k, v) in kw
-      r = getfield(PU, k); r[] = convert(eltype(r), v)
-    end
-    return f()
-  finally
-    foreach((r, v) -> (r[] = v), GLOBALS, saved)
-  end
-end
+# The loss options are the fields of PU.LossParams (immutable, built per test); the reference normalisation is a PU.LossScales.
 
 # ---------------------------------------------------------------- synthetic site + reference
 function make_site(rng; ncoh=10, nsp=3, ages_max=90, drop_species=Int[])
@@ -51,14 +37,14 @@ function make_ref(rng, lp::PU.LossParams; nsp=3, keys=[true, true, false], maxag
   end
   PU.SPDFGroundTruth(keys=BitVector(keys), records=recs)
 end
-lossparams(; bins=[10, 20, 40, 80], open=true, sw=1) = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=open),
-  smoothing_weights=sw == 1 ? FT[1] : PU.get_smoothing_window(smoothing_window=sw), lambda=FT(1.0))
+lossparams(; bins=[10, 20, 40, 80], open=true, sw=1, kw...) = PU.LossParams(; age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=open),
+  smoothing_weights=sw == 1 ? FT[1] : PU.get_smoothing_window(smoothing_window=sw), lambda=FT(1.0), kw...)
 
-function run_pair(soa, gt, lp; excluded=nothing, excl_c=nothing, nsp=3, esids=[[1, 2, 3]])
+function run_pair(soa, gt, lp, sc=PU.LossScales(); excluded=nothing, excl_c=nothing, nsp=3, esids=[[1, 2, 3]])
   site = PC.getsite(soa, 1)
-  L = PU.calculate_site_loss2(5, site, nsp, esids, gt, lp; excluded=excluded, excl_c=excl_c)
+  L = PU.calculate_site_loss2(5, site, nsp, esids, gt, lp, sc; excluded=excluded, excl_c=excl_c)
   w = zeros(FT, nsp); a = zeros(FT, nsp)
-  sag = PU.calculate_site_loss2_acc!(w, a, 5, site, nsp, esids, gt, lp, Int[], FT[], Bool[], FT[], FT[]; excluded=excluded, excl_c=excl_c)
+  sag = PU.calculate_site_loss2_acc!(w, a, 5, site, nsp, esids, gt, lp, sc, Int[], FT[], Bool[], FT[], FT[]; excluded=excluded, excl_c=excl_c)
   (L, w, a, sag)
 end
 
@@ -92,15 +78,13 @@ end
 
 @testset "smoothen_bin_cdf_forgive == smoothen_bin_cdf_forgive!" begin
   rng = Random.Xoshiro(2)
-  lp = lossparams(); ab = lp.age_bins
-  with_opts() do
-    for hp in (0.0, 0.05), tr in 1:20
-      PU.W_HINGE_PCT[] = FT(hp)
-      p = FT.(rand(rng, 100) .* 50); obs = FT.(rand(rng, 5) .* 800)
-      c1 = PU.smoothen_bin_cdf_forgive(p, obs; age_bins=ab); c2 = PU.smoothen_bin_cdf_forgive!(FT[], p, obs; age_bins=ab)
-      @test c1 == c2
-      @test issorted(c1) && (c1[end] == 1 || c1[end] == 0)
-    end
+  ab = lossparams().age_bins
+  for hp in (0.0, 0.05), tr in 1:20
+    lp = lossparams(; w_hinge_pct=FT(hp))
+    p = FT.(rand(rng, 100) .* 50); obs = FT.(rand(rng, 5) .* 800)
+    c1 = PU.smoothen_bin_cdf_forgive(p, obs, lp; age_bins=ab); c2 = PU.smoothen_bin_cdf_forgive!(FT[], p, obs, lp; age_bins=ab)
+    @test c1 == c2
+    @test issorted(c1) && (c1[end] == 1 || c1[end] == 0)
   end
 end
 
@@ -111,26 +95,22 @@ end
   setups = [(bins=[10, 20, 40, 80], open=true, sw=1), (bins=[10, 20, 40, 80], open=true, sw=3), (bins=[10, 20, 40, 80], open=false, sw=1),
             (bins=collect(2:60), open=true, sw=1)]    # last = "unbinned"-style per-year grid
   for st in setups, whinge in (false, true), ahinge in (false, true), softplus in (false, true), cbal in (false, true), cellnorm in (false, true)
-    lp = lossparams(; st...)
+    lp = lossparams(; st..., w_hinge=whinge, agb_hinge=ahinge, w_softplus=softplus, cbal_on=cbal, cell_norm=cellnorm,
+                    agb_hinge_p=ahinge ? FT(2) : FT(1), w_normalize=!cellnorm, agb_normalize=!cellnorm, w_p=FT(2))
     nb = length(lp.age_bins.bins_idx) + (lp.age_bins.last_bin_open ? 1 : 0)
-    opts = (W_HINGE=whinge, AGB_HINGE=ahinge, W_SOFTPLUS=softplus, W_SOFTPLUS_BETA=0.01, CBAL_ON=cbal, CELL_NORM=cellnorm,
-            AGB_HINGE_P=ahinge ? 2.0 : 1.0, W_NORMALIZE=!cellnorm, W_SCALE=3.0, AGB_NORMALIZE=!cellnorm, AGB_SCALE=1000.0, W_P=2.0)
-    with_opts(; opts...) do
-      if cbal   # coarse bins = lp's own bins (identity map), non-trivial weights per (gsp, eco)
-        PU.CBAL_W[] = reshape([FT.(0.5 .+ rand(rng, nb)) for _ in 1:3], 3, 1)
-        PU.CBAL_COARSE[] = collect(1:length(lp.age_bins.bin_widths))
-      end
-      for trial in 1:3
-        drop = trial == 2 ? [2] : Int[]                                  # trial 2: species 2 in REF but absent from SIM
-        soa = make_site(rng; ncoh=rand(rng, 4:14), drop_species=drop)
-        gt = make_ref(rng, lp; keys=trial == 3 ? [true, true, true] : [true, true, false])
-        L, w, a, sag = run_pair(soa, gt, lp)
-        @test L.sp_w_loss == w                                           # bit-identical (same arithmetic order)
-        @test L.sp_agb_loss == a
-        @test L.site_agb_loss == sag
-        @test L.num_sites == 1 && L.num_obs == 1
-        nchecked += 1
-      end
+    # cbal: coarse bins = lp's own bins (identity map), non-trivial weights per (gsp, eco)
+    cb = cbal ? PU.CbalTables(reshape([FT.(0.5 .+ rand(rng, nb)) for _ in 1:3], 3, 1), collect(1:length(lp.age_bins.bin_widths))) : PU.NO_CBAL
+    sc = PU.LossScales(w_global=FT(3), agb_global=FT(1000), softplus_beta=FT(0.01), cbal=cb)
+    for trial in 1:3
+      drop = trial == 2 ? [2] : Int[]                                  # trial 2: species 2 in REF but absent from SIM
+      soa = make_site(rng; ncoh=rand(rng, 4:14), drop_species=drop)
+      gt = make_ref(rng, lp; keys=trial == 3 ? [true, true, true] : [true, true, false])
+      L, w, a, sag = run_pair(soa, gt, lp, sc)
+      @test L.sp_w_loss == w                                           # bit-identical (same arithmetic order)
+      @test L.sp_agb_loss == a
+      @test L.site_agb_loss == sag
+      @test L.num_sites == 1 && L.num_obs == 1
+      nchecked += 1
     end
   end
   @test nchecked == length(setups) * 2^5 * 3
@@ -138,9 +118,9 @@ end
 
 @testset "excluded / excl_c / empty-site paths agree" begin
   rng = Random.Xoshiro(5)
-  lp = lossparams()
   for whinge in (false, true), ahinge in (false, true)
-    with_opts(; W_HINGE=whinge, AGB_HINGE=ahinge) do
+    lp = lossparams(; w_hinge=whinge, agb_hinge=ahinge)
+    begin
       for trial in 1:6
         soa = make_site(rng; ncoh=10); gt = make_ref(rng, lp; keys=[true, true, true])
         s = PC.getsite(soa, 1)
@@ -176,46 +156,47 @@ end
   ages = zeros(FT, 100); ages[25] = 500
   rec = PU.SPDFRecord(sp_agb_sum=FT(500), sp_age_cdf=PU.smoothen_bin_cdf(ages; w=lp.smoothing_weights, age_bins=lp.age_bins), sp_age_agb=PU.bin_ages(ages; age_bins=lp.age_bins.bins_idx, last_bin_open=true))
   gt = PU.SPDFGroundTruth(keys=BitVector([true]), records=Dict(UT(1) => rec))
-  with_opts() do
-    L = PU.calculate_site_loss2(1, s, 1, [[1]], gt, lp)
+  sc0 = PU.LossScales()
+  begin
+    L = PU.calculate_site_loss2(1, s, 1, [[1]], gt, lp, sc0)
     @test L.sp_w_loss == FT[0] && L.sp_agb_loss == FT[0] && L.site_agb_loss == 0
     # sim cohort in the wrong age bin: W = |Δcdf|·width summed
     s.c_age[1] = FT(55)
-    L = PU.calculate_site_loss2(1, s, 1, [[1]], gt, lp)
+    L = PU.calculate_site_loss2(1, s, 1, [[1]], gt, lp, sc0)
     # cdf bins [10,20,40,80,open]; ref mass in bin 3 (age 25 -> bin [20,40)), sim in bin 4 ([40,80)): |ΔF| = 1 only in bin 3 => W = width3 = 20
     @test L.sp_w_loss[1] == FT(20)
     # AGB (non-hinge) term: per-bin (sqrt(sim) - sqrt(obs))^2 summed = 500 + 500
     @test L.sp_agb_loss[1] ≈ 1000 rtol = 1e-5
     # absent-from-sim species: W = Σ bw·ref_cdf, AGB loss = lambda · ref total
     s.live = 0
-    L = PU.calculate_site_loss2(1, s, 1, [[1]], gt, lp)
+    L = PU.calculate_site_loss2(1, s, 1, [[1]], gt, lp, sc0)
     @test L.sp_w_loss[1] == sum(lp.age_bins.bin_widths .* rec.sp_age_cdf[1:4]) && L.sp_agb_loss[1] == 500 && L.site_agb_loss == 500
     # lambda scales the AGB term only
     lp2 = PU.LossParams(age_bins=lp.age_bins, smoothing_weights=lp.smoothing_weights, lambda=FT(0.25))
-    L = PU.calculate_site_loss2(1, s, 1, [[1]], gt, lp2); @test L.sp_agb_loss[1] == 125
+    L = PU.calculate_site_loss2(1, s, 1, [[1]], gt, lp2, sc0); @test L.sp_agb_loss[1] == 125
   end
 end
 
 @testset "calculate_species_loss! == calculate_species_loss_acc! (direct)" begin
   rng = Random.Xoshiro(77)
   for sw in (1, 3), whinge in (false, true), ahinge in (false, true), trial in 1:4
-    lp = lossparams(; sw=sw)
-    with_opts(; W_HINGE=whinge, AGB_HINGE=ahinge, AGB_HINGE_P=2.0) do
+    lp = lossparams(; sw=sw, w_hinge=whinge, agb_hinge=ahinge, agb_hinge_p=FT(2)); sc = PU.LossScales()
+    begin
       soa = make_site(rng; ncoh=12); site = PC.getsite(soa, 1); gt = make_ref(rng, lp; keys=[true, false, true])
       p = sortperm(site.c_species); sp = site.c_species[p[1]]
       hi = findlast(==(sp), site.c_species[p])
       maxage = Int(ceil(maximum(site.c_age))) + (length(lp.smoothing_weights) >> 1)
       w1 = zeros(FT, 3); a1 = zeros(FT, 3)
-      sag1 = PU.calculate_species_loss!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp,
+      sag1 = PU.calculate_species_loss!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
         sp_w_loss=w1, sp_agb_loss=a1, site_agb_loss=FT(0))
       w2 = zeros(FT, 3); a2 = zeros(FT, 3)
-      sag2 = PU.calculate_species_loss_acc!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp,
+      sag2 = PU.calculate_species_loss_acc!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
         w_acc=w2, agb_acc=a2, site_agb_loss=FT(0), cdf=FT[], agb_bins=FT[])
       @test w1 == w2 && a1 == a2 && sag1 == sag2
       # DOCUMENTED DIFFERENCE: the reference ASSIGNS into the per-species slot, the _acc! variant ACCUMULATES (+=) — calling twice differs.
-      PU.calculate_species_loss_acc!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp,
+      PU.calculate_species_loss_acc!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
         w_acc=w2, agb_acc=a2, site_agb_loss=FT(0), cdf=FT[], agb_bins=FT[])
-      PU.calculate_species_loss!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp,
+      PU.calculate_species_loss!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
         sp_w_loss=w1, sp_agb_loss=a1, site_agb_loss=FT(0))
       @test a2 == 2 .* a1 && w2 == 2 .* w1
     end
@@ -224,58 +205,48 @@ end
 
 # ---------------------------------------------------------------- hinge, total loss, SiteLoss algebra
 @testset "_hinge_relu" begin
-  with_opts() do
-    PU.AGB_HINGE_BETA[] = FT(0)                       # beta <= 0 => hard ReLU
-    @test PU._hinge_relu(FT(3)) == 3 && PU._hinge_relu(FT(-2)) == 0 && PU._hinge_relu(FT(0)) == 0
-    PU.AGB_HINGE_BETA[] = FT(-5)
-    @test PU._hinge_relu(FT(3)) == 3 && PU._hinge_relu(FT(-2)) == 0
-    PU.AGB_HINGE_BETA[] = FT(1)                       # softplus_beta
-    h(x) = PU._hinge_relu(FT(x))
-    @test h(0) ≈ log(2) rtol = 1e-6                    # NOT 0 at the origin: softplus(0) = ln2/β
-    @test isapprox(h(20), 20; atol=1e-6)
-    @test isapprox(h(-20), 0; atol=1e-6)
-    @test isapprox(h(1), log1p(exp(1.0)); rtol=1e-6)
-    @test isapprox(h(-1), log1p(exp(-1.0)); rtol=1e-6)
-    @test h(1) - h(-1) ≈ 1 atol = 1e-6                 # softplus identity: sp(x) - sp(-x) = x
-    PU.AGB_HINGE_BETA[] = FT(4)
-    @test isapprox(h(0), log(2) / 4; rtol=1e-6)
-    @test isapprox(h(5), 5; atol=1e-3)
-    @test issorted(h.(-5:0.5:5))                       # monotone
-    # thresholds: flat vs pct-of-obs clamped to [min,max]
-    PU.AGB_HINGE_THRESHOLD[] = FT(10); PU.AGB_HINGE_PCT[] = FT(0)
-    @test PU._agb_hinge_thresh(FT(1000)) == 10
-    PU.AGB_HINGE_PCT[] = FT(0.04); PU.AGB_HINGE_PCT_MIN[] = FT(10); PU.AGB_HINGE_PCT_MAX[] = FT(200)
-    @test PU._agb_hinge_thresh(FT(100)) == 10 && PU._agb_hinge_thresh(FT(2000)) == 80 && PU._agb_hinge_thresh(FT(1e6)) == 200
-    @test PU._w_hinge_thresh(FT(100)) == 2 && PU._w_hinge_thresh(FT(300)) == 3 && PU._w_hinge_thresh(FT(1e5)) == 5   # default 1% clamped to [2,5]
-    # power helpers
-    PU.AGB_HINGE_P[] = FT(2); @test PU._agb_pow(FT(3)) == 9
-    PU.AGB_HINGE_P[] = FT(1); @test PU._agb_pow(FT(3)) == 3
-    PU.AGB_HINGE_P[] = FT(1.5); @test PU._agb_pow(FT(4)) ≈ 8
-  end
+  lpb(b) = lossparams(; agb_hinge_beta=FT(b))
+  @test PU._hinge_relu(lpb(0), FT(3)) == 3 && PU._hinge_relu(lpb(0), FT(-2)) == 0 && PU._hinge_relu(lpb(0), FT(0)) == 0   # beta <= 0 => hard ReLU
+  @test PU._hinge_relu(lpb(-5), FT(3)) == 3 && PU._hinge_relu(lpb(-5), FT(-2)) == 0
+  h(x) = PU._hinge_relu(lpb(1), FT(x))                 # softplus_beta
+  @test h(0) ≈ log(2) rtol = 1e-6                      # NOT 0 at the origin: softplus(0) = ln2/β
+  @test isapprox(h(20), 20; atol=1e-6)
+  @test isapprox(h(-20), 0; atol=1e-6)
+  @test isapprox(h(1), log1p(exp(1.0)); rtol=1e-6)
+  @test isapprox(h(-1), log1p(exp(-1.0)); rtol=1e-6)
+  @test h(1) - h(-1) ≈ 1 atol = 1e-6                   # softplus identity: sp(x) - sp(-x) = x
+  h4(x) = PU._hinge_relu(lpb(4), FT(x))
+  @test isapprox(h4(0), log(2) / 4; rtol=1e-6)
+  @test isapprox(h4(5), 5; atol=1e-3)
+  @test issorted(h4.(-5:0.5:5))                        # monotone
+  # thresholds: flat vs pct-of-obs clamped to [min,max]
+  lp_flat = lossparams(; agb_hinge_threshold=FT(10), agb_hinge_pct=FT(0))
+  @test PU._agb_hinge_thresh(lp_flat, FT(1000)) == 10
+  lp_pct = lossparams(; agb_hinge_pct=FT(0.04), agb_hinge_pct_min=FT(10), agb_hinge_pct_max=FT(200))
+  @test PU._agb_hinge_thresh(lp_pct, FT(100)) == 10 && PU._agb_hinge_thresh(lp_pct, FT(2000)) == 80 && PU._agb_hinge_thresh(lp_pct, FT(1e6)) == 200
+  lpw = lossparams()
+  @test PU._w_hinge_thresh(lpw, FT(100)) == 2 && PU._w_hinge_thresh(lpw, FT(300)) == 3 && PU._w_hinge_thresh(lpw, FT(1e5)) == 5   # default 1% clamped to [2,5]
+  # power helpers
+  @test PU._agb_pow(lossparams(; agb_hinge_p=FT(2)), FT(3)) == 9
+  @test PU._agb_pow(lossparams(; agb_hinge_p=FT(1)), FT(3)) == 3
+  @test PU._agb_pow(lossparams(; agb_hinge_p=FT(1.5)), FT(4)) ≈ 8
 end
 
 @testset "get_total_loss / SiteLoss algebra" begin
   mk(w, a, ns=1, no=1) = PU.SiteLoss(sp_w_loss=FT.(w), sp_agb_loss=FT.(a), site_agb_loss=FT(0), num_sites=ns, num_obs=no)
-  with_opts() do
-    l = mk([1, 2, 3], [10, 20], 4, 4)
-    # default: (alpha*ΣW + beta*ΣAGB)/num_obs with alpha=LOSS_ALPHA(1), beta=1
-    @test PU.get_total_loss(l) == (6 + 30) / 4
-    @test PU.get_total_loss(l, FT(0.5), FT(2)) == (0.5 * 6 + 2 * 30) / 4
-    PU.LOSS_ALPHA[] = FT(0)                         # alpha = 0 keeps only the AGB term (the default alpha arg is read at CALL time)
-    @test PU.get_total_loss(l) == 30 / 4
-    PU.LOSS_ALPHA[] = FT(1)
-    # normalized terms are already intensive => no /num_obs
-    PU.W_NORMALIZE[] = true;  @test PU.get_total_loss(l) == 36
-    PU.W_NORMALIZE[] = false; PU.AGB_NORMALIZE[] = true; @test PU.get_total_loss(l) == 36
-    PU.AGB_NORMALIZE[] = false
-    # piecewise: sqrt below pivot, square above, on the AGGREGATES
-    PU.LOSS_PIECEWISE[] = true; PU.W_PIVOT[] = FT(4); PU.AGB_PIVOT[] = FT(10)
-    @test PU.get_total_loss(l) ≈ sqrt(6 / 4) * 0 + (6 / 4)^2 + (30 / 10)^2     # ΣW=6 > 4 -> (6/4)^2 ; ΣAGB=30 > 10 -> 3^2
-    @test PU._piecewise(FT(1), FT(4)) == 0.5 && PU._piecewise(FT(8), FT(4)) == 4 && PU._piecewise(FT(3), FT(0)) == 3
-    PU.LOSS_PIECEWISE[] = false
-    # convert(Float64, SiteLoss) == get_total_loss
-    @test convert(Float64, l) == Float64(PU.get_total_loss(l))
-  end
+  l = mk([1, 2, 3], [10, 20], 4, 4)
+  # default: (alpha*ΣW + beta*ΣAGB)/num_obs with alpha=loss_alpha(1), beta=1
+  @test PU.get_total_loss(l, lossparams()) == (6 + 30) / 4
+  @test PU.get_total_loss(l, lossparams(), FT(2)) == (6 + 2 * 30) / 4
+  @test PU.get_total_loss(l, lossparams(; loss_alpha=FT(0.5)), FT(2)) == (0.5 * 6 + 2 * 30) / 4
+  @test PU.get_total_loss(l, lossparams(; loss_alpha=FT(0))) == 30 / 4      # alpha = 0 keeps only the AGB term
+  # normalized terms are already intensive => no /num_obs
+  @test PU.get_total_loss(l, lossparams(; w_normalize=true)) == 36
+  @test PU.get_total_loss(l, lossparams(; agb_normalize=true)) == 36
+  # piecewise: sqrt below pivot, square above, on the AGGREGATES
+  lpp = lossparams(; loss_piecewise=true, w_pivot=FT(4), agb_pivot=FT(10))
+  @test PU.get_total_loss(l, lpp) ≈ (6 / 4)^2 + (30 / 10)^2     # ΣW=6 > 4 -> (6/4)^2 ; ΣAGB=30 > 10 -> 3^2
+  @test PU._piecewise(FT(1), FT(4)) == 0.5 && PU._piecewise(FT(8), FT(4)) == 4 && PU._piecewise(FT(3), FT(0)) == 3
   # + and sum add every field (num_sites / num_obs included)
   a = mk([1, 2], [3, 4], 1, 2); b = mk([10, 20], [30, 40], 2, 3)
   c = a + b
@@ -302,13 +273,13 @@ end
   import DataFrames
   cb = PU.AgeBins(bins_idx=[10, 20, 40], last_bin_open=true)
   df = DataFrames.DataFrame(species_id=[1, 1, 1, 1, 1, 1], eco_id=fill(1, 6), age_calc=[5, 5, 5, 5, 5, 30])
-  with_opts() do
-    PU._set_cbal_weights!(df, cb, cb, [[1]], 1; beta=0.9)
-    W = PU.CBAL_W[][1, 1]
+  begin
+    tabs = PU.build_cbal_tables(df, cb, cb, [[1]], 1; beta=0.9)
+    W = tabs.w[1, 1]
     @test length(W) == 4 && W[2] == 1 && W[4] == 1                       # bins 2 and 4 empty -> neutral
     @test (W[1] + W[3]) / 2 ≈ 1                                          # occupied bins have mean 1
     @test W[3] > W[1]                                                    # rarer bin (1 cohort vs 5) gets MORE weight
-    @test PU.CBAL_COARSE[] == [PU.find_age_bin(b - 1, cb) for b in cb.bins_idx]
+    @test tabs.coarse == [PU.find_age_bin(b - 1, cb) for b in cb.bins_idx]
   end
 end
 end # module
