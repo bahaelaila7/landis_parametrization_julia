@@ -29,7 +29,7 @@ else
   P.apply_scoring_flags!(cfg)   # the run's scoring rule (all scoring globals, one shared function)
   D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
   P.DUAL_MODE[] = cfg["dual_mode"]
-  P.TIER_B[] = cfg["tier_b"]; PU.CELL_NORM[] = cfg["cell_normalize"]
+  P.TIER_B[] = cfg["tier_b"]
   P.SIMB_SPINUP[] = cfg["simB_spinup"]   # honor non-spinup Sim B (start from observed cohorts)
   no_estab = cfg["no_establishment"]; rng = P.RNGType(UInt64(cfg["seed"]))
   splots, eco_list, species_list, eco_species_ids, _ = D.prepare_parametrization_data(;
@@ -41,7 +41,7 @@ else
     single_ecoregion=cfg["single_ecoregion"], stratify_landuse=cfg["stratify_landuse"], RNG=rng)
   n_species = length(species_list)
   bins = cfg["bins_idx"]
-  loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(cfg["loss_lambda"]))
+  loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(cfg["loss_lambda"]), cell_norm=cfg["cell_normalize"])
   n_bins = length(bins) + 1
   spinup = cfg["spinup"]; max_age = Int(maximum(splots.age_calc))
   spdf = PU.smoothen_ref_years(splots, loss_params, max_age; debug=false)

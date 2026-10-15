@@ -33,9 +33,21 @@ smooth = sw > 0 ? PU.get_smoothing_window(; smoothing_window=sw, smoothing_varia
 # unbinned_w (Sim A): mirror parametrize() — per-year 1:400 grid, no age-smoothing → W₁ is the EXACT per-year EMD.
 # `bins` (config bins_idx) is still the COARSE grid used for the count-balance reweight below.
 unbinned_w = Bool(g("unbinned_w", false))
+# Replicate the RUN's loss shaping (all loss options are LossParams fields) so the re-evaluation (ΣW, ΣAGB, aggregate, NDS fronts) is on the SAME
+# NORMALIZED loss the Sobol run optimized. Values + defaults mirror parametrize().
+FTy = P.FloatType
+lopts = (; loss_alpha=FTy(g("loss_alpha", 1.0)), agb_hinge=Bool(g("agb_hinge", false)), agb_hinge_threshold=FTy(g("agb_hinge_threshold", 10.0)),
+  agb_hinge_pct=FTy(g("agb_hinge_pct", 0.0)), agb_hinge_pct_min=FTy(g("agb_hinge_pct_min", 0.0)), agb_hinge_pct_max=FTy(g("agb_hinge_pct_max", Inf)),
+  agb_hinge_p=FTy(g("agb_hinge_p", 2.0)), agb_hinge_beta=FTy(g("agb_hinge_beta", 1.0)),
+  agb_normalize=Bool(g("agb_normalize", false)), w_normalize=Bool(g("w_normalize", false)), cell_norm=Bool(g("cell_normalize", false)),
+  w_scale_factor=FTy(g("w_scale_factor", 1.0)), w_softplus=Bool(g("w_smooth", false)),
+  w_smooth_band=FTy(g("w_smooth_band", 0.05)), w_smooth_conc=FTy(g("w_smooth_conc", 0.5)), w_smooth_beta=FTy(g("w_smooth_beta", 1.0)),
+  w_smooth_auto_knee=Bool(g("w_smooth_auto_knee", false)), w_p=FTy(g("w_p", 1.0)),
+  loss_piecewise=Bool(g("loss_piecewise", false)), w_pivot=FTy(g("w_pivot", 1.0)), agb_pivot=FTy(g("agb_pivot", 1.0)),
+  cbal_on=Bool(g("w_count_balance", false)), cbal_mode=Symbol(lowercase(String(g("w_count_balance_mode", "both")))), cbal_beta=Float64(g("w_count_beta", 0.99)))
 loss_params = unbinned_w ?
-  PU.LossParams(age_bins=PU.AgeBins(bins_idx=collect(1:400), last_bin_open=true), smoothing_weights=P.FloatType[one(P.FloatType)], lambda=P.FloatType(g("loss_lambda", 1.0))) :
-  PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=smooth, lambda=P.FloatType(g("loss_lambda", 1.0)))
+  PU.LossParams(; age_bins=PU.AgeBins(bins_idx=collect(1:400), last_bin_open=true), smoothing_weights=P.FloatType[one(P.FloatType)], lambda=P.FloatType(g("loss_lambda", 1.0)), lopts...) :
+  PU.LossParams(; age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=smooth, lambda=P.FloatType(g("loss_lambda", 1.0)), lopts...)
 
 spdf = PU.smoothen_ref_years(splots, loss_params, Int(maximum(splots.age_calc)); debug=false)
 spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(splots)
@@ -53,50 +65,27 @@ for ((pid, eid), yd) in spdf_plts, (sy, gt) in yd
   c = get(cmap, (Int(pid), Int(sy)), 0); c == 0 && continue
   for (sp_eco, rec) in gt.records; t4_ref[eid][c][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
 end
-# Replicate the RUN's loss shaping so the re-evaluation (ΣW, ΣAGB, aggregate, NDS fronts) is on the SAME
-# NORMALIZED loss the Sobol run optimized — previously these flags were unset, so the re-eval ran on the
-# RAW/unnormalized loss and mismatched the stored mean_loss. Values + defaults mirror parametrize().
-PU.LOSS_ALPHA[]          = P.FloatType(g("loss_alpha", 1.0))
-PU.AGB_HINGE[]           = Bool(g("agb_hinge", false))
-PU.AGB_HINGE_THRESHOLD[] = P.FloatType(g("agb_hinge_threshold", 10.0))
-PU.AGB_HINGE_PCT[]       = P.FloatType(g("agb_hinge_pct", 0.0))
-PU.AGB_HINGE_PCT_MIN[]   = P.FloatType(g("agb_hinge_pct_min", 0.0))
-PU.AGB_HINGE_PCT_MAX[]   = P.FloatType(g("agb_hinge_pct_max", Inf))
-PU.AGB_HINGE_L2[]        = Bool(g("agb_hinge_l2", false))
-PU.AGB_HINGE_P[]         = P.FloatType(g("agb_hinge_p", 2.0))
-PU.AGB_HINGE_BETA[]      = P.FloatType(g("agb_hinge_beta", 1.0))
-PU.AGB_NORMALIZE[]       = Bool(g("agb_normalize", false))
-PU.W_NORMALIZE[]         = Bool(g("w_normalize", false))
-PU.CELL_NORM[]           = Bool(g("cell_normalize", false))
-PU.W_SCALE_FACTOR[]      = P.FloatType(g("w_scale_factor", 1.0))
-PU.CELL_NORM[] && (PU.RANKW[] = zeros(P.FloatType, 0, 0); PU.CELL_NORM_FREEZE[] = false)
-PU.W_SOFTPLUS[]          = Bool(g("w_smooth", false))
-PU.W_SMOOTH_BAND[]       = P.FloatType(g("w_smooth_band", 0.05)); PU.W_SMOOTH_CONC[] = P.FloatType(g("w_smooth_conc", 0.5))
-PU.W_SMOOTH_BETA[]       = P.FloatType(g("w_smooth_beta", 1.0)); PU.W_SMOOTH_AUTO_KNEE[] = Bool(g("w_smooth_auto_knee", false))
-PU.W_P[]                 = P.FloatType(g("w_p", 1.0))
-PU.LOSS_PIECEWISE[]      = Bool(g("loss_piecewise", false)); PU.W_PIVOT[] = P.FloatType(g("w_pivot", 1.0)); PU.AGB_PIVOT[] = P.FloatType(g("agb_pivot", 1.0))
-P._set_loss_scales!(Int(g("tier", 3)), spdf_plts, t4_ref, loss_params, eco_species_ids, n_species)  # populate W/AGB scales + RANKW from the train reference
-println("norm: W=$(PU.W_NORMALIZE[]) AGB=$(PU.AGB_NORMALIZE[]) CELL=$(PU.CELL_NORM[]) | RANKW $(size(PU.RANKW[])) W_SCALE_A $(size(PU.W_SCALE_A[]))")
-# Count-balance reweight (survivorship correction) — mirror parametrize() lines 945-950 so the re-eval
-# aggregate matches the stored mean_loss. Frozen from the TRAIN reference on the coarse `bins` grid;
-# Sim A looks it up per-year via CBAL_COARSE. Defaults off → runs without w_count_balance are unaffected.
-PU.CBAL_ON[]   = Bool(g("w_count_balance", false))
-PU.CBAL_MODE[] = Symbol(lowercase(String(g("w_count_balance_mode", "both"))))
-PU.CBAL_BETA[] = Float64(g("w_count_beta", 0.99))
-if PU.CBAL_ON[]
-  PU._set_cbal_weights!(splots, PU.AgeBins(bins_idx=bins, last_bin_open=true), loss_params.age_bins, eco_species_ids, n_species; beta=PU.CBAL_BETA[])
-  println("CBAL ON mode=$(PU.CBAL_MODE[]) β=$(PU.CBAL_BETA[]); coarse=$(length(bins)) bins+open, Sim-A W bins=$(length(loss_params.age_bins.bin_widths))")
+# Count-balance reweight (survivorship correction) — frozen from the TRAIN reference on the coarse `bins` grid; Sim A looks it up per-year via
+# cbal.coarse. Defaults off → runs without w_count_balance are unaffected.
+cbal = PU.NO_CBAL
+if loss_params.cbal_on
+  cbal = PU.build_cbal_tables(splots, PU.AgeBins(bins_idx=bins, last_bin_open=true), loss_params.age_bins, eco_species_ids, n_species; beta=loss_params.cbal_beta)
+  println("CBAL ON mode=$(loss_params.cbal_mode) β=$(loss_params.cbal_beta); coarse=$(length(bins)) bins+open, Sim-A W bins=$(length(loss_params.age_bins.bin_widths))")
 end
+seed = PU.LossScales(cbal=cbal)
 
-dual_b = P.DUAL_MODE[] == :off ? nothing :
+dual_b0 = P.DUAL_MODE[] == :off ? nothing :
   P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cmap, ncyc, inj, spc, rng, no_estab; b_only=false)
+# the scales of the TRAIN reference (W/AGB scales + RANKW), and of Sim B inside dual_b
+scales, dual_b = P.build_split_scales(loss_params, seed, Int(g("tier", 3)), spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)
+println("norm: W=$(loss_params.w_normalize) AGB=$(loss_params.agb_normalize) CELL=$(loss_params.cell_norm) | RANKW $(size(scales.rankw)) w_cell $(size(scales.w_cell))")
 
 # measure() = (ΣW, ΣAGB) over the dominance species for one candidate
 function wagb(params)
   res = P.fit_params(ref, params, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
     debug=false, search_tier=Int(g("tier", 3)), t4_ref=t4_ref, cycle_map=cmap, n_cycles=ncyc,
-    injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], dual_b=dual_b)
-  fx = P.MOLBSA.MOFitness(P._mo_objectives(res[1][3], eco_species_ids), convert(Float64, PU.get_total_loss(res[1][1])))
+    injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], dual_b=dual_b, scales=scales)
+  fx = P.MOLBSA.MOFitness(P._mo_objectives(res[1][3], eco_species_ids, loss_params, scales, dual_b), convert(Float64, PU.get_total_loss(res[1][1], loss_params)))
   m = P.CMAMAE.measure(fx); (Float64(m[1]), Float64(m[2]), Float64(fx.aggregate), fx.objectives)
 end
 

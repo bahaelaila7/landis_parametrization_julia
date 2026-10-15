@@ -41,7 +41,7 @@ for r in eachrow(splots)
   s = Int(r.species_id); e = Int(r.eco_id)
   (1 <= s <= ns && 1 <= e <= ne) && (nc[s, e] += 1)
 end
-# A[gsp,e]: total ref AGB per cell (rank driver) — order matches _set_rankw!'s A (Σ sp_agb_sum)
+# A[gsp,e]: total ref AGB per cell (rank driver) — order matches _rankw's A (Σ sp_agb_sum)
 A = zeros(Float64, ns, ne)
 for r in eachrow(DF.subset(splots, :sim_year => DF.ByRow(>(0))))
   s = Int(r.species_id); e = Int(r.eco_id)
