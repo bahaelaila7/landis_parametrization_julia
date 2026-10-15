@@ -51,4 +51,17 @@ end
   @test_throws ErrorException Pan._check_search_mode("sa")
 end
 
+
+@testset "B14 loss_before_injection is defined by the injection mode" begin
+  r(d) = Pan._resolve_loss_before_injection(Pan._cfg_getter(Dict{String,Any}(d)))
+  sync = ("override_injection" => true, "override_injection_sync" => true)
+  @test r([sync...]) === true                                            # the 2026-10-15 rule
+  @test r([sync..., "loss_before_injection" => false]) === false         # legacy order on request
+  @test r(["override_injection" => true]) === false                      # append mode: legacy order by default
+  @test r([sync..., "override_injection_replace" => true]) === false     # replace mode: legacy order by default
+  @test_throws ErrorException r(["override_injection" => true, "loss_before_injection" => true])
+  @test_throws ErrorException r([sync..., "override_injection_replace" => true, "loss_before_injection" => true])
+  @test r(Pair{String,Any}[]) === true                                   # no injection: flag has no effect, keep the default
+end
+
 end

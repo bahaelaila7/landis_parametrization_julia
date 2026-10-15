@@ -6093,6 +6093,22 @@ function _parse_dual_mode(v)::Symbol
   error("dual_mode must be off | joint | b (or true/false), got $(repr(v))")
 end
 
+# yaml `loss_before_injection` (B14). The 2026-10-15 scoring rule (shock → score → sync injection) is defined for sync
+# injection only (override_injection + override_injection_sync, not replace). There the default is true; for the other
+# injection modes (append, replace) the default is the legacy order (false) and an explicit `true` is an error: those modes
+# used to score pre-injection silently, with the species-level exclusion and no recruit exclusion. Without injection the
+# flag has no effect. `g(key, default)` is a config getter (_cfg_getter / run_from_yaml's get_cfg).
+function _resolve_loss_before_injection(g)::Bool
+  v = g("loss_before_injection", nothing)
+  inj = Bool(g("override_injection", false))
+  rule = inj && Bool(g("override_injection_sync", false)) && !Bool(g("override_injection_replace", false))
+  v === nothing && return !inj || rule
+  b = Bool(v)
+  b && inj && !rule && error("loss_before_injection: true needs override_injection_sync (and not override_injection_replace); " *
+                             "the other injection modes score in the legacy order — set loss_before_injection: false or omit it")
+  return b
+end
+
 """
     prep_kwargs_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, rng=nothing) -> NamedTuple
 
@@ -6109,7 +6125,7 @@ Per-fold scripts can override with `prepare_from_cfg(cfg; fold_index=k)`.
 # behaviour byte-identical: no partial-drop attach, no shock rows).
 function _configure_disturbance_shock!(cfg::AbstractDict)
   g = _cfg_getter(cfg)
-  lbi = Bool(g("loss_before_injection", true))
+  lbi = _resolve_loss_before_injection(g)
   dual = _parse_dual_mode(g("dual_mode", "off")) !== :off
   # Sim A needs sync injection; Sim B (dual mode / simB_disturb_only) uses the full removals + partial drops on its own
   on = lbi && ((Bool(g("override_injection", false)) && Bool(g("override_injection_sync", false))) || dual || Bool(g("simB_disturb_only", false)))
@@ -6241,7 +6257,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   OVERRIDE_INJECTION[] = Bool(get_cfg("override_injection", false))
   OVERRIDE_INJECTION_REPLACE[] = Bool(get_cfg("override_injection_replace", false))
   OVERRIDE_INJECTION_SYNC[] = Bool(get_cfg("override_injection_sync", false))
-  LOSS_BEFORE_INJECTION[] = Bool(get_cfg("loss_before_injection", true))
+  LOSS_BEFORE_INJECTION[] = _resolve_loss_before_injection(get_cfg)
   _configure_disturbance_shock!(cfg)
   EXCLUDE_RECRUITS_AT_ENTRY[] = Bool(get_cfg("exclude_recruits_at_entry", true))
   W_SCOPE[] = Symbol(get_cfg("w_scope", "all")); W_SCOPE[] in (:all, :survivors) || error("w_scope must be all | survivors")
