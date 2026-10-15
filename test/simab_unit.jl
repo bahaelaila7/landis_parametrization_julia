@@ -15,13 +15,13 @@ function site_with(cohs)
   df = DataFrame(mapcode=fill(1, length(cohs)), eco_id=fill(1, length(cohs)), eco_species_id=[c[1] for c in cohs], age_calc=[c[2] for c in cohs], agb_sum=[c[3] for c in cohs])
   soa = P.make_sites_from_communities(df, esids, Random.Xoshiro(1)); s = P.getsite(soa, 1); s.B = sum(Float64(s.c_bio[j]) for j in 1:Int(s.live)); soa
 end
-P.OVERRIDE_INJECTION_DISTURBANCE[] = :off; P.EXCLUDE_RECRUITS_AT_ENTRY[] = false
+scoring = P.ScoringOptions(; disturbance=:off, exclude_recruits_at_entry=false)
 # visits at year 2 and 5 (Δt = 3). Observed at T=5: A=(sp1,40) survivor, E=(sp2,10) survivor. Sim has A, E and C=(sp1,20) (absent from obs ⇒ natural death).
 inj2 = P._SiteInjectionYear([(1, Tuple{UI,FT,FT,FT}[(UI(1), FT(37), FT(90), FT(0)), (UI(1), FT(17), FT(60), FT(0)), (UI(2), FT(7), FT(30), FT(0))])])
 inj5 = P._SiteInjectionYear([(1, Tuple{UI,FT,FT,FT}[(UI(1), FT(40), FT(100), FT(0)), (UI(2), FT(10), FT(35), FT(0))])])
 idict = P._SiteInjectionDict(2 => inj2, 5 => inj5)
 soa = site_with([(1, 40, 100.0), (1, 20, 70.0), (2, 10, 35.0)])
-plan = P._build_excl_plan(idict, soa, esids, lp)
+plan = P._build_excl_plan(idict, soa, esids, lp, scoring)
 @check plan.prev[5][1] == 2 "previous visit of year 5 is year 2 ($(get(plan.prev, 5, nothing)))"
 acc = P.DeathAcc(esids)
 P._death_collect!(acc, soa, 5, idict, plan)

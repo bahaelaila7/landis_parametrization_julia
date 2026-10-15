@@ -162,22 +162,27 @@ end
   @test L("loss_before_injection" => "false")["loss_before_injection"] === false && L("loss_before_injection" => 0)["loss_before_injection"] === false
   m = cerr(() -> L("override_injection" => true, "loss_before_injection" => true)); @test m !== nothing && occursin("loss_before_injection", m)
   @test cerr(() -> L(sync..., "override_injection_replace" => true, "loss_before_injection" => true)) !== nothing
-  # apply_scoring_flags! sets every scoring Ref from the config
-  saved = (Pan.OVERRIDE_INJECTION[], Pan.OVERRIDE_INJECTION_SYNC[], Pan.OVERRIDE_INJECTION_REPLACE[], Pan.LOSS_BEFORE_INJECTION[],
-           Pan.EXCLUDE_RECRUITS_AT_ENTRY[], Pan.W_SCOPE[], Pan.DEATH_TERM[], Pan.OVERRIDE_INJECTION_NOISE[], Pan.OVERRIDE_INJECTION_DISTURBANCE[])
+  # scoring_from_config builds the immutable options from the config (no module state, nothing to leak between configs)
+  saved_pmort = Pan.BSP.DEATH_PMORT_SIMA[]
   try
-    Pan.apply_scoring_flags!(L(sync..., "disturbance_full_removals" => false, "exclude_recruits_at_entry" => false, "w_scope" => "survivors",
-                               "death_term" => "likelihood", "override_injection_noise" => 0.1, "override_injection_disturbance" => "scale"))
-    @test Pan.OVERRIDE_INJECTION[] && Pan.OVERRIDE_INJECTION_SYNC[] && !Pan.OVERRIDE_INJECTION_REPLACE[] && Pan.LOSS_BEFORE_INJECTION[]
-    @test !Pan.EXCLUDE_RECRUITS_AT_ENTRY[] && Pan.W_SCOPE[] === :survivors && Pan.DEATH_TERM[] === :likelihood
-    @test Pan.OVERRIDE_INJECTION_NOISE[] == 0.1 && Pan.OVERRIDE_INJECTION_DISTURBANCE[] === :scale
-    Pan.apply_scoring_flags!(L())                                                            # a plain config resets them (no leak between configs)
-    @test !Pan.OVERRIDE_INJECTION[] && Pan.EXCLUDE_RECRUITS_AT_ENTRY[] && Pan.W_SCOPE[] === :all && Pan.DEATH_TERM[] === :none
-    Pan.apply_scoring_flags!(Dict{String,Any}("w_scope" => "survivors"))                    # a raw Dict is loaded through the same reader
-    @test Pan.W_SCOPE[] === :survivors
+    sc, sb = Pan.scoring_from_config(L(sync..., "disturbance_full_removals" => false, "exclude_recruits_at_entry" => false, "w_scope" => "survivors",
+                                       "death_term" => "likelihood", "override_injection_noise" => 0.1, "override_injection_disturbance" => "scale",
+                                       "init_perturb_frac" => 0.05, "init_perturb_cap" => 25, "dual_mode" => "b", "tier_b" => 4, "simB_spinup" => false))
+    @test sc.override && sc.sync && !sc.replace && sc.loss_before_injection && Pan.shock_order(sc)
+    @test !sc.exclude_recruits_at_entry && sc.w_scope === :survivors && sc.death_term === :likelihood
+    @test sc.noise == 0.1 && sc.disturbance === :scale && sc.init_perturb_frac == 0.05 && sc.init_perturb_cap == 25f0
+    @test sb.dual_mode === :b && sb.t4_primary && !sb.simb_spinup && sb.tier_b == 4
+    @test Pan.BSP.DEATH_PMORT_SIMA[]                                                         # death_term likelihood: score-only PROB_MORT in Sim A
+    sc0, sb0 = Pan.scoring_from_config(L())                                                  # a plain config gets the defaults (no leak between configs)
+    @test !sc0.override && sc0.exclude_recruits_at_entry && sc0.w_scope === :all && sc0.death_term === :none && !Pan.shock_order(sc0)
+    @test sb0.dual_mode === :off && !sb0.t4_primary && sb0.simb_spinup && !sb0.simb_disturb_only
+    @test !Pan.BSP.DEATH_PMORT_SIMA[]
+    @test Pan.scoring_from_config(Dict{String,Any}("w_scope" => "survivors"))[1].w_scope === :survivors    # a raw Dict is loaded through the same reader
+    @test Pan.simb_options(L("tier" => 4)).t4_primary && !Pan.simb_options(L("tier" => 4, "dual_mode" => "joint")).t4_primary   # tier 4 without a dual, or dual b
+    @test !ismutabletype(Pan.ScoringOptions) && !ismutabletype(Pan.SimBOptions) && all(isconcretetype, fieldtypes(Pan.ScoringOptions)) && all(isconcretetype, fieldtypes(Pan.SimBOptions))   # immutable, concretely typed: free to read in the site loop
+    @test Pan.with_options(sc; w_scope=:all).w_scope === :all && Pan.with_options(sc; w_scope=:all).noise == 0.1
   finally
-    (Pan.OVERRIDE_INJECTION[], Pan.OVERRIDE_INJECTION_SYNC[], Pan.OVERRIDE_INJECTION_REPLACE[], Pan.LOSS_BEFORE_INJECTION[],
-     Pan.EXCLUDE_RECRUITS_AT_ENTRY[], Pan.W_SCOPE[], Pan.DEATH_TERM[], Pan.OVERRIDE_INJECTION_NOISE[], Pan.OVERRIDE_INJECTION_DISTURBANCE[]) = saved
+    Pan.BSP.DEATH_PMORT_SIMA[] = saved_pmort
     Pan.Data.DISTURBANCE_FULL_PATH[] = ""
   end
 end

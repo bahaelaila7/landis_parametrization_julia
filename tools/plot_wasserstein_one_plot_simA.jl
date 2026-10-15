@@ -9,9 +9,8 @@ import JLD2, CairoMakie, Statistics, DataFrames
 const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames
 
 cfg = P.load_config(ARGS[1])
-P.apply_scoring_flags!(cfg)   # the run's scoring rule (all scoring globals, one shared function)
+scoring, simb = P.scoring_from_config(cfg); scoring = P.with_options(scoring; init_perturb_frac=0.0)   # nominal sim (no perturbation); the run's scoring rule (all scoring globals, one shared function)
 D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
-P.INIT_PERTURB_FRAC[] = 0.0
 no_estab = cfg["no_establishment"]
 rng = P.RNGType(UInt64(cfg["seed"]))
 val_frac = cfg["val_frac"]; split_rng = val_frac > 0 ? P.RNGType(UInt64(cfg["split_seed"])) : nothing
@@ -39,12 +38,12 @@ end
 sp = splots
 max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
 spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
-inj = (no_estab || P.OVERRIDE_INJECTION[]) ? D.get_injection_cohorts(sp; all_cohorts=P.OVERRIDE_INJECTION[]) : nothing
+inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
 rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
 idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
 msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
 res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-  debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)])
+  debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], scoring, simb)
 cached = res[1][2]
 
 # sim cohorts: AGB per (plot, year, age), summed over species

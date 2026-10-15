@@ -14,13 +14,9 @@ EQM = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 0.2
 ALPHA = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 0.05
 Δ = log1p(EQM)
 outdir = cfg["output_dir"]
-P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
-P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
-P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
-P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
+scoring = P.ScoringOptions(; override=Bool(g("override_injection", true)), sync=Bool(g("override_injection_sync", true)), replace=Bool(g("override_injection_replace", false)), disturbance=Symbol(g("override_injection_disturbance", "off"))); simb = P.SimBOptions()
 D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
 D.FIA_CYCLE_MERGE[] = Int(g("fia_cycle_merge", 1))
-P.INIT_PERTURB_FRAC[] = 0.0
 no_estab = Bool(g("no_establishment", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
 val_frac = Float64(g("val_frac", 0.0))
@@ -37,12 +33,12 @@ function val_equiv_count(params)
   (isnothing(sp) || DF.nrow(sp) == 0) && return (0, 0)
   max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
-  inj = (no_estab || P.OVERRIDE_INJECTION[]) ? D.get_injection_cohorts(sp; all_cohorts=P.OVERRIDE_INJECTION[]) : nothing
+  inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
   rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
   idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, params, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)])
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], scoring, simb)
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
@@ -50,7 +46,7 @@ function val_equiv_count(params)
   obs = DF.combine(DF.groupby(DF.subset(sp, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :eco_id, :eco_species_id]), :agb_sum => sum => :obs_agb)
   DF.rename!(obs, :eco_species_id => :esp)
   paired = DF.innerjoin(obs, sim_agg, on=[:plot_id, :sim_year, :esp])
-  if P.OVERRIDE_INJECTION_DISTURBANCE[] in (:exclude_overwrite, :exclude_noscale) && !isnothing(inj)
+  if scoring.disturbance in (:exclude_overwrite, :exclude_noscale) && !isnothing(inj)
     excl = Set((Int(r.plot_id), Int(r.sim_year), Int(r.eco_species_id)) for r in eachrow(inj) if r.disturbance_drop_pct > 0)
     paired = DF.filter(row -> !((row.plot_id, row.sim_year, row.esp) in excl), paired)
   end

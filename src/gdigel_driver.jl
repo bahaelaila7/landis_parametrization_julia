@@ -65,7 +65,7 @@ function _gd_groups(param_dists, slots, eco_species_ids, species_list, eco_list;
   cell_group, labels
 end
 
-function _gd_index(injection_cohorts, splots, cell_group, labels; real_only::Bool=true)
+function _gd_index(injection_cohorts, splots, cell_group, labels, scoring::ScoringOptions; real_only::Bool=true)
   inj = injection_cohorts
   ph = hasproperty(inj, :phantom_frac) ? Float64.(inj.phantom_frac) : zeros(nrow(inj))
   dr = hasproperty(inj, :disturbance_drop_pct) ? Float64.(coalesce.(inj.disturbance_drop_pct, 0.0)) : zeros(nrow(inj))
@@ -86,11 +86,11 @@ function _gd_index(injection_cohorts, splots, cell_group, labels; real_only::Boo
   # legacy order: only :exclude_overwrite drops partially-disturbed pairs. New order (loss_before_injection): also :exclude_noscale (its
   # sim is NOT scaled/overwritten, so a disturbed observation is not comparable); :scale compares against the (1-drop)-scaled sim and
   # keeps the pair; fully removed cohorts have no observed record at all.
-  excl = OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite || (LOSS_BEFORE_INJECTION[] && OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_noscale)
+  excl = scoring.disturbance == :exclude_overwrite || (scoring.loss_before_injection && scoring.disturbance == :exclude_noscale)
   key2rec = Dict{NTuple{4,Int},Int}(); rec_pair = Int[]; rec_obs = Float64[]; pairid = Dict{NTuple{3,Int},Int}(); pair_group = Int[]
   for (k, o) in obs
     (excl && drop[k] > 0) && continue
-    if LOSS_BEFORE_INJECTION[] && EXCLUDE_RECRUITS_AT_ENTRY[]   # recruits at entry have no sim counterpart (no establishment): not scored (as in the loss)
+    if scoring.loss_before_injection && scoring.exclude_recruits_at_entry   # recruits at entry have no sim counterpart (no establishment): not scored (as in the loss)
       py0 = get(prevyr, (k[1], k[2]), nothing)
       py0 !== nothing && !((k[1], py0, k[3], k[4] - (k[2] - py0)) in seen) && continue
     end
@@ -274,7 +274,7 @@ function _write_mo_archive(dir, nd, st, labels, dec)
 end
 
 function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years,
-    species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool,
+    species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool,
     TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing,
     start_from::Union{Nothing,String}=nothing, n_reps::Int=1, no_establishment::Bool=false, injection_cohorts=nothing,
     gd_opts::AbstractDict=Dict{String,Any}(), scale_seed::PU.LossScales=PU.LossScales(), kw...)
@@ -290,13 +290,13 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   DEATH_FOLD = o("death_fold")
   M3 = MO && M_OBJ == 3
   USE_D = M3 || DEATH_FOLD
-  USE_D && DEATH_TERM[] !== :likelihood && error("gdigel: m=3 / death_fold need yaml death_term: likelihood")
-  USE_D && !(OVERRIDE_INJECTION_SYNC[] && LOSS_BEFORE_INJECTION[]) && error("gdigel: the death term needs override_injection_sync + loss_before_injection")
+  USE_D && scoring.death_term !== :likelihood && error("gdigel: m=3 / death_fold need yaml death_term: likelihood")
+  USE_D && !(scoring.sync && scoring.loss_before_injection) && error("gdigel: the death term needs override_injection_sync + loss_before_injection")
   (M3 && DEATH_FOLD) && error("gdigel: death_fold (m=2) and m=3 are exclusive")
   kappa = Ref(0.0)   # death_fold: w'_g = w_g + κ d_g,  κ = W_ref/D_ref (fixed after the start points are evaluated)
   MO && o("mode") == "explore" && error("gdigel: objective mo is not available in mode explore")
   MO && o("single_block") && @warn "gdigel mo: single_block ablation uses the total A, W of all groups as the one block"
-  DUAL_MODE[] == :off || error("gdigel: Sim A only (dual_mode must be off)")
+  simb.dual_mode == :off || error("gdigel: Sim A only (dual_mode must be off)")
   isnothing(injection_cohorts) && error("gdigel needs override injection cohorts (Sim A)")
   mkpath(output_dir)
   SP = succession_plugin_of(ref_soa)
@@ -304,7 +304,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   template = !isnothing(start_from) ? _load_params_from_path(start_from) : generate_params(SP, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
   slots = PU.build_slots(pd, template); nd = length(slots)
   cell_group, labels = _gd_groups(pd, slots, eco_species_ids, species_list, eco_list; group_param=o("group_param"))
-  ix = _gd_index(injection_cohorts, splots, cell_group, labels; real_only=real_only)
+  ix = _gd_index(injection_cohorts, splots, cell_group, labels, scoring; real_only=real_only)
   # blocks: u-coordinates grouped by the set of groups they affect
   bmap = Dict{Vector{Int},Vector{Int}}()
   for (i, (pi, t)) in enumerate(slots)
@@ -319,8 +319,8 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   injection_dict = _build_injection_dict(injection_cohorts, ref_soa); injection_years = Set(Int.(injection_cohorts.sim_year))
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   n_species = length(species_list)
-  fixed_seeds = _fixed_seeds(rng, n_reps)
-  scales, _ = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, nothing, eco_species_ids, n_species)   # the TRAIN (Sim A) reference scales
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
+  scales, _ = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, nothing, eco_species_ids, n_species; simb)   # the TRAIN (Sim A) reference scales
   groupcells = _gd_groupcells(ix.cell_group, ix.ngroups)
   nvis = MO ? _gd_cell_visits(spdf_plts, eco_species_ids, spinup ? 0 : 1) : nothing
   ws_t = [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()]
@@ -329,8 +329,8 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     pp = dec(u)
     dacc = USE_D ? DeathAcc(eco_species_ids) : nothing
     r = fit_params(ref_soa, pp, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params;
-      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales)
-    _, _, k = _agg_reps(r, loss_params)
+      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales, scoring, simb)
+    _, _, k = _agg_reps(r, loss_params, scoring)
     res = _gd_losses(ix, r[k][2]; size_weight=sw, min_pairs=min_pairs)
     MO || return res
     num, den = _gd_cell_w(r[k][3], eco_species_ids, nvis, loss_params, scales)

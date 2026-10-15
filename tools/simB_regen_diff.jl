@@ -26,11 +26,8 @@ if isfile(CACHE) && !RESIM
   species_list = cc["species_list"]; eco_species_ids = cc["eco_species_ids"]; n_cycles = cc["n_cycles"]; bins = cc["bins"]
   println("loaded cache $CACHE — $(length(allsims)) candidates × $(length(allsims[1])) reps (pass --resim to redo)")
 else
-  P.apply_scoring_flags!(cfg)   # the run's scoring rule (all scoring globals, one shared function)
+  scoring, simb = P.scoring_from_config(cfg); scoring = P.with_options(scoring; init_perturb_frac=0.0)   # the run's scoring rule and Sim B options
   D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
-  P.DUAL_MODE[] = cfg["dual_mode"]
-  P.TIER_B[] = cfg["tier_b"]
-  P.SIMB_SPINUP[] = cfg["simB_spinup"]   # honor non-spinup Sim B (start from observed cohorts)
   no_estab = cfg["no_establishment"]; rng = P.RNGType(UInt64(cfg["seed"]))
   splots, eco_list, species_list, eco_species_ids, _ = D.prepare_parametrization_data(;
     cohorts_db_path=cfg["cohorts_db_path"], eco_field=cfg["eco_field"], tablename=cfg["tablename"],
@@ -46,7 +43,7 @@ else
   spinup = cfg["spinup"]; max_age = Int(maximum(splots.age_calc))
   spdf = PU.smoothen_ref_years(splots, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(splots)
-  inj = (no_estab || P.OVERRIDE_INJECTION[]) ? D.get_injection_cohorts(splots; all_cohorts=P.OVERRIDE_INJECTION[]) : nothing
+  inj = (no_estab || scoring.override) ? D.get_injection_cohorts(splots; all_cohorts=scoring.override) : nothing
   cycle_map, n_cycles = D.build_cycle_map(splots; cycle_years=cfg["cycle_years"])
   t4_ref = [[zeros(P.FloatType, length(eco_species_ids[e]), n_bins) for _ in 1:n_cycles] for e in eachindex(eco_list)]
   for ((plot_id, eco_id), yd) in spdf_plts, (sy, gt) in yd
@@ -56,7 +53,7 @@ else
     end
   end
   ref_soa = P.make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_estab)
-  dual_b = P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, inj, spc, rng, no_estab; b_only=false)
+  dual_b = P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, inj, spc, rng, no_estab; b_only=false, scoring, simb)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   arch = collect(JLD2.load_object(joinpath(outdir, "search_state_latest.jld2")).archive)
   println("archive: $(length(arch)) candidates; simulating $REPS Sim-B reps each …")
@@ -68,7 +65,7 @@ else
       P.fit_params(dual_b.ref_soa, c.x, msy, n_species, eco_species_ids, dual_b.spdf_plts, ssy, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params;
         debug=false, search_tier=4, t4_ref=dual_b.t4_ref, cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles,
         seeds=[rand(rng, UInt64)], injection_dict=dual_b.injection_dict, injection_years=dual_b.injection_years,
-        disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years)
+        disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, scoring, simb)
       cap = P.CAPTURE_T4SIM[]; P.CAPTURE_T4SIM[] = nothing
       cap === :want && error("candidate $ci rep $rep: no t4_sim captured")
       reps[rep] = [[Float32.(m) for m in eco] for eco in cap.sim]

@@ -12,12 +12,9 @@ base_outdir = get(ENV, "PAN_OUT", "") != "" ? joinpath(ENV["PAN_OUT"], basename(
 # PAN_PARAMS = a specific params .jld2 to plot (else the run's representative); PAN_OUTSUB = output subfolder.
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
 TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""   # candidate id in titles
-P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
-P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
-P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
-P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
+scoring = P.ScoringOptions(; override=Bool(g("override_injection", true)), sync=Bool(g("override_injection_sync", true)), replace=Bool(g("override_injection_replace", false)), disturbance=Symbol(g("override_injection_disturbance", "off"))); simb = P.SimBOptions()
 D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
-P.INIT_PERTURB_FRAC[] = 0.0                       # nominal sim (no perturbation) for the scatter
+# nominal sim (no perturbation) for the scatter
 no_estab = Bool(g("no_establishment", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
 
@@ -71,13 +68,13 @@ function make_scatter(sp, label)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids)
   ssy = D.get_site_sim_years(spdf)
   spc = D.get_spinup_cohorts(sp)
-  inj = (no_estab || P.OVERRIDE_INJECTION[]) ? D.get_injection_cohorts(sp; all_cohorts=P.OVERRIDE_INJECTION[]) : nothing
+  inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
   rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
   idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs)
   iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true)  # pre-inject = pure model state (REQUIRED for the cohort match below)
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true, scoring, simb)  # pre-inject = pure model state (REQUIRED for the cohort match below)
   cached = res[1][2]
   # ONLY genuinely-simulated biomass ends up in the scatter. Match the pre-inject model cohorts to the
   # OBSERVED injection set by (plot, year, species, AGE) — exactly the sync survivor rule. This drops
@@ -93,7 +90,7 @@ function make_scatter(sp, label)
                     :obs_agb => sum => :obs_agb, :drop => maximum => :drop)
   matched = DF.innerjoin(simc, injc, on=[:plot_id, :sim_year, :esp, :age])   # sync survivors: simulated ∩ observed, same (species,age)
   n_sim = DF.nrow(simc)
-  P.OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && (matched = DF.filter(r -> r.drop <= 0.0, matched))
+  scoring.disturbance == :exclude_overwrite && (matched = DF.filter(r -> r.drop <= 0.0, matched))
   paired = DF.combine(DF.groupby(matched, [:plot_id, :sim_year, :esp]), :sim_agb => sum => :sim_agb, :obs_agb => sum => :obs_agb)
   println("  $label: $(DF.nrow(paired)) (plot,yr,sp) points from $(DF.nrow(matched))/$(n_sim) simulated cohorts matched to observed (dropped sync-removed + injected + disturbance-overwritten)")
   # eco_species_id is LOCAL to each eco, so eco must come from the PLOT (each plot → one eco);
@@ -221,7 +218,7 @@ function make_scatter_B(sp, label)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   # Re-simulate the FREE Sim-B path EXACTLY as the run (disturb-only / year-0-vs-spinup / establishment ON;
   # frozen growth is baked into `best`), then pair sim vs obs by tier-4 age-bins. Shared with sMAPE/TOST.
-  paired, _cyc_map, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng)
+  paired, _cyc_map, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng; scoring=scoring)
   # SPLIT BY CYCLE: one figure per (cycle × eco × mode); species panels; points = age bins (colour = bin).
   for mode in (:linear, :log, :weighted, :weightedlog), cy in sort(unique(paired.cyc)), e in sort(unique(paired.eco))
     pe = DF.subset(paired, :cyc => DF.ByRow(==(cy)), :eco => DF.ByRow(==(e)))

@@ -13,14 +13,14 @@ using Test, Pan
 end
 
 @testset "B1 injection flags do not leak between configs" begin
-  # A previous run in the same process left the injection globals on; a config without the keys must get the defaults.
-  Pan.OVERRIDE_INJECTION[] = true; Pan.OVERRIDE_INJECTION_SYNC[] = true
+  # the options are immutable values built from the config alone: a config without the keys gets the defaults, whatever ran before it
+  on = Pan.scoring_options(Dict{String,Any}("override_injection" => true, "override_injection_sync" => true))
+  @test on.override && on.sync
+  off = Pan.scoring_options(Dict{String,Any}("loss_before_injection" => true))                 # no injection keys ⇒ the schema defaults
+  @test !off.override && !off.sync && !off.replace && off.disturbance === :off
   @test Pan._configure_disturbance_shock!(Dict{String,Any}("loss_before_injection" => true)) == ""   # no sync in this config ⇒ no shock
   @test Pan._configure_disturbance_shock!(Dict{String,Any}("override_injection" => true, "override_injection_sync" => true)) != ""
-  Pan.OVERRIDE_INJECTION[] = false; Pan.OVERRIDE_INJECTION_SYNC[] = false
-  # run_from_yaml: every injection key falls back to a literal default, never to the current Ref value
-  src = read(joinpath(pkgdir(Pan), "src", "Pan.jl"), String)
-  @test !occursin(r"get_cfg\(\"override_injection[a-z_]*\", *[A-Za-z_]*OVERRIDE_INJECTION", src)
+  @test !isdefined(Pan, :OVERRIDE_INJECTION) && !isdefined(Pan, :OVERRIDE_INJECTION_SYNC)      # no module-level flag left to leak
 end
 
 

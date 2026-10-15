@@ -13,12 +13,9 @@ base_outdir = cfg["output_dir"]
 # PAN_PARAMS = a specific params .jld2 to plot (else the run's representative); PAN_OUTSUB = output subfolder.
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
 TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""   # candidate id in titles
-P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
-P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
-P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
-P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
+scoring = P.ScoringOptions(; override=Bool(g("override_injection", true)), sync=Bool(g("override_injection_sync", true)), replace=Bool(g("override_injection_replace", false)), disturbance=Symbol(g("override_injection_disturbance", "off"))); simb = P.SimBOptions()
 D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
-P.INIT_PERTURB_FRAC[] = 0.0                       # nominal sim (no perturbation) for the scatter
+# nominal sim (no perturbation) for the scatter
 no_estab = Bool(g("no_establishment", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
 
@@ -56,13 +53,13 @@ function make_scatter(sp, label)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids)
   ssy = D.get_site_sim_years(spdf)
   spc = D.get_spinup_cohorts(sp)
-  inj = (no_estab || P.OVERRIDE_INJECTION[]) ? D.get_injection_cohorts(sp; all_cohorts=P.OVERRIDE_INJECTION[]) : nothing
+  inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
   rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
   idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs)
   iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"))
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"), scoring, simb)
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
@@ -74,7 +71,7 @@ function make_scatter(sp, label)
   # In :exclude_overwrite the disturbed (drop>0) cohorts are OVERWRITTEN with the observed biomass
   # (supplied, not predicted) and excluded from the loss — strip those (plot, year, species) points
   # too, exactly like the first measurement, so the scatter only shows genuine predictions.
-  if P.OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && !isnothing(inj)
+  if scoring.disturbance == :exclude_overwrite && !isnothing(inj)
     excl = Set((Int(r.plot_id), Int(r.sim_year), Int(r.eco_species_id)) for r in eachrow(inj) if r.disturbance_drop_pct > 0)
     n0 = DF.nrow(paired)
     paired = DF.filter(row -> !((row.plot_id, row.sim_year, row.esp) in excl), paired)
@@ -214,7 +211,7 @@ function make_scatter_B(sp, label)
   iyears_b = DF.nrow(inj_b) == 0 ? Set{Int}() : Set(Int.(inj_b.sim_year))
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs_b, best, msy, n_species, eco_species_ids, spdf_plts, ssy, true, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict_b, injection_years=iyears_b, seeds=[rand(rng, UInt64)])
+    debug=false, search_tier=3, injection_dict=idict_b, injection_years=iyears_b, seeds=[rand(rng, UInt64)], scoring, simb)
   cached = res[1][2]; ab = loss_params.age_bins
   # FOREST age-distribution, exactly as Sim B's tier-4 objective: aggregate AGB by
   # (cycle × eco/land-use × species × age-bin) across all plots — sim age-bins vs obs age-bins.

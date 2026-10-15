@@ -10,13 +10,8 @@ const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const D
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
 outdir = cfg["output_dir"]
 dbpath = String(g("sobol_candidates_db", joinpath(outdir, "losses.duckdb")))
-P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
-P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
-P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
-P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
+scoring = P.ScoringOptions(; override=Bool(g("override_injection", true)), sync=Bool(g("override_injection_sync", true)), replace=Bool(g("override_injection_replace", false)), disturbance=Symbol(g("override_injection_disturbance", "off"))); simb = P.SimBOptions(; dual_mode=let v = g("dual_mode", "off"); v === true ? :joint : v === false ? :off : Symbol(lowercase(String(v))) end, tier_b=Int(g("tier_b", 4)))
 D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false)); D.FIA_CYCLE_MERGE[] = Int(g("fia_cycle_merge", 1))
-P.DUAL_MODE[] = let v = g("dual_mode", "off"); v === true ? :joint : v === false ? :off : Symbol(lowercase(String(v))) end
-P.TIER_B[] = Int(g("tier_b", 4)); P.INIT_PERTURB_FRAC[] = 0.0
 no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("seed", 1))))
 splots, eco_list, species_list, eco_species_ids, _ = D.prepare_parametrization_data(;
   cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=String(g("filter_eco_field", "epa_l4")),
@@ -51,7 +46,7 @@ loss_params = unbinned_w ?
 
 spdf = PU.smoothen_ref_years(splots, loss_params, Int(maximum(splots.age_calc)); debug=false)
 spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(splots)
-inj = (no_estab || P.OVERRIDE_INJECTION[]) ? D.get_injection_cohorts(splots; all_cohorts=P.OVERRIDE_INJECTION[]) : nothing
+inj = (no_estab || scoring.override) ? D.get_injection_cohorts(splots; all_cohorts=scoring.override) : nothing
 ref = P.make_sites(splots, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
 idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, ref); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
 msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
@@ -74,17 +69,17 @@ if loss_params.cbal_on
 end
 seed = PU.LossScales(cbal=cbal)
 
-dual_b0 = P.DUAL_MODE[] == :off ? nothing :
-  P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cmap, ncyc, inj, spc, rng, no_estab; b_only=false)
+dual_b0 = simb.dual_mode == :off ? nothing :
+  P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cmap, ncyc, inj, spc, rng, no_estab; b_only=false, scoring, simb)
 # the scales of the TRAIN reference (W/AGB scales + RANKW), and of Sim B inside dual_b
-scales, dual_b = P.build_split_scales(loss_params, seed, Int(g("tier", 3)), spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)
+scales, dual_b = P.build_split_scales(loss_params, seed, Int(g("tier", 3)), spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)
 println("norm: W=$(loss_params.w_normalize) AGB=$(loss_params.agb_normalize) CELL=$(loss_params.cell_norm) | RANKW $(size(scales.rankw)) w_cell $(size(scales.w_cell))")
 
 # measure() = (ΣW, ΣAGB) over the dominance species for one candidate
 function wagb(params)
   res = P.fit_params(ref, params, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
     debug=false, search_tier=Int(g("tier", 3)), t4_ref=t4_ref, cycle_map=cmap, n_cycles=ncyc,
-    injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], dual_b=dual_b, scales=scales)
+    injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], dual_b=dual_b, scales=scales, scoring, simb)
   fx = P.MOLBSA.MOFitness(P._mo_objectives(res[1][3], eco_species_ids, loss_params, scales, dual_b), convert(Float64, PU.get_total_loss(res[1][1], loss_params)))
   m = P.CMAMAE.measure(fx); (Float64(m[1]), Float64(m[2]), Float64(fx.aggregate), fx.objectives)
 end

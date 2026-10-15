@@ -12,7 +12,6 @@ const MK = CairoMakie; const P = Pan; const D = P.Data; const BSP = P.BiomassSuc
 
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
 D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
-P.INIT_PERTURB_FRAC[] = 0.0
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
 val_frac = Float64(g("val_frac", 0.0)); split_rng = val_frac > 0 ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
 splots, eco_list, species_list, eco_species_ids, splots_val = D.prepare_parametrization_data(;

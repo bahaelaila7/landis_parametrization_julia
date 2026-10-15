@@ -45,6 +45,7 @@ const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 include("succession_api.jl")
 include("params_yaml.jl")
 include("config.jl")
+include("options.jl")
 
 succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "biomasssuccession", "bs") ? _BS :
                                                 lowercase(name) in ("pnet", "pnet-succession") ? _PN :
@@ -235,34 +236,25 @@ end
 const _SiteInjectionYear = Vector{Tuple{Int,Vector{Tuple{UIntType,FloatType,FloatType,FloatType}}}}
 const _SiteInjectionDict = Dict{Int,_SiteInjectionYear}
 
-# Diagnostic toggle. When true, the injection path is switched to OVERRIDE mode:
-# get_injection_cohorts returns the full observed state at every measurement year,
-# and _inject_observed_cohorts! forces each observed cohort onto the site — overwriting
-# the biomass of the matching (species, age) cohort in place, or adding it if absent —
-# so sim matches obs at every loss point. Flip from the REPL: `Pan.OVERRIDE_INJECTION[] = false`.
-# Mirrors the BiomassSuccessionPlugin.CALIBRATE[] pattern. For the sensitivity test, set
-# OVERRIDE_INJECTION_NOISE[] > 0 (multiplicative jitter sd on injected biomass).
-# OVERRIDE_INJECTION_REPLACE[] = true switches override to FULL REPLACE: each measured
-# site is wiped (live/old/B reset) and rebuilt from exactly the observed cohorts, dropping
-# sim-only cohorts (ones that should have died but didn't). Gives an exact multi-cohort
-# state for stress-testing the CSR indexing. Requires OVERRIDE_INJECTION[] (for the data).
-const OVERRIDE_INJECTION = Ref(false)
-const OVERRIDE_INJECTION_NOISE = Ref(0.0)
-const OVERRIDE_INJECTION_REPLACE = Ref(false)
-# OVERRIDE_INJECTION_SYNC[] = true: SET-SYNC mode (choice B) — the injection manages the cohort
-# SET to track the data (remove sim cohorts whose (species,age) isn't observed = "died"; add
-# observed cohorts the sim lacks = "recruited", with observed biomass) but LEAVES matched
-# survivors' sim biomass untouched, so the simulator fits their biomass deterministically.
-# Requires OVERRIDE_INJECTION[]; mutually exclusive with REPLACE (REPLACE takes precedence).
-const OVERRIDE_INJECTION_SYNC = Ref(false)
-# LOSS_BEFORE_INJECTION[] = true (default on branch mo-gdigel): at a measurement year the loss (every search tier) is computed
-# on the SIMULATED state — i.e. BEFORE the observed cohorts are injected for the next interval. The previous order (inject,
-# then score) compared a state whose cohort SET had already been forced to the observed one (sync: unobserved sim cohorts
-# removed, missing observed cohorts added with observed biomass), so the age-structure (Wasserstein) term largely scored
-# observed against observed. `loss_before_injection: false` reproduces the previous behaviour (and earlier results).
-const LOSS_BEFORE_INJECTION = Ref(true)
-
-# Partial-disturbance handling in SYNC mode. Each observed cohort carries a disturbance_drop_pct
+# Injection modes (ScoringOptions, built once per run by `scoring_from_config`; src/options.jl):
+#   override=true: get_injection_cohorts returns the full observed state at every measurement year, and _inject_observed_cohorts!
+#     forces each observed cohort onto the site — overwriting the biomass of the matching (species, age) cohort in place, or adding
+#     it if absent — so sim matches obs at every loss point. For the sensitivity test, noise > 0 is a multiplicative jitter sd on
+#     injected biomass.
+#   replace=true switches override to FULL REPLACE: each measured site is wiped (live/old/B reset) and rebuilt from exactly the
+#     observed cohorts, dropping sim-only cohorts (ones that should have died but didn't). Gives an exact multi-cohort state for
+#     stress-testing the CSR indexing. Requires override (for the data).
+#   sync=true: SET-SYNC mode (choice B) — the injection manages the cohort SET to track the data (remove sim cohorts whose
+#     (species,age) isn't observed = "died"; add observed cohorts the sim lacks = "recruited", with observed biomass) but LEAVES
+#     matched survivors' sim biomass untouched, so the simulator fits their biomass deterministically. Requires override; mutually
+#     exclusive with replace (replace takes precedence).
+#   loss_before_injection=true (the default for sync): at a measurement year the loss (every search tier) is computed on the SIMULATED
+#     state — i.e. BEFORE the observed cohorts are injected for the next interval. The previous order (inject, then score) compared a
+#     state whose cohort SET had already been forced to the observed one (sync: unobserved sim cohorts removed, missing observed
+#     cohorts added with observed biomass), so the age-structure (Wasserstein) term largely scored observed against observed.
+#     `loss_before_injection: false` reproduces the previous behaviour (and earlier results).
+#
+# Partial-disturbance handling in SYNC mode (ScoringOptions.disturbance). Each observed cohort carries a disturbance_drop_pct
 # (from curation). Modes:
 #   :off              — ignore drop (current behaviour).
 #   :scale            — scale the matched (survivor) sim cohort's biomass by (1-drop) at the
@@ -271,9 +263,8 @@ const LOSS_BEFORE_INJECTION = Ref(true)
 #   :exclude_overwrite— overwrite the matched cohort with the observed (already-reduced) biomass and
 #                       EXCLUDE it from the site loss at that year.
 #   :exclude_noscale  — leave the sim biomass and EXCLUDE the cohort from the site loss at that year.
-const OVERRIDE_INJECTION_DISTURBANCE = Ref(:off)
 
-# Disturbance SHOCK (new scoring order, LOSS_BEFORE_INJECTION[] = true + override sync). Applied at every measurement year T
+# Disturbance SHOCK (new scoring order, loss_before_injection + override sync = `shock_order(opts)`). Applied at every measurement year T
 # AFTER the growth step and BEFORE scoring, on the simulated state:
 #   (a) sim cohorts matching (eco_species, age) of a cohort FULLY removed by disturbance in (T_prev→T) are removed;
 #   (b) :scale — matched partially-disturbed survivors (observed drop > 0) are scaled by (1-drop).
@@ -309,12 +300,11 @@ end
 # ---- cohort-level exclusion at a measurement year (new order; replaces the species-level exclusion_dict) ----------------------
 # A cohort (eco_species, age) at (site, T) is EXCLUDED from the loss on BOTH sides when it is
 #   * partially disturbed (drop > 0) and the mode is :exclude_overwrite / :exclude_noscale, or
-#   * a RECRUIT at entry (EXCLUDE_RECRUITS_AT_ENTRY[]): observed at T but with no record of the same cohort (species, age-(T-T_prev))
+#   * a RECRUIT at entry (ScoringOptions.exclude_recruits_at_entry): observed at T but with no record of the same cohort (species, age-(T-T_prev))
 #     at the previous visit of that plot — Sim A has no establishment, so it cannot produce it; it enters via the sync afterwards.
 # Sim side: the cohort is skipped (PU._excl_perm!). Reference side: an alternative SPDFGroundTruth for that site-year is built from the
 # observed cohorts WITHOUT the excluded ones (same smoothing/binning code: PU.smoothen_ref_years). A species left with no cohort on
 # either side contributes nothing (no "missing species" penalty).
-const EXCLUDE_RECRUITS_AT_ENTRY = Ref(true)
 struct _ExclPlan
   mode::Symbol
   recruits::Bool
@@ -335,8 +325,8 @@ function _clear_run_caches!()
   nothing
 end
 
-function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::_ExclPlan
-  mode = OVERRIDE_INJECTION_DISTURBANCE[]; rec_on = EXCLUDE_RECRUITS_AT_ENTRY[]
+function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params, opts::ScoringOptions)::_ExclPlan
+  mode = opts.disturbance; rec_on = opts.exclude_recruits_at_entry
   dist_on = mode in (:exclude_overwrite, :exclude_noscale)
   site_years = Dict{Int,Vector{Int}}()
   site_set = Dict{Tuple{Int,Int},Set{Tuple{UIntType,Int}}}()
@@ -385,12 +375,12 @@ function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
   _ExclPlan(mode, rec_on, coh, ref, prev)
 end
 
-function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::_ExclPlan
+function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params, opts::ScoringOptions)::_ExclPlan
   lock(_EXCL_LOCK) do
     key = (injection_dict, ref_soa, loss_params)
     pl = get(_EXCL_CACHE, key, nothing)
-    if pl === nothing || pl.mode !== OVERRIDE_INJECTION_DISTURBANCE[] || pl.recruits != EXCLUDE_RECRUITS_AT_ENTRY[]
-      pl = _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
+    if pl === nothing || pl.mode !== opts.disturbance || pl.recruits != opts.exclude_recruits_at_entry
+      pl = _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params, opts)
       _EXCL_CACHE[key] = pl
     end
     pl
@@ -398,14 +388,12 @@ function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::
 end
 
 # ---- Sim A scoring modes for the natural-death part (docs/simAB_options_experiment.md) ------------------------------------
-# W_SCOPE[]   :all       — W on every simulated cohort (sim-only natural deaths included; current behaviour)
+# w_scope     :all       — W on every simulated cohort (sim-only natural deaths included; current behaviour)
 #             :survivors — W on cohorts present in both sim and obs at T: sim cohorts absent from the observed set are removed before scoring
 #                          (the sync injection removes them right after anyway). Needs the new order + sync.
-# DEATH_TERM[] :none | :likelihood — per-cohort survive/die negative log-likelihood given PROB_MORT p over the interval Δt (years between
+# death_term  :none | :likelihood — per-cohort survive/die negative log-likelihood given PROB_MORT p over the interval Δt (years between
 #                          the two visits): survivor −Δt·log(1−p); natural death −log(1−(1−p)^Δt). PROB_MORT is NOT applied in the Sim A
 #                          simulation (zeroed inside fit_params when a DeathAcc is passed); it only enters the death term.
-const W_SCOPE = Ref(:all)
-const DEATH_TERM = Ref(:none)
 const DEATH_PMIN = 1e-6
 const DEATH_PMAX = 0.5
 const DEATH_MAXDT = 80
@@ -452,7 +440,7 @@ function _death_collect!(acc::DeathAcc, soa, year, injection_dict, plan)
   nothing
 end
 
-# Survivors-only scoring: remove sim cohorts absent from the observed set at T (see W_SCOPE).
+# Survivors-only scoring: remove sim cohorts absent from the observed set at T (see ScoringOptions.w_scope).
 function _survivors_only!(soa, year, injection_dict)
   for (si, cohorts) in injection_dict[year]
     site = getsite(soa, si); site.active || continue
@@ -472,15 +460,15 @@ function _survivors_only!(soa, year, injection_dict)
   nothing
 end
 
-# DIAGNOSTIC ONLY (default :none = no effect). W_DIAG[] at a measurement year, new order, just before scoring:
+# DIAGNOSTIC ONLY (default :none = no effect). ScoringOptions.w_diag at a measurement year, new order, just before scoring:
 #   :stats   — accumulate cohort-set statistics sim-vs-obs into W_DIAG_STATS (no state change)
 #   :nodeath — additionally REMOVE sim cohorts that are absent from the observed set (oracle natural deaths)
 #   :oracle  — run the sync injection BEFORE scoring (sim set := obs set; matched keep sim biomass): the shape-only W
-const W_DIAG = Ref(:none)
 const W_DIAG_STATS = zeros(Float64, 16)
 const W_DIAG_CAT = zeros(Float64, 6, 2)   # rows: 1 both-exact 2 both-mismatched 3 ref-only(missing species) 4 both-but-nothing-matched; cols: ΣW, count
 const W_DIAG_CTX = Ref{Any}(nothing)      # (spdf_plts, n_species, eco_species_ids, loss_params, scales) set by tools/w_decompose.jl
-function _w_diag_apply!(soa, year, injection_dict, plan, mode::Symbol)
+function _w_diag_apply!(soa, year, injection_dict, plan, opts::ScoringOptions)
+  mode = opts.w_diag
   S = W_DIAG_STATS
   for (si, cohorts) in injection_dict[year]
     site = getsite(soa, si); site.active || continue
@@ -546,7 +534,7 @@ function _w_diag_apply!(soa, year, injection_dict, plan, mode::Symbol)
       end
     end
   end
-  mode === :oracle && _inject_observed_cohorts!(soa, injection_dict[year]; override=true, sync=true, skip_scale=true)
+  mode === :oracle && _inject_observed_cohorts!(soa, injection_dict[year], opts; override=true, replace=false, sync=true, skip_scale=true)
   nothing
 end
 
@@ -560,7 +548,7 @@ end
   nothing
 end
 
-function _apply_disturbance_shock!(soa, shock_year::Union{Nothing,_SiteShockYear}, site_cohorts::Union{Nothing,_SiteInjectionYear})
+function _apply_disturbance_shock!(soa, shock_year::Union{Nothing,_SiteShockYear}, site_cohorts::Union{Nothing,_SiteInjectionYear}, opts::ScoringOptions)
   SP = succession_plugin_of(soa)
   if shock_year !== nothing
     for (site_idx, lst) in shock_year
@@ -589,7 +577,7 @@ function _apply_disturbance_shock!(soa, shock_year::Union{Nothing,_SiteShockYear
       end
     end
   end
-  if site_cohorts !== nothing && OVERRIDE_INJECTION_DISTURBANCE[] === :scale
+  if site_cohorts !== nothing && opts.disturbance === :scale
     for (site_idx, cohorts) in site_cohorts
       site = getsite(soa, site_idx)
       site.active || continue
@@ -618,7 +606,7 @@ end
 # override=true: for each observed cohort, overwrite the biomass of the matching
 #   (species, age) cohort in place; add it only if no match exists. Sim cohorts with
 #   no observed counterpart are left untouched; capacity grows only by the unmatched count.
-function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; override::Bool=false, replace::Bool=false, sync::Bool=false, skip_scale::Bool=false)
+function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear, opts::ScoringOptions; override::Bool=opts.override, replace::Bool=opts.replace, sync::Bool=opts.sync, skip_scale::Bool=false)
   SP = succession_plugin_of(soa)
   if !override
     for (site_idx, cohorts) in site_cohorts
@@ -648,7 +636,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
       site._new_cohort_counts = length(cohorts)
     end
     PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
-    noise = FloatType(OVERRIDE_INJECTION_NOISE[])
+    noise = FloatType(opts.noise)
     for (site_idx, cohorts) in site_cohorts
       site = getsite(soa, site_idx)
       site.active || continue
@@ -695,7 +683,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
     #   :scale            — biomass *= (1-drop): a known shock; cohort STAYS in the loss (growth fits it).
     #   :exclude_overwrite— biomass := observed survivor biomass; cohort EXCLUDED from loss (loss side).
     #   :exclude_noscale  — biomass unchanged; cohort EXCLUDED from loss (loss side).
-    let dmode = OVERRIDE_INJECTION_DISTURBANCE[]
+    let dmode = opts.disturbance
       if (dmode === :scale && !skip_scale) || dmode === :exclude_overwrite   # skip_scale: the (1-drop) shock was already applied before scoring
         for (site_idx, cohorts) in site_cohorts
           site = getsite(soa, site_idx)
@@ -737,7 +725,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
     end
     PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
     # Pass C: append the unmatched observed cohorts (recruits) with observed biomass; recompute old.
-    noise = FloatType(OVERRIDE_INJECTION_NOISE[])
+    noise = FloatType(opts.noise)
     for (site_idx, cohorts) in site_cohorts
       site = getsite(soa, site_idx)
       site.active || continue
@@ -796,7 +784,7 @@ function _inject_observed_cohorts!(soa, site_cohorts::_SiteInjectionYear; overri
   # append the unmatched. Biomass is written RAW (no trunc) so the injected state
   # equals the reference exactly — only this diagnostic path skips the integer-valued
   # truncation that add_cohort!/succession use everywhere else (C# parity).
-  noise = FloatType(OVERRIDE_INJECTION_NOISE[])
+  noise = FloatType(opts.noise)
   for (site_idx, cohorts) in site_cohorts
     site = getsite(soa, site_idx)
     site.active || continue
@@ -1402,8 +1390,8 @@ function parametrize(; cohorts_db_path::String,
   loss_piecewise::Bool=false,
   w_pivot::Float64=1.0,
   agb_pivot::Float64=1.0,
-  init_perturb_frac::Float64=0.0,
-  init_perturb_cap::Float64=50.0,   # max |absolute biomass deviation| per cohort
+  scoring::ScoringOptions=ScoringOptions(),   # the scoring rule + initial-biomass perturbation (see `scoring_from_config`)
+  simb::SimBOptions=SimBOptions(),            # Sim B / dual-mode options
   diagnose::Bool=false,
   cycle_years::Real=8,
   cmaes_lambda::Union{Nothing,Int}=nothing,
@@ -1461,9 +1449,7 @@ function parametrize(; cohorts_db_path::String,
   #bins_idx = vcat(5:5:30, 40:10:80, 100:20:160)
   @info bins_idx
   @info smoothing_window
-  INIT_PERTURB_FRAC[] = init_perturb_frac    # >0 ⇒ n_reps initial-biomass perturbations, scored by best
-  INIT_PERTURB_CAP[] = FloatType(init_perturb_cap)   # cap on |absolute biomass change| per cohort
-  init_perturb_frac > 0 && @info "Initial-condition perturbation: ±$(round(100*init_perturb_frac;digits=2))% over $(n_reps) reps (best-of), shared seed; perturbed = max(2, bio + clamp(bio·pct, ±$(init_perturb_cap))) [max deviation $(init_perturb_cap), floor 2]"
+  scoring.init_perturb_frac > 0 && @info "Initial-condition perturbation: ±$(round(100*scoring.init_perturb_frac;digits=2))% over $(n_reps) reps (best-of), shared seed; perturbed = max(2, bio + clamp(bio·pct, ±$(scoring.init_perturb_cap))) [max deviation $(scoring.init_perturb_cap), floor 2]"
   # unbinned_w (Sim A): per-year age grid (1:400) + no age-smoothing → W₁ is the EXACT per-year EMD.
   # Setting the bins at the SOURCE means the softplus β and the cell-norm W scales
   # (compute_loss_scales) both recompute on this same grid — W₁, its normalization, and the softplus knee
@@ -1508,7 +1494,7 @@ function parametrize(; cohorts_db_path::String,
   ACTIVE_SUCCESSION[] = SUCC
   if SUCC === PnETPlugin.PnET
     spinup && error("succession_plugin=pnet requires spinup: false (cohorts start from the observed state)")
-    DUAL_MODE[] === :off || error("succession_plugin=pnet does not support dual_mode yet (Sim B needs establishment)")
+    simb.dual_mode === :off || error("succession_plugin=pnet does not support dual_mode yet (Sim B needs establishment)")
     (isempty(pnet_climate_cache) || isempty(pnet_co2_csv)) && error("succession_plugin=pnet requires pnet_climate_cache and pnet_co2_csv")
     PnETPlugin.configure!(; climate_cache=pnet_climate_cache, co2_csv=pnet_co2_csv, generic=pnet_generic, db_path=cohorts_db_path)
     @info "PnET succession: climate cache $(basename(pnet_climate_cache)) ($(length(PnETPlugin.CLIMATE[].ids)) L4s, $(PnETPlugin.CLIMATE[].y1)-$(PnETPlugin.CLIMATE[].y2)); fixed constants" PnETPlugin.FIXED[]
@@ -1606,7 +1592,7 @@ function parametrize(; cohorts_db_path::String,
     val_spdf_plts = Data.make_spdf_dict(val_spdf, eco_species_ids)
     val_site_sim_years = Data.get_site_sim_years(val_spdf)
     val_spinup_cohorts = Data.get_spinup_cohorts(splots_val_raw)   # needed for the val Sim-B spinup (dual val)
-    val_injection_cohorts = (no_establishment || OVERRIDE_INJECTION[] || SIMB_DISTURB_ONLY[]) ? Data.get_injection_cohorts(splots_val_raw; all_cohorts=(OVERRIDE_INJECTION[] || SIMB_DISTURB_ONLY[])) : nothing
+    val_injection_cohorts = (no_establishment || scoring.override || simb.simb_disturb_only) ? Data.get_injection_cohorts(splots_val_raw; all_cohorts=(scoring.override || simb.simb_disturb_only)) : nothing
     val_ref_soa = make_sites(splots_val_raw, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment, plugin=SUCC, site_attrs=_site_attrs(splots_val_raw))
     val_splots = splots_val_raw
     println("Val: $(length(unique(splots_val_raw.plot_id))) plots, $(nrow(splots_val_raw)) rows")
@@ -1654,8 +1640,8 @@ function parametrize(; cohorts_db_path::String,
 
   # SIMB_DISTURB_ONLY builds injection_cohorts purely as the disturbance-data source (all_cohorts=true so the
   # drops cover the whole stand), even with no_establishment=false + override_injection=false — it never injects.
-  injection_cohorts = (no_establishment || OVERRIDE_INJECTION[] || SIMB_DISTURB_ONLY[]) ?
-    Data.get_injection_cohorts(splots; all_cohorts=(OVERRIDE_INJECTION[] || SIMB_DISTURB_ONLY[])) : nothing
+  injection_cohorts = (no_establishment || scoring.override || simb.simb_disturb_only) ?
+    Data.get_injection_cohorts(splots; all_cohorts=(scoring.override || simb.simb_disturb_only)) : nothing
   ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment, plugin=SUCC, site_attrs=_site_attrs(splots))
   if search_mode == "sobol"
     return parametrize_sobol(; ref_soa=ref_soa,
@@ -1668,6 +1654,8 @@ function parametrize(; cohorts_db_path::String,
       eco_list=eco_list,
       eco_species_ids=eco_species_ids,
       loss_params=loss_params,
+      scoring=scoring,
+      simb=simb,
       scale_seed=scale_seed,
       spinup=spinup,
       no_establishment=no_establishment,
@@ -1685,7 +1673,7 @@ function parametrize(; cohorts_db_path::String,
   _build_anpp_floor!(eco_list, species_list, eco_species_ids)   # per-(eco,species) ANPP data floor → PU.ANPP_FLOOR (nothing if off)
   _build_prob_estab_floor!(eco_list, species_list, eco_species_ids)   # per-(eco,species) PROB_ESTAB data LOWER bound → PU.PROB_ESTAB_FLOOR (nothing if off)
   if context_only   # plot_only / plot_only_sobol and context tools: the training context, no search
-    ctx = (; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment)
+    ctx = (; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment)
     POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[](ctx)
     return ctx
   end
@@ -1730,6 +1718,8 @@ function parametrize(; cohorts_db_path::String,
       sobol_candidates_db=sobol_candidates_db,
       sobol_top_frac=sobol_top_frac,
       loss_params=loss_params,
+      scoring=scoring,
+      simb=simb,
       scale_seed=scale_seed,
       no_establishment=no_establishment,
       injection_cohorts=injection_cohorts,
@@ -1747,7 +1737,7 @@ function parametrize(; cohorts_db_path::String,
   finally
     PARALLEL_SITES[] = _prev_parallel_sites
   end
-  POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment))
+  POST_SEARCH_HOOK[] === nothing || POST_SEARCH_HOOK[]((; ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment))
   return _driver_result
 end
 function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params::PU.LossParams, scratch_perm::Vector{Int}, scratch_ages::Vector{FloatType})
@@ -1850,7 +1840,7 @@ end
 # CDF is computed per (eco, cycle, species); cycles are summed into one SiteLoss per eco
 # (num_obs = total measurements in the eco, so get_total_loss is per-measurement-averaged W1).
 const CAPTURE_T4SIM = Ref{Any}(nothing)   # diagnostics: set non-nothing → next calculate_t4_loss stashes (sim,ref,n_cycles)
-function calculate_t4_loss(t4_sim, t4_ref, loss_params::PU.LossParams, scales::PU.LossScales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=nothing)
+function calculate_t4_loss(t4_sim, t4_ref, loss_params::PU.LossParams, scales::PU.LossScales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=nothing, per_plot_mean::Bool)
   CAPTURE_T4SIM[] === nothing || (CAPTURE_T4SIM[] = (sim=deepcopy(t4_sim), ref=t4_ref, n_cycles=n_cycles, site_counts=deepcopy(t4_site_counts)))
   eco_losses = Vector{PU.SiteLoss}(undef, length(eco_species_ids))
   for eco_id in eachindex(eco_species_ids)
@@ -1864,9 +1854,9 @@ function calculate_t4_loss(t4_sim, t4_ref, loss_params::PU.LossParams, scales::P
       ref_c = t4_ref[eco_id][cyc]
       # per-plot-mean: divide the AGB level by the # of distinct plots in this (eco,cycle) so the loss is
       # mean biomass-per-plot-by-age (invariant to plot count). W is CDF-normalized → pcinv cancels there.
-      # Uses the SAME T4_CELL_PLOTS the AGB scale divides by, so numerator/denominator stay consistent.
+      # Uses the SAME cell plot counts the AGB scale divides by, so numerator/denominator stay consistent.
       _cpl = cell_plots !== nothing ? cell_plots : T4_CELL_PLOTS[]
-      pcinv = (T4_PER_PLOT_MEAN[] && _cpl !== nothing) ?
+      pcinv = (per_plot_mean && _cpl !== nothing) ?
         one(FloatType) / FloatType(max(1, _cpl[eco_id][cyc])) : one(FloatType)
       for sp_eco in eachindex(sp_map)
         gsp = sp_map[sp_eco]
@@ -1929,7 +1919,7 @@ function _cell_ncoh(splots, n_species::Int, n_eco::Int)::Matrix{Int}
 end
 
 function compute_loss_scales(lp::PU.LossParams, search_tier::Int, spdf_plts, t4_ref, eco_species_ids, n_species::Int;
-    cell_plots=nothing, cbal::PU.CbalTables=PU.NO_CBAL, ncoh::Matrix{Int}=zeros(Int, 0, 0),
+    cell_plots=nothing, per_plot_mean::Bool, cbal::PU.CbalTables=PU.NO_CBAL, ncoh::Matrix{Int}=zeros(Int, 0, 0),
     rankw::Union{Nothing,Matrix{FloatType}}=nothing, softplus_cell_from::Union{Nothing,PU.LossScales}=nothing)::PU.LossScales
   bw = lp.age_bins.bin_widths
   ne = length(eco_species_ids)
@@ -1981,7 +1971,7 @@ function compute_loss_scales(lp::PU.LossParams, search_tier::Int, spdf_plts, t4_
   end
   # --- per-cell scales (+ RANKW) ---
   if lp.cell_norm
-    W, A, R = _cell_scales(lp, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species, cbal, ncoh, cell_plots, rankw)
+    W, A, R = _cell_scales(lp, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species, cbal, ncoh, cell_plots, rankw, per_plot_mean)
     return PU.LossScales(w_cell=W, agb_cell=A, rankw=R, softplus_beta=sp_beta, softplus_beta_cell=sp_beta_cell, cbal=cbal, ncoh=ncoh)
   end
   rk = rankw === nothing ? zeros(FloatType, 0, 0) : rankw
@@ -2011,14 +2001,14 @@ end
 # (1/log(rank+1))/Σ over dominance-included cells, rank by observed AGB descending. `rankw === nothing` ⇒ this is the TRAIN reference
 # and the rank is computed from it (Sim A: per-stratum plot counts as split size; Sim B-only: equal strata); otherwise the given train rank is used.
 function _cell_scales(lp::PU.LossParams, search_tier::Int, spdf_plts, t4_ref, eco_species_ids, n_species::Int, cbal::PU.CbalTables,
-    ncoh::Matrix{Int}, cell_plots, rankw::Union{Nothing,Matrix{FloatType}})
+    ncoh::Matrix{Int}, cell_plots, rankw::Union{Nothing,Matrix{FloatType}}, per_plot_mean::Bool)
   bw = lp.age_bins.bin_widths
   ne = length(eco_species_ids)
   W = zeros(FloatType, n_species, ne); A = zeros(FloatType, n_species, ne)
   if search_tier == 4 && t4_ref !== nothing
     useB = lp.cbal_on && lp.cbal_mode !== :a && !isempty(cbal.w)   # reweight the ref-scale to match calculate_t4_loss (Sim B): direct cbw[k]
     _cpl = cell_plots !== nothing ? cell_plots : T4_CELL_PLOTS[]   # explicit per-split counts (dual_b.cell_plots) win over the legacy global
-    cp = (T4_PER_PLOT_MEAN[] && _cpl !== nothing) ? _cpl : nothing
+    cp = (per_plot_mean && _cpl !== nothing) ? _cpl : nothing
     for (e, eco) in enumerate(t4_ref)
       sp_map = eco_species_ids[e]
       for (cyc, cycmat) in enumerate(eco), sp in 1:size(cycmat, 1)
@@ -2105,49 +2095,49 @@ end
 # `train` is the TRAIN LossScales for a val split (its rankw and softplus cells are reused, so train and val weight cells the same way);
 # `train === nothing` marks the train split itself, whose first reference defines RANKW. `seed` carries the run-wide `cbal`/`ncoh` tables.
 function build_split_scales(lp::PU.LossParams, seed::PU.LossScales, search_tier::Int, spdf_plts, t4_ref, eco_species_ids, n_species::Int;
-    dual_b=nothing, cell_plots=nothing, train::Union{Nothing,PU.LossScales}=nothing)
-  main = compute_loss_scales(lp, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; cell_plots=cell_plots, cbal=seed.cbal, ncoh=seed.ncoh,
+    dual_b=nothing, cell_plots=nothing, train::Union{Nothing,PU.LossScales}=nothing, simb::SimBOptions)
+  main = compute_loss_scales(lp, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean, cbal=seed.cbal, ncoh=seed.ncoh,
     rankw = train === nothing ? nothing : train.rankw, softplus_cell_from = train)
-  if train !== nothing && dual_b === nothing && T4_PRIMARY[] && !(search_tier == 4 && t4_ref !== nothing)
-    # Tier-4-only run (T4_PRIMARY, no Sim B) whose val reference is evaluated as Sim A (tier 3): its per-cell objective has always been
+  if train !== nothing && dual_b === nothing && simb.t4_primary && !(search_tier == 4 && t4_ref !== nothing)
+    # Tier-4-only run (t4_primary, no Sim B) whose val reference is evaluated as Sim A (tier 3): its per-cell objective has always been
     # normalised by the TRAIN tier-4 tables (the val Sim A reference never produced tier-4 tables of its own). Kept as is: the loss
     # kernels use the val reference's own fields, `_mo_objectives` reads the train cell scales.
     main = PU.LossScales(w_global=main.w_global, agb_global=main.agb_global, w_cell=train.w_cell, agb_cell=train.agb_cell, rankw=main.rankw,
       softplus_beta=main.softplus_beta, softplus_beta_cell=main.softplus_beta_cell, cbal=main.cbal, ncoh=main.ncoh)
   end
   dual_b === nothing && return main, nothing
-  bs = compute_loss_scales(dual_b.loss_params, dual_b.tier, dual_b.spdf_plts, dual_b.t4_ref, eco_species_ids, n_species; cell_plots=dual_b.cell_plots,
+  bs = compute_loss_scales(dual_b.loss_params, dual_b.tier, dual_b.spdf_plts, dual_b.t4_ref, eco_species_ids, n_species; cell_plots=dual_b.cell_plots, per_plot_mean=simb.t4_per_plot_mean,
     cbal=seed.cbal, ncoh=seed.ncoh, rankw=main.rankw, softplus_cell_from=(train === nothing ? main : train))
   return main, merge(dual_b, (scales=bs,))
 end
 
-# The two scale sets `_mo_objectives` indexes by group: group 0 = the primary reference — Sim A, except when Sim B is primary (T4_PRIMARY: a
+# The two scale sets `_mo_objectives` indexes by group: group 0 = the primary reference — Sim A, except when Sim B is primary (SimBOptions.t4_primary, carried by dual_b: a
 # dual_mode b run, whose only block is Sim B, or a tier-4-only run whose single reference already carries the tier-4 scales); group 1 = Sim B.
 @inline function _group_scales(scales::PU.LossScales, dual_b)
   # without a Sim B (tier 5 stacks a tier-4 half after the tier-3 half) group 1 has NO scales of its own: the empty LossScales makes _mo_objectives
   # refuse (B11) instead of normalising tier-4 losses with another reference's scales
   dual_b === nothing && return scales, PU.LossScales()
   bsc = dual_b.scales::PU.LossScales
-  return (T4_PRIMARY[] ? bsc : scales), bsc
+  return (dual_b.t4_primary ? bsc : scales), bsc
 end
 
-function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, shock_dict=nothing, death_acc::Union{Nothing,DeathAcc}=nothing, cell_plots=nothing, scales::Union{Nothing,PU.LossScales}=nothing)
+function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier::Int=3, t1_ref::Union{Nothing,Vector{Matrix{FloatType}}}=nothing, t2_ref=nothing, seeds::AbstractVector=[nothing], injection_dict=nothing, injection_years=Set{Int}(), t4_ref=nothing, cycle_map=nothing, n_cycles::Int=0, dual_b=nothing, disturbance_dict=nothing, disturbance_years=Set{Int}(), cache_preinject::Bool=false, work_soa=nothing, shock_dict=nothing, death_acc::Union{Nothing,DeathAcc}=nothing, cell_plots=nothing, scales::Union{Nothing,PU.LossScales}=nothing, scoring::ScoringOptions, simb::SimBOptions)
   # `scales`: the normalisation of THIS reference (see compute_loss_scales / build_split_scales); computed here from the reference when the caller
   # has none (one-off evaluations, analysis tools). Sim B's (dual_b.scales) are derived from it the same way when absent.
-  scales === nothing && (scales = compute_loss_scales(loss_params, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; cell_plots=cell_plots))
+  scales === nothing && (scales = compute_loss_scales(loss_params, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean))
   if dual_b !== nothing && !haskey(dual_b, :scales)
-    dual_b = merge(dual_b, (scales=compute_loss_scales(dual_b.loss_params, dual_b.tier, dual_b.spdf_plts, dual_b.t4_ref, eco_species_ids, n_species; cell_plots=dual_b.cell_plots, rankw=scales.rankw, softplus_cell_from=scales),))
+    dual_b = merge(dual_b, (scales=compute_loss_scales(dual_b.loss_params, dual_b.tier, dual_b.spdf_plts, dual_b.t4_ref, eco_species_ids, n_species; cell_plots=dual_b.cell_plots, per_plot_mean=simb.t4_per_plot_mean, rankw=scales.rankw, softplus_cell_from=scales),))
   end
-  search_tier == 4 && T4_PER_PLOT_MEAN[] && !isempty(get(ENV, "PAN_LOG_CELLPLOTS", "")) && @info "tier-4 per-plot-mean cell plots: Σ = $(sum(sum, something(cell_plots, T4_CELL_PLOTS[], [Int[]]))) ($(cell_plots === nothing ? "legacy global" : "explicit dual_b.cell_plots"); the legacy global currently holds Σ = $(T4_CELL_PLOTS[] === nothing ? 0 : sum(sum, T4_CELL_PLOTS[])))"   # global ratio-of-sums or per-cell denominators (skipped inside a candidate-parallel batch — set once serially by the caller)
+  search_tier == 4 && simb.t4_per_plot_mean && !isempty(get(ENV, "PAN_LOG_CELLPLOTS", "")) && @info "tier-4 per-plot-mean cell plots: Σ = $(sum(sum, something(cell_plots, T4_CELL_PLOTS[], [Int[]]))) ($(cell_plots === nothing ? "legacy global" : "explicit dual_b.cell_plots"); the legacy global currently holds Σ = $(T4_CELL_PLOTS[] === nothing ? 0 : sum(sum, T4_CELL_PLOTS[])))"   # global ratio-of-sums or per-cell denominators (skipped inside a candidate-parallel batch — set once serially by the caller)
   # Disturbance exclude-modes derive a (year → site_idx → excluded eco_species) lookup from the
   # injection cohorts with drop>0, so those (site, species) are skipped from the loss at that year.
   # Disturbance shock (new order only): needs the sync injection (the observed set defines which cohorts were disturbed).
-  _do_shock = LOSS_BEFORE_INJECTION[] && OVERRIDE_INJECTION[] && OVERRIDE_INJECTION_SYNC[] && !OVERRIDE_INJECTION_REPLACE[] && injection_dict !== nothing
+  _do_shock = shock_order(scoring) && injection_dict !== nothing
   _shock = _do_shock ? (shock_dict === nothing ? get(_SHOCK_REGISTRY, injection_dict, nothing) : shock_dict) : nothing
   _skip_scale = _do_shock
-  _excl_plan = _do_shock ? _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params) : nothing   # cohort-level exclusion (new order)
+  _excl_plan = _do_shock ? _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params, scoring) : nothing   # cohort-level exclusion (new order)
   exclusion_dict = nothing
-  if _excl_plan === nothing && OVERRIDE_INJECTION_DISTURBANCE[] in (:exclude_overwrite, :exclude_noscale) && injection_dict !== nothing   # legacy: species-level
+  if _excl_plan === nothing && scoring.disturbance in (:exclude_overwrite, :exclude_noscale) && injection_dict !== nothing   # legacy: species-level
     exclusion_dict = Dict{Int,Dict{Int,Set{UIntType}}}()
     for (yr, sites) in injection_dict
       sd = Dict{Int,Set{UIntType}}()
@@ -2165,22 +2155,22 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       site_sim_years, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params; debug, search_tier=dual_b.tier,
       t4_ref=dual_b.t4_ref, cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles, seeds=b_seeds,
       injection_dict=dual_b.injection_dict, injection_years=dual_b.injection_years,
-      disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales)
+      disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb)
     b_losses = Float64[convert(Float64, PU.get_total_loss(r[1], loss_params)) for r in resB]
     bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep
     return [resB[bi]]
   end
-  init_scales = _init_scales(length(seeds))   # per-rep initial-biomass scale (identity unless perturbing)
+  init_scales = _init_scales(length(seeds), scoring)   # per-rep initial-biomass scale (identity unless perturbing)
   # Mean-over-reps (tier-4 free sim): accumulate every rep's sim histogram, then score ONE loss on the mean
   # histogram (loss-of-mean = the model's EXPECTED distribution) instead of a median-rep pick. Reps run
   # sequentially (plain map), so the shared accumulator is race-free.
-  _mor = T4_MEAN_OVER_REPS[] && search_tier == 4 && dual_b === nothing && length(seeds) > 1
+  _mor = simb.t4_mean_over_reps && search_tier == 4 && dual_b === nothing && length(seeds) > 1
   _mor_hist = _mor ? [[zeros(FloatType, length(eco_species_ids[e]), size(t4_ref[1][1], 2)) for _ in 1:n_cycles] for e in eachindex(eco_species_ids)] : nothing
   _mor_counts = Ref{Any}(nothing)
   resA = map(eachindex(seeds)) do ri
     soa = work_soa === nothing ? copy_and_reseed_soa(ref_soa, seeds[ri]) : reset_soa!(work_soa, ref_soa; seed=seeds[ri])
     if init_scales[ri] != one(FloatType)       # perturb the sim-year-0 population (not scored, only propagated)
-      sc = init_scales[ri]; cap = INIT_PERTURB_CAP[]; SPp = succession_plugin_of(soa)
+      sc = init_scales[ri]; cap = scoring.init_perturb_cap; SPp = succession_plugin_of(soa)
       @maybe_threads PARALLEL_SITES[] for i in 1:soa.n     # per-site independent → parallel in SoA mode
         site = getsite(soa, i)
         site.active || continue
@@ -2329,7 +2319,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       if _do_shock                              # disturbance shock: removals + (:scale) partial drops, BEFORE the preinject snapshot and all scoring
         _shy = _shock === nothing ? nothing : get(_shock, current_sim_year, nothing)
         _inj = current_sim_year in injection_years ? injection_dict[current_sim_year] : nothing
-        (_shy === nothing && _inj === nothing) || _apply_disturbance_shock!(soa, _shy, _inj)
+        (_shy === nothing && _inj === nothing) || _apply_disturbance_shock!(soa, _shy, _inj, scoring)
       end
       if cache_preinject                       # snapshot pure model prediction BEFORE any injection/override
         for i in 1:soa.n
@@ -2344,14 +2334,14 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       end
-      if !LOSS_BEFORE_INJECTION[] && !isnothing(injection_dict) && current_sim_year in injection_years   # legacy order: inject, then score
-        _inject_observed_cohorts!(soa, injection_dict[current_sim_year]; override=OVERRIDE_INJECTION[], replace=OVERRIDE_INJECTION_REPLACE[], sync=OVERRIDE_INJECTION_SYNC[])
+      if !scoring.loss_before_injection && !isnothing(injection_dict) && current_sim_year in injection_years   # legacy order: inject, then score
+        _inject_observed_cohorts!(soa, injection_dict[current_sim_year], scoring)
       end
       if _do_shock && current_sim_year in injection_years
         death_acc === nothing || _death_collect!(death_acc, soa, current_sim_year, injection_dict, _excl_plan)
-        W_SCOPE[] === :survivors && _survivors_only!(soa, current_sim_year, injection_dict)
+        scoring.w_scope === :survivors && _survivors_only!(soa, current_sim_year, injection_dict)
       end
-      (W_DIAG[] !== :none && LOSS_BEFORE_INJECTION[] && _do_shock && current_sim_year in injection_years) && _w_diag_apply!(soa, current_sim_year, injection_dict, _excl_plan, W_DIAG[])
+      (scoring.w_diag !== :none && scoring.loss_before_injection && _do_shock && current_sim_year in injection_years) && _w_diag_apply!(soa, current_sim_year, injection_dict, _excl_plan, scoring)
       if search_tier == 1
         @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
           @inbounds begin
@@ -2512,8 +2502,8 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       end
-      if LOSS_BEFORE_INJECTION[] && !isnothing(injection_dict) && current_sim_year in injection_years   # score the simulated state first, then inject for the next interval
-        _inject_observed_cohorts!(soa, injection_dict[current_sim_year]; override=OVERRIDE_INJECTION[], replace=OVERRIDE_INJECTION_REPLACE[], sync=OVERRIDE_INJECTION_SYNC[], skip_scale=_skip_scale)
+      if scoring.loss_before_injection && !isnothing(injection_dict) && current_sim_year in injection_years   # score the simulated state first, then inject for the next interval
+        _inject_observed_cohorts!(soa, injection_dict[current_sim_year], scoring; skip_scale=_skip_scale)
       end
     end
     if search_tier == 1
@@ -2537,7 +2527,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
           end
         end
       end
-      eco_losses = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, scales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots)
+      eco_losses = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, scales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean)
       run_result = sum(eco_losses)
       if _mor_hist !== nothing   # accumulate this rep's sim histogram for the mean-over-reps pass
         for eco_id in eachindex(eco_species_ids), cyc in 1:n_cycles
@@ -2553,7 +2543,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       for tid in 2:Threads.maxthreadid(), eco_id in eachindex(eco_species_ids), cyc in 1:n_cycles
         t4_sim_t[1][eco_id][cyc] .+= t4_sim_t[tid][eco_id][cyc]
       end
-      eco_losses_4 = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, scales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots)
+      eco_losses_4 = calculate_t4_loss(t4_sim_t[1], t4_ref, loss_params, scales, n_species, eco_species_ids, t4_site_counts, t4_obs_counts, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean)
       run_result = sum(PU.skipundef(years_results)) + sum(eco_losses_4)
       eco_losses = vcat(eco_losses_3, eco_losses_4)
     else
@@ -2584,8 +2574,8 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       _mor_hist[e][cyc] ./= ns
     end
     sc, oc = _mor_counts[]
-    eco_losses_m = calculate_t4_loss(_mor_hist, t4_ref, loss_params, scales, n_species, eco_species_ids, sc, oc, n_cycles; cell_plots=cell_plots)
-    resA = [(sum(eco_losses_m), _median_rep_cached(resA, loss_params), eco_losses_m)]
+    eco_losses_m = calculate_t4_loss(_mor_hist, t4_ref, loss_params, scales, n_species, eco_species_ids, sc, oc, n_cycles; cell_plots=cell_plots, per_plot_mean=simb.t4_per_plot_mean)
+    resA = [(sum(eco_losses_m), _median_rep_cached(resA, loss_params, scoring), eco_losses_m)]
   end
   dual_b === nothing && return resA
   b_seeds = UInt64[hash((UInt64(seeds[1]), i)) for i in eachindex(seeds)]
@@ -2593,13 +2583,13 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
     site_sim_years, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params; debug, search_tier=dual_b.tier, t4_ref=dual_b.t4_ref,
     cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles, seeds=b_seeds, injection_dict=dual_b.injection_dict,
     injection_years=dual_b.injection_years, disturbance_dict=dual_b.disturbance_dict,
-    disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales)
-  a_run, a_eco, a_idx = _agg_reps(resA, loss_params)
+    disturbance_years=dual_b.disturbance_years, dual_b=nothing, cell_plots=dual_b.cell_plots, scales=dual_b.scales, scoring, simb)
+  a_run, a_eco, a_idx = _agg_reps(resA, loss_params, scoring)
   b_losses = Float64[convert(Float64, PU.get_total_loss(r[1], loss_params)) for r in resB]
   bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep (robust to a lucky/unlucky draw)
   return [(a_run + resB[bi][1], resA[a_idx][2], vcat(a_eco, resB[bi][3]))]
 end
-function parametrize_sobol(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, rng::Random.AbstractRNG, debug::Bool, N::Int=100, M::Int=5, eval_tier::Int=3, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, cycle_years::Real=8, saltelli::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_sobol(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, rng::Random.AbstractRNG, debug::Bool, N::Int=100, M::Int=5, eval_tier::Int=3, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, cycle_years::Real=8, saltelli::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
@@ -2635,7 +2625,7 @@ function parametrize_sobol(; ref_soa::SiteSoA, output_dir::AbstractString, splot
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif eval_tier == 4 || eval_tier == 5 || DUAL_MODE[] != :off
+  elseif eval_tier == 4 || eval_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -2656,7 +2646,7 @@ function parametrize_sobol(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   end
 
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, n_species, n_ecoregions, eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, n_species, n_ecoregions, eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   initial_params = generate_params(SP, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
@@ -2668,12 +2658,12 @@ function parametrize_sobol(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   # IDENTICAL eval to the downstream optimizers: dual Sim A⊕B, init-perturbation reps (best-of for A),
   # B median-over-distinct-seeds — i.e. a candidate's loss here == its CMA-MAE/CMA-ES quality, so the
   # seed pool ranks on the same loss surface. (M = n_reps perturbation reps via _fixed_seeds.)
-  fixed_seeds = _fixed_seeds(rng, M)
-  dual_b0 = DUAL_MODE[] == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
-  scales, dual_b = build_split_scales(loss_params, scale_seed, eval_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)   # the TRAIN reference scales (RANKW defined here)
+  fixed_seeds = _fixed_seeds(rng, M, scoring)
+  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb)
+  scales, dual_b = build_split_scales(loss_params, scale_seed, eval_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
   _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params;
     debug=debug, search_tier=eval_tier, t1_ref=t1_ref, t2_ref=t2_ref, t4_ref=t4_ref, cycle_map=cycle_map, n_cycles=n_cycles,
-    seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales)
+    seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales, scoring, simb)
 
   ResultT = @NamedTuple{params::typeof(initial_params), mean_loss::FloatType, std_loss::FloatType, median_loss::FloatType, losses::Vector{FloatType}}
   results = ResultT[]
@@ -2691,7 +2681,7 @@ function parametrize_sobol(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   try
     TProgress.@track for i in 1:n_samples
       bio_params = samples[i]
-      run_result, eco_losses, _ = _agg_reps(_run(bio_params), loss_params)    # A best-of-perturbation + B median → one aggregate
+      run_result, eco_losses, _ = _agg_reps(_run(bio_params), loss_params, scoring)    # A best-of-perturbation + B median → one aggregate
       objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)   # EXACT downstream objective (cell-norm ÷scale, rank, power)
       loss = FloatType(_mo_aggregate(objs, run_result, loss_params))   # = Σobjs under cell-norm; get_total_loss otherwise
       sumW = sum(@view objs[1:2:end]); sumA = sum(@view objs[2:2:end])   # W = odd objs, AGB = even (A_W,A_AGB,B_W,B_AGB)
@@ -2725,7 +2715,7 @@ function parametrize_sobol(; ref_soa::SiteSoA, output_dir::AbstractString, splot
         site_sim_years, spinup, spinup_cohorts, loss_params;
         debug, search_tier=eval_tier, t1_ref=t1_ref, t2_ref=t2_ref, t4_ref=t4_ref, cycle_map=cycle_map, n_cycles=n_cycles,
         seeds=[rand(rng, UInt64)],
-        injection_dict=injection_dict, injection_years=injection_years, scales=scales))
+        injection_dict=injection_dict, injection_years=injection_years, scales=scales, scoring, simb))
       sim_sample = _filter_cached_to_df(best_result[2], sampled_ids)
       generate_plots(emp_sample, sim_sample, "sobol_best", convert(Float64, PU.get_total_loss(best_result[1], loss_params)), output_dir)
     end
@@ -2760,28 +2750,25 @@ function _make_emp_df(splots::DataFrame, sampled_ids::Set)
   )
 end
 
-# Initial-condition perturbation. When INIT_PERTURB_FRAC[] > 0 the n_reps "reps" are NOT RNG re-seeds
-# but evenly-spaced scalings of the INITIAL cohort biomass over [1-frac, 1+frac] (the sim-year-0
+# Initial-condition perturbation (ScoringOptions.init_perturb_frac / _cap). When init_perturb_frac > 0 the n_reps "reps" are NOT RNG
+# re-seeds but evenly-spaced scalings of the INITIAL cohort biomass over [1-frac, 1+frac] (the sim-year-0
 # population only — year 0 is never scored, so this is pure boundary-condition slack), and an
 # individual's fitness is the BEST (min) rep, not the sum. frac=0 ⇒ legacy behavior (seed-varied reps,
-# summed). fit_params reads this Ref directly off the number of seeds, so callers need no new args.
-const INIT_PERTURB_FRAC = Ref{Float64}(0.0)
-# Optional absolute cap (g/m²) on the per-cohort biomass CHANGE: the perturbation is bio*(scale-1)
-# clamped to ±INIT_PERTURB_CAP, so e.g. 5% on a 4000 g/m² cohort is limited to ±100 instead of ±200.
-# Inf ⇒ uncapped (pure multiplicative scaling).
-const INIT_PERTURB_CAP = Ref{FloatType}(FloatType(Inf))
+# summed). fit_params reads the options off the number of seeds, so callers need no new args.
+# init_perturb_cap is an optional absolute cap (g/m²) on the per-cohort biomass CHANGE: the perturbation is bio*(scale-1)
+# clamped to ±cap, so e.g. 5% on a 4000 g/m² cohort is limited to ±100 instead of ±200. Inf ⇒ uncapped (pure multiplicative scaling).
 # n evenly-spaced initial-biomass scale factors across [1-frac, 1+frac]; identity when off or n≤1.
-_init_scales(n::Int) = (INIT_PERTURB_FRAC[] <= 0 || n <= 1) ? fill(one(FloatType), n) :
-  FloatType[1 - INIT_PERTURB_FRAC[] + 2 * INIT_PERTURB_FRAC[] * (k - 1) / (n - 1) for k in 1:n]
+_init_scales(n::Int, opts::ScoringOptions) = (opts.init_perturb_frac <= 0 || n <= 1) ? fill(one(FloatType), n) :
+  FloatType[1 - opts.init_perturb_frac + 2 * opts.init_perturb_frac * (k - 1) / (n - 1) for k in 1:n]
 # Per-rep RNG seeds. Perturb mode shares ONE seed across reps so the only thing that varies is the
 # initial-biomass scaling (sync path has no RNG influence anyway, but this makes it exact); legacy
 # draws an independent seed per rep.
-_fixed_seeds(rng, n::Int) = INIT_PERTURB_FRAC[] > 0 ? fill(rand(rng, UInt64), n) : [rand(rng, UInt64) for _ in 1:n]
+_fixed_seeds(rng, n::Int, opts::ScoringOptions) = opts.init_perturb_frac > 0 ? fill(rand(rng, UInt64), n) : [rand(rng, UInt64) for _ in 1:n]
 
 # Aggregate per-rep results into (run_result, eco_losses, picked_idx). Legacy (frac=0): SUM across reps.
 # Perturb mode (frac>0 & >1 rep): pick the SINGLE BEST rep (min total loss).
-function _agg_reps(rep_results, loss_params::PU.LossParams)
-  if INIT_PERTURB_FRAC[] > 0 && length(rep_results) > 1
+function _agg_reps(rep_results, loss_params::PU.LossParams, opts::ScoringOptions)
+  if opts.init_perturb_frac > 0 && length(rep_results) > 1
     b = argmin(Float64[convert(Float64, PU.get_total_loss(r[1], loss_params)) for r in rep_results])
     return rep_results[b][1], rep_results[b][3], b
   end
@@ -2790,42 +2777,33 @@ function _agg_reps(rep_results, loss_params::PU.LossParams)
   return run_result, eco_losses, 1
 end
 
-function _median_rep_cached(rep_results, loss_params::PU.LossParams)
+function _median_rep_cached(rep_results, loss_params::PU.LossParams, opts::ScoringOptions)
   losses = Float64[convert(Float64, PU.get_total_loss(r[1], loss_params)) for r in rep_results]
   # perturb mode caches the BEST rep's trajectory (matching _agg_reps); legacy caches the median rep.
-  (INIT_PERTURB_FRAC[] > 0 && length(rep_results) > 1) && return rep_results[argmin(losses)][2]
+  (opts.init_perturb_frac > 0 && length(rep_results) > 1) && return rep_results[argmin(losses)][2]
   rep_results[argmin(abs.(losses .- Statistics.median(losses)))][2]
 end
 
-# Dual-mode (Sim A sync + Sim B free). When DUAL_MODE[] is set: establishment params are fit, and each
+# Dual-mode (Sim A sync + Sim B free; SimBOptions.dual_mode). When dual_mode is not :off: establishment params are fit, and each
 # candidate is evaluated with a second simulation (free process: model regenerates natural plots, planting
 # handed in for artificial plots) whose tier-4 per-eco losses are stacked after Sim A's via fit_params'
 # dual_b. Errors attribute to the process each param governs (growth←A, introduction←B).
-const DUAL_MODE = Ref{Symbol}(:off)   # :off (Sim A only) · :joint (A⊕B) · :b (Sim B only, seed from A)
-# The primary simulation is scored at tier 4 (dual_mode b, or tier 4 without a dual): its per-cell loss scales live in the B slots
-# (the tier-4 LossScales of dual_b / the primary reference, see _group_scales), so _mo_objectives must normalise group 0 with them. Before this,
-# group 0 always used the A (tier-3) scales: Sim B objectives were divided by the Sim A reference's scales and the tier-4 scales
-# were unused; tier-4-only runs read empty A matrices (raw losses, zero rank weights).
-const T4_PRIMARY = Ref{Bool}(false)
-const TIER_B = Ref{Int}(4)            # Sim B's tier (yaml tier_b; A's tier is the config `tier`)
+# dual_mode: :off (Sim A only) · :joint (A⊕B) · :b (Sim B only, seed from A). t4_primary: see SimBOptions (src/options.jl).
 const LBSA_STRETCH_LEN = Ref{Int}(150)  # LBSA stretch length (yaml lbsa_stretch_len); shorter → faster freeze detection
 const LBSA_STALE_RATIO = Ref{Float64}(0.95)  # LBSA up_attempt_stale_ratio (yaml lbsa_stale_ratio); lower → freezes/reheats sooner
 const LBSA_TEMP_LIST_LEN = Ref{Int}(150)     # LBSA temperature-list length L (yaml lbsa_temp_list_len)
 const LBSA_REPLACE_OLDEST = Ref{Bool}(true)  # LBSA replace_oldest_instead_of_max (yaml lbsa_replace_oldest); false → overwrite the MAX each stretch (temp adapts every stretch instead of a full L-cycle)
 const LBSA_COOLING_ONLY = Ref{Bool}(false)   # LBSA cooling_only_schedule (yaml lbsa_cooling_only); true → max temp can only decrease (monotone cooling) so the search actually freezes → freeze/reheat/restart chain fires. false → temp self-regulates to accepted-uphill mean and never freezes.
-const SIMB_SPINUP = Ref{Bool}(true)   # Sim B start (yaml simB_spinup): true = spin up from a deficit (back-cast);
-                                      # false = start from the OBSERVED year-0 cohorts (anchored), still free establishment
-# yaml simB_disturb_only: Sim B is PURELY FREE — NO cohort injection anywhere (natural AND artificial run free
+# SimBOptions.simb_spinup (yaml simB_spinup): Sim B start; true = spin up from a deficit (back-cast);
+#                       false = start from the OBSERVED year-0 cohorts (anchored), still free establishment
+# SimBOptions.simb_disturb_only (yaml simB_disturb_only): Sim B is PURELY FREE — NO cohort injection anywhere (natural AND artificial run free
 # from the year-0 initial cohorts, model establishment via PROB_ESTAB stays ON), and the observed disturbance
 # drops are applied as scale-reductions to EVERY plot's matching-species cohorts (no artificial exclusion, no
 # planting sync). Contrast the default: natural free + artificial planting-synced + disturbance excluded on artificial.
-const SIMB_DISTURB_ONLY = Ref{Bool}(false)
-# Tier-4 (Sim B) loss options. PER_PLOT_MEAN: divide each (eco,cycle,species) cell histogram by its plot count →
-# AGB term is mean biomass-per-plot-by-age (intensive; W is CDF-normalized so unaffected). MEAN_OVER_REPS: for
+# Tier-4 (Sim B) loss options. t4_per_plot_mean (simB_per_plot_mean): divide each (eco,cycle,species) cell histogram by its plot count →
+# AGB term is mean biomass-per-plot-by-age (intensive; W is CDF-normalized so unaffected). t4_mean_over_reps (simB_rep_mean): for
 # the stochastic free sim, average the n_reps' tier-4 sim histograms and score the loss ONCE on the mean
 # histogram (loss-of-mean, the model's EXPECTED distribution) instead of picking a median rep.
-const T4_PER_PLOT_MEAN = Ref{Bool}(false)   # yaml simB_per_plot_mean
-const T4_MEAN_OVER_REPS = Ref{Bool}(false)  # yaml simB_rep_mean
 
 # ── Optional wall-time instrumentation (env PAN_TIMING=1). Zero cost when off: every probe is behind a single
 # PAN_TIMING[] Ref read, and the only always-on work is a handful of time_ns() per GENERATION (not per site).
@@ -2848,9 +2826,9 @@ _tsec(ns) = round(max(0, signed(UInt64(ns))) / 1e9, digits=3)   # signed+clamp: 
 const T4_CELL_PLOTS = Ref{Union{Nothing,Vector{Vector{Int}}}}(nothing)
 # Build Sim B's dual_b NamedTuple: free-process SoA + injection restricted to artificial ecos (natural
 # plots run free), sharing A's t4_ref/cycle bins (Sim B is tier-4).
-function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only::Bool=false)
+function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only::Bool=false, scoring::ScoringOptions, simb::SimBOptions)
   # Per-(eco,cycle) distinct-plot count, matching the tier-4 ref build (all measured years per cycle). Used
-  # by T4_PER_PLOT_MEAN to turn the AGB level into mean biomass-per-plot-by-age (consistently in scale+loss).
+  # by SimBOptions.t4_per_plot_mean to turn the AGB level into mean biomass-per-plot-by-age (consistently in scale+loss).
   cell_plots = [zeros(Int, max(1, n_cycles)) for _ in eachindex(eco_species_ids)]
   for ((plot_id, eco_id), year_dict) in spdf_plts
     cycs = Set{Int}()
@@ -2863,12 +2841,12 @@ function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params
   T4_CELL_PLOTS[] = cell_plots
   art = Set(e for e in eachindex(eco_list) if occursin("artificial", lowercase(eco_list[e])))
   art_plots = Set(Int(r.plot_id) for r in eachrow(splots) if Int(r.eco_id) in art)
-  # SIMB_DISTURB_ONLY: no injection at all (purely free everywhere); else default = plant/sync artificial plots.
-  inj_b = (SIMB_DISTURB_ONLY[] || isnothing(injection_cohorts)) ? nothing : filter(r -> Int(r.plot_id) in art_plots, injection_cohorts)
-  # Sim B start: SIMB_SPINUP[]=true spins up from a deficit (model establishes the stand from scratch via the
+  # simb_disturb_only: no injection at all (purely free everywhere); else default = plant/sync artificial plots.
+  inj_b = (simb.simb_disturb_only || isnothing(injection_cohorts)) ? nothing : filter(r -> Int(r.plot_id) in art_plots, injection_cohorts)
+  # Sim B start: simb_spinup=true spins up from a deficit (model establishes the stand from scratch via the
   # back-cast); false starts from the OBSERVED year-0 cohorts (anchored to data, no invented history) while
   # still running free establishment forward.
-  ref_b = make_sites_like(ACTIVE_SUCCESSION[], splots, eco_species_ids; rng=rng, spinup=SIMB_SPINUP[], no_establishment=false)
+  ref_b = make_sites_like(ACTIVE_SUCCESSION[], splots, eco_species_ids; rng=rng, spinup=simb.simb_spinup, no_establishment=false)
   idict_b = isnothing(inj_b) ? nothing : _build_injection_dict(inj_b, ref_b)
   iyears_b = isnothing(inj_b) ? Set{Int}() : Set(Int.(inj_b.sim_year))
   # Disturbance-apply for the free (natural) plots: at each disturbance year, reduce the species' free-sim
@@ -2882,7 +2860,7 @@ function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params
     plot_to_site = Dict{Int,Int}(Int(getsite(ref_b, i).ref_cn) => i for i in 1:ref_b.n)
     acc = Dict{Tuple{Int,Int,UIntType,UIntType},Tuple{FloatType,FloatType}}()   # (year,site,species,age)→(Σ bio·drop, Σ bio)
     for r in eachrow(injection_cohorts)
-      (!SIMB_DISTURB_ONLY[] && Int(r.plot_id) in art_plots) && continue   # disturb-only: apply to ALL plots
+      (!simb.simb_disturb_only && Int(r.plot_id) in art_plots) && continue   # disturb-only: apply to ALL plots
       r.disturbance_drop_pct > 0 || continue
       si = get(plot_to_site, Int(r.plot_id), 0); si == 0 && continue
       k = (Int(r.sim_year), si, UIntType(r.eco_species_id), UIntType(round(r.age_calc)))
@@ -2899,7 +2877,7 @@ function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params
     if "disturbance_shock" in metadatakeys(injection_cohorts)
       nfull_b = 0
       for r in eachrow(metadata(injection_cohorts, "disturbance_shock"))
-        (!SIMB_DISTURB_ONLY[] && Int(r.plot_id) in art_plots) && continue
+        (!simb.simb_disturb_only && Int(r.plot_id) in art_plots) && continue
         si = get(plot_to_site, Int(r.plot_id), 0); si == 0 && continue
         sd = get!(get!(ddict, Int(r.sim_year), Dict{Int,Dict{Tuple{UIntType,UIntType},FloatType}}()), si, Dict{Tuple{UIntType,UIntType},FloatType}())
         sd[(UIntType(r.eco_species_id), UIntType(r.age_calc))] = one(FloatType); nfull_b += 1
@@ -2907,10 +2885,10 @@ function _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params
       @info "Sim B: $(nfull_b) full-removal disturbance entries"
     end
   end
-  @info "Sim B dual_b: $(ref_b.n) sites, $(length(art_plots)) artificial plots | injection=$(idict_b === nothing ? "OFF" : "ON ($(length(iyears_b)) yrs, artificial)") | disturbance-scale=$(isempty(ddict) ? "OFF" : "ON ($(length(ddict)) yrs, $(SIMB_DISTURB_ONLY[] ? "ALL plots" : "natural only"))") | establishment=ON"
+  @info "Sim B dual_b: $(ref_b.n) sites, $(length(art_plots)) artificial plots | injection=$(idict_b === nothing ? "OFF" : "ON ($(length(iyears_b)) yrs, artificial)") | disturbance-scale=$(isempty(ddict) ? "OFF" : "ON ($(length(ddict)) yrs, $(simb.simb_disturb_only ? "ALL plots" : "natural only"))") | establishment=ON"
   return (ref_soa=ref_b, spdf_plts=spdf_plts, loss_params=loss_params, t4_ref=t4_ref,
     cycle_map=cycle_map, n_cycles=n_cycles, injection_dict=idict_b, injection_years=iyears_b,
-    spinup=SIMB_SPINUP[], spinup_cohorts=spinup_cohorts, b_only=b_only, tier=TIER_B[],
+    spinup=simb.simb_spinup, spinup_cohorts=spinup_cohorts, b_only=b_only, tier=simb.tier_b, t4_primary=simb.t4_primary,
     disturbance_dict=(isempty(ddict) ? nothing : ddict), disturbance_years=Set(keys(ddict)), cell_plots=cell_plots)
 end
 
@@ -2924,18 +2902,15 @@ end
 # preexist=true keeps only cohorts that existed at the plot's first visit (age > sim_year) on BOTH sides: drops simulated
 # recruits and observed cohorts younger than the run (timber-only data cannot observe recruits until they reach 5 in).
 function resim_simB_paired(cfg0, params, sp, spdf_plts, site_sim_years, spinup_cohorts, loss_params,
-                           eco_list, species_list, eco_species_ids, rng; by_plot::Bool=false, preexist::Bool=false)
+                           eco_list, species_list, eco_species_ids, rng; by_plot::Bool=false, preexist::Bool=false,
+                           scoring::ScoringOptions=scoring_options(cfg0))
   cfg = _as_config(cfg0)
   ACTIVE_SUCCESSION[] = succession_plugin_for(params)
-  DUAL_MODE[] = :b
-  T4_PRIMARY[] = true
-  SIMB_DISTURB_ONLY[] = cfg["simB_disturb_only"]
-  SIMB_SPINUP[] = cfg["simB_spinup"]
-  TIER_B[] = cfg["tier_b"]
-  T4_PER_PLOT_MEAN[] = cfg["simB_per_plot_mean"]
-  T4_MEAN_OVER_REPS[] = cfg["simB_rep_mean"]
+  # Sim B only (dual_mode b), whatever the config says; the other Sim B options follow the config.
+  simb = SimBOptions(; dual_mode=:b, tier_b=cfg["tier_b"], t4_primary=true, simb_spinup=cfg["simB_spinup"],
+    simb_disturb_only=cfg["simB_disturb_only"], t4_per_plot_mean=cfg["simB_per_plot_mean"], t4_mean_over_reps=cfg["simB_rep_mean"])
   n_species = length(species_list)
-  inj = (SIMB_DISTURB_ONLY[] || OVERRIDE_INJECTION[]) ? Data.get_injection_cohorts(sp; all_cohorts=true) : nothing
+  inj = (simb.simb_disturb_only || scoring.override) ? Data.get_injection_cohorts(sp; all_cohorts=true) : nothing
   cycle_map, n_cycles = Data.build_cycle_map(sp; cycle_years=cfg["cycle_years"])
   n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
   t4_ref = [[zeros(FloatType, length(eco_species_ids[e]), n_bins) for _ in 1:n_cycles] for e in eachindex(eco_list)]
@@ -2943,10 +2918,10 @@ function resim_simB_paired(cfg0, params, sp, spdf_plts, site_sim_years, spinup_c
     cyc = get(cycle_map, (Int(pid), Int(sy)), 0); cyc == 0 && continue
     for (spe, rec) in gt.records; t4_ref[eid][cyc][spe, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
   end
-  dual_b = _build_dual_b(sp, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, inj, spinup_cohorts, rng, false; b_only=true)
+  dual_b = _build_dual_b(sp, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, inj, spinup_cohorts, rng, false; b_only=true, scoring, simb)
   msy = maximum(maximum.(filter(!isempty, site_sim_years.sim_years)))
   res = fit_params(dual_b.ref_soa, params, msy, n_species, eco_species_ids, spdf_plts, site_sim_years, false, spinup_cohorts, loss_params;
-    debug=false, search_tier=3, dual_b=dual_b, seeds=[rand(rng, UInt64)])
+    debug=false, search_tier=3, dual_b=dual_b, seeds=[rand(rng, UInt64)], scoring, simb)
   cached = res[1][2]; ab = loss_params.age_bins
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DataFrames.select(sp, [:plot_id, :eco_id]))))
   simdf = DataFrames.DataFrame(plot=Int[], cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
@@ -2979,8 +2954,8 @@ end
 # (otherwise val = Sim A only, which is not comparable to a dual train loss). Builds val tier-4 refs +
 # cycle map, then the dual_b. Returns nothing when dual mode is off.
 function _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years,
-    val_injection_cohorts, val_spinup_cohorts, rng, no_establishment)
-  DUAL_MODE[] == :off && return nothing
+    val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring::ScoringOptions, simb::SimBOptions)
+  simb.dual_mode == :off && return nothing
   vcm, vnc = Data.build_cycle_map(val_splots; cycle_years=cycle_years)
   nb = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
   vt4 = [[zeros(FloatType, length(eco_species_ids[e]), nb) for _ in 1:vnc] for e in eachindex(eco_list)]
@@ -2989,7 +2964,7 @@ function _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts,
     for (sp_eco, rec) in gt.records; vt4[eid][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
   end
   _build_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, vt4, vcm, vnc,
-    val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
+    val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb)
 end
 
 function _filter_cached_to_df(cached, sampled_ids::Set)
@@ -2998,7 +2973,7 @@ function _filter_cached_to_df(cached, sampled_ids::Set)
   DataFrame(filtered, [:plot_id, :sim_year, :species_id, :age, :agb])
 end
 
-function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, scale_seed::PU.LossScales=PU.LossScales())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   # Fixed plot sample chosen once at startup so progress is comparable across iterations
@@ -3009,7 +2984,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
@@ -3018,7 +2993,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots
   have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
-  val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
+  val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb) : nothing
   sampled_ids_val = (have_val && n_output_plots > 0) ?
                     _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) :
                     Set{UIntType}()
@@ -3055,7 +3030,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || DUAL_MODE[] != :off
+  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -3079,9 +3054,9 @@ function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots
   # comparison, smoothing the surface — vs drawing fresh seeds per trial (high variance).
   # (On resume this is a new realization; the incumbent self-heals after the first accepted
   # move. Refreshing periodically to avoid overfitting one realization is a later knob.)
-  fixed_seeds = _fixed_seeds(rng, n_reps)
-  scales, _ = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species)   # the TRAIN reference scales (RANKW defined here)
-  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales)) : nothing
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
+  scales, _ = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; simb)   # the TRAIN reference scales (RANKW defined here)
+  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales, simb)) : nothing
   # Score by the SAME Sim-A loss as the (MO-)CMA-ES drivers: under CELL_NORM the cell-normalized aggregate
   # (Σ of _mo_objectives — per-cell ÷scale, per-stratum RANKW), else the raw scalar. So LBSA optimizes the
   # identical objective and its convergence is directly comparable.
@@ -3099,7 +3074,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots
     else
       generate_params(SP, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     end
-    init_rr, init_el, _ = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales), loss_params)
+    init_rr, init_el, _ = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales, scoring, simb), loss_params, scoring)
     cur = LBSA.LBSACandidate(bio_params, _norm_loss(init_rr, init_el))
     search_state = LBSA.LBSAState(cur, cur, rng; max_iter=TRIALS, stretch_len=LBSA_STRETCH_LEN[], up_attempt_stale_ratio=LBSA_STALE_RATIO[], temp_list_len=LBSA_TEMP_LIST_LEN[], replace_oldest_instead_of_max=LBSA_REPLACE_OLDEST[], cooling_only_schedule=LBSA_COOLING_ONLY[])
     search_state.sobol_cand_idx = 2
@@ -3168,9 +3143,9 @@ function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots
         bio_params, _ = PU.mutate_params(bio_params, param_dists; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
       end
 
-      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales)
-      run_result, eco_losses, _ = _agg_reps(rep_results, loss_params)
-      cached_sites_state = _median_rep_cached(rep_results, loss_params)
+      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales, scoring, simb)
+      run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
+      cached_sites_state = _median_rep_cached(rep_results, loss_params, scoring)
       next_loss = _norm_loss(run_result, eco_losses)
 
       current_loss = convert(Float64, search_state.current.fx)
@@ -3190,7 +3165,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots
       if did_restart
         @info "Restarting @ $(search_state.i)"
         bio_params = next_candidate()
-        rst_rr, rst_el, _ = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales), loss_params)
+        rst_rr, rst_el, _ = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales, scoring, simb), loss_params, scoring)
         is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, _norm_loss(rst_rr, rst_el)))
       end
       val_sim_sample = nothing
@@ -3213,7 +3188,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots
               spinup, val_spinup_cohorts, loss_params;
               debug=false, search_tier=3,
               injection_dict=inj_dict_val, injection_years=inj_years_val,
-              seeds=[rand(rng, UInt64)], scales=val_scales))
+              seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb))
             val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
             @info "Val loss @ $iter | loss=$val_total"
             try
@@ -3304,7 +3279,7 @@ end
 # threads internally), then updates the CMA-ES distribution. TRIALS is the total fit_params budget
 # (so it's comparable to LBSA); λ defaults to Hansen's 4+⌊3·ln(n)⌋. `ipop=true` enables IPOP
 # restarts (doubling λ from a fresh mean on σ-collapse / stagnation); default is a single run.
-function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   # Fixed plot sample chosen once at startup so progress is comparable across iterations
@@ -3315,7 +3290,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
@@ -3324,7 +3299,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
-  val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
+  val_dual_b = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb) : nothing
   sampled_ids_val = (have_val && n_output_plots > 0) ?
                     _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) :
                     Set{UIntType}()
@@ -3361,7 +3336,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splot
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || DUAL_MODE[] != :off
+  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -3384,9 +3359,9 @@ function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   # scored on the *same* stochastic realization (required for a fair CMA-ES ranking — a noisier
   # candidate must not win on a lucky seed). Fixing it for the whole run smooths the surface;
   # refreshing per generation to avoid overfitting one realization is a later knob.
-  fixed_seeds = _fixed_seeds(rng, n_reps)
-  scales, _ = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species)   # the TRAIN reference scales (RANKW defined here)
-  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales)) : nothing
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
+  scales, _ = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; simb)   # the TRAIN reference scales (RANKW defined here)
+  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales, simb)) : nothing
 
   # Sobol-or-random source for the initial mean and any IPOP restart mean.
   sobol_idx = Ref(1)
@@ -3411,7 +3386,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splot
       next_candidate()
     end
     slots = PU.build_slots(param_dists, bio_params)
-    init_run = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales), loss_params)[1]
+    init_run = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales, scoring, simb), loss_params, scoring)[1]
     mean0 = PU.params_to_u(bio_params, param_dists, slots)
     init_best = CMAES.CMAESCandidate(bio_params, convert(Float64, PU.get_total_loss(init_run, loss_params)))
     groups = (single_cov ? Vector{Int}[collect(1:length(slots))] : PU.build_groups(param_dists, slots, per_eco_groups(SP)))   # block-diagonal CMA-ES
@@ -3470,8 +3445,8 @@ function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splot
       # nest :static regions and oversubscribe cores; one fit_params call already saturates threads.
       for k in 1:λ
         cand = PU.u_to_params(xs_u[k], param_dists, slots, bio_params)
-        rep_results = fit_params(ref_soa, cand, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales)
-        run_result, eco_losses_k, _ = _agg_reps(rep_results, loss_params)
+        rep_results = fit_params(ref_soa, cand, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, scales=scales, scoring, simb)
+        run_result, eco_losses_k, _ = _agg_reps(rep_results, loss_params, scoring)
         fitnesses[k] = convert(Float64, PU.get_total_loss(run_result, loss_params))
         evals_done += 1
         if fitnesses[k] < gen_best_f
@@ -3479,7 +3454,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splot
           gen_best_params = cand
           gen_best_run = run_result
           gen_best_eco = eco_losses_k
-          gen_best_cached = _median_rep_cached(rep_results, loss_params)
+          gen_best_cached = _median_rep_cached(rep_results, loss_params, scoring)
         end
       end
 
@@ -3510,7 +3485,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splot
               spinup, val_spinup_cohorts, loss_params;
               debug=false, search_tier=3,
               injection_dict=inj_dict_val, injection_years=inj_years_val,
-              seeds=[rand(rng, UInt64)], scales=val_scales))
+              seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb))
             val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
             @info "Val loss @ gen $iter | loss=$val_total"
             try
@@ -3598,7 +3573,7 @@ end
 # held-out loss is on the SAME objective the candidates were selected under. Writes per-fold cv_front_metrics.csv
 # (rep × W/AGB/total), cv_front_plots.csv (per-plot sim vs ref AGB, for TOST) and cv_eco_map.csv.
 function _dump_cv_front(search_state, output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
-    val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+    val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
     inj_dict_val, inj_years_val, val_dual_b, val_scales, fixed_seeds, val_splots, val_injection_cohorts)
   arch = collect(search_state.archive)
   isempty(arch) && (@warn "cv dump: empty archive"; return)
@@ -3613,14 +3588,14 @@ function _dump_cv_front(search_state, output_dir, eco_list, eco_species_ids, n_s
   reps = [("best", best), ("extW", eW), ("extAGB", eA), ("knee", knee)]
   obs = combine(groupby(subset(val_splots, :sim_year => ByRow(>(0))), [:plot_id, :sim_year]), :agb_sum => sum => :ref_agb)
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(select(val_splots, [:plot_id, :eco_id]))))
-  excl = (OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && !isnothing(val_injection_cohorts) && hasproperty(val_injection_cohorts, :disturbance_drop_pct)) ?
+  excl = (scoring.disturbance == :exclude_overwrite && !isnothing(val_injection_cohorts) && hasproperty(val_injection_cohorts, :disturbance_drop_pct)) ?
     Set((Int(r.plot_id), Int(r.sim_year)) for r in eachrow(val_injection_cohorts) if r.disturbance_drop_pct > 0) : Set{Tuple{Int,Int}}()
   mrows = NamedTuple[]; prows = NamedTuple[]
   for (kind, c) in reps
     rr = fit_params(val_ref_soa, c.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years,
       spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val,
-      injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales)
-    run_result, eco_losses, idx = _agg_reps(rr, loss_params)
+      injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb)
+    run_result, eco_losses, idx = _agg_reps(rr, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, val_scales, val_dual_b)
     push!(mrows, (rep_kind=kind, W=Float64(sum(objs[1:2:end])), AGB=Float64(sum(objs[2:2:end])), total=Float64(_mo_aggregate(objs, run_result, loss_params)), front_size=length(arch)))
     sim = DataFrame(plot_id=Int[], sim_year=Int[], agb=Float64[])
@@ -3648,7 +3623,7 @@ const SKIP_VAL = Ref(false)      # env PAN_SKIP_VAL=1: skip ALL held-out val re-
 # count) → p100 = best-on-val archive; last = final checkpoint. Designate 5 positions {extreme_w, extreme_agb,
 # knee, "median", best_aggregate} on each archive's VAL front. Writes cv_reselect_metrics.csv (10 rows, val + train objectives).
 function _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
-    val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+    val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
     inj_dict_val, inj_years_val, val_dual_b, val_scales, fixed_seeds, val_splots, species_list)
   ckpts = Tuple{Int,Any}[]
   for f in readdir(output_dir; join=true)
@@ -3662,8 +3637,8 @@ function _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max
   val_obj(x) = begin
     rr = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years,
       spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val,
-      injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales)
-    _, eco_losses, _ = _agg_reps(rr, loss_params); objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, val_scales, val_dual_b)
+      injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb)
+    _, eco_losses, _ = _agg_reps(rr, loss_params, scoring); objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, val_scales, val_dual_b)
     (Float64(sum(objs[1:2:end])), Float64(sum(objs[2:2:end])))
   end
   # evaluate EVERY unique archive candidate on val once
@@ -3762,8 +3737,8 @@ function _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max
     for (nm, c, _vp) in positions(p100_arch)
       rr = fit_params(val_ref_soa, c.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years,
         spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val,
-        injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales)
-      av = _agg_reps(rr, loss_params); cached = rr[av[3]][2]
+        injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb)
+      av = _agg_reps(rr, loss_params, scoring); cached = rr[av[3]][2]
       simdf = DataFrame(plot_id=Int[], sim_year=Int[], eco_species_id=Int[], sim_agb=Float64[])
       for (pid, sy, esp, _age, bio) in cached
         sy > 0 && push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio)))
@@ -3987,7 +3962,7 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
   return save_ckpt
 end
 
-function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmaes_warmstart_seeds::Int=20, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmaes_warmstart_seeds::Int=20, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
   all_plot_ids = UIntType.(unique(splots.plot_id))
@@ -3997,7 +3972,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   # Candidate pool for the initial point + IPOP restarts. seed_archive_from pours a PRIOR run's Pareto
   # archive (its members' params) into this pool — e.g. seed Sim B's MO-CMA-ES from the single-cov Sim A
   # archive so each restart re-centers on a diverse good-A solution (params are re-evaluated on use).
@@ -4017,7 +3992,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
   have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
-  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
+  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb) : nothing
   sampled_ids_val = (have_val && n_output_plots > 0) ?
                     _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) :
                     Set{UIntType}()
@@ -4055,7 +4030,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || DUAL_MODE[] != :off
+  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -4069,24 +4044,24 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
       end
     end
   end
-  fixed_seeds = _fixed_seeds(rng, n_reps)
-  dual_b0 = DUAL_MODE[] == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)   # the TRAIN reference scales (RANKW defined here)
-  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
+  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb)
+  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
+  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales, simb) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
 
 
   if CV_RESELECT[]   # skip the search; just re-score the 10 reselection positions (5 per archive) on the (frozen-norm) val set
     have_val || (@warn "CV_RESELECT set but no val split — nothing to do"; return)
     _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
-      val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+      val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
       inj_dict_val, inj_years_val, val_dual_b, val_scales, fixed_seeds, val_splots, species_list)
     return
   end
 
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales)
+  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales, scoring, simb)
   # Score a candidate's repetitions into one MOFitness (eco_losses summed over reps) + aux.
   function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params)
+    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
     MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
   end
@@ -4193,7 +4168,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
           _vr = _agg_reps(fit_params(val_ref_soa, p, max_sim_year, n_species, eco_species_ids,
             val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params;
             debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val,
-            dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales), loss_params)
+            dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb), loss_params, scoring)
           vl = _mo_val_loss((_vr[1], nothing, _vr[2]), eco_species_ids, loss_params, val_scales, val_dual_b)
           println(io, "$it,$vl"); flush(io); @info "val-replay @ $it = $vl"
         catch e
@@ -4215,8 +4190,8 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
   barren_restarts = 0             # consecutive IPOP restarts with no new best (barren-restart stop)
   improved_since_restart = false  # any new best found in the current IPOP epoch?
   val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales)
-      v = _agg_reps(vreps, loss_params); (v[1], vreps[v[3]][2], v[2])
+      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb)
+      v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
     end : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
@@ -4247,7 +4222,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
           gb_idx = k
           gb_run = run_k
           gb_eco = eco_k
-          gb_cached = _median_rep_cached(rep_results, loss_params)
+          gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
         end
       end
 
@@ -4307,7 +4282,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, spl
 
   have_val && try   # CV: held-out front metrics under THIS fold's live (train-frozen) loss — see _dump_cv_front
     _dump_cv_front(search_state, output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
-      val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+      val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
       inj_dict_val, inj_years_val, val_dual_b, val_scales, fixed_seeds, val_splots, val_injection_cohorts)
   catch e; @error "cv front dump failed" exception = (e, catch_backtrace()); end
 
@@ -4318,7 +4293,7 @@ end
 # writer as parametrize_MOCMAES, but the engine is a population of μ (1+1)-CMA-ES individuals
 # (IgelMOCMAES) rather than one distribution — better front spread/extreme coverage. μ candidates
 # are evaluated per generation (serially); the initial population is a Sobol design.
-function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_sobol_pool_k::Int=1, igel_sobol_raw_mult::Int=2, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_reseed_random_frac::Float64=0.0, igel_maturity::Int=0, igel_seed_maturity::Bool=false, igel_warm_start::Bool=false, igel_freeze_seed_growth::Bool=false, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_sobol_pool_k::Int=1, igel_sobol_raw_mult::Int=2, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_reseed_random_frac::Float64=0.0, igel_maturity::Int=0, igel_seed_maturity::Bool=false, igel_warm_start::Bool=false, igel_freeze_seed_growth::Bool=false, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -4326,7 +4301,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
@@ -4352,7 +4327,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
       push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || DUAL_MODE[] != :off
+  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -4361,22 +4336,22 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
       for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
     end
   end
-  fixed_seeds = _fixed_seeds(rng, n_reps)
-  dual_b0 = DUAL_MODE[] == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)   # the TRAIN reference scales (RANKW defined here)
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
+  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb)
+  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
   # ONE reusable working SoA per reference — candidates/reps run serially, so reset_soa! reuses these
   # buffers each eval instead of deep-copying the reference (removes the serial per-eval deepcopy + its churn).
   _work_soa = deepcopy(ref_soa)
   _work_soa_val = have_val ? deepcopy(val_ref_soa) : nothing
   # candidate mode: one work SoA PER THREAD (each candidate eval runs single-threaded on its own, NUMA-local)
   _work_soa_t = PARALLEL_MODE[] == :candidate ? [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
-  _run(p; ws=_work_soa) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, work_soa=ws, scales=scales)
+  _run(p; ws=_work_soa) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, work_soa=ws, scales=scales, scoring, simb)
   # Candidate mode: sites go serial for EVERY eval in this driver (init population, RANKW freeze, gen loop, val),
   # so each eval is single-threaded/deterministic and the gen loop parallelizes over candidates. Restored in `finally`.
   _prev_parallel_sites_igel = PARALLEL_SITES[]
   PARALLEL_MODE[] == :candidate && (PARALLEL_SITES[] = false)
   function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params)
+    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
     MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
   end
@@ -4498,14 +4473,14 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
   # (val_dual_b = nothing when DUAL_MODE==:off ⇒ val_fit falls back to the tier-3 Sim-A path.) Previously this
   # driver hardcoded dual_b=nothing here, so a dual_mode:b run measured VAL on Sim A — inconsistent with the
   # Sim-B train loss (and sensitive to init_perturb via the Sim-A rep-combination). Fixed to use val_dual_b.
-  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
-  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
+  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb) : nothing
+  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales, simb) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
   # candidate mode: per-thread val buffers so val_fit can run concurrently across archive members (val is sites-serial)
   _val_work_t = (have_val && PARALLEL_MODE[] == :candidate) ? [deepcopy(val_ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
   val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
       _vws = _val_work_t === nothing ? _work_soa_val : _val_work_t[Threads.threadid()]
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, work_soa=_vws, scales=val_scales)
-      v = _agg_reps(vreps, loss_params); (v[1], vreps[v[3]][2], v[2])
+      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=fixed_seeds, work_soa=_vws, scales=val_scales, scoring, simb)
+      v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
     end : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
@@ -4557,14 +4532,14 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, output_dir::AbstractString,
           (k == 1 || isless(off_fxs[k].aggregate, gen_best_agg)) && (gen_best_agg = off_fxs[k].aggregate; gb_idx = k)
         end
         gb_run = off_run[gb_idx]; gb_eco = off_eco[gb_idx]  # already computed in the parallel batch (identical to a re-sim: fixed seeds) — no serial full-sim
-        gb_cached = n_output_plots > 0 ? _median_rep_cached(_run(off_params[gb_idx]; ws=_work_soa_t[1]), loss_params) : nothing  # cohort cache only feeds output plots; unused otherwise
+        gb_cached = n_output_plots > 0 ? _median_rep_cached(_run(off_params[gb_idx]; ws=_work_soa_t[1]), loss_params, scoring) : nothing  # cohort cache only feeds output plots; unused otherwise
       else
         for k in 1:igel_mu                              # SoA mode: serial candidates, sites parallel (fit_params threads)
           p = PU.u_to_params(offs[k], param_dists, slots, bases === nothing ? bio_params : bases[k])
           rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
           off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
           if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
-            gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params)
+            gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
           end
         end
       end
@@ -4622,7 +4597,7 @@ end
 # checkpoints (mo_gen_finalize!) fire ONLY in integration; specialization phases are warmups (they advance
 # n_evals and log a light progress line). Schedule: cc_cycles × [spec cc_spec_gens + integ cc_integ_gens],
 # then integration until the TRIALS budget is exhausted.
-function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, single_cov::Bool=false, cc_group_size::Int=2, cc_spec_gens::Int=20, cc_integ_gens::Int=20, cc_cycles::Int=5, cc_fix_others::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, single_cov::Bool=false, cc_group_size::Int=2, cc_spec_gens::Int=20, cc_integ_gens::Int=20, cc_cycles::Int=5, cc_fix_others::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -4630,7 +4605,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
@@ -4656,7 +4631,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || DUAL_MODE[] != :off
+  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -4665,19 +4640,19 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
     end
   end
-  fixed_seeds = _fixed_seeds(rng, n_reps)
-  dual_b0 = DUAL_MODE[] == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)   # the TRAIN reference scales (RANKW defined here)
-  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales)) : nothing   # the VAL reference scales (RANKW = the train one)
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales)
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
+  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb)
+  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
+  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales, simb)) : nothing   # the VAL reference scales (RANKW = the train one)
+  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales, scoring, simb)
   function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params)
+    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
     MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
   end
   # per-species objective (specialization scoring): score species g only, aggregate = Σ of its 2 objectives.
   function _fitness_species(rep_results, gsp::Int)
-    _, eco_losses, _ = _agg_reps(rep_results, loss_params)
+    _, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
     objs = _mo_objectives_species(eco_losses, eco_species_ids, loss_params, scales, dual_b, gsp)
     MOLBSA.MOFitness(objs, Float64(sum(objs)))
   end
@@ -4721,8 +4696,8 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
   val_fit = have_val ? function (x)
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=nothing, seeds=fixed_seeds, scales=val_scales)
-      v = _agg_reps(vreps, loss_params); (v[1], vreps[v[3]][2], v[2])
+      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=nothing, seeds=fixed_seeds, scales=val_scales, scoring, simb)
+      v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
     end : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
@@ -4747,7 +4722,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
       off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
       if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
-        gen_best_agg = fx_k.aggregate; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params)
+        gen_best_agg = fx_k.aggregate; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
       end
     end
     is_new_best = IgelMOCMAES.tell!(search_state, off_fxs, off_params)
@@ -4867,7 +4842,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   return search_state
 end
 
-function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, nsga2_pop::Int=48, nsga2_offspring::Union{Nothing,Int}=nothing, nsga2_eta_c::Float64=20.0, nsga2_eta_m::Float64=20.0, nsga2_pc::Float64=0.9, nsga2_pm::Float64=-1.0, sobol_init::Bool=true, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, nsga2_pop::Int=48, nsga2_offspring::Union{Nothing,Int}=nothing, nsga2_eta_c::Float64=20.0, nsga2_eta_m::Float64=20.0, nsga2_pc::Float64=0.9, nsga2_pm::Float64=-1.0, sobol_init::Bool=true, scale_seed::PU.LossScales=PU.LossScales())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -4875,7 +4850,7 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
@@ -4901,7 +4876,7 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splot
       push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || DUAL_MODE[] != :off
+  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -4910,13 +4885,13 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splot
       for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
     end
   end
-  fixed_seeds = _fixed_seeds(rng, n_reps)
-  dual_b0 = DUAL_MODE[] == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)   # the TRAIN reference scales (RANKW defined here)
-  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales)) : nothing   # the VAL reference scales (RANKW = the train one)
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales)
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
+  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb)
+  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
+  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales, simb)) : nothing   # the VAL reference scales (RANKW = the train one)
+  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales, scoring, simb)
   function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params)
+    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
     MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
   end
@@ -4955,8 +4930,8 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splot
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
   val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=nothing, seeds=fixed_seeds, scales=val_scales)
-      v = _agg_reps(vreps, loss_params); (v[1], vreps[v[3]][2], v[2])
+      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=nothing, seeds=fixed_seeds, scales=val_scales, scoring, simb)
+      v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
     end : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
@@ -4981,7 +4956,7 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, output_dir::AbstractString, splot
         rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
         off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
         if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
-          gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params)
+          gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
         end
       end
       is_new_best = NSGA2.tell!(search_state, off_fxs, off_params, offs)   # (μ+λ) non-dom-sort + crowding selection
@@ -5008,7 +4983,7 @@ end
 # (a quality-diversity set of fits), the representative is the lowest-aggregate elite. Same MO objective
 # vector, writer, archive logging and losses.duckdb schema as parametrize_MOCMAES; the emitter re-seeds
 # itself on convergence/stagnation (no external IPOP). Grid bounds are auto-scaled from the seed loss.
-function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmame_alpha::Float64=0.02, cmame_grid::Int=15, cmame_reseed_explore::Float64=1.0, cmame_restart_patience::Int=6, cmame_sobol_reseed::Bool=false, balanced_quality::Bool=false, cmame_mo_rank::Bool=false, archive_by_sp::Bool=false, bounds_by_sobol::Bool=false, top_seeds::Float64=0.2, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmame_alpha::Float64=0.02, cmame_grid::Int=15, cmame_reseed_explore::Float64=1.0, cmame_restart_patience::Int=6, cmame_sobol_reseed::Bool=false, balanced_quality::Bool=false, cmame_mo_rank::Bool=false, archive_by_sp::Bool=false, bounds_by_sobol::Bool=false, top_seeds::Float64=0.2, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
   all_plot_ids = UIntType.(unique(splots.plot_id))
   sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
@@ -5016,7 +4991,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
@@ -5042,7 +5017,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || DUAL_MODE[] != :off
+  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -5051,12 +5026,12 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
     end
   end
-  fixed_seeds = _fixed_seeds(rng, n_reps)
-  dual_b0 = DUAL_MODE[] == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)   # the TRAIN reference scales (RANKW defined here)
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales)
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
+  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb)
+  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
+  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales, scoring, simb)
   function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params)
+    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
     MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
   end
@@ -5170,9 +5145,9 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     end
   end
   # Validation Sim B so held-out loss measures the SAME A⊕B objective as training (dual modes only).
-  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
-  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, search_tier, val_spdf_plts, val_t4_ref, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
-  val_fit = have_val ? (x -> only(fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales))) : nothing
+  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb) : nothing
+  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, search_tier, val_spdf_plts, val_t4_ref, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales, simb) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
+  val_fit = have_val ? (x -> only(fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb))) : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
     resuming=false, splots=splots, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids,
     n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params, no_establishment=no_establishment,
@@ -5218,7 +5193,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splo
           m = CMAMAE.measure(fx_k); meas[k] = (Float64(m[1]), Float64(m[2]))
         end
         if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
-          gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params)
+          gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
         end
       end
 
@@ -5247,7 +5222,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, output_dir::AbstractString, splo
         open(joinpath(output_dir, "archive_eval.csv"), "w") do io
           println(io, "candidate,train_loss,val_loss")
           for (ci, m) in enumerate(search_state.archive)
-            vr = only(fit_params(val_ref_soa, m.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales))
+            vr = only(fit_params(val_ref_soa, m.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb))
             println(io, "$ci,$(Float64(m.fx.aggregate)),$(_mo_val_loss(vr, eco_species_ids, loss_params, val_scales, val_dual_b))")
           end
         end
@@ -5478,7 +5453,7 @@ end
 # objective win-count (MOLBSA.mo_delta) rather than by the scalar total loss.
 # All tiers (1, 2, 3, 4) expose the per-ecoregion breakdown that the objective
 # vector is built from.
-function parametrize_MOLBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales())
+function parametrize_MOLBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales())
   search_tier in (1, 2, 3, 4, 5) || error("parametrize_MOLBSA: unknown search_tier=$search_tier (expected 1, 2, 3, 4, or 5)")
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
@@ -5489,7 +5464,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   n_species = length(species_list)
   max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(DUAL_MODE[] != :off))
+  param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=(simb.dual_mode != :off))
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   injection_dict = isnothing(injection_cohorts) ? nothing : _build_injection_dict(injection_cohorts, ref_soa)
   injection_years = isnothing(injection_cohorts) ? Set{Int}() : Set(Int.(injection_cohorts.sim_year))
@@ -5497,7 +5472,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   have_val = !isnothing(val_ref_soa) && !SKIP_VAL[]   # PAN_SKIP_VAL disables all held-out val re-sim during training
   inj_dict_val = (have_val && !isnothing(val_injection_cohorts)) ? _build_injection_dict(val_injection_cohorts, val_ref_soa) : nothing
   inj_years_val = (have_val && !isnothing(val_injection_cohorts)) ? Set(Int.(val_injection_cohorts.sim_year)) : Set{Int}()
-  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment) : nothing
+  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb) : nothing
   sampled_ids_val = (have_val && n_output_plots > 0) ?
                     _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) :
                     Set{UIntType}()
@@ -5535,7 +5510,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       end
     end
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || DUAL_MODE[] != :off
+  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
     cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
@@ -5549,15 +5524,15 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splo
       end
     end
   end
-  fixed_seeds = _fixed_seeds(rng, n_reps)
+  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
 
-  dual_b0 = DUAL_MODE[] == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(DUAL_MODE[] == :b))
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0)   # the TRAIN reference scales (RANKW defined here)
-  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales)
+  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb)
+  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
+  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales, simb) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
+  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection_dict=injection_dict, injection_years=injection_years, dual_b=dual_b, scales=scales, scoring, simb)
   # Score a candidate's repetitions into one MOFitness (eco_losses summed over reps).
   function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params)
+    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
     MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
   end
@@ -5623,7 +5598,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
   DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
-  val_fit = have_val ? (x -> only(fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales))) : nothing
+  val_fit = have_val ? (x -> only(fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection_dict=inj_dict_val, injection_years=inj_years_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb))) : nothing
   gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
     resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
     eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
@@ -5645,7 +5620,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, output_dir::AbstractString, splo
 
       rep_results = _run(bio_params)
       fx, run_result, eco_losses = _fitness(rep_results)
-      cached_sites_state = _median_rep_cached(rep_results, loss_params)
+      cached_sites_state = _median_rep_cached(rep_results, loss_params, scoring)
 
       next = MOLBSA.MOCandidate(bio_params, fx)
       is_new_best = MOLBSA.search_cmp!(next, search_state)
@@ -5748,7 +5723,7 @@ end
 
 function parametrize_SA(; ref_soa::SiteSoA, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, scale_seed::PU.LossScales=PU.LossScales())
   n_species = length(species_list)
-  sa_scales = compute_loss_scales(loss_params, 3, spdf_plts, nothing, eco_species_ids, n_species; cbal=scale_seed.cbal, ncoh=scale_seed.ncoh)
+  sa_scales = compute_loss_scales(loss_params, 3, spdf_plts, nothing, eco_species_ids, n_species; per_plot_mean=false, cbal=scale_seed.cbal, ncoh=scale_seed.ncoh)
   SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
   param_dists = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids)
   bio_params = generate_params(SP, species_list, eco_list, eco_species_ids; rng=rng)
@@ -6211,26 +6186,54 @@ function _configure_disturbance_shock!(cfg0::AbstractDict)
 end
 
 """
-    apply_scoring_flags!(cfg)
+    scoring_options(cfg) -> ScoringOptions
 
-Set every module Ref that defines the scoring rule from a loaded config: the injection mode (`override_injection[_replace|_sync|_noise|_disturbance]`),
-`loss_before_injection`, the disturbance-shock data path, `exclude_recruits_at_entry`, `w_scope` and `death_term`. `run_from_yaml` and the analysis
-tools (tost, scatter, plots) all call this one function, so a tool scores exactly the way the run was trained.
+The scoring rule of a run, read from a loaded config: the injection mode (`override_injection[_replace|_sync|_noise|_disturbance]`),
+`loss_before_injection`, `exclude_recruits_at_entry`, `w_scope`, `death_term` and the initial-biomass perturbation (`init_perturb_frac/_cap`).
+Pure: it touches no module state.
 """
-function apply_scoring_flags!(cfg0::AbstractDict)
+function scoring_options(cfg0::AbstractDict)::ScoringOptions
   cfg = _as_config(cfg0)
-  OVERRIDE_INJECTION[] = cfg["override_injection"]
-  OVERRIDE_INJECTION_REPLACE[] = cfg["override_injection_replace"]
-  OVERRIDE_INJECTION_SYNC[] = cfg["override_injection_sync"]
-  LOSS_BEFORE_INJECTION[] = cfg["loss_before_injection"]
+  w_scope = cfg["w_scope"]; w_scope in (:all, :survivors) || error("w_scope must be all | survivors")
+  death_term = cfg["death_term"]; death_term in (:none, :likelihood) || error("death_term must be none | likelihood")
+  return ScoringOptions(; override=cfg["override_injection"], replace=cfg["override_injection_replace"], sync=cfg["override_injection_sync"],
+    noise=cfg["override_injection_noise"], disturbance=cfg["override_injection_disturbance"],
+    loss_before_injection=cfg["loss_before_injection"], exclude_recruits_at_entry=cfg["exclude_recruits_at_entry"],
+    w_scope=w_scope, death_term=death_term,
+    init_perturb_frac=cfg["init_perturb_frac"], init_perturb_cap=FloatType(cfg["init_perturb_cap"]))
+end
+
+"""
+    simb_options(cfg) -> SimBOptions
+
+Sim B / dual-mode options of a run, read from a loaded config. `t4_primary` is true for a dual_mode `b` run and for a tier-4 run without a dual.
+Pure: it touches no module state.
+"""
+function simb_options(cfg0::AbstractDict)::SimBOptions
+  cfg = _as_config(cfg0)
+  dual = cfg["dual_mode"]
+  return SimBOptions(; dual_mode=dual, tier_b=cfg["tier_b"], t4_primary=(dual === :b || (dual === :off && cfg["tier"] == 4)),
+    simb_spinup=cfg["simB_spinup"], simb_disturb_only=cfg["simB_disturb_only"],
+    t4_per_plot_mean=cfg["simB_per_plot_mean"], t4_mean_over_reps=cfg["simB_rep_mean"])
+end
+
+"""
+    scoring_from_config(cfg) -> (scoring::ScoringOptions, simb::SimBOptions)
+
+The ONE place the scoring and Sim B options are built. `run_from_yaml` and the analysis tools (tost, scatter, plots) all call it, so a tool
+scores exactly the way the run was trained; the options are then passed explicitly to `parametrize`, `fit_params` and the helpers.
+
+Two pieces of state that are NOT options yet are still configured here (their owners are Steps 3c and 3f): the disturbance-shock data
+path (`Data.DISTURBANCE_FULL_PATH`, read when the injection cohorts are built) and the Biomass Succession param-space switch
+`BSP.DEATH_PMORT_SIMA` (a score-only PROB_MORT in Sim A, i.e. `death_term == :likelihood`).
+"""
+function scoring_from_config(cfg0::AbstractDict)
+  cfg = _as_config(cfg0)
+  scoring = scoring_options(cfg)
+  simb = simb_options(cfg)
   _configure_disturbance_shock!(cfg)
-  EXCLUDE_RECRUITS_AT_ENTRY[] = cfg["exclude_recruits_at_entry"]
-  W_SCOPE[] = cfg["w_scope"]; W_SCOPE[] in (:all, :survivors) || error("w_scope must be all | survivors")
-  DEATH_TERM[] = cfg["death_term"]; DEATH_TERM[] in (:none, :likelihood) || error("death_term must be none | likelihood")
-  BSP.DEATH_PMORT_SIMA[] = DEATH_TERM[] === :likelihood
-  OVERRIDE_INJECTION_NOISE[] = cfg["override_injection_noise"]
-  OVERRIDE_INJECTION_DISTURBANCE[] = cfg["override_injection_disturbance"]
-  return nothing
+  BSP.DEATH_PMORT_SIMA[] = scoring.death_term === :likelihood
+  return scoring, simb
 end
 
 """
@@ -6336,21 +6339,14 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   n_output_plots = cfg["n_output_plots"]
   search_mode = cfg["search_mode"]
 
-  apply_scoring_flags!(cfg)   # injection / scoring-rule Refs (shared with the analysis tools)
+  scoring, simb = scoring_from_config(cfg)   # scoring rule + Sim B options (shared with the analysis tools), passed explicitly below
   Data.USE_FIA_CYCLE[] = cfg["fia_cycle"]   # tier-4/5 cycles from FIA `cycle` vs computed split
   Data.FIA_CYCLE_MERGE[] = cfg["fia_cycle_merge"]   # merge N consecutive FIA cycles into one group
-  DUAL_MODE[] = cfg["dual_mode"]   # off (A only) | joint (A⊕B) | b (B only, seed from A)
-  TIER_B[] = cfg["tier_b"]                       # Sim B's tier (A's tier = config `tier`)
-  T4_PRIMARY[] = DUAL_MODE[] === :b || (DUAL_MODE[] === :off && cfg["tier"] == 4)   # see T4_PRIMARY
   LBSA_STRETCH_LEN[] = cfg["lbsa_stretch_len"] # LBSA stretch length
   LBSA_STALE_RATIO[] = cfg["lbsa_stale_ratio"] # LBSA freeze-detection uphill-attempt ratio
   LBSA_TEMP_LIST_LEN[] = cfg["lbsa_temp_list_len"]   # LBSA temperature-list length L
   LBSA_REPLACE_OLDEST[] = cfg["lbsa_replace_oldest"] # false → overwrite the max each stretch (responsive temp)
   LBSA_COOLING_ONLY[] = cfg["lbsa_cooling_only"]    # true → monotone cooling → search actually freezes → reheat/restart fires
-  SIMB_SPINUP[] = cfg["simB_spinup"]         # false = Sim B starts from observed cohorts (no spinup)
-  T4_PER_PLOT_MEAN[] = cfg["simB_per_plot_mean"]   # tier-4: AGB as mean biomass-per-plot-by-age
-  T4_MEAN_OVER_REPS[] = cfg["simB_rep_mean"]       # tier-4: score loss on the mean-over-reps sim histogram
-  SIMB_DISTURB_ONLY[] = cfg["simB_disturb_only"]   # Sim B purely free (no injection); disturbance-scale on ALL plots
   MOCMAES.USE_NDS[] = cfg["mocmaes_true_nds"] # true = MO-CMA-ES offspring ranked by NSGA-II Pareto fronts (vs default win-count)
   MOCMAES.USE_NDS[] && @info "MO-CMA-ES offspring ranking: TRUE NSGA-II non-dominated sorting (Pareto fronts + crowding)"
   BiomassSuccessionPlugin.FIXED_LONGEVITY[] = (let v = cfg["fix_longevity"]; isnothing(v) ? nothing : Float64(v) end)
@@ -6471,8 +6467,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     loss_piecewise=cfg["loss_piecewise"],
     w_pivot=cfg["w_pivot"],
     agb_pivot=cfg["agb_pivot"],
-    init_perturb_frac=cfg["init_perturb_frac"],
-    init_perturb_cap=cfg["init_perturb_cap"],
+    scoring=scoring,
+    simb=simb,
     cmaes_lambda=cfg["cmaes_lambda"],
     cmaes_sigma0=cfg["cmaes_sigma0"],
     cmaes_warmstart_seeds=cfg["cmaes_warmstart_seeds"],
@@ -6624,7 +6620,7 @@ function _run_and_plot(bio_params, label, ctx; sampled_ids, emp_sample, output_d
     ctx.spdf_plts, ctx.site_sim_years, ctx.spinup, ctx.spinup_cohorts, ctx.loss_params;
     debug=false, search_tier=3, seeds=[rand(rng, UInt64)], cache_preinject=!isnothing(inj_dict),
     injection_dict=inj_dict, injection_years=inj_years,
-    scales=compute_loss_scales(ctx.loss_params, 3, ctx.spdf_plts, nothing, ctx.eco_species_ids, ctx.n_species; cbal=ctx.scale_seed.cbal, ncoh=ctx.scale_seed.ncoh)))
+    scales=compute_loss_scales(ctx.loss_params, 3, ctx.spdf_plts, nothing, ctx.eco_species_ids, ctx.n_species; per_plot_mean=ctx.simb.t4_per_plot_mean, cbal=ctx.scale_seed.cbal, ncoh=ctx.scale_seed.ncoh), scoring=ctx.scoring, simb=ctx.simb))
   loss = convert(Float64, PU.get_total_loss(result[1], ctx.loss_params))
   sim_sample = _filter_cached_to_df(result[2], sampled_ids)
   generate_plots(emp_sample, sim_sample, label, loss, output_dir)

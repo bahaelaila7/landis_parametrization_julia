@@ -13,7 +13,7 @@ gids = eco_species_ids[eco_id]; sp_names = [species_list[g] for g in gids]
 sp_local = findfirst(==("LIST2"), sp_names)
 println("species order: $sp_names ; LIST2 local idx=$sp_local")
 # sync injection setup
-P.OVERRIDE_INJECTION[] = true; P.OVERRIDE_INJECTION_SYNC[] = true; P.OVERRIDE_INJECTION_DISTURBANCE[] = :off
+scoring = P.ScoringOptions(; override=true, sync=true, disturbance=:off)
 ic = P.Data.get_injection_cohorts(splots; all_cohorts=true)
 injd = P._build_injection_dict(ic, ref_soa); iyears = Set(Int.(ic.sim_year))
 println("inject years=$(sort(collect(iyears)))")
@@ -31,7 +31,7 @@ ctx = (BiomassSuccession=(eco_params=P.BiomassSuccessionPlugin.generate_eco_para
 for y in 0:30
   if y > 0
     P.PanCore.process_plugin!(soa, P.BiomassSuccessionPlugin.BiomassSuccession, y; ctx=ctx.BiomassSuccession)
-    y in iyears && haskey(injd, y) && P._inject_observed_cohorts!(soa, injd[y]; override=true, sync=true)
+    y in iyears && haskey(injd, y) && P._inject_observed_cohorts!(soa, injd[y], scoring)
   end
   site = P.getsite(soa, 1); ages = Float64[]; bios = Float64[]
   for j in 1:Int(site.live)

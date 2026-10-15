@@ -5,8 +5,8 @@ import JLD2, Statistics, DataFrames, HypothesisTests, CSV
 const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames; const HT = HypothesisTests
 # caller defines: cfg (Pan.load_config), SPLIT ("train"|"val"|"test") before including this file
 ALPHA = 0.05
-P.apply_scoring_flags!(cfg)   # the scoring rule of the run (injection mode, loss_before_injection, recruits, w_scope, death_term, disturbance shock)
-D.USE_FIA_CYCLE[] = cfg["fia_cycle"]; P.INIT_PERTURB_FRAC[] = 0.0
+scoring, simb = P.scoring_from_config(cfg); scoring = P.with_options(scoring; init_perturb_frac=0.0)   # nominal sim (no perturbation); the scoring rule of the run (injection mode, loss_before_injection, recruits, w_scope, death_term, disturbance shock)
+D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
 no_estab = cfg["no_establishment"]; rng0 = cfg["seed"]
 splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = P.prepare_from_cfg(cfg)
 # SPLIT: "train" | "val" | "test", or several joined by "+" (e.g. "train+val"): pairs of every listed split are pooled
@@ -38,7 +38,7 @@ loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=tru
 function _split_ctx(sp)
   max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
-  inj = D.get_injection_cohorts(sp; all_cohorts=P.OVERRIDE_INJECTION[])
+  inj = D.get_injection_cohorts(sp; all_cohorts=scoring.override)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DF.select(sp, [:plot_id, :eco_id]))))
   especo2sp = Dict((Int(r.eco_id), Int(r.eco_species_id)) => Int(r.species_id) for r in eachrow(unique(DF.select(sp, [:eco_id, :eco_species_id, :species_id]))))
@@ -74,7 +74,7 @@ function _paired_one(params, c, offset)
   if SIMB
     # SIMB_REPS replicate free runs (different seeds), sim AGB averaged per (plot, cycle, eco, species, bin): the plot's
     # EXPECTED simulated AGB, so the bootstrap CI reflects plot sampling rather than the model's own demographic noise.
-    prs = [P.resim_simB_paired(cfg, params, c.sp, c.spdf_plts, c.ssy, c.spc, loss_params, eco_list, species_list, eco_species_ids, rng; by_plot=true, preexist=SIMB_PREEXIST)[1] for _ in 1:SIMB_REPS]
+    prs = [P.resim_simB_paired(cfg, params, c.sp, c.spdf_plts, c.ssy, c.spc, loss_params, eco_list, species_list, eco_species_ids, rng; by_plot=true, preexist=SIMB_PREEXIST, scoring=scoring)[1] for _ in 1:SIMB_REPS]
     pr = DF.combine(DF.groupby(reduce(vcat, prs), [:plot, :cyc, :eco, :esp, :bin, :sp]), :obs_agb => maximum => :obs_agb, :sim_agb => (x -> sum(x) / SIMB_REPS) => :sim_agb)
     pr = DF.filter(r -> (r.obs_agb > 0 || r.sim_agb > 0) && r.bin >= SIMB_MIN_BIN, pr)
     # plot-level pairs: Σ over the comparable bins per (plot, cycle, eco, species); the test clusters on plot (D14)
@@ -86,12 +86,12 @@ function _paired_one(params, c, offset)
   rs = _mk_sites(c.sp; rng=rng, spinup=false, no_establishment=no_estab)
   idict = P._build_injection_dict(c.inj, rs); iyears = Set(Int.(c.inj.sim_year))
   res = P.fit_params(rs, params, c.msy, n_species, eco_species_ids, c.spdf_plts, c.ssy, false, c.spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true)
+    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true, scoring, simb)
   simc = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], age=Int[], sim_agb=Float64[])
   for (pid, sy, esp, age, bio) in res[1][2]; push!(simc, (Int(pid), Int(sy), Int(esp), Int(age), Float64(bio))); end
   simc = DF.combine(DF.groupby(DF.subset(simc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]), :sim_agb => sum => :sim_agb)
   m = DF.innerjoin(simc, c.injc, on=[:plot_id, :sim_year, :esp, :age])
-  P.OVERRIDE_INJECTION_DISTURBANCE[] == :exclude_overwrite && (m = DF.filter(r -> r.drop <= 0.0, m))
+  scoring.disturbance == :exclude_overwrite && (m = DF.filter(r -> r.drop <= 0.0, m))
   if REAL_ONLY   # D9: compare only REAL measurements whose simulated interval also STARTED from a real record
     keep = map(eachrow(m)) do r
       r.phantom >= 0.5 && return false
