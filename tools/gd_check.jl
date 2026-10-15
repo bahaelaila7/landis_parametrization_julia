@@ -9,10 +9,10 @@ function chk(d)
   slots = PU.build_slots(pd, p0)
   cg, labels = P._gd_groups(pd, slots, d.eco_species_ids, d.species_list, d.eco_list)
   ix = P._gd_index(d.injection_cohorts, d.splots, cg, labels, d.scoring; real_only=true)
-  idict = P._build_injection_dict(d.injection_cohorts, d.ref_soa); iy = Set(Int.(d.injection_cohorts.sim_year))
+  injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
   r = P.fit_params(d.ref_soa, p0, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iy, seeds=[UInt64(1)], cache_preinject=true, scoring=d.scoring, simb=d.simb)
+    debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=true, scoring=d.scoring, simb=d.simb)
   L = P._gd_losses(ix, r[1][2])
   for g in 1:ix.ngroups; @printf("GDCHK %-24s n=%5d bias=%7.2f%%\n", labels[g], L.n[g], 100 * expm1(L.m[g])); end
   @printf("GDCHK pass05=%d pass10=%d pass20=%d\n", P._gd_pass(L.m, L.se, 0.05), P._gd_pass(L.m, L.se, 0.1), P._gd_pass(L.m, L.se, 0.2))

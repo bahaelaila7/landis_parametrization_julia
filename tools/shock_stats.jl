@@ -9,14 +9,14 @@ function chk(d)
   println("STATS injection cohort rows (train): ", P.DataFrames.nrow(ic), "; with drop>0: ", count(>(0), ic.disturbance_drop_pct), "; sites with drop: ", length(unique(ic.plot_id[ic.disturbance_drop_pct .> 0])))
   sh = P.DataFrames.metadata(ic, "disturbance_shock")
   println("STATS plot-level full-removal entries (train): ", P.DataFrames.nrow(sh))
-  idict = P._build_injection_dict(ic, d.ref_soa); iy = Set(Int.(ic.sim_year))
+  injection = P.build_injection_plan(ic, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
   foreach(a -> a[] = 0, P.SHOCK_STATS)
   P.fit_params(d.ref_soa, p0, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iy, seeds=[UInt64(1)], scoring=d.scoring, simb=d.simb)
+    debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], scoring=d.scoring, simb=d.simb)
   s = [a[] for a in P.SHOCK_STATS]
   println("STATS shock: full-removal entries applied=$(s[1]) matched sim cohorts (removed)=$(s[2]); partial cohorts with drop>0 =$(s[3]) matched sim cohorts (scaled, :scale mode only)=$(s[4])")
-  pl = P._get_excl_plan(idict, d.ref_soa, d.eco_species_ids, d.loss_params)
+  pl = injection.excl
   println("STATS cohort-level exclusions: ", sum(length(v) for y in values(pl.coh) for v in values(y)), " cohorts in ", sum(length(y) for y in values(pl.coh)), " site-years")
 end
 P.POST_SEARCH_HOOK[] = chk

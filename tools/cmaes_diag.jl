@@ -17,8 +17,7 @@ function diag(d)
   pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=true, fit_establishment=false)
   slots = PU.build_slots(pd, p0)
   u0 = PU.params_to_u(p0, pd, slots); nd = length(u0)
-  idict = isnothing(d.injection_cohorts) ? nothing : P._build_injection_dict(d.injection_cohorts, d.ref_soa)
-  iyears = isnothing(d.injection_cohorts) ? Set{Int}() : Set(Int.(d.injection_cohorts.sim_year))
+  injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
   inj = d.injection_cohorts
   injc = combine(groupby(DataFrame(plot_id=Int.(inj.plot_id), sim_year=Int.(inj.sim_year), esp=Int.(inj.eco_species_id),
@@ -28,7 +27,7 @@ function diag(d)
   sc = P.compute_loss_scales(d.loss_params, d.tier, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, per_plot_mean=d.simb.t4_per_plot_mean)   # the reference's loss scales
   function ev(p; seed=UInt64(1))
     r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-      debug=false, search_tier=d.tier, injection_dict=idict, injection_years=iyears, seeds=[seed], cache_preinject=true, scales=sc, scoring=d.scoring, simb=d.simb)
+      debug=false, search_tier=d.tier, injection=injection, seeds=[seed], cache_preinject=true, scales=sc, scoring=d.scoring, simb=d.simb)
     rr, el, k = P._agg_reps(r, d.loss_params, d.scoring)
     objs = Float64.(P._mo_objectives(el, d.eco_species_ids, d.loss_params, sc))
     sim = Dict{NTuple{4,Int},Float64}()

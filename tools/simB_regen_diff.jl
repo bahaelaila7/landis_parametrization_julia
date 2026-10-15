@@ -64,7 +64,7 @@ else
       P.CAPTURE_T4SIM[] = :want
       P.fit_params(dual_b.ref_soa, c.x, msy, n_species, eco_species_ids, dual_b.spdf_plts, ssy, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params;
         debug=false, search_tier=4, t4_ref=dual_b.t4_ref, cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles,
-        seeds=[rand(rng, UInt64)], injection_dict=dual_b.injection_dict, injection_years=dual_b.injection_years,
+        seeds=[rand(rng, UInt64)], injection=dual_b.injection,
         disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, scoring, simb)
       cap = P.CAPTURE_T4SIM[]; P.CAPTURE_T4SIM[] = nothing
       cap === :want && error("candidate $ci rep $rep: no t4_sim captured")

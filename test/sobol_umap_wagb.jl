@@ -48,7 +48,7 @@ spdf = PU.smoothen_ref_years(splots, loss_params, Int(maximum(splots.age_calc));
 spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(splots)
 inj = (no_estab || scoring.override) ? D.get_injection_cohorts(splots; all_cohorts=scoring.override) : nothing
 ref = P.make_sites(splots, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
-idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, ref); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
+injection = P.build_injection_plan(inj, ref, eco_species_ids, loss_params, scoring)
 msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
 cycle_years = Real(g("cycle_years", 8))
 # n_bins must match sp_age_cdf length, which derives from loss_params.age_bins (1:400 when unbinned_w,
@@ -79,7 +79,7 @@ println("norm: W=$(loss_params.w_normalize) AGB=$(loss_params.agb_normalize) CEL
 function wagb(params)
   res = P.fit_params(ref, params, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
     debug=false, search_tier=Int(g("tier", 3)), t4_ref=t4_ref, cycle_map=cmap, n_cycles=ncyc,
-    injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], dual_b=dual_b, scales=scales, scoring, simb)
+    injection=injection, seeds=[rand(rng, UInt64)], dual_b=dual_b, scales=scales, scoring, simb)
   fx = P.MOLBSA.MOFitness(P._mo_objectives(res[1][3], eco_species_ids, loss_params, scales, dual_b), convert(Float64, PU.get_total_loss(res[1][1], loss_params)))
   m = P.CMAMAE.measure(fx); (Float64(m[1]), Float64(m[2]), Float64(fx.aggregate), fx.objectives)
 end

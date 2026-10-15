@@ -24,11 +24,11 @@ function check(d)
   res["cells"] = DataFrame(rows)
   if mode == "A"
     # ---- 3. EMPIRICAL natural-death rate per (eco, species) on train: same cohort/interval definitions as the death term (Sim A run at the params)
-    idict = P._build_injection_dict(d.injection_cohorts, d.ref_soa); iy = Set(Int.(d.injection_cohorts.sim_year))
+    injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
     msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
     acc = P.DeathAcc(d.eco_species_ids)
     P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-      debug=false, search_tier=3, injection_dict=idict, injection_years=iy, seeds=[UInt64(1)], death_acc=acc, scoring=d.scoring, simb=d.simb)
+      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], death_acc=acc, scoring=d.scoring, simb=d.simb)
     grid = exp.(range(log(1e-6), log(0.5); length=400)); erow = NamedTuple[]
     for (e, ids) in enumerate(d.eco_species_ids), (j, gsp) in enumerate(ids)
       nd = sum(acc.dhist[e][j]); ns = acc.n_surv[e][j]; expo = acc.surv_dt[e][j] + sum(k * acc.dhist[e][j][k] for k in 1:P.DEATH_MAXDT)

@@ -13,14 +13,13 @@ function diag(d)
   ck = sort(filter(f -> occursin(r"^best_params@\d+\.jld2$", f), readdir(outd)); by=f -> parse(Int, match(r"@(\d+)", f)[1]))
   best = JLD2.load_object(joinpath(outd, last(ck)))
   println("DIAG: best params = $(last(ck))")
-  idict = isnothing(d.injection_cohorts) ? nothing : P._build_injection_dict(d.injection_cohorts, d.ref_soa)
-  iyears = isnothing(d.injection_cohorts) ? Set{Int}() : Set(Int.(d.injection_cohorts.sim_year))
+  injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
   obs = combine(groupby(d.splots, [:plot_id, :sim_year]), :agb_sum => sum => :obs)
   rows = DataFrame(plot_id=Int[], mode=String[], sim_year=Int[], sim=Float64[], obs=Float64[])
   for (mode, pre) in (("pre-injection (pure model)", true), ("post-injection (loss view)", false))
     res = P.fit_params(d.ref_soa, best, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-      debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[UInt64(1)], cache_preinject=pre, scoring=d.scoring, simb=d.simb)
+      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=pre, scoring=d.scoring, simb=d.simb)
     cached = res[1][2]
     sim = Dict{Tuple{Int,Int},Float64}()
     for (pid, sy, _esp, _age, bio) in cached

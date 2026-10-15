@@ -84,9 +84,9 @@ function _paired_one(params, c, offset)
     return pr
   end
   rs = _mk_sites(c.sp; rng=rng, spinup=false, no_establishment=no_estab)
-  idict = P._build_injection_dict(c.inj, rs); iyears = Set(Int.(c.inj.sim_year))
+  injection = P.build_injection_plan(c.inj, rs, eco_species_ids, loss_params, scoring)
   res = P.fit_params(rs, params, c.msy, n_species, eco_species_ids, c.spdf_plts, c.ssy, false, c.spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true, scoring, simb)
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=true, scoring, simb)
   simc = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], age=Int[], sim_agb=Float64[])
   for (pid, sy, esp, age, bio) in res[1][2]; push!(simc, (Int(pid), Int(sy), Int(esp), Int(age), Float64(bio))); end
   simc = DF.combine(DF.groupby(DF.subset(simc, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :esp, :age]), :sim_agb => sum => :sim_agb)

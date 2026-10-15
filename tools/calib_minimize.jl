@@ -42,13 +42,13 @@ groupcells = P._gd_groupcells(ix.cell_group, ix.ngroups)
 targets = Dict{String,Vector{Tuple{Int,Int}}}(labels[k] => groupcells[k] for k in 1:ix.ngroups)
 nvis = P._gd_cell_visits(d.spdf_plts, d.eco_species_ids, spinup ? 0 : 1)
 sc = P.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, per_plot_mean=d.simb.t4_per_plot_mean)   # the reference's loss scales
-idict = P._build_injection_dict(d.injection_cohorts, d.ref_soa); iyears = Set(Int.(d.injection_cohorts.sim_year))
+injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
 msy = d.site_sim_years.sim_years .|> maximum |> maximum
 seeds = P._fixed_seeds(P.RNGType(UInt64(cfg["seed"])), 1, d.scoring)
 function ev(p)
   dacc = USED ? P.DeathAcc(d.eco_species_ids) : nothing
   r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, spinup, d.spinup_cohorts, d.loss_params;
-    debug=false, search_tier=d.tier, seeds=seeds, injection_dict=idict, injection_years=iyears, cache_preinject=true, death_acc=dacc, scales=sc, scoring=d.scoring, simb=d.simb)
+    debug=false, search_tier=d.tier, seeds=seeds, injection=injection, cache_preinject=true, death_acc=dacc, scales=sc, scoring=d.scoring, simb=d.simb)
   _, _, k = P._agg_reps(r, d.loss_params, d.scoring)
   res = P._gd_losses(ix, r[k][2])
   num, den = P._gd_cell_w(r[k][3], d.eco_species_ids, nvis, d.loss_params, sc)

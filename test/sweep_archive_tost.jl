@@ -35,10 +35,10 @@ function val_equiv_count(params)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
   rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
-  idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
+  injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, params, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], scoring, simb)
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], scoring, simb)
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end

@@ -16,13 +16,11 @@ function golden_probe(d, cfg, outdir)
   u = rand(Random.Xoshiro(11), length(slots))
   p = PU.u_to_params(u, pd, slots, tmpl)
   u2 = PU.params_to_u(p, pd, slots)
-  inj = d.injection_cohorts
-  idict = inj === nothing ? nothing : Pan._build_injection_dict(inj, d.ref_soa)
-  iy = inj === nothing ? Set{Int}() : Set(Int.(inj.sim_year))
+  injection = Pan.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)   # this reference's injection dict / shock / exclusions
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
   sc = Pan.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, per_plot_mean=d.simb.t4_per_plot_mean)   # the training reference's loss scales
   r = Pan.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iy, seeds=[UInt64(1)], cache_preinject=true, scales=sc, scoring=d.scoring, simb=d.simb)
+    debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=true, scales=sc, scoring=d.scoring, simb=d.simb)
   run, state, eco = r[1]
   open(joinpath(outdir, "probe_eco_loss.csv"), "w") do io
     println(io, "eco,species,sp_w_loss,sp_agb_loss")

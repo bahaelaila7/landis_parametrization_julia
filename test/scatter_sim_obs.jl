@@ -55,11 +55,10 @@ function make_scatter(sp, label)
   spc = D.get_spinup_cohorts(sp)
   inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
   rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
-  idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs)
-  iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
+  injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"), scoring, simb)
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"), scoring, simb)
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
@@ -207,11 +206,10 @@ function make_scatter_B(sp, label)
   inj_all = D.get_injection_cohorts(sp; all_cohorts=true)
   inj_b = DF.filter(r -> Int(r.plot_id) in art_plots, inj_all)
   rs_b = P.make_sites(sp, eco_species_ids; rng=rng, spinup=true, no_establishment=false)
-  idict_b = DF.nrow(inj_b) == 0 ? nothing : P._build_injection_dict(inj_b, rs_b)
-  iyears_b = DF.nrow(inj_b) == 0 ? Set{Int}() : Set(Int.(inj_b.sim_year))
+  injection_b = P.build_injection_plan(DF.nrow(inj_b) == 0 ? nothing : inj_b, rs_b, eco_species_ids, loss_params, scoring)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs_b, best, msy, n_species, eco_species_ids, spdf_plts, ssy, true, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict_b, injection_years=iyears_b, seeds=[rand(rng, UInt64)], scoring, simb)
+    debug=false, search_tier=3, injection=injection_b, seeds=[rand(rng, UInt64)], scoring, simb)
   cached = res[1][2]; ab = loss_params.age_bins
   # FOREST age-distribution, exactly as Sim B's tier-4 objective: aggregate AGB by
   # (cycle × eco/land-use × species × age-bin) across all plots — sim age-bins vs obs age-bins.

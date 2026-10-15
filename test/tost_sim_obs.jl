@@ -64,10 +64,10 @@ function paired_for(sp, label)
   end
   inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
   rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
-  idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs); iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
+  injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], cache_preinject=true, scoring, simb)
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=true, scoring, simb)
   cached = res[1][2]
   # ONLY genuinely-simulated biomass: match pre-inject model cohorts to the OBSERVED injection set by
   # (plot, year, species, AGE) = sync survivor rule; drop injected (obs-only), sync-removed (sim-only) and

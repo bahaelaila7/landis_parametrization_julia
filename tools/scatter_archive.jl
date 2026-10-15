@@ -29,8 +29,7 @@ spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
 spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
 inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
 rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
-idict = isnothing(inj) ? nothing : P._build_injection_dict(inj, rs)
-iyears = isnothing(inj) ? Set{Int}() : Set(Int.(inj.sim_year))
+injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)
 msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
 plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DF.select(sp, [:plot_id, :eco_id]))))
 obs = DF.combine(DF.groupby(DF.subset(sp, :sim_year => DF.ByRow(>(0))), [:plot_id, :sim_year, :eco_species_id, :eco_id]), :agb_sum => sum => :obs_agb)
@@ -53,7 +52,7 @@ tbl = DF.DataFrame(candidate=Int[], species=String[], stratum=String[], n=Int[],
 for (ci, cf) in enumerate(cand_files)
   cand = JLD2.load_object(cf)
   res = P.fit_params(rs, cand, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection_dict=idict, injection_years=iyears, seeds=[rand(rng, UInt64)], scoring, simb)
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], scoring, simb)
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; sy > 0 && push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
