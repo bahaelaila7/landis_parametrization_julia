@@ -29,7 +29,7 @@ function diag(d)
   function ev(p; seed=UInt64(1))
     r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
       debug=false, search_tier=d.tier, injection_dict=idict, injection_years=iyears, seeds=[seed], cache_preinject=true, scales=sc)
-    rr, el, k = P._agg_reps(r)
+    rr, el, k = P._agg_reps(r, d.loss_params)
     objs = Float64.(P._mo_objectives(el, d.eco_species_ids, d.loss_params, sc))
     sim = Dict{NTuple{4,Int},Float64}()
     for (pid, sy, esp, age, bio) in r[k][2]

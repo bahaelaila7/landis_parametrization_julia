@@ -49,7 +49,7 @@ function ev(p)
   dacc = USED ? P.DeathAcc(d.eco_species_ids) : nothing
   r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, spinup, d.spinup_cohorts, d.loss_params;
     debug=false, search_tier=d.tier, seeds=seeds, injection_dict=idict, injection_years=iyears, cache_preinject=true, death_acc=dacc, scales=sc)
-  _, _, k = P._agg_reps(r)
+  _, _, k = P._agg_reps(r, d.loss_params)
   res = P._gd_losses(ix, r[k][2])
   num, den = P._gd_cell_w(r[k][3], d.eco_species_ids, nvis, d.loss_params, sc)
   w = P._gd_group_w(num, den, groupcells, d.loss_params)
