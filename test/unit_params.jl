@@ -176,16 +176,13 @@ end
     # inverse of the rescale
     pu = PU.params_to_u(p, pd, slots)
     @test all(isapprox.(pu[db], 0.25; atol = 50 / 15000 + 1e-9))
-    # floor ABOVE the upper bound (40000 > 35000): CURRENT behaviour = every slot with u>0 is pinned AT THE FLOOR (above the declared upper bound!)
+    # floor ABOVE the upper bound (40000 > 35000): the floor wins, the slot is pinned at the floor for EVERY u (B18 — u ≤ 0 used
+    # to decode to the upper bound 35000, below the floor)
     PU.BMAX_FLOOR[] = Dict{Tuple{Int,Int},Float32}((e, s) => 40000f0 for (e, ids) in enumerate(ESI) for s in eachindex(ids))
-    # DISCREPANCY: exactly u==0 (raw==floor, not < floor) falls through to the `raw > max` branch and yields the UPPER bound 35000.
-    for uv in (1e-9, 0.3, 0.99, 1.0)
+    for uv in (-0.5, 0.0, 1e-9, 0.3, 0.99, 1.0, 1.7)
       u = fill(0.5, length(slots)); u[db] .= uv
       p = PU.u_to_params(u, pd, slots, tpl)
       @test all(==(40000f0), reduce(vcat, p.B_MAX_SPP))
-    end
-    let u = fill(0.5, length(slots)); u[db] .= 0.0
-      @test all(==(35000f0), reduce(vcat, PU.u_to_params(u, pd, slots, tpl).B_MAX_SPP))
     end
     # ...and the inverse is degenerate (negative window): clamped to 1e-6
     p = PU.u_to_params(fill(0.5, length(slots)), pd, slots, tpl)

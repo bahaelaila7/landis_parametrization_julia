@@ -1167,13 +1167,12 @@ function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slot
     else
       Dists.quantile(param.dist, clamp(Float64(u[dim]), 1e-10, 1 - 1e-10))
     end
-    val = if !isnothing(lo_eff) && raw < lo_eff
-      param.type(lo_eff)
-    elseif !isnothing(max_) && raw > max_
-      param.type(max_)
-    else
-      param.type(raw)
-    end
+    # clip to [lo_eff, max_]; a data floor above the box upper bound wins (B18: the slot is pinned at its floor for every u —
+    # previously u ≤ 0 decoded to the upper bound, BELOW the floor, and every u > 0 to the floor)
+    v = raw
+    !isnothing(max_) && v > max_ && (v = max_)
+    !isnothing(lo_eff) && v < lo_eff && (v = lo_eff)
+    val = param.type(v)
     val = _quantize(val, param.quantum, param.type)   # snap to the param's grid (e.g. B_MAX by 100)
     f = getproperty(p, param.name)
     for t in tgts                                     # single target ⇒ one write (identical to before)

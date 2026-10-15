@@ -5818,7 +5818,10 @@ function _build_bmax_floor!(eco_list, species_list, eco_species_ids)
     end
   end
   PU.BMAX_FLOOR[] = d
-  @info "bmax_floor_from_data: B_MAX lower bound set for $(length(d)) eco×species cells ($(count(>(FloatType(12000)), values(d))) above the 12000 default); window [12000,35000]"
+  lo, hi = BSP.BMAX_BOUNDS[]
+  @info "bmax_floor_from_data: B_MAX lower bound set for $(length(d)) eco×species cells ($(count(>(FloatType(lo)), values(d))) above the $(lo) default); window [$(lo),$(hi)]"
+  pinned = sort!([(eco_list[e], species_list[eco_species_ids[e][j]], Float64(f)) for ((e, j), f) in d if f > hi]; by=x -> -x[3])
+  isempty(pinned) || @warn "bmax_floor_from_data: $(length(pinned)) cells have a data floor above the B_MAX upper bound $(hi) — their B_MAX is pinned at the floor (no search freedom; raise `bmax_upper`)" cells = join(["$(c[1])/$(c[2])=$(round(Int, c[3]))" for c in first(pinned, 20)], ", ")
   nothing
 end
 
