@@ -5,9 +5,9 @@
 #
 #   param_space_options(cfg)  -> PU.ParamSpaceOptions     which parameters exist (fix_growth, ...) and their boxes
 #   build_param_tying(...)    -> PU.ParamTying             pooling labels / split sets / tier merges (what shares a u-dimension)
-#   cma_blocks(P, mode, ecos) -> PU.CmaBlocks              block-diagonal covariance layout
+#   cma_blocks(mode, ecos)    -> PU.CmaBlocks              block-diagonal covariance layout
 #   build_param_floors(...)   -> PU.ParamFloors            data floors of B_MAX / ANPP / PROB_ESTAB
-#   make_param_space(P, ...)  -> PU.ParamSpace             distributions + slots + all of the above
+#   make_param_space(pc, ...) -> PU.ParamSpace             distributions + slots + all of the above (pc = the plugin context)
 
 """
     param_space_options(cfg) -> PU.ParamSpaceOptions
@@ -28,16 +28,16 @@ function param_space_options(cfg0::AbstractDict)::PU.ParamSpaceOptions
 end
 
 """
-    make_param_space(P, species_list, eco_list, eco_species_ids; no_establishment, fit_establishment, opts, tying, floors, blocks) -> PU.ParamSpace
+    make_param_space(pc, species_list, eco_list, eco_species_ids; no_establishment, fit_establishment, opts, tying, floors, blocks) -> PU.ParamSpace
 
-The search space of succession plugin `P` over the given data lists. `blocks` carries the covariance mode and L3/L2 indices (see `cma_blocks`);
+The search space of the succession plugin of context `pc` (`BSTables` | `PnETContext` | `HBADContext`) over the given data lists. `blocks` carries the covariance mode and L3/L2 indices (see `cma_blocks`);
 the plugin's per-eco groups are filled in here. Defaults give the plain legacy space (no floors, no pooling, `:eco` blocks).
 """
-function make_param_space(::Type{P}, species_list, eco_list, eco_species_ids::Vector{Vector{Int}}; no_establishment::Bool=false, fit_establishment::Bool=false,
+function make_param_space(pc, species_list, eco_list, eco_species_ids::Vector{Vector{Int}}; no_establishment::Bool=false, fit_establishment::Bool=false,
     opts::PU.ParamSpaceOptions=PU.ParamSpaceOptions(), tying::PU.ParamTying=PU.ParamTying(), floors::PU.ParamFloors=PU.ParamFloors(),
-    blocks::PU.CmaBlocks=PU.CmaBlocks()) where {P}
-  dists = make_param_dists(P, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=fit_establishment, opts=opts)
-  blocks = PU.CmaBlocks(; mode=blocks.mode, eco_l3=blocks.eco_l3, eco_l2=blocks.eco_l2, per_eco_groups=per_eco_groups(P))
+    blocks::PU.CmaBlocks=PU.CmaBlocks())
+  dists = make_param_dists(pc, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=fit_establishment, opts=opts)
+  blocks = PU.CmaBlocks(; mode=blocks.mode, eco_l3=blocks.eco_l3, eco_l2=blocks.eco_l2, per_eco_groups=per_eco_groups(plugin_type(pc)))
   return PU.ParamSpace(dists, length(species_list), eco_list, eco_species_ids; opts=opts, tying=tying, floors=floors, blocks=blocks)
 end
 
@@ -151,11 +151,11 @@ function build_param_tying(param_split_species::AbstractDict, param_tier_merge::
   return PU.ParamTying(; labels=labels, floor_pooled_max=floor_pooled_max, split_sets=split_sets, tier_merge=tier_merge)
 end
 
-# Per-(eco_id, sp_local) B_MAX lower bound = max(12000, table[(species,l3,lu)]) (nothing when the feature is off). The plugin table
-# (BiomassSuccessionPlugin.BMAX_FLOOR_TABLE) is plugin data and stays a module Ref until Step 3d.
+# Per-(eco_id, sp_local) B_MAX lower bound = max(12000, table[(species,l3,lu)]) (nothing when the feature is off). The table is
+# `BSTables.bmax_floor`, passed in explicitly.
 # A floor above the B_MAX upper bound pins its cell at the floor (B18): warned ONCE here, when the floors of the run are built.
-function _build_bmax_floor(opts::PU.ParamSpaceOptions, eco_list, species_list, eco_species_ids)
-  tbl = BiomassSuccessionPlugin.BMAX_FLOOR_TABLE[]
+function _build_bmax_floor(tables::BiomassSuccessionPlugin.BSTables, opts::PU.ParamSpaceOptions, eco_list, species_list, eco_species_ids)
+  tbl = tables.bmax_floor
   isnothing(tbl) && return nothing
   d = Dict{Tuple{Int,Int},FloatType}()
   for (eco_id, sp_ids) in enumerate(eco_species_ids)
@@ -174,8 +174,8 @@ end
 # Per-(eco_id, sp_local) PROB_ESTAB lower bound = mult × data value (yaml `prob_estab_lower_bound`: use the per-species data PROB_ESTAB as a LOWER
 # bound on the search, window [data, 1.0], instead of only seeding it, so the optimizer can't suppress establishment below the empirically observed
 # rate). Cells with no table entry keep the param's own lower bound. nothing when off or without the table (prob_estab_from_data).
-function _build_prob_estab_floor(opts::PU.ParamSpaceOptions, eco_list, species_list, eco_species_ids)
-  tbl = BiomassSuccessionPlugin.PROB_ESTAB_TABLE[]
+function _build_prob_estab_floor(tables::BiomassSuccessionPlugin.BSTables, opts::PU.ParamSpaceOptions, eco_list, species_list, eco_species_ids)
+  tbl = tables.prob_estab
   (!opts.prob_estab_lower_bound || isnothing(tbl)) && return nothing
   mult = opts.prob_estab_lower_mult
   d = Dict{Tuple{Int,Int},FloatType}()
@@ -192,8 +192,8 @@ function _build_prob_estab_floor(opts::PU.ParamSpaceOptions, eco_list, species_l
 end
 
 # Per-(eco_id, sp_local) ANPP lower bound = table[(species,l3,lu)] (0 = no floor); nothing when off. Parallel to _build_bmax_floor.
-function _build_anpp_floor(eco_list, species_list, eco_species_ids)
-  tbl = BiomassSuccessionPlugin.ANPP_FLOOR_TABLE[]
+function _build_anpp_floor(tables::BiomassSuccessionPlugin.BSTables, eco_list, species_list, eco_species_ids)
+  tbl = tables.anpp_floor
   isnothing(tbl) && return nothing
   d = Dict{Tuple{Int,Int},FloatType}()
   for (eco_id, sp_ids) in enumerate(eco_species_ids)
@@ -207,15 +207,15 @@ function _build_anpp_floor(eco_list, species_list, eco_species_ids)
 end
 
 """
-    build_param_floors(opts, eco_list, species_list, eco_species_ids) -> PU.ParamFloors
+    build_param_floors(tables, opts, eco_list, species_list, eco_species_ids) -> PU.ParamFloors
 
 The data floors of the decode (B_MAX, derived ANPP, PROB_ESTAB), one dict per (eco_id, sp_local); each `nothing` when its feature is off.
 Built once per run (the B18 warning for floors above the B_MAX upper bound therefore fires once).
 """
-build_param_floors(opts::PU.ParamSpaceOptions, eco_list, species_list, eco_species_ids) =
-  PU.ParamFloors(; bmax=_build_bmax_floor(opts, eco_list, species_list, eco_species_ids),
-                   anpp=_build_anpp_floor(eco_list, species_list, eco_species_ids),
-                   prob_estab=_build_prob_estab_floor(opts, eco_list, species_list, eco_species_ids))
+build_param_floors(tables::BiomassSuccessionPlugin.BSTables, opts::PU.ParamSpaceOptions, eco_list, species_list, eco_species_ids) =
+  PU.ParamFloors(; bmax=_build_bmax_floor(tables, opts, eco_list, species_list, eco_species_ids),
+                   anpp=_build_anpp_floor(tables, eco_list, species_list, eco_species_ids),
+                   prob_estab=_build_prob_estab_floor(tables, opts, eco_list, species_list, eco_species_ids))
 
 # Raise any seed B_MAX below its floor up to the floor, so the initial candidate is feasible / consistent
 # with the rescaled decode. No-op when the floor feature is off.
@@ -256,28 +256,28 @@ function _apply_frozen_growth!(cand, ref, opts::PU.ParamSpaceOptions)
 end
 
 """
-    with_establishment(P, space; no_establishment, fit_establishment) -> PU.ParamSpace
+    with_establishment(pc, space; no_establishment, fit_establishment) -> PU.ParamSpace
 
-The run's `space` over the distributions of the same plugin with other establishment switches (tools that fit another parameter subset than
+The run's `space` over the distributions of the same plugin (context `pc`) with other establishment switches (tools that fit another parameter subset than
 the run did); options, tying, floors and blocks are kept.
 """
-with_establishment(::Type{P}, space::PU.ParamSpace; no_establishment::Bool, fit_establishment::Bool=false) where {P} =
-  PU.with_dists(space, make_param_dists(P, space.n_species, length(space.eco_list), space.eco_species_ids;
+with_establishment(pc, space::PU.ParamSpace; no_establishment::Bool, fit_establishment::Bool=false) =
+  PU.with_dists(space, make_param_dists(pc, space.n_species, length(space.eco_list), space.eco_species_ids;
                                          no_establishment=no_establishment, fit_establishment=fit_establishment, opts=space.opts))
 
 """
-    param_space_from_cfg(cfg, P, splots, eco_list, species_list, eco_species_ids; no_establishment, fit_establishment=false, floors=true, output_dir=mktempdir()) -> PU.ParamSpace
+    param_space_from_cfg(cfg, pc, splots, eco_list, species_list, eco_species_ids; no_establishment, fit_establishment=false, floors=true, output_dir=mktempdir()) -> PU.ParamSpace
 
 The space `parametrize` builds, re-derived from a loaded config and the prepared data (analysis tools that run no search, e.g. gd_equifinality):
 the same options, split sets / tier merges / pooling (from the TRAIN plots `splots`; `pool_map.csv` goes to `output_dir`) and covariance blocks.
-`floors` adds the data floors (they read the plugin tables, which only `run_from_yaml` loads, so they are `nothing` unless the caller loaded them).
+`floors` adds the data floors from the plugin context's `BSTables` (`bs_tables(pc)`; `nothing` entries unless the caller loaded the tables, see `bs_tables_from_cfg`).
 """
-function param_space_from_cfg(cfg0::AbstractDict, ::Type{P}, splots, eco_list, species_list, eco_species_ids; no_establishment::Bool, fit_establishment::Bool=false,
-    floors::Bool=true, output_dir::AbstractString=mktempdir()) where {P}
+function param_space_from_cfg(cfg0::AbstractDict, pc, splots, eco_list, species_list, eco_species_ids; no_establishment::Bool, fit_establishment::Bool=false,
+    floors::Bool=true, output_dir::AbstractString=mktempdir())
   cfg = _as_config(cfg0)
   opts = param_space_options(cfg)
   tying = build_param_tying(cfg["param_split_species"], cfg["param_tier_merge"], cfg["param_pooling"], splots, eco_list, species_list, eco_species_ids, output_dir)
-  fl = floors ? build_param_floors(opts, eco_list, species_list, eco_species_ids) : PU.ParamFloors()
-  return make_param_space(P, species_list, eco_list, eco_species_ids; no_establishment=no_establishment, fit_establishment=fit_establishment,
+  fl = floors ? build_param_floors(bs_tables(pc), opts, eco_list, species_list, eco_species_ids) : PU.ParamFloors()
+  return make_param_space(pc, species_list, eco_list, eco_species_ids; no_establishment=no_establishment, fit_establishment=fit_establishment,
     opts=opts, tying=tying, floors=fl, blocks=cma_blocks(cfg["cmaes_blocks"], eco_list))
 end

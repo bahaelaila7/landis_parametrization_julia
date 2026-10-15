@@ -153,20 +153,8 @@ mutable struct PnETScratch
 end
 PnETScratch() = PnETScratch(Int32[], Int32[], Int32[], SpMonth[], zeros(Int, MAXL + 2), zeros(Int, MAXL + 2), zeros(12), zeros(12), MonthWork())
 
-const _SCRATCH_POOL = PnETScratch[]
-"""Global per-thread scratch pool (indexed by Threads.threadid()); grown lazily, never shrunk."""
-const _POOL_LOCK = ReentrantLock()
-function scratch_pool()
-  nt = Threads.maxthreadid()
-  if length(_SCRATCH_POOL) < nt
-    lock(_POOL_LOCK) do
-      while length(_SCRATCH_POOL) < nt
-        push!(_SCRATCH_POOL, PnETScratch())
-      end
-    end
-  end
-  return _SCRATCH_POOL
-end
+"""A fresh per-thread scratch pool (indexed by `Threads.threadid()`), sized for the running thread count. Owned by a `PnETContext`; working memory only."""
+new_scratch_pool() = PnETScratch[PnETScratch() for _ in 1:Threads.maxthreadid()]
 
 function ensure_capacity!(scr::PnETScratch, n::Int)
   length(scr.ord) < n && (resize!(scr.ord, n); resize!(scr.spm, n))
@@ -763,13 +751,13 @@ end
 # Cohort add / external biomass writes
 # ---------------------------------------------------------------------------------------------------------------------
 """
-    add_cohort!(site, species_local, age, agb; eco=nothing, cst=FIXED[])
+    add_cohort!(site, species_local, age, agb; eco=nothing, cst=PnETConst())
 
 Append a cohort with OBSERVED reported aboveground biomass `agb` (g/m2). The pools (TotalBiomass, Fol, NSC, ...) depend on the candidate's
 parameters, so they are initialised lazily from `agb` by the spec-section-8 solve at the start of the next `process_plugin!` year
 (`c_tbio == 0` marks a pending cohort). Passing `eco` (a PnETEcoParams) initialises immediately.
 """
-function add_cohort!(site::SiteView, species::Integer, age::Real, agb::Real; eco::Union{Nothing,PnETEcoParams}=nothing, cst::PnETConst=FIXED[])
+function add_cohort!(site::SiteView, species::Integer, age::Real, agb::Real; eco::Union{Nothing,PnETEcoParams}=nothing, cst::PnETConst=PnETConst())
   site.live += 1
   age > 1 && (site.old += 1)
   k = Int(site.live)

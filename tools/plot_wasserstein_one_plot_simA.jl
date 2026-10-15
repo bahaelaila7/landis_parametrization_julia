@@ -43,7 +43,7 @@ rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=n
 injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)
 msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
 res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-  debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], scoring, simb)
+  debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], scoring, simb, plugin=P.bs_plugin())
 cached = res[1][2]
 
 # sim cohorts: AGB per (plot, year, age), summed over species

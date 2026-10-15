@@ -146,11 +146,10 @@ const BROADLEAF_EVERGREEN = Set([
   "QUVI", "QULA3", "QUGE2", "QUHE2", "QUCH2", "MAGR4", "MAVI2", "PEBO", "PEPA37", "ILOP", "SAPA", "OSAM", "GOLA", "MYCE"])
 # Deciduous conifers (TAAS pond cypress, TADI2 baldcypress, larches).
 const DECIDUOUS_CONIFER = Set(["TAAS", "TADI2", "LALA", "LALY", "LAOC", "METAS"])
-# FIA SFTWD_HRDWD per species symbol (S/H), filled from REF_SPECIES by site_attrs.jl; empty => genus-prefix heuristic.
-const SPECIES_SFTWD = Ref(Dict{String,String}())
+# FIA SFTWD_HRDWD per species symbol (S/H) comes from REF_SPECIES (`read_species_sftwd`, kept in `PnETContext.species_sftwd`); empty => genus-prefix heuristic.
 const _SOFTWOOD_PREFIX = ("PI", "JU", "TS", "AB", "PC", "CH", "TH", "TA", "LA", "TX", "CU", "SE", "PS", "ME")
 
-function pft_of(sym::AbstractString)::UInt8
+function pft_of(sym::AbstractString, sftwd::AbstractDict=Dict{String,String}())::UInt8
   s = String(sym)
   sym_u = uppercase(s)
   if startswith(s, "_")
@@ -167,7 +166,7 @@ function pft_of(sym::AbstractString)::UInt8
   end
   sym_u in DECIDUOUS_CONIFER && return PFT_DC
   sym_u in BROADLEAF_EVERGREEN && return PFT_BLE
-  sw = get(SPECIES_SFTWD[], sym_u, "")
+  sw = get(sftwd, sym_u, "")
   if sw == "S"
     return PFT_NLE
   elseif sw == "H"
@@ -262,15 +261,10 @@ const BOUNDS_RDMULT = (0.4f0, 2.0f0)
 
 @inline _jit(rng, med, lo, hi, sd=0.25) = clamp(med * exp(sd * randn(rng)), lo, hi)
 
-function generate_pnet_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, no_establishment::Bool=false)
+function generate_pnet_params(tables::BiomassSuccessionPlugin.BSTables, sftwd::AbstractDict, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, no_establishment::Bool=false)
   n_species = length(species_list)
-  pft = UInt8[pft_of(s) for s in species_list]
-  LONG = if !isnothing(BiomassSuccessionPlugin.LONGEVITY_TABLE[])
-    tbl = BiomassSuccessionPlugin.LONGEVITY_TABLE[]
-    FloatType[get(tbl, sym, BiomassSuccessionPlugin.LONGEVITY_DEFAULT[]) for sym in species_list]
-  else
-    fill(FloatType(something(BiomassSuccessionPlugin.FIXED_LONGEVITY[], 400.0)), n_species)
-  end
+  pft = UInt8[pft_of(s, sftwd) for s in species_list]
+  LONG = BiomassSuccessionPlugin.default_longevity(tables, species_list)
   spec(i) = pft_spec(pft[i])
   mk(f, b) = FloatType[_jit(rng, f(spec(i)), b[1], b[2]) for i in 1:n_species]
   MaxFracFol = mk(s -> s.maxfracfol, BOUNDS_MAXFRACFOL)
@@ -296,7 +290,7 @@ function max_lai(fracfol::Float64, fractwd::Float64, slwmax::Float64, slwdel::Fl
   return s
 end
 
-function generate_pnet_eco_params(params::PnETParams, cst::PnETConst=FIXED[])::Vector{PnETEcoParams}
+function generate_pnet_eco_params(params::PnETParams, cst::PnETConst)::Vector{PnETEcoParams}
   out = Vector{PnETEcoParams}(undef, length(params.ECO_SPECIES_IDS))
   ib = Float64(trunc(Int, cst.initial_nsc / (cst.dnsc * cst.cfrac)))
   for (e, gids) in enumerate(params.ECO_SPECIES_IDS)

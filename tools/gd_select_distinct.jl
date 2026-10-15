@@ -13,8 +13,7 @@ drop = length(ARGS) >= 6 ? parse(Int, ARGS[6]) : 2
 # inside the same preparation path (POST_SEARCH_HOOK after a 1-trial run), exactly like the search did
 function select_hook(d)
   global anchor = P._load_params_from_path(anchor_path)
-  SP = P.succession_plugin_for(anchor)
-  global spc = P.with_establishment(SP, d.space; no_establishment=true, fit_establishment=false)   # the run's parameter space (pooling, floors) over the Sim A parameter subset
+  global spc = P.with_establishment(d.plugin.ctx, d.space; no_establishment=true, fit_establishment=false)   # the run's parameter space (pooling, floors) over the Sim A parameter subset
   global pd = spc.dists; global slots = spc.slots
   ck = sort(filter(f -> occursin(r"^gd_state@\d+\.jld2$", f), readdir(gdd)); by=f -> parse(Int, match(r"@(\d+)", f)[1]))
   S = JLD2.load_object(joinpath(gdd, last(ck))); st = S.st

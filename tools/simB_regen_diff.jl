@@ -53,7 +53,7 @@ else
     end
   end
   ref_soa = P.make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_estab)
-  dual_b = P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, inj, spc, rng, no_estab; b_only=false, scoring, simb)
+  dual_b = P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, inj, spc, rng, no_estab; b_only=false, scoring, simb, plugin=P.bs_plugin())
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   arch = collect(JLD2.load_object(joinpath(outdir, "search_state_latest.jld2")).archive)
   println("archive: $(length(arch)) candidates; simulating $REPS Sim-B reps each …")
@@ -65,7 +65,7 @@ else
       P.fit_params(dual_b.ref_soa, c.x, msy, n_species, eco_species_ids, dual_b.spdf_plts, ssy, dual_b.spinup, dual_b.spinup_cohorts, dual_b.loss_params;
         debug=false, search_tier=4, t4_ref=dual_b.t4_ref, cycle_map=dual_b.cycle_map, n_cycles=dual_b.n_cycles,
         seeds=[rand(rng, UInt64)], injection=dual_b.injection,
-        disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, scoring, simb)
+        disturbance_dict=dual_b.disturbance_dict, disturbance_years=dual_b.disturbance_years, scoring, simb, plugin=P.bs_plugin())
       cap = P.CAPTURE_T4SIM[]; P.CAPTURE_T4SIM[] = nothing
       cap === :want && error("candidate $ci rep $rep: no t4_sim captured")
       reps[rep] = [[Float32.(m) for m in eco] for eco in cap.sim]

@@ -5,8 +5,8 @@ using Pan; import JLD2
 const P = Pan; const HB = P.HBADPlugin
 cfg = Pan.load_config(ARGS[1]); bs = JLD2.load_object(ARGS[2]); out = ARGS[3]
 splots, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
-P.setup_plugin_from_cfg(cfg, eco_list; species_list=species_list, eco_species_ids=eco_species_ids)
-p = HB.generate_hbad_params(species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)), mode=:default)
+plugin = P.setup_plugin_from_cfg(cfg, eco_list; species_list=species_list, eco_species_ids=eco_species_ids)   # HBADContext: priors + eco table + options
+p = HB.generate_hbad_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)), mode=:default)
 bsi = Dict(s => k for (k, s) in enumerate(bs.SPECIES_LIST)); nl = 0
 for (k, s) in enumerate(species_list); haskey(bsi, s) && (p.LONGEVITY[k] = bs.LONGEVITY[bsi[s]]; global nl += 1); end
 JLD2.save_object(out, p)

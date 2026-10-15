@@ -27,11 +27,10 @@ elseif cmd == "seeds"
   # ---- Sim B context (own species/eco lists) and the remap of tools/seed_simB_start.jl
   P = Pan; BSP = P.BiomassSuccessionPlugin; cfg = P.load_config(cfgBp)
   _, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
-  BSP.SHADE_TOL_TABLE[] = P._load_shade_tol_table(cfg["shade_tol_csv"])
-  BSP.MATURITY_TABLE[] = P._load_maturity_table(cfg["maturity_csv"])
+  tables = BSP.BSTables(shade_tol=P._load_shade_tol_table(cfg["shade_tol_csv"]), maturity=P._load_maturity_table(cfg["maturity_csv"]))   # explicit plugin tables (no module state)
   pet = isfile(cfg["maturity_csv"]) ? CSV.read(cfg["maturity_csv"], DataFrame) : nothing
   function remap(simA)
-    p = BSP.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)), no_establishment=false)
+    p = BSP.generate_biomass_params(tables, species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)), no_establishment=false)
     ai = Dict((simA.ECO_LIST[e], simA.SPECIES_LIST[Int(gid)]) => (e, j) for (e, ids) in enumerate(simA.ECO_SPECIES_IDS) for (j, gid) in enumerate(ids))
     asp = Dict(s => k for (k, s) in enumerate(simA.SPECIES_LIST)); nhit = 0; nmiss = 0
     for (e, ids) in enumerate(eco_species_ids), (j, gid) in enumerate(ids)
@@ -45,12 +44,12 @@ elseif cmd == "seeds"
       end
     end
     for (k, s) in enumerate(species_list); haskey(asp, s) || continue; a = asp[s]; p.D[k] = simA.D[a]; p.LONGEVITY[k] = simA.LONGEVITY[a]; end
-    st = BSP.SHADE_TOL_TABLE[]
+    st = tables.shade_tol
     for (k, s) in enumerate(species_list)
       v = st === nothing ? nothing : get(st, uppercase(s), nothing)
       p.SHADE_TOL[k] = v !== nothing ? v : (endswith(s, "_HST") ? 4 : endswith(s, "_LST") ? 2 : 3)
     end
-    P._seed_maturity!(p, species_list)
+    P._seed_maturity!(tables, p, species_list)
     for (e, ids) in enumerate(eco_species_ids), (j, gid) in enumerate(ids)
       if pet === nothing; p.PROB_ESTAB_SPP[e][j] = 0.1f0; continue; end
       nm = uppercase(species_list[gid]); l3 = String(first(split(eco_list[e], "|lu=")))

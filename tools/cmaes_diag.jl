@@ -12,9 +12,8 @@ const P = Pan; const PU = P.PU
 cfgpath, ppath, outd = ARGS[1], ARGS[2], ARGS[3]; mkpath(outd)
 
 function diag(d)
-  SP = P.succession_plugin_of(d.ref_soa)
   p0 = JLD2.load_object(ppath)
-  sp = P.with_establishment(SP, d.space; no_establishment=true, fit_establishment=false); slots = sp.slots   # the run's parameter space (pooling, floors) over the Sim A parameter subset
+  sp = P.with_establishment(d.plugin.ctx, d.space; no_establishment=true, fit_establishment=false); slots = sp.slots   # the run's parameter space (pooling, floors) over the Sim A parameter subset
   u0 = PU.params_to_u(p0, sp, slots); nd = length(u0)
   injection = P.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
@@ -26,7 +25,7 @@ function diag(d)
   sc = P.compute_loss_scales(d.loss_params, d.tier, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, dom=d.scale_seed.dom, per_plot_mean=d.simb.t4_per_plot_mean)   # the reference's loss scales
   function ev(p; seed=UInt64(1))
     r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-      debug=false, search_tier=d.tier, injection=injection, seeds=[seed], cache_preinject=true, scales=sc, scoring=d.scoring, simb=d.simb)
+      debug=false, search_tier=d.tier, injection=injection, seeds=[seed], cache_preinject=true, scales=sc, scoring=d.scoring, simb=d.simb, plugin=d.plugin)
     rr, el, k = P._agg_reps(r, d.loss_params, d.scoring)
     objs = Float64.(P._mo_objectives(el, d.eco_species_ids, d.loss_params, sc))
     sim = Dict{NTuple{4,Int},Float64}()
@@ -46,7 +45,7 @@ function diag(d)
   dec(u) = PU.u_to_params(clamp.(u, 0.0, 1.0), sp, slots, p0)
   log_rows = DataFrame(test=String[], sigma=Float64[], dir=Int[], t=Float64[], W=Float64[], AGB=Float64[], biasloss=Float64[])
   t0 = time(); e0 = ev(p0); te = time() - t0
-  @printf("DIAG plugin=%s slots=%d  base: ΣW=%.6f ΣAGB=%.6f biasloss=%.5f  (eval %.1fs)\n", SP, nd, e0.objs[1], e0.objs[2], e0.bl, te)
+  @printf("DIAG plugin=%s slots=%d  base: ΣW=%.6f ΣAGB=%.6f biasloss=%.5f  (eval %.1fs)\n", P.plugin_type(d.plugin), nd, e0.objs[1], e0.objs[2], e0.bl, te)
   # A. repeat noise
   ea = ev(p0); @printf("A. same seed twice: |ΔW|=%.3g |ΔAGB|=%.3g\n", abs(ea.objs[1] - e0.objs[1]), abs(ea.objs[2] - e0.objs[2]))
   for s in (UInt64(2), UInt64(3), UInt64(4))

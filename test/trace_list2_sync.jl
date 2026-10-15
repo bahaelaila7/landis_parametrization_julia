@@ -31,7 +31,7 @@ ctx = (BiomassSuccession=(eco_params=P.BiomassSuccessionPlugin.generate_eco_para
 for y in 0:30
   if y > 0
     P.PanCore.process_plugin!(soa, P.BiomassSuccessionPlugin.BiomassSuccession, y; ctx=ctx.BiomassSuccession)
-    y in iyears && haskey(injd, y) && P._inject_observed_cohorts!(soa, injd[y], scoring)
+    y in iyears && haskey(injd, y) && P._inject_observed_cohorts!(P.bs_plugin().ctx, soa, injd[y], scoring)
   end
   site = P.getsite(soa, 1); ages = Float64[]; bios = Float64[]
   for j in 1:Int(site.live)

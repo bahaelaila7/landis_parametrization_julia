@@ -350,13 +350,13 @@ end
 # Cohort add / external biomass writes
 # ---------------------------------------------------------------------------------------------------------------------
 """
-    add_cohort!(site, species_local, age, agb)
+    add_cohort!(ctx, site, species_local, age, agb)
 
 Append a cohort with OBSERVED aboveground biomass `agb` (g/m2): (tph, dq, h) from the empirical translation (`translate`), `c_bio = agb` exactly.
-Reads the module-level `PRIORS[]` / `ECO_GIDS[]` (set by `configure!`). `prior=` overrides the species prior (tests).
+The species prior comes from the `HBADContext` `ctx`. `prior=` overrides it (tests).
 """
-function add_cohort!(site::SiteView, species::Integer, age::Real, agb::Real; prior::Union{Nothing,SpPrior}=nothing)
-  p = prior === nothing ? PRIORS[].sp[global_species(Int(site.eco_id), species)] : prior
+function add_cohort!(ctx::HBADContext, site::SiteView, species::Integer, age::Real, agb::Real; prior::Union{Nothing,SpPrior}=nothing)
+  p = prior === nothing ? prior_of(ctx, Int(site.eco_id), species) : prior
   site.live += 1
   age > 1 && (site.old += 1)
   k = Int(site.live)
@@ -372,18 +372,18 @@ function add_cohort!(site::SiteView, species::Integer, age::Real, agb::Real; pri
 end
 
 """
-    set_cohort_bio!(site, k, newbio)
+    set_cohort_bio!(ctx, site, k, newbio)
 
 Set the reported AGB of cohort k. Trees are removed / added at the same size: `c_tph` is scaled by newbio/oldbio (dq and h unchanged), so the
 allometric AGB equals `newbio`. A cohort with no previous biomass is re-translated from (species, age, newbio).
 """
-function set_cohort_bio!(site::SiteView, k::Integer, newbio::Real)
+function set_cohort_bio!(ctx::HBADContext, site::SiteView, k::Integer, newbio::Real)
   old = site.c_bio[k]
   nb = max(Float64(newbio), 0.0)
   if old > 0 && site.c_tph[k] > 0
     site.c_tph[k] = FloatType(Float64(site.c_tph[k]) * nb / Float64(old))
   elseif nb > 0
-    p = PRIORS[].sp[global_species(Int(site.eco_id), site.c_species[k])]
+    p = prior_of(ctx, Int(site.eco_id), site.c_species[k])
     tph, dq, h = translate(p, Float64(site.c_age[k]), nb)
     site.c_tph[k] = FloatType(tph); site.c_dq[k] = FloatType(dq); site.c_h[k] = FloatType(h)
   else
@@ -412,10 +412,10 @@ function plant_slot_needed(site::SiteView, species::Integer, age::Real=1)::Int
 end
 
 """
-    plant!(site, species_local, tph; age=1, dq=nothing, prior=nothing, cst=FIXED[]) -> Int
+    plant!(ctx, site, species_local, tph; age=1, dq=nothing, prior=nothing) -> Int
 
 Plant / add `tph` trees/ha of eco-local species `species_local` at `age` (years) and quadratic mean diameter `dq` (cm; default `cst.estab_dq` = the
-establishment state, clamped to [0.25, 170]). Same state initialisation as natural establishment: `h = 1.3 + CR(dq)` (Chapman-Richards of the
+establishment state `ctx.fixed.estab_dq`, clamped to [0.25, 170]). Same state initialisation as natural establishment: `h = 1.3 + CR(dq)` (Chapman-Richards of the
 species prior), `c_bio` = allometric AGB of (tph, dq). If a cohort of the same species and age exists the trees are merged into it (densities add,
 dq = quadratic mean, h = tph-weighted mean); otherwise a cohort is appended. Site totals `B`, `BA`, `SDI` are updated incrementally (`RD` is refreshed by
 the next annual step, which recomputes it from the state). Returns the index of the cohort (1-based within the site).
@@ -423,15 +423,15 @@ the next annual step, which recomputes it from the state). Returns the index of 
 CSR capacity is the CALLER's job, exactly as for `add_cohort!` in `_inject_observed_cohorts!`: before appending, set
 `site._new_cohort_counts = site.live + plant_slot_needed(site, sp, age)` (summed over all plantings of that site) for every planted site and call
 `PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))` once (note the SiteView must be re-fetched afterwards). `Pan.plant_sites!`
-does this for a list of plantings. Throws a descriptive error when no free slot exists. Reads the module-level `PRIORS[]` / `ECO_GIDS[]`.
+does this for a list of plantings. Throws a descriptive error when no free slot exists. Priors and constants come from the `HBADContext` `ctx`.
 """
-function plant!(site::SiteView, species::Integer, tph::Real; age::Real=1, dq::Union{Nothing,Real}=nothing,
-                prior::Union{Nothing,SpPrior}=nothing, cst::HBADConst=FIXED[])
+function plant!(ctx::HBADContext, site::SiteView, species::Integer, tph::Real; age::Real=1, dq::Union{Nothing,Real}=nothing,
+                prior::Union{Nothing,SpPrior}=nothing)
   t = Float64(tph)
   (isfinite(t) && t > 0) || error("HBAD plant!: tph must be positive and finite, got $tph")
   age >= 0 || error("HBAD plant!: age must be >= 0, got $age")
-  p = prior === nothing ? PRIORS[].sp[global_species(Int(site.eco_id), species)] : prior
-  d = clamp(dq === nothing ? cst.estab_dq : Float64(dq), HB_DQ_MIN, HB_DQ_MAX)
+  p = prior === nothing ? prior_of(ctx, Int(site.eco_id), species) : prior
+  d = clamp(dq === nothing ? ctx.fixed.estab_dq : Float64(dq), HB_DQ_MIN, HB_DQ_MAX)
   h = 1.3 + chapman_richards(p.hd_a, p.hd_b, p.hd_c, d)
   n = Int(site.live)
   cs = site.c_species; ca = site.c_age

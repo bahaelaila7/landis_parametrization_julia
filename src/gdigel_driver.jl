@@ -273,7 +273,7 @@ function _write_mo_archive(dir, nd, st, labels, dec)
   nothing
 end
 
-function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years,
+function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years,
     species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool,
     TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing,
     start_from::Union{Nothing,String}=nothing, n_reps::Int=1, no_establishment::Bool=false, injection_cohorts=nothing,
@@ -299,9 +299,8 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, output_dir
   simb.dual_mode == :off || error("gdigel: Sim A only (dual_mode must be off)")
   isnothing(injection_cohorts) && error("gdigel needs override injection cohorts (Sim A)")
   mkpath(output_dir)
-  SP = succession_plugin_of(ref_soa)
   pd = space.dists   # gdigel is Sim A only (dual_mode off), so the run's space already has fit_establishment = false
-  template = !isnothing(start_from) ? _load_params_from_path(start_from) : generate_params(SP, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
+  template = !isnothing(start_from) ? _load_params_from_path(start_from) : generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
   slots = space.slots; nd = length(slots)
   cell_group, labels = _gd_groups(pd, slots, eco_species_ids, species_list, eco_list; group_param=o("group_param"))
   ix = _gd_index(injection_cohorts, splots, cell_group, labels, scoring; real_only=real_only)
@@ -329,7 +328,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, output_dir
     pp = dec(u)
     dacc = USE_D ? DeathAcc(eco_species_ids) : nothing
     r = fit_params(ref_soa, pp, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params;
-      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection=injection, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales, scoring, simb)
+      debug=false, search_tier=search_tier, seeds=fixed_seeds, injection=injection, work_soa=ws, cache_preinject=true, death_acc=dacc, scales=scales, scoring, simb, plugin=plugin)
     _, _, k = _agg_reps(r, loss_params, scoring)
     res = _gd_losses(ix, r[k][2]; size_weight=sw, min_pairs=min_pairs)
     MO || return res

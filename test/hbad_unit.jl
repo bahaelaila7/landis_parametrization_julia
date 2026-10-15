@@ -18,7 +18,8 @@ rel(a, b) = abs(a - b) / max(abs(b), 1e-300)
 species_list = ["PITA", "PIEL", "QUNI", "ACRU", "LITU", "SAPA", "CAAL27", "_S_HST", "_H_LST", "_H_NA", "_GRP_41_LST", "_GRP_28_LST", "_GRP_8_HST", "QUAL"]
 eco_species_ids = [[1, 2, 3, 4, 8, 9], [1, 3, 5, 6, 7, 10, 11], [2, 12, 13, 14, 1, 4]]
 eco_list = ["e1", "e2", "e3"]
-pri = H.configure!(; species_list=species_list, eco_species_ids=eco_species_ids, verbose=false)
+hctx0 = H.HBADContext(species_list, eco_species_ids; verbose=false)   # the run context: priors + eco -> species table + options (immutable)
+pri = hctx0.priors
 println("species -> translation key / prior key / growth key / mort key")
 for (i, s) in enumerate(species_list)
   @printf("  %-12s %-8s %-8s %-8s %-8s sdimax p90/p95/p99 = %.0f/%.0f/%.0f\n", s, pri.trans_key[i], pri.prior_key[i], pri.growth_key[i], pri.mort_key[i], pri.sp[i].sdi_p90, pri.sp[i].sdi_p95, pri.sp[i].sdi_p99)
@@ -74,17 +75,17 @@ function build_soa(site_specs::Vector; eco_ids=nothing, rng=MersenneTwister(7))
     site.old = 0; site.live = 0
     Pan._init_site_plugin!(HB, site, true)
     for (esp, age, agb) in site_specs[i]
-      H.add_cohort!(site, esp, age, agb)
+      H.add_cohort!(hctx0, site, esp, age, agb)
     end
     site.B = sum(site.c_bio)
   end
   return soa
 end
 function make_ctx_default(; mode=:default, mutate=nothing)
-  prm = H.generate_hbad_params(species_list, eco_list, eco_species_ids; rng=MersenneTwister(3), mode=mode)
+  prm = H.generate_hbad_params(hctx0, species_list, eco_list, eco_species_ids; rng=MersenneTwister(3), mode=mode)
   mutate === nothing || (prm = mutate(prm))
-  eco = H.generate_hbad_eco_params(prm)
-  return Pan.make_ctx(HB, eco), prm
+  eco = H.generate_hbad_eco_params(hctx0, prm)
+  return Pan.make_ctx(hctx0, eco), prm
 end
 rng = MersenneTwister(11)
 specs = [[(rand(rng, 1:length(eco_species_ids[1 + (i - 1) % 3])), rand(rng, 1:200), exp(rand(rng) * 9 + 0.5)) for _ in 1:rand(rng, 3:8)] for i in 1:60]
@@ -105,7 +106,7 @@ end
 # set_cohort_bio!: scales tph, keeps dq/h
 site = getsite(soa, 1); k = 1
 dq0 = site.c_dq[k]; h0 = site.c_h[k]; b0 = site.c_bio[k]; p = pri.sp[eco_species_ids[1][Int(site.c_species[k])]]
-Pan.set_cohort_bio!(HB, site, k, 0.5 * b0)
+Pan.set_cohort_bio!(hctx0, site, k, 0.5 * b0)
 @check site.c_bio[k] == 0.5f0 * b0 && site.c_dq[k] == dq0 && site.c_h[k] == h0 "set_cohort_bio! keeps size"
 @check rel(H.agb_of(p, Float64(site.c_tph[k]), Float64(site.c_dq[k])), 0.5 * b0) < 1e-5 "set_cohort_bio! allometric consistency"
 
@@ -263,7 +264,7 @@ okf = check6(site, nl, orig, keep, bal0)
 @printf("  %d of %d cohorts kept by longevity rule; CSR capacity after step = %d\n", nl, nco, Int(soa6.refs.cohort[2] - soa6.refs.cohort[1]))
 # tph<1 removal
 soa6b = build_soa([[(1, 20, 300.0), (3, 20, 2.0), (4, 20, 400.0)]]; eco_ids=[1])
-s6b = getsite(soa6b, 1); Pan.set_cohort_bio!(HB, s6b, 2, 1e-5)
+s6b = getsite(soa6b, 1); Pan.set_cohort_bio!(hctx0, s6b, 2, 1e-5)
 println("  before: tph=", Float64.(getsite(soa6b, 1).c_tph), " live=", getsite(soa6b, 1).live)
 Pan.step!(HB, soa6b, 1, ctx6z)
 println("  after: live=", getsite(soa6b, 1).live, " tph=", Float64.(getsite(soa6b, 1).c_tph))
@@ -314,16 +315,16 @@ hb_with(prm; kw...) = H.HBADParams(; merge(NamedTuple{fieldnames(H.HBADParams)}(
 # eco 1 species (local 1..6) = PITA PIEL QUNI ACRU _S_HST _H_LST = global 1 2 3 4 8 9; tolerance by global species id
 tol_by_global = UIntType[1, 2, 3, 4, 3, 3, 3, 5, 5, 3, 3, 3, 3, 3]
 estab_ctx(; p=1.0, rain=true, mutate=nothing, mode=:default) = begin
-  prm = H.generate_hbad_params(species_list, eco_list, eco_species_ids; rng=MersenneTwister(3), mode=mode)
+  prm = H.generate_hbad_params(hctx0, species_list, eco_list, eco_species_ids; rng=MersenneTwister(3), mode=mode)
   prm = hb_with(prm; PROB_ESTAB_SPP=[fill(FloatType(p), length(v)) for v in prm.PROB_ESTAB_SPP], SHADE_TOL=tol_by_global, ESTAB_SEED_RAIN=rain)
   mutate === nothing || (prm = mutate(prm))
-  Pan.make_ctx(HB, H.generate_hbad_eco_params(prm)), prm
+  Pan.make_ctx(hctx0, H.generate_hbad_eco_params(hctx0, prm)), prm
 end
 estab_on!(soa) = (soa.scalar.no_establish .= false; soa)
 const BSL = Pan.BiomassSuccessionPlugin
 # defaults of the new parameters
-let prm = H.generate_hbad_params(species_list, eco_list, eco_species_ids; rng=MersenneTwister(3))
-  bsl = BSL.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=MersenneTwister(1))
+let prm = H.generate_hbad_params(hctx0, species_list, eco_list, eco_species_ids; rng=MersenneTwister(3))
+  bsl = BSL.generate_biomass_params(BSL.BSTables(), species_list, eco_list, eco_species_ids; rng=MersenneTwister(1))
   @check prm.SUFFICIENT_LIGHT == bsl.SUFFICIENT_LIGHT "SUFFICIENT_LIGHT default == BiomassSuccession matrix"
   @check prm.SUFFICIENT_LIGHT[6][5] == 0.5f0 "corner (shade class 5, tolerance 5) == 0.50"
   @check all(v -> all(0 .< v .< 1), prm.PROB_ESTAB_SPP) "default annual PROB_ESTAB in (0,1)"
@@ -439,7 +440,7 @@ println("(e) plant! round trip (+ generic hook, BiomassSuccession, PnET)")
 soae = estab_on!(build_soa([[(1, 30, 3000.0)], Tuple{Int,Int,Float64}[], [(3, 10, 200.0), (4, 12, 300.0)]]; eco_ids=[1, 1, 1]))
 PanCore.PARALLEL_SITES[] = false
 Pan.step!(HB, soae, 0, estab_ctx(p=0.0, rain=false)[1])      # primes BA / SDI / RD (no establishment: p = 0)
-Pan.plant_sites!(soae, [(1, 5, 600.0), (2, 1, 1000.0), (2, 2, 400.0), (3, 6, 250.0)])   # eco1 local species: 5 = _S_HST, 6 = _H_LST
+Pan.plant_sites!(hctx0, soae, [(1, 5, 600.0), (2, 1, 1000.0), (2, 2, 400.0), (3, 6, 250.0)])   # eco1 local species: 5 = _S_HST, 6 = _H_LST
 for (si, esp, tph_) in [(1, 5, 600.0), (2, 1, 1000.0), (2, 2, 400.0), (3, 6, 250.0)]
   site = getsite(soae, si); k = findfirst(k -> site.c_species[k] == esp && site.c_age[k] == 1, 1:Int(site.live))
   pp = pri.sp[eco_species_ids[1][esp]]
@@ -453,13 +454,13 @@ for si in 1:3
 end
 @check Int(getsite(soae, 2).live) == 2 && Int(getsite(soae, 1).live) == 2 "cohort counts after planting"
 # second planting of the same species and age merges (no duplicate), with a different dq
-Pan.plant_sites!(soae, [(1, 5, 400.0)]; dq=3.0)
+Pan.plant_sites!(hctx0, soae, [(1, 5, 400.0)]; dq=3.0)
 site = getsite(soae, 1)
 k = findfirst(k -> site.c_species[k] == 5 && site.c_age[k] == 1, 1:Int(site.live))
 @check Int(site.live) == 2 && count(j -> site.c_species[j] == 5 && site.c_age[j] == 1, 1:Int(site.live)) == 1 "same species+age merged"
 @check site.c_tph[k] == 1000 && abs(site.c_dq[k] - sqrt((600 * 1.0 + 400 * 9.0) / 1000)) < 1e-5 "merge: densities add, dq quadratic mean ($(site.c_dq[k]))"
 # planting with an explicit age and dq, then the model grows it
-Pan.plant_sites!(soae, [(2, 3, 300.0)]; age=8, dq=6.0)
+Pan.plant_sites!(hctx0, soae, [(2, 3, 300.0)]; age=8, dq=6.0)
 site = getsite(soae, 2); k = findfirst(k -> site.c_species[k] == 3, 1:Int(site.live))
 @check site.c_age[k] == 8 && site.c_dq[k] == 6.0 "plant! age and dq arguments"
 ctxe, _ = estab_ctx(p=0.0, rain=false)
@@ -467,25 +468,26 @@ for y in 1:5; Pan.step!(HB, soae, y, ctxe); end
 @check all(Float64(getsite(soae, i).B) > 0 && isfinite(Float64(getsite(soae, i).B)) for i in 1:3) "stand keeps running after planting"
 # capacity guard
 soag = estab_on!(build_soa([[(1, 30, 3000.0)]]; eco_ids=[1]))
-errg = try; HBADPlugin.plant!(getsite(soag, 1), 2, 100.0); nothing; catch e; sprint(showerror, e); end
+errg = try; HBADPlugin.plant!(hctx0, getsite(soag, 1), 2, 100.0); nothing; catch e; sprint(showerror, e); end
 @check errg !== nothing && occursin("no free cohort slot", errg) "plant! without capacity errors clearly"
 # BiomassSuccession: new cohort with LANDIS initial biomass; PnET: clear error
-let bsprm = BSL.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=MersenneTwister(2), no_establishment=false)
-  bseco = Pan.generate_eco_params(Pan._BS, bsprm)
+let bsprm = BSL.generate_biomass_params(BSL.BSTables(), species_list, eco_list, eco_species_ids; rng=MersenneTwister(2), no_establishment=false)
+  bseco = Pan.generate_eco_params(BSL.BSTables(), bsprm)
   soabs = Pan.soa_type(Pan._BS)((cohort=Int32[1, 1], species=Int32[6, 6]))
   for i in 1:2
     st = getsite(soabs, i); st.active = true; st.rng = Random.Xoshiro(i); st.eco_id = 1; st.ecocode = 1; st.mapcode = i; st.ref_cn = i; st.live = 0; st.old = 0
     Pan._init_site_plugin!(Pan._BS, st, false)
   end
   getsite(soabs, 1).B = 0f0; getsite(soabs, 2).B = 12000f0
-  Pan.plant_sites!(soabs, [(1, 2, 500.0), (2, 2, 500.0)]; age=1, eco_params=bseco)
+  Pan.plant_sites!(BSL.BSTables(), soabs, [(1, 2, 500.0), (2, 2, 500.0)]; age=1, eco_params=bseco)
   b1 = getsite(soabs, 1).c_bio[1]; b2 = getsite(soabs, 2).c_bio[1]
   e = bseco[1]
   @check b1 == trunc(BSL.calculate_initial_biomass(e.ANPP_MAX_SPP[2], 0f0, e.B_MAX_ECO)) && b2 == trunc(BSL.calculate_initial_biomass(e.ANPP_MAX_SPP[2], 12000f0, e.B_MAX_ECO)) "BS plant!: LANDIS initial biomass (trunc as add_cohort!)"
   @check b2 < b1 && getsite(soabs, 1).live == 1 && getsite(soabs, 1).c_species[1] == 2 "BS plant!: more shade -> smaller initial biomass; cohort recorded"
   @printf("  BS plant!: initial biomass open site %.0f g/m2, site B=12000 -> %.0f g/m2\n", b1, b2)
 end
-errp = try; Pan.plant!(Pan._PN, nothing, 1, 100.0); nothing; catch e; sprint(showerror, e); end
+pnc_ = Pan.Plugins.PnETPlugin.PnETContext(; climate=Pan.Plugins.PnETPlugin.build_climate(["x"], [2000], zeros(Float32, 12, 1, 1), zeros(Float32, 12, 1, 1), zeros(Float32, 12, 1, 1), [400.0]))
+errp = try; Pan.plant!(pnc_, nothing, 1, 100.0); nothing; catch e; sprint(showerror, e); end
 @check errp !== nothing && occursin("not supported", errp) "PnET plant! errors with a clear message"
 
 println("(f) 100-yr clear-cut trajectory with seed rain (eco 1: PITA PIEL QUNI ACRU _S_HST _H_LST; annual PROB_ESTAB default 0.108; mean of 200 replicate sites)")
@@ -523,7 +525,7 @@ PanCore.PARALLEL_SITES[] = true
 
 println("(g) params round trip: JLD2, and upgrade of a pre-establishment JLD2 file")
 using Pan.JLD2
-let prm = H.generate_hbad_params(species_list, eco_list, eco_species_ids; rng=MersenneTwister(3), mode=:jitter, seed_rain=true)
+let prm = H.generate_hbad_params(hctx0, species_list, eco_list, eco_species_ids; rng=MersenneTwister(3), mode=:jitter, seed_rain=true)
   f = tempname() * ".jld2"; JLD2.save_object(f, prm); q = JLD2.load_object(f); rm(f)
   @check q isa H.HBADParams && all(getfield(q, n) == getfield(prm, n) for n in fieldnames(H.HBADParams)) && q.ESTAB_SEED_RAIN "JLD2 round trip keeps every field incl. the establishment block"
   old = joinpath(@__DIR__, "..", "results", "hbad_gafl", "params_gafl_hbad.jld2")
@@ -531,7 +533,7 @@ let prm = H.generate_hbad_params(species_list, eco_list, eco_species_ids; rng=Me
     raw = JLD2.load_object(old)
     up = H.upgrade_params(raw)
     @check up isa H.HBADParams && up.G_MULT == raw.G_MULT && up.SDIMAX == raw.SDIMAX && all(==(0.5f0), [up.SUFFICIENT_LIGHT[6][5]]) && !up.ESTAB_SEED_RAIN "pre-establishment params file upgraded with defaults"
-    eco_ = H.generate_hbad_eco_params(raw)       # the fallback method upgrades on the fly
+    eco_ = H.generate_hbad_eco_params(H.HBADContext(String.(raw.SPECIES_LIST), raw.ECO_SPECIES_IDS; verbose=false), raw)       # the fallback method upgrades on the fly
     @check length(eco_) == length(raw.ECO_LIST) && all(isapprox.(eco_[1].min_rel_rd, (0.15, 0.30, 0.45, 0.60, 0.75); atol=1e-6)) "generate_hbad_eco_params(old file) works"
     @printf("  upgraded %s: %d ecos, %d species\n", basename(old), length(up.ECO_LIST), length(up.SPECIES_LIST))
   end

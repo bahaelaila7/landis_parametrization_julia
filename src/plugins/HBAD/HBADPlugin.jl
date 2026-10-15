@@ -13,9 +13,10 @@ const REPO_ROOT = normpath(joinpath(@__DIR__, "..", "..", ".."))
 const DEFAULT_PRIORS_CSV = joinpath(REPO_ROOT, "results", "hbad", "priors.csv")
 const DEFAULT_COEFS_CSV = joinpath(REPO_ROOT, "results", "hbad", "translation_coefs.csv")
 
-include("priors.jl")   # SpPrior, PRIORS, species->key resolution, translation, configure!
+include("priors.jl")   # SpPrior, HBADPriors, species->key resolution, translation
+include("context.jl")  # HBADConst, HBADContext (priors + eco table + options), built once per run
 include("params.jl")   # HBADParams, HBADEcoParams, generate_*
 include("plugin.jl")   # SoA layout, kernel, process_plugin!, add_cohort!, set_cohort_bio!
 
-export HBAD, HBADParams, HBADEcoParams, HBADConst, SpPrior
+export HBAD, HBADParams, HBADEcoParams, HBADConst, HBADContext, SpPrior
 end

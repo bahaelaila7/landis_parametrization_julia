@@ -9,6 +9,7 @@ macro check(cond, msg)
   end
 end
 UI = P.UIntType; FT = P.FloatType
+const PC0 = P.Plugins.BiomassSuccessionPlugin.BSTables()    # the plugin context of the injection / shock functions
 
 # one site, species 1 and 2 of eco 1.  Simulated cohorts at measurement year T:
 #   A = (sp1, 40) 100 undisturbed;  B = (sp1, 20) 80 FULLY removed by disturbance;
@@ -31,7 +32,7 @@ for (mode, d_expect_after_shock) in ((:scale, 50.0 * 0.6), (:exclude_overwrite, 
   scoring = P.ScoringOptions(; disturbance=mode)
   soa = fresh(); s = P.getsite(soa, 1)
   @check Int(s.live) == 4 "setup: 4 cohorts ($mode)"
-  P._apply_disturbance_shock!(soa, shk, inj, scoring)
+  P._apply_disturbance_shock!(PC0, soa, shk, inj, scoring)
   c = cohorts(soa)
   @check Int(s.live) == 3 && !haskey(c, (1, 20)) "$mode: B (fully removed) is gone BEFORE scoring"
   @check haskey(c, (1, 40)) && isapprox(c[(1, 40)], 100.0; atol=0.5) "$mode: A (undisturbed) keeps its simulated biomass ($(get(c,(1,40),NaN)))"
@@ -39,7 +40,7 @@ for (mode, d_expect_after_shock) in ((:scale, 50.0 * 0.6), (:exclude_overwrite, 
   @check haskey(c, (2, 10)) && isapprox(c[(2, 10)], d_expect_after_shock; atol=0.5) "$mode: D after shock = $d_expect_after_shock (got $(get(c,(2,10),NaN)))"
   @check isapprox(Float64(s.B), sum(values(c)); rtol=1e-5) "$mode: site.B consistent with cohorts ($(s.B) vs $(sum(values(c))))"
   # the injection for the NEXT interval: D must be scaled exactly once (skip_scale), C removed by the sync's Pass A
-  P._inject_observed_cohorts!(soa, inj, scoring; override=true, sync=true, skip_scale=true)
+  P._inject_observed_cohorts!(PC0, soa, inj, scoring; override=true, sync=true, skip_scale=true)
   c2 = cohorts(soa)
   @check !haskey(c2, (2, 30)) && !haskey(c2, (1, 20)) "$mode: sync removes C (and B stays gone)"
   if mode === :scale
@@ -48,11 +49,11 @@ for (mode, d_expect_after_shock) in ((:scale, 50.0 * 0.6), (:exclude_overwrite, 
 end
 # legacy path (skip_scale = false, no shock): the sync scales D itself, once
 scoring = P.ScoringOptions(; disturbance=:scale)
-soa = fresh(); P._inject_observed_cohorts!(soa, inj, scoring; override=true, sync=true)
+soa = fresh(); P._inject_observed_cohorts!(PC0, soa, inj, scoring; override=true, sync=true)
 c = cohorts(soa)
 @check isapprox(c[(2, 10)], 30.0; atol=0.5) "legacy sync scaling unchanged (D = 30 once)"
 # double application would give 18: confirm the guard matters
-soa = fresh(); P._apply_disturbance_shock!(soa, nothing, inj, scoring); P._inject_observed_cohorts!(soa, inj, scoring; override=true, sync=true)
+soa = fresh(); P._apply_disturbance_shock!(PC0, soa, nothing, inj, scoring); P._inject_observed_cohorts!(PC0, soa, inj, scoring; override=true, sync=true)
 @check isapprox(cohorts(soa)[(2, 10)], 18.0; atol=0.5) "without skip_scale a shocked cohort would be scaled twice (18) -> skip_scale is required"
 
 # ---------------- cohort-level exclusion (two cohorts of the SAME species, one disturbed) and recruits at entry ----------------

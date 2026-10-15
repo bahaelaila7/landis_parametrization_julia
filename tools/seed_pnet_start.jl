@@ -5,7 +5,8 @@ using Pan; import JLD2
 const P = Pan; const PN = P.PnETPlugin
 cfg = Pan.load_config(ARGS[1]); bs = JLD2.load_object(ARGS[2]); out = ARGS[3]
 splots, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
-p = PN.generate_pnet_params(species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)))
+p = PN.generate_pnet_params(P.BiomassSuccessionPlugin.BSTables(), Dict{String,String}(), species_list,   # no climate needed here: default tables, genus-heuristic PFTs (as before)
+   eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)))
 for i in eachindex(species_list)
   s = PN.pft_spec(p.PFT[i])
   p.MaxFracFol[i] = s.maxfracfol; p.FrActWd[i] = s.fractwd; p.SLWmax[i] = s.slwmax; p.TOwood[i] = 0.01f0; p.PsnAgeRed[i] = s.psnagered

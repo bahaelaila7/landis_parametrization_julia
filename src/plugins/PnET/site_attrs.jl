@@ -2,13 +2,11 @@
 # sim year 0, latitude, and soil texture. Built in `Pan.parametrize` only when succession_plugin == pnet and handed to `init_sites!`.
 
 """
-    configure!(; climate_cache, co2_csv, generic=Dict(), db_path=nothing)
+    pnet_const(generic) -> PnETConst
 
-Load the PRISM climate cache + CO2 series into `CLIMATE[]`, apply `generic` overrides (PnETConst field names -> values) to `FIXED[]`, and
-(if `db_path` is given) read REF_SPECIES.SFTWD_HRDWD for plant-functional-type assignment.
+`PnETConst()` with the `generic` overrides (yaml `pnet_generic`: PnETConst field names -> values) applied.
 """
-function configure!(; climate_cache::AbstractString, co2_csv::AbstractString, generic::AbstractDict=Dict{String,Any}(), db_path::Union{Nothing,AbstractString}=nothing)
-  CLIMATE[] = load_climate(climate_cache, co2_csv)
+function pnet_const(generic::AbstractDict=Dict{String,Any}())
   ov = Dict{Symbol,Any}()
   for (k, v) in generic
     f = Symbol(k)
@@ -16,21 +14,26 @@ function configure!(; climate_cache::AbstractString, co2_csv::AbstractString, ge
     ov[f] = v
   end
   base = PnETConst()
-  FIXED[] = PnETConst(; (f => convert(fieldtype(PnETConst, f), get(ov, f, getfield(base, f))) for f in fieldnames(PnETConst))...)
-  1 <= FIXED[].max_layers <= MAXL || error("pnet_generic.max_layers must be in 1:$(MAXL) (scratch arrays are sized for MAXL)")
-  if db_path !== nothing && isfile(db_path)
-    db = DuckDB.DB(); con = DuckDB.connect(db)
-    try
-      DuckDB.execute(con, "ATTACH '$(db_path)' AS src (READ_ONLY);")
-      df = DuckDB.execute(con, "SELECT UPPER(TRIM(SPECIES_SYMBOL)) AS s, SFTWD_HRDWD AS t FROM src.REF_SPECIES") |> DataFrame
-      SPECIES_SFTWD[] = Dict{String,String}(String(r.s) => String(coalesce(r.t, "")) for r in eachrow(df) if !ismissing(r.s))
-    catch e
-      @warn "PnET: could not read REF_SPECIES.SFTWD_HRDWD; PFT falls back to genus heuristics" exception = e
-    finally
-      DuckDB.close(db)
-    end
+  cst = PnETConst(; (f => convert(fieldtype(PnETConst, f), get(ov, f, getfield(base, f))) for f in fieldnames(PnETConst))...)
+  1 <= cst.max_layers <= MAXL || error("pnet_generic.max_layers must be in 1:$(MAXL) (scratch arrays are sized for MAXL)")
+  return cst
+end
+
+"""REF_SPECIES.SFTWD_HRDWD of the FIA database at `db_path` (species symbol -> "S"/"H"), for plant-functional-type assignment; empty when unreadable."""
+function read_species_sftwd(db_path::Union{Nothing,AbstractString})
+  out = Dict{String,String}()
+  (db_path !== nothing && isfile(db_path)) || return out
+  db = DuckDB.DB(); con = DuckDB.connect(db)
+  try
+    DuckDB.execute(con, "ATTACH '$(db_path)' AS src (READ_ONLY);")
+    df = DuckDB.execute(con, "SELECT UPPER(TRIM(SPECIES_SYMBOL)) AS s, SFTWD_HRDWD AS t FROM src.REF_SPECIES") |> DataFrame
+    out = Dict{String,String}(String(r.s) => String(coalesce(r.t, "")) for r in eachrow(df) if !ismissing(r.s))
+  catch e
+    @warn "PnET: could not read REF_SPECIES.SFTWD_HRDWD; PFT falls back to genus heuristics" exception = e
+  finally
+    DuckDB.close(db)
   end
-  return nothing
+  return out
 end
 
 _l3_of_eco(eco::AbstractString) = String(first(split(String(eco), "|lu=")))
@@ -38,7 +41,7 @@ _l3_of_eco(eco::AbstractString) = String(first(split(String(eco), "|lu=")))
 """
     build_site_attrs(db_path, tablename, splots, eco_list; soil_map=Dict(), default_soil="LOAM", soil_csv="") -> DataFrame
 
-One row per plot_id of `splots`: clim_id (index into CLIMATE[].ids from the plot's epa_l4), cal_year0 (calendar year of the plot's first
+One row per plot_id of `splots`: clim_id (index into `clim.ids` from the plot's epa_l4), cal_year0 (calendar year of the plot's first
 measurement = sim year 0), lat (PLOT.LAT), soil (Saxton-Rawls texture code from `soil_map[L3]`, else `default_soil`).
 
 If `soil_csv` is non-empty (yaml `pnet_soil_csv`, produced by tools/build_plot_soil.jl: statecd,unitcd,countycd,plot,porosity,fieldcap,wiltpnt,
@@ -46,10 +49,8 @@ rooting_depth_mm,...) the table also carries per-plot `soil_por`, `soil_fc`, `so
 texture. Plots absent from the CSV (or with non-finite values) get NaN there and fall back to the texture path (count logged). With
 `soil_csv == ""` the table is exactly the legacy one (no extra columns).
 """
-function build_site_attrs(db_path::AbstractString, tablename::AbstractString, splots::DataFrame, eco_list::Vector{String};
+function build_site_attrs(clim::PnETClimate, db_path::AbstractString, tablename::AbstractString, splots::DataFrame, eco_list::Vector{String};
                           soil_map::AbstractDict=Dict{String,String}(), default_soil::AbstractString="LOAM", soil_csv::AbstractString="")
-  clim = CLIMATE[]
-  clim === nothing && error("PnET climate not loaded: call PnETPlugin.configure!(...) first")
   db = DuckDB.DB(); con = DuckDB.connect(db)
   l4 = Dict{NTuple{4,Int},String}(); lat = Dict{NTuple{4,Int},Float64}()
   try
@@ -122,7 +123,7 @@ end
 Set one site's PnET static attributes + initial state (soil bucket full to field capacity, empty snow pack). Soil = texture class `soil`, or,
 when `theta = (porosity, fieldcap, wiltpnt)` is given, the per-plot curve of `saxton_rawls_theta` (returns 1 if the invariant needed repair).
 """
-function init_site!(soa, i::Int; clim_id::Integer, cal_year0::Integer, lat::Real, soil::AbstractString="LOAM", root_depth::Real=FIXED[].root_depth_base,
+function init_site!(soa, i::Int; clim_id::Integer, cal_year0::Integer, lat::Real, soil::AbstractString="LOAM", root_depth::Real=PnETConst().root_depth_base,
                     theta::Union{Nothing,NTuple{3,Float64}}=nothing)
   nrep = 0
   if theta === nothing
@@ -138,8 +139,8 @@ function init_site!(soa, i::Int; clim_id::Integer, cal_year0::Integer, lat::Real
   return nrep
 end
 
-"""Plugin hook called by make_sites with the per-plot attribute table (rows keyed by plot_id == site.mapcode)."""
-function init_sites!(soa, attrs::DataFrame)
+"""Plugin hook called by make_sites with the per-plot attribute table (rows keyed by plot_id == site.mapcode); `cst` supplies the default rooting depth."""
+function init_sites!(soa, attrs::DataFrame, cst::PnETConst=PnETConst())
   pos = Dict{Int,Int}(Int(r.plot_id) => k for (k, r) in enumerate(eachrow(attrs)))
   per_plot = hasproperty(attrs, :soil_por)     # only when yaml pnet_soil_csv was set (build_site_attrs soil_csv)
   nplot = 0; ntex = 0; nrep = 0
@@ -152,7 +153,7 @@ function init_sites!(soa, attrs::DataFrame)
       nrep += init_site!(soa, i; clim_id=r.clim_id, cal_year0=r.cal_year0, lat=r.lat, root_depth=r.soil_rd, theta=(Float64(r.soil_por), Float64(r.soil_fc), Float64(r.soil_wp)))
       nplot += 1
     else
-      init_site!(soa, i; clim_id=r.clim_id, cal_year0=r.cal_year0, lat=r.lat, soil=r.soil)
+      init_site!(soa, i; clim_id=r.clim_id, cal_year0=r.cal_year0, lat=r.lat, soil=r.soil, root_depth=cst.root_depth_base)
       ntex += 1
     end
   end

@@ -13,7 +13,7 @@ function chk(d)
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
   foreach(a -> a[] = 0, P.SHOCK_STATS)
   P.fit_params(d.ref_soa, p0, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-    debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], scoring=d.scoring, simb=d.simb)
+    debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], scoring=d.scoring, simb=d.simb, plugin=d.plugin)
   s = [a[] for a in P.SHOCK_STATS]
   println("STATS shock: full-removal entries applied=$(s[1]) matched sim cohorts (removed)=$(s[2]); partial cohorts with drop>0 =$(s[3]) matched sim cohorts (scaled, :scale mode only)=$(s[4])")
   pl = injection.excl

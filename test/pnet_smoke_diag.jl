@@ -19,7 +19,7 @@ function diag(d)
   rows = DataFrame(plot_id=Int[], mode=String[], sim_year=Int[], sim=Float64[], obs=Float64[])
   for (mode, pre) in (("pre-injection (pure model)", true), ("post-injection (loss view)", false))
     res = P.fit_params(d.ref_soa, best, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=pre, scoring=d.scoring, simb=d.simb)
+      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=pre, scoring=d.scoring, simb=d.simb, plugin=d.plugin)
     cached = res[1][2]
     sim = Dict{Tuple{Int,Int},Float64}()
     for (pid, sy, _esp, _age, bio) in cached

@@ -70,7 +70,7 @@ end
 seed = PU.LossScales(cbal=cbal)
 
 dual_b0 = simb.dual_mode == :off ? nothing :
-  P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cmap, ncyc, inj, spc, rng, no_estab; b_only=false, scoring, simb)
+  P._build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cmap, ncyc, inj, spc, rng, no_estab; b_only=false, scoring, simb, plugin=P.bs_plugin())
 # the scales of the TRAIN reference (W/AGB scales + RANKW), and of Sim B inside dual_b
 scales, dual_b = P.build_split_scales(loss_params, seed, Int(g("tier", 3)), spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)
 println("norm: W=$(loss_params.w_normalize) AGB=$(loss_params.agb_normalize) CELL=$(loss_params.cell_norm) | RANKW $(size(scales.rankw)) w_cell $(size(scales.w_cell))")
@@ -79,7 +79,7 @@ println("norm: W=$(loss_params.w_normalize) AGB=$(loss_params.agb_normalize) CEL
 function wagb(params)
   res = P.fit_params(ref, params, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
     debug=false, search_tier=Int(g("tier", 3)), t4_ref=t4_ref, cycle_map=cmap, n_cycles=ncyc,
-    injection=injection, seeds=[rand(rng, UInt64)], dual_b=dual_b, scales=scales, scoring, simb)
+    injection=injection, seeds=[rand(rng, UInt64)], dual_b=dual_b, scales=scales, scoring, simb, plugin=P.bs_plugin())
   fx = P.MOLBSA.MOFitness(P._mo_objectives(res[1][3], eco_species_ids, loss_params, scales, dual_b), convert(Float64, PU.get_total_loss(res[1][1], loss_params)))
   m = P.CMAMAE.measure(fx); (Float64(m[1]), Float64(m[2]), Float64(fx.aggregate), fx.objectives)
 end

@@ -7,10 +7,10 @@ const BIOMASS_PER_ECO_GROUPS = Set([:growth_biomass, :min_rel])
 # bmax_bounds, anpp_ratio_bounds) are the immutable PU.ParamSpaceOptions passed to make_biomass_param_dists (Step 3c).
 using ..Parametrization
 using ..PanCore
-using ....Plugins.BiomassSuccessionPlugin: BiomassSuccessionParams, FIXED_LONGEVITY, LONGEVITY_TABLE, SHADE_TOL_TABLE
+using ....Plugins.BiomassSuccessionPlugin: BiomassSuccessionParams, BSTables
 import Random
 using Distributions
-function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species_ids::Vector{Vector{Int}}; no_establishment::Bool=false, fit_establishment::Bool=false, opts::ParamSpaceOptions=ParamSpaceOptions())
+function make_biomass_param_dists(tables::BSTables, n_species::Int, n_ecoregions::Int, eco_species_ids::Vector{Vector{Int}}; no_establishment::Bool=false, fit_establishment::Bool=false, opts::ParamSpaceOptions=ParamSpaceOptions())
   n_ess = sum(length(s) for s in eco_species_ids)
   # dual_mode: even with no_establishment (sync Sim A), FIT the introduction params for the free Sim B.
   # PROB_MORT stays pinned to 0; the rest {MATURITY, SHADE_TOL, PROB_ESTAB, MIN_REL} are searched.
@@ -31,9 +31,9 @@ function make_biomass_param_dists(n_species::Int, n_ecoregions::Int, eco_species
     # random "act-of-god" mortality (PROB_MORT, pinned to 0 in generate_biomass_params). → 1 GLOBAL
     # {LONGEVITY, D} + 1×#eco {S, ANPP_MAX, B_MAX} blocks.
     (opts.fix_growth ? () : (MutableParam(:D, Uniform(5.0f0, 25.0f0), (5.0f0, 25.0f0), 0.2f0, FloatType, SpeciesSampler(), IndexApplier(); group=:longevity_decay),))...,
-    ((isnothing(FIXED_LONGEVITY[]) && isnothing(LONGEVITY_TABLE[])) ? (MutableParam(:LONGEVITY, DiscreteUniform(100, 600), (100, 600), 50, FloatType, SpeciesSampler(), IndexApplier(); quantum=50, group=:longevity_decay),) : ())...,
+    ((isnothing(tables.fixed_longevity) && isnothing(tables.longevity)) ? (MutableParam(:LONGEVITY, DiscreteUniform(100, 600), (100, 600), 50, FloatType, SpeciesSampler(), IndexApplier(); quantum=50, group=:longevity_decay),) : ())...,
     (est && !opts.fix_maturity ? (MutableParam(:MATURITY, DiscreteUniform(1, 50), (1, 50), 3, FloatType, SpeciesSampler(), IndexApplier(); group=:maturity),) : ())...,
-    (est && isnothing(SHADE_TOL_TABLE[]) ? (MutableParam(:SHADE_TOL, DiscreteUniform(1, 5), (1, 5), 1, UIntType, SpeciesSampler(), IndexApplier(); group=:shade),) : ())...,
+    (est && isnothing(tables.shade_tol) ? (MutableParam(:SHADE_TOL, DiscreteUniform(1, 5), (1, 5), 1, UIntType, SpeciesSampler(), IndexApplier(); group=:shade),) : ())...,
     (opts.fix_growth ? () : (MutableParam(:S, Uniform(0.01f0, 1.0f0), (0.01f0, 1.0f0), 0.01f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),))...,   # PER-(eco,species): only param_split_species vary by eco, rest pooled (like B_MAX/ANPP)
     (opts.fix_growth ? () : (MutableParam(:B_MAX_SPP, DiscreteUniform(opts.bmax_bounds...), opts.bmax_bounds, 1000, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); quantum=100, group=:growth_biomass),))...,   # window widened 15000→12000 lower / 30000→35000 upper; per-(eco,species) data floor applied at decode via ParamSpace.floors.bmax. DECODED BEFORE ANPP so the ratio reparam reads the floored B_MAX.
     (opts.fix_growth ? () : (MutableParam(:ANPP_MAX_SPP, Uniform(opts.anpp_ratio_bounds...), opts.anpp_ratio_bounds, 1.0f0, FloatType, EcoSpeciesSampler(), NestedIndexApplier(); group=:growth_biomass),))...,   # FITTED AS the B_MAX/ANPP ratio ∈ [20,35] (per eco×species); the ANPP_MAX_SPP FIELD stores the DERIVED ANPP = B_MAX_SPP/ratio (see u_to_params/params_to_u special-case). Enforces the eco ~25-30× relationship — no high-B_MAX/low-ANPP combos. Plugin unchanged (still reads ANPP_MAX_SPP).

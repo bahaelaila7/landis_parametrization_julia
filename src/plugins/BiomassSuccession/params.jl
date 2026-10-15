@@ -25,7 +25,16 @@ function generate_eco_params(params::BiomassSuccessionParams)::Vector{BiomassSuc
 
 end
 
-function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, no_establishment::Bool=false)
+"""Per-species LONGEVITY of a fresh parameter set: the data table (absent species -> `longevity_default`), else the pinned `fixed_longevity` (default 400). Shared with the PnET / HBAD generators."""
+function default_longevity(tables::BSTables, species_list::AbstractVector{<:AbstractString})::Vector{FloatType}
+  if !isnothing(tables.longevity)
+    tbl = tables.longevity
+    return FloatType[get(tbl, sym, tables.longevity_default) for sym in species_list]   # per-species, data-derived
+  end
+  return fill(FloatType(something(tables.fixed_longevity, 400.0)), length(species_list))
+end
+
+function generate_biomass_params(tables::BSTables, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, no_establishment::Bool=false)
   n_species = length(species_list) |> UIntType
   n_ecoregions = length(eco_list) |> UIntType
   SPINUP_MORTALITY_FRACTION = 0.0f0 # was 0.15f0 (uncalibrated; added extra age-mortality during spinup only) — disabled per request
@@ -38,16 +47,11 @@ function generate_biomass_params(species_list::Vector{String}, eco_list::Vector{
   D = rand(rng, Dists.truncated(Dists.Normal(15, 10), 5, 25), n_species) .|> FloatType
   #println(typeof(D))
   #LONGEVITY = rand(rng, Dists.truncated(Dists.Normal(200, 100), 100, 300), n_species) .|> FloatType
-  LONGEVITY = if !isnothing(LONGEVITY_TABLE[])
-    tbl = LONGEVITY_TABLE[]
-    FloatType[get(tbl, sym, LONGEVITY_DEFAULT[]) for sym in species_list]   # per-species, data-derived
-  else
-    fill(FloatType(something(FIXED_LONGEVITY[], 400.0)), n_species)
-  end
+  LONGEVITY = default_longevity(tables, species_list)
   #println(typeof(LONGEVITY))
-  SHADE_TOL = if !isnothing(SHADE_TOL_TABLE[])
-    tbl = SHADE_TOL_TABLE[]
-    UIntType[get(tbl, sym, SHADE_TOL_DEFAULT[]) for sym in species_list]   # per-species, data-derived (out of search)
+  SHADE_TOL = if !isnothing(tables.shade_tol)
+    tbl = tables.shade_tol
+    UIntType[get(tbl, sym, tables.shade_tol_default) for sym in species_list]   # per-species, data-derived (out of search)
   else
     rand(rng, Dists.DiscreteUniform(1, 5), n_species) .|> UIntType
   end

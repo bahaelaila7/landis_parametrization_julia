@@ -9,10 +9,9 @@ const P = Pan; const BSP = P.BiomassSuccessionPlugin
 cfg = Pan.load_config(ARGS[1]); simA = JLD2.load_object(ARGS[2]); out = ARGS[3]
 pe0 = length(ARGS) >= 4 ? parse(Float32, ARGS[4]) : 0.10f0
 splots, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
-BSP.SHADE_TOL_TABLE[] = P._load_shade_tol_table(cfg["shade_tol_csv"])
-BSP.MATURITY_TABLE[] = P._load_maturity_table(cfg["maturity_csv"])
+tables = BSP.BSTables(shade_tol=P._load_shade_tol_table(cfg["shade_tol_csv"]), maturity=P._load_maturity_table(cfg["maturity_csv"]))   # explicit plugin tables (no module state)
 rng = P.RNGType(UInt64(1))
-p = P.BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=rng, no_establishment=false)
+p = P.BiomassSuccessionPlugin.generate_biomass_params(tables, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=false)
 # --- remap Sim A growth by name
 ai = Dict((simA.ECO_LIST[e], simA.SPECIES_LIST[Int(gid)]) => (e, j) for (e, ids) in enumerate(simA.ECO_SPECIES_IDS) for (j, gid) in enumerate(ids))
 asp = Dict(s => k for (k, s) in enumerate(simA.SPECIES_LIST))
@@ -34,12 +33,12 @@ for (k, s) in enumerate(species_list)
   a = asp[s]; p.D[k] = simA.D[a]; p.LONGEVITY[k] = simA.LONGEVITY[a]
 end
 # --- establishment-related traits from data
-st = BSP.SHADE_TOL_TABLE[]
+st = tables.shade_tol
 for (k, s) in enumerate(species_list)
   v = st === nothing ? nothing : get(st, uppercase(s), nothing)
   p.SHADE_TOL[k] = v !== nothing ? v : (endswith(s, "_HST") ? 4 : endswith(s, "_LST") ? 2 : 3)
 end
-P._seed_maturity!(p, species_list)
+P._seed_maturity!(tables, p, species_list)
 # PROB_MORT_SPP is remapped with growth above (cells new to Sim B keep 0: no catastrophic mortality, as in Sim A).
 # PROB_ESTAB from data (prob_estab_all_species.csv: species, category, l3, …, prob_estab): match (category==name, l3),
 # else (species==name, l3), else the species' median over L3s, else the global median; pe0 only if the table is absent.

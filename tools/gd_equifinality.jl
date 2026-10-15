@@ -13,7 +13,7 @@ MARGINS = [0.05, 0.1, 0.2]; mi = findfirst(==(MARGIN), MARGINS)
 include(joinpath(@__DIR__, "tost_common.jl"))
 files = sort(filter(f -> endswith(f, ".jld2"), readdir(joinpath(gdd, "solutions"); join=true)))
 SPT = P.succession_plugin_for(JLD2.load_object(files[1]))
-spc = P.param_space_from_cfg(cfg, SPT, splots, eco_list, species_list, eco_species_ids; no_establishment=true, fit_establishment=false)   # the run's parameter space (options, pooling, blocks) over the Sim A subset
+spc = P.param_space_from_cfg(cfg, PLUGIN.ctx, splots, eco_list, species_list, eco_species_ids; no_establishment=true, fit_establishment=false)   # the run's parameter space (options, pooling, blocks) over the Sim A subset
 pd = spc.dists
 sols = [JLD2.load_object(f) for f in files]
 slots = spc.slots
@@ -36,7 +36,7 @@ U = [PU.params_to_u(p, spc, slots) for p in sols]; NV = [PU.params_to_nativevec(
 if SPT === P.HBADPlugin.HBAD
   for (i, (pi, t)) in enumerate(slots)
     String(pd.params[pi].name) == "SDIMAX" || continue
-    lo, hi = P.HBADPlugin.sdimax_range(P.HBADPlugin.PRIORS[].sp[Int(t)])
+    lo, hi = P.HBADPlugin.sdimax_range(PLUGIN.ctx.priors.sp[Int(t)])
     for v in NV; v[i] = clamp(v[i], lo, hi); end
   end
 end

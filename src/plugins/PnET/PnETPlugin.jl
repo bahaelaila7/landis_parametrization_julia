@@ -1,6 +1,6 @@
 # PnET-Succession (v2 cohort ecophysiology) as a Pan succession plugin. Science: docs/pnet_spec.md.
 # Structure-of-arrays: every per-cohort quantity is a CSR (:cohort) array moved by PanCore.swap_cohort!; per-site state is scalar arrays.
-# Hot loop is allocation-free: per-thread scratch (PnETScratch) lives in a global pool, indexed by Threads.threadid().
+# Hot loop is allocation-free: per-thread scratch (PnETScratch) lives in a pool owned by the PnETContext, indexed by Threads.threadid().
 module PnETPlugin
 using ..PanCore
 import ..BiomassSuccessionPlugin
@@ -12,12 +12,10 @@ const IMAX = 5     # sublayers per cohort (E2 IMAX). Compile-time constant: scra
 const MAXL = 3     # max canopy layers supported (E2 MaxCanopyLayers = 3)
 
 include("params.jl")   # PFT tables, PnETParams, PnETEcoParams, Saxton-Rawls, generate_*
-const FIXED = Ref(PnETConst())   # global fixed constants (settable from yaml/tests)
 include("climate.jl")  # PRISM cache -> derived array, daylength / PAR
 include("plugin.jl")   # SoA layout, kernels, process_plugin!, add_cohort!, set_cohort_bio!
 include("site_attrs.jl")   # DB -> per-site attributes (clim_id, cal_year0, lat, soil), init_sites!
+include("context.jl")  # PnETContext: fixed constants + climate + species table + per-thread scratch, built once per run
 
-__init__() = (scratch_pool(); nothing)   # pre-size the per-thread scratch pool for the running thread count
-
-export PnET, PnETParams, PnETEcoParams, PnETConst, PnETClimate
+export PnET, PnETParams, PnETEcoParams, PnETConst, PnETClimate, PnETContext
 end

@@ -38,7 +38,8 @@ end
 
 species = ["PITA", "QURU", "TAAS"]
 Random.seed!(7)
-params = PN.generate_pnet_params(species, ["8.5.3"], [[1, 2, 3]]; rng=Random.Xoshiro(3))
+pnctx = PN.PnETContext(; climate=make_climate(PPT))
+params = PN.generate_pnet_params(pnctx, species, ["8.5.3"], [[1, 2, 3]]; rng=Random.Xoshiro(3))
 @assert params.PFT == UInt8[1, 2, 4] "PFT assignment: $(params.PFT)"
 cst0 = PN.PnETConst()
 ep = PN.generate_pnet_eco_params(params, cst0)[1]
@@ -47,7 +48,7 @@ ep = PN.generate_pnet_eco_params(params, cst0)[1]
 # (c) add_cohort! reproduces the observed reported AGB within 2 g/m2
 # ------------------------------------------------------------------------------------------------------------------
 @testset "(c) add_cohort! circular solve" begin
-  PN.CLIMATE[] = make_climate(PPT)
+  clim = make_climate(PPT)
   for sp in 1:3, agb in (50.0, 500.0, 5000.0, 20000.0)
     soa = make_soa([2])
     s = PC.getsite(soa, 1)
@@ -68,7 +69,7 @@ end
 # (g) unreachable target: reported AGB peaks at finite TotalBiomass (foliage/LAI saturates). An observed AGB above the
 #     peak must start the cohort AT the peak with finite pools (was: runaway TB ≈ 8e6 → reported 0 → cohort deleted).
 @testset "(g) solve beyond the reported-AGB peak" begin
-  PN.CLIMATE[] = make_climate(PPT)
+  clim = make_climate(PPT)
   for sp in 1:3
     tbs = 10.0 .^ range(0, 7; length=4000)
     reps = [PN.reported_of_tb(t, ep, sp) for t in tbs]
@@ -254,7 +255,7 @@ function ref_year(st::RefState, sp, ep, soilc, cst, latdeg)
 end
 
 @testset "(a) single cohort, constant climate: monthly fluxes vs independent spec transcription" begin
-  PN.CLIMATE[] = make_climate(zeros(12))
+  clim = make_climate(zeros(12))
   cst = PN.PnETConst(precip_events=Int32(0))
   for sp in (1, 2)
     soa = make_soa([2]; lat=33.0)
@@ -267,8 +268,8 @@ end
     refs = ref_year(st, sp, ep, soilc, cst, 33.0)
     got = NTuple{4,Float64}[]
     cb = (m, ca_, o, n, w) -> push!(got, (Float64(ca_.gpp_m[o+1]), Float64(ca_.folresp_m[o+1]), Float64(ca_.netpsn_m[o+1]), Float64(ca_.transp_m[o+1])))
-    scr = PN.scratch_pool()[1]
-    PN.site_year!(soa, 1, 1, ep, cst, PN.CLIMATE[], scr, soa.scalar.rng[1]; cb=cb)
+    scr = PN.new_scratch_pool()[1]
+    PN.site_year!(soa, 1, 1, ep, cst, clim, scr, soa.scalar.rng[1]; cb=cb)
     @test length(got) == 12
     worst = 0.0
     for m in 1:12, q in 1:4
@@ -292,7 +293,7 @@ end
 # (b) annual carbon bookkeeping: d(TB + Fol + NSC/C) = (sum NetPsn - sum MaintResp)/C - foliage senescence - turnover
 # ------------------------------------------------------------------------------------------------------------------
 @testset "(b) carbon closure over several years (3 cohorts, precipitation events, layered canopy)" begin
-  PN.CLIMATE[] = make_climate(PPT)
+  clim = make_climate(PPT)
   cst = PN.PnETConst()
   soa = make_soa([4]; seed=11)
   s = PC.getsite(soa, 1)
@@ -300,7 +301,7 @@ end
   PN.add_cohort!(s, 2, 40, 6000.0; eco=ep, cst=cst)
   PN.add_cohort!(s, 2, 15, 2500.0; eco=ep, cst=cst)
   ca = PN.CohArrays(soa.csr)
-  scr = PN.scratch_pool()[1]
+  scr = PN.new_scratch_pool()[1]
   worst = 0.0
   for yr in 1:2   # climate cache holds 2 calendar years; reuse them
     n = Int(s.live)
@@ -309,7 +310,7 @@ end
       S0[(Int(ca.species[k]), Int(round(ca.age[k])) + 1)] = Float64(ca.tbio[k]) + Float64(ca.fol[k]) + Float64(ca.nsc[k]) / cst.cfrac
     end
     ibok = [ca.tbio[k] >= ep.initbiomass[Int(ca.species[k])] for k in 1:n]
-    PN.site_year!(soa, 1, yr, ep, cst, PN.CLIMATE[], scr, soa.scalar.rng[1])
+    PN.site_year!(soa, 1, yr, ep, cst, clim, scr, soa.scalar.rng[1])
     n_after = Int(s.live)
     n_after < n && println("(b) yr $yr: $(n - n_after) cohort(s) removed at year end (closure is checked on the survivors)")
     @test n_after >= 2
@@ -333,7 +334,7 @@ end
 # set_cohort_bio!: reported AGB equals the requested value after proportional rescaling (and a pending cohort just stores it)
 # ------------------------------------------------------------------------------------------------------------------
 @testset "set_cohort_bio! rescales pools so reported AGB == newbio" begin
-  PN.CLIMATE[] = make_climate(PPT)
+  clim = make_climate(PPT)
   soa = make_soa([3])
   s = PC.getsite(soa, 1)
   PN.add_cohort!(s, 2, 25, 3000.0; eco=ep)
@@ -348,7 +349,7 @@ end
   PN.set_cohort_bio!(s, 2, 900.0)                   # pending: store only
   @test s.c_bio[2] == 900.0f0 && s.c_tbio[2] == 0
   # a pending cohort is initialised from its stored AGB at the start of the next year and lands within 2 g/m2 of it
-  scr = PN.scratch_pool()[1]
+  scr = PN.new_scratch_pool()[1]
   PN.materialize_pending!(PN.CohArrays(soa.csr), Int(soa.refs.cohort[1]) - 1, 2, ep, PN.PnETConst())
   @test s.c_tbio[2] > 0 && abs(s.c_bio[2] - 900.0) <= 2.0
 end
@@ -367,13 +368,14 @@ function build_multi(nsite; seed)
   end
   return soa
 end
-mkctx() = (eco=[ep], cst=PN.PnETConst(), clim=PN.CLIMATE[], scratch=PN.scratch_pool())
+const SCRATCH = PN.new_scratch_pool()    # per-thread working memory (owned by whoever builds the ctx: here the test)
+mkctx(clim) = (eco=[ep], cst=PN.PnETConst(), clim=clim, scratch=SCRATCH)
 
 @testset "(d) determinism" begin
-  PN.CLIMATE[] = make_climate(PPT)
+  clim = make_climate(PPT)
   A = build_multi(12; seed=5); B = build_multi(12; seed=5); C = build_multi(12; seed=6)
   for t in 1:5
-    PC.process_plugin!(A, PN.PnET, t; ctx=mkctx()); PC.process_plugin!(B, PN.PnET, t; ctx=mkctx()); PC.process_plugin!(C, PN.PnET, t; ctx=mkctx())
+    PC.process_plugin!(A, PN.PnET, t; ctx=mkctx(clim)); PC.process_plugin!(B, PN.PnET, t; ctx=mkctx(clim)); PC.process_plugin!(C, PN.PnET, t; ctx=mkctx(clim))
   end
   same = all(k -> A.csr[k] == B.csr[k], keys(A.csr)) && A.scalar.B == B.scalar.B && A.scalar.soil_water == B.scalar.soil_water && A.refs.cohort == B.refs.cohort
   @test same
@@ -383,9 +385,9 @@ mkctx() = (eco=[ep], cst=PN.PnETConst(), clim=PN.CLIMATE[], scratch=PN.scratch_p
 end
 
 @testset "(e) allocations of a full process_plugin! year" begin
-  PN.CLIMATE[] = make_climate(PPT)
+  clim = make_climate(PPT)
   soa = build_multi(40; seed=5)
-  ctx = mkctx()
+  ctx = mkctx(clim)
   old = PC.PARALLEL_SITES[]
   PC.PARALLEL_SITES[] = false
   for t in 1:2; PC.process_plugin!(soa, PN.PnET, t; ctx=ctx); end   # warm-up (compilation + steady CSR capacities)
@@ -393,7 +395,7 @@ end
   a_serial = @allocated PC.process_plugin!(soa, PN.PnET, 3; ctx=ctx)
   a_serial2 = @allocated PC.process_plugin!(soa, PN.PnET, 4; ctx=ctx)
   # kernel only (no readjust bookkeeping)
-  scr = PN.scratch_pool()[1]
+  scr = PN.new_scratch_pool()[1]
   kern(soa, ep, cst, clim, scr, t) = (for i in 1:soa.n; PN.site_year!(soa, i, t, ep, cst, clim, scr, soa.scalar.rng[i]::Random.Xoshiro); end; nothing)
   kern(soa, ep, ctx.cst, ctx.clim, scr, 5)
   a_kernel = @allocated kern(soa, ep, ctx.cst, ctx.clim, scr, 6)
@@ -444,13 +446,13 @@ using DataFrames
   end
 
   # (c) init_sites!: no soil columns => identical to the legacy texture path; with columns => per-plot values + depth, texture fallback for NaN
-  PN.CLIMATE[] = make_climate(PPT)
+  clim = make_climate(PPT)
   mk() = make_soa([3, 3, 3])
   attrs0 = DataFrame(plot_id=1:3, clim_id=Int32[1, 1, 1], cal_year0=Int16[2000, 2000, 2000], lat=Float32[33, 33, 33], soil=["LOAM", "SAND", "LOAM"])
   a = mk(); PN.init_sites!(a, attrs0)
   b = mk(); for i in 1:3; PN.init_site!(b, i; clim_id=1, cal_year0=2000, lat=33.0, soil=attrs0.soil[i]); end
   @test all(k -> getfield(a.scalar, k) == getfield(b.scalar, k), (:soil_por, :soil_fc, :soil_wp, :soil_A, :soil_B, :rooting_depth, :soil_water))
-  @test all(a.scalar.rooting_depth .== Float32(PN.FIXED[].root_depth_base))
+  @test all(a.scalar.rooting_depth .== Float32(PN.PnETConst().root_depth_base))
   attrs1 = copy(attrs0)
   attrs1.soil_por = [0.45, NaN, 0.30]; attrs1.soil_fc = [0.28, NaN, 0.30]; attrs1.soil_wp = [0.13, NaN, 0.30]; attrs1.soil_rd = [650.0, NaN, 1500.0]
   c = mk(); PN.init_sites!(c, attrs1)
@@ -468,7 +470,7 @@ using DataFrames
     s = PC.getsite(d, i)
     PN.add_cohort!(s, 1, 35 + i, 4000.0 + 100 * i; eco=ep); PN.add_cohort!(s, 2, 30 + i, 3000.0 + 50 * i; eco=ep); PN.add_cohort!(s, 2, 12, 900.0 + 10 * i; eco=ep)
   end
-  for t in 1:3; PC.process_plugin!(d, PN.PnET, t; ctx=mkctx()); end
+  for t in 1:3; PC.process_plugin!(d, PN.PnET, t; ctx=mkctx(clim)); end
   @test all(isfinite, d.scalar.soil_water)
   @test all(d.scalar.soil_water .>= 0)
   @test all(isfinite, d.scalar.B)

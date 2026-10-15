@@ -34,6 +34,7 @@ struct ParamSet
   eco_index::Dict{String,Int}
   local_index::Vector{Dict{Int,Int}}   # per eco: global species → eco-local index
   spcd::Dict{String,Int}               # parameter species → FIA SPCD (groups: negative synthetic codes)
+  hb::HBADPlugin.HBADContext           # HBAD priors of THIS set's species list: cohort-structure translation (TPA/QMD/height) for every plugin; the HBAD run context
 end
 
 function load_paramset(text::AbstractString)
@@ -42,15 +43,15 @@ function load_paramset(text::AbstractString)
   sp_index = Dict(String(s) => k for (k, s) in enumerate(p.SPECIES_LIST))
   eco_index = Dict(String(e) => k for (k, e) in enumerate(p.ECO_LIST))
   local_index = [Dict(Int(g) => j for (j, g) in enumerate(ids)) for ids in p.ECO_SPECIES_IDS]
-  # cohort-structure translation (TPA/QMD/height) for every plugin uses the HBAD priors of this species list
-  HBADPlugin.configure!(; species_list=String.(p.SPECIES_LIST), eco_species_ids=[Int.(ids) for ids in p.ECO_SPECIES_IDS])
+  # cohort-structure translation (TPA/QMD/height) for every plugin uses the HBAD priors of this species list (an immutable context owned by the set)
+  hb = HBADPlugin.HBADContext(String.(p.SPECIES_LIST), [Int.(ids) for ids in p.ECO_SPECIES_IDS])
   spcd = Dict{String,Int}(); k = 0
   codes = _species_codes()
   for s in p.SPECIES_LIST
     c = get(codes, uppercase(String(s)), 0)
     spcd[String(s)] = c > 0 ? c : (k -= 1)
   end
-  ParamSet(string(hash(text); base=16, pad=16), p, meta, SP, sp_index, eco_index, local_index, spcd)
+  ParamSet(string(hash(text); base=16, pad=16), p, meta, SP, sp_index, eco_index, local_index, spcd, hb)
 end
 
 const _SPCODES = Ref{Union{Nothing,Dict{String,Int}}}(nothing)
@@ -225,7 +226,7 @@ function _cohort_struct(ps::ParamSet, site, k::Int)
     return Float64(site.c_tph[k]), Float64(site.c_dq[k]), Float64(site.c_h[k])
   end
   bio = Float64(site.c_bio[k]); bio > 0 || return 0.0, 0.0, 0.0
-  pr = HBADPlugin.PRIORS[].sp[_gsp(ps, site.eco_id, site.c_species[k])]
+  pr = ps.hb.priors.sp[_gsp(ps, site.eco_id, site.c_species[k])]
   HBADPlugin.translate(pr, max(Float64(site.c_age[k]), 1.0), bio)
 end
 
@@ -272,8 +273,7 @@ function _remove_cohort!(site, k::Int)
 end
 
 """Apply one removal to the selected cohorts of a site. Returns (removed AGB g/m², removed total cubic ft³/ac, removed board feet/ac)."""
-function _apply_removal!(ps::ParamSet, site, act, sym_ok::Function)
-  SP = ps.plugin
+function _apply_removal!(ps::ParamSet, pc, site, act, sym_ok::Function)
   n = Int(site.live); n == 0 && return 0.0, 0.0, 0.0
   st = [_cohort_struct(ps, site, k) for k in 1:n]; veq = volume_eqs(ps)
   sel = Int[]
@@ -323,7 +323,7 @@ function _apply_removal!(ps::ParamSet, site, act, sym_ok::Function)
     if f[k] >= 0.999 || b * (1 - f[k]) < 1.0
       _remove_cohort!(site, k)
     else
-      set_cohort_bio!(SP, site, k, FloatType(b * (1 - f[k])))
+      set_cohort_bio!(pc, site, k, FloatType(b * (1 - f[k])))
     end
   end
   hasproperty(site, :B) && (site.B = FloatType(sum(Float64(site.c_bio[k]) for k in 1:Int(site.live); init=0.0)))
@@ -332,15 +332,15 @@ end
 
 """Plant `tpa` trees/ac (× survival) of FIA symbol `sym` on a site (new cohort, age 1, QMD 1 cm). Returns false if the species
 cannot be represented in the site's eco cell. CSR capacity must have been reserved by the caller."""
-function _plant!(ps::ParamSet, site, sym::AbstractString, tpa::Real, survival::Real)
+function _plant!(ps::ParamSet, pc, site, sym::AbstractString, tpa::Real, survival::Real)
   esp = scenario_species(ps, Int(site.eco_id), sym); esp == 0 && return false
   tph = Float64(tpa) / SC_HA_PER_AC * clamp(Float64(survival), 0, 100) / 100
   tph > 0 || return true
-  pr = HBADPlugin.PRIORS[].sp[_gsp(ps, site.eco_id, esp)]
+  pr = ps.hb.priors.sp[_gsp(ps, site.eco_id, esp)]
   dq = 1.0; agb = HBADPlugin.agb_of(pr, tph, dq)
-  add_cohort!(ps.plugin, site, UIntType(esp), FloatType(1), FloatType(agb))
+  add_cohort!(pc, site, UIntType(esp), FloatType(1), FloatType(agb))
   k = Int(site.live)
-  set_cohort_bio!(ps.plugin, site, k, FloatType(agb))
+  set_cohort_bio!(pc, site, k, FloatType(agb))
   if ps.plugin === HBADPlugin.HBAD          # keep the planted density/size (add_cohort! re-translates from AGB)
     site.c_tph[k] = FloatType(tph); site.c_dq[k] = FloatType(dq)
     site.c_h[k] = FloatType(1.3 + HBADPlugin.chapman_richards(pr.hd_a, pr.hd_b, pr.hd_c, dq)); site.c_bio[k] = FloatType(agb)
@@ -380,9 +380,6 @@ Dict(cn => (status, message, metrics::Vector{SCMetrics}, dist::Dict{Int,Dict{(sp
 """
 function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=1, establishment::Bool=true, progress=nothing)
   SP = ps.plugin; p = ps.params
-  # HBAD priors are module-level state (also used for the TPA/QMD/H translation of Biomass/PnET cohorts): configure them
-  # for THIS parameter set's species lists — another set may have been loaded since (multi-set worker).
-  HBADPlugin.configure!(; species_list=String.(p.SPECIES_LIST), eco_species_ids=[Int.(ids) for ids in p.ECO_SPECIES_IDS])
   cycles = Int(get(plan, "cycles", 10)); period = Int(get(plan, "period", 10)); horizon = cycles * period
   warnings = String[]
   info = load_scenario_units(plots, warnings)
@@ -419,15 +416,15 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
                                          age_calc=FloatType(1), agb_sum=FloatType(1), measdate=m.measdate, start_measdate=m.measdate, sim_year=0))
   end
   splots = DataFrame(rows)
+  # the plugin context of this run: HBAD = the set's priors; PnET = the per-request climate (+ the cached base constants / species table); BS = no data
   attrs = nothing
-  if SP === PnETPlugin.PnET
-    _ensure_pnet_climate!(climate, meta, horizon, warnings)
-    attrs = _pnet_site_attrs(meta, warnings)
-  end
+  pc = SP === PnETPlugin.PnET ? _pnet_context(climate, meta, horizon, warnings) :
+       SP === HBADPlugin.HBAD ? ps.hb : BiomassSuccessionPlugin.BSTables()
+  SP === PnETPlugin.PnET && (attrs = _pnet_site_attrs(pc.climate, meta, warnings))
   rng = RNGType(UInt64(seed))
-  soa = make_sites(splots, [Int.(ids) for ids in p.ECO_SPECIES_IDS]; plugin=SP, rng=rng, spinup=false,
+  soa = make_sites(splots, [Int.(ids) for ids in p.ECO_SPECIES_IDS]; plugin=PluginConfig(pc), rng=rng, spinup=false,
                    no_establishment=!establishment, site_attrs=attrs)
-  eco_params = generate_eco_params(SP, p); ctx = make_ctx(SP, eco_params)
+  eco_params = generate_eco_params(pc, p); ctx = make_ctx(pc, eco_params)
   site_of = Dict(Int(soa.scalar.mapcode[i]) => i for i in 1:soa.n)
   pm = Dict(m.plot_id => m for m in meta)
   acr = Dict(i => acres[pm[Int(soa.scalar.mapcode[i])].cn] for i in 1:soa.n)
@@ -439,17 +436,17 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
     for (ec, kind, act) in events
       ec == c || continue
       if kind == "plant"
-        _plant_all!(ps, soa, collect(1:soa.n), act, warnings)
+        _plant_all!(ps, pc, soa, collect(1:soa.n), act, warnings)
       elseif kind == "harvest"
         sites = _select_stands(ps, soa, act, acr, seed + c)
         spf = _sel_species(get(get(act, "selection", Dict()), "species", "all"))
         ok(sp) = spf === nothing || uppercase(sp) in spf || any(s -> get(ps.meta.species_map, s, "") == sp, spf)
         for i in sites
-          rb, rv, rs = _apply_removal!(ps, getsite(soa, i), act, ok)
+          rb, rv, rs = _apply_removal!(ps, pc, getsite(soa, i), act, ok)
           rem[i][1] += rb; rem[i][2] += rv; rem[i][3] += rs
         end
         pa = get(act, "plant_after", nothing)
-        pa === nothing || _plant_all!(ps, soa, sites, Dict{String,Any}(String(k) => v for (k, v) in pairs(pa)), warnings)
+        pa === nothing || _plant_all!(ps, pc, soa, sites, Dict{String,Any}(String(k) => v for (k, v) in pairs(pa)), warnings)
       end
     end
   end
@@ -489,14 +486,14 @@ function _reserve!(soa, extra::Dict{Int,Int})
   PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
 end
 
-function _plant_all!(ps::ParamSet, soa, sites, act, warnings)
+function _plant_all!(ps::ParamSet, pc, soa, sites, act, warnings)
   spec = String(something(get(act, "species", ""), ""))
   syms = [uppercase(strip(x)) for x in split(spec, ',') if !isempty(strip(x))]
   isempty(syms) && return
   _reserve!(soa, Dict(i => length(syms) for i in sites))
   tpa = Float64(something(get(act, "tpa", 0.0), 0.0)); surv = Float64(something(get(act, "survival", 100.0), 100.0))
   for i in sites, sym in syms
-    _plant!(ps, getsite(soa, i), sym, tpa, surv) ||
+    _plant!(ps, pc, getsite(soa, i), sym, tpa, surv) ||
       push!(warnings, "planting: species $sym cannot be represented in eco cell $(ps.params.ECO_LIST[Int(getsite(soa, i).eco_id)]) (skipped)")
   end
 end
@@ -564,14 +561,20 @@ function scenario_climate(l4s::Vector{String}, y1::Int, y2::Int, climate)
   years, out, co2
 end
 
-"""Install a per-request PnET climate covering every plot's L4 for its whole run; returns l4 → clim_id."""
-function _ensure_pnet_climate!(climate, meta, horizon::Int, warnings)
+# The PnET run context without a per-request climate: constants / species table + the 1980-2025 climate cache. Loaded on first use (lazy cache).
+const _PNET_BASE = Ref{Union{Nothing,PnETPlugin.PnETContext}}(nothing)
+function _pnet_base_context()
+  _PNET_BASE[] === nothing && (_PNET_BASE[] = PnETPlugin.PnETContext(SCEN_PNET_CLIMATE[], SCEN_CO2_CSV[]; generic=Dict{String,Any}(), db_path=SCEN_FIA_DB[]))
+  return _PNET_BASE[]
+end
+
+"""The PnET context of a request: the base constants with a per-request climate covering every plot's L4 for its whole run (the cached 1980-2025 cache without a climate DB)."""
+function _pnet_context(climate, meta, horizon::Int, warnings)
+  base = _pnet_base_context()
   if !isfile(SCEN_CLIMATE_DB[])
-    PnETPlugin.CLIMATE[] === nothing && PnETPlugin.configure!(; climate_cache=SCEN_PNET_CLIMATE[], co2_csv=SCEN_CO2_CSV[], generic=Dict{String,Any}(), db_path=SCEN_FIA_DB[])
     push!(warnings, "PnET climate: $(SCEN_CLIMATE_DB[]) not found — using the 1980–2025 cache (later years repeat 2025); climate scenarios unavailable")
-    return
+    return base
   end
-  PnETPlugin.CLIMATE[] === nothing && PnETPlugin.configure!(; climate_cache=SCEN_PNET_CLIMATE[], co2_csv=SCEN_CO2_CSV[], generic=Dict{String,Any}(), db_path=SCEN_FIA_DB[])
   l4s = sort(unique(String(m.l4) for m in meta if !isempty(m.l4)))
   y1 = minimum(Dates.year(m.measdate) for m in meta); y2 = maximum(Dates.year(m.measdate) for m in meta) + horizon + 1
   years, cl, co2 = scenario_climate(l4s, y1, y2, climate)
@@ -580,12 +583,10 @@ function _ensure_pnet_climate!(climate, meta, horizon::Int, warnings)
   for (c, l) in enumerate(l4s)
     tmin[:, :, c] .= cl[l]["tmin"]; tmax[:, :, c] .= cl[l]["tmax"]; ppt[:, :, c] .= cl[l]["ppt"]
   end
-  PnETPlugin.CLIMATE[] = PnETPlugin.build_climate(l4s, years, tmin, tmax, ppt, co2)
-  return
+  return PnETPlugin.with_climate(base, PnETPlugin.build_climate(l4s, years, tmin, tmax, ppt, co2))
 end
 
-function _pnet_site_attrs(meta, warnings)
-  cl = PnETPlugin.CLIMATE[]
+function _pnet_site_attrs(cl, meta, warnings)
   idpos = Dict(id => i for (i, id) in enumerate(cl.ids))
   soil = isfile(SCEN_SOIL_CSV[]) ? PnETPlugin.load_plot_soil(SCEN_SOIL_CSV[]) : Dict()
   located = [m for m in meta if isfinite(m.lon)]

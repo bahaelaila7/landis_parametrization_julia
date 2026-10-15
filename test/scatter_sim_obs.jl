@@ -58,7 +58,7 @@ function make_scatter(sp, label)
   injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"), scoring, simb)
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"), scoring, simb, plugin=P.bs_plugin())
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
@@ -209,7 +209,7 @@ function make_scatter_B(sp, label)
   injection_b = P.build_injection_plan(DF.nrow(inj_b) == 0 ? nothing : inj_b, rs_b, eco_species_ids, loss_params, scoring)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs_b, best, msy, n_species, eco_species_ids, spdf_plts, ssy, true, spc, loss_params;
-    debug=false, search_tier=3, injection=injection_b, seeds=[rand(rng, UInt64)], scoring, simb)
+    debug=false, search_tier=3, injection=injection_b, seeds=[rand(rng, UInt64)], scoring, simb, plugin=P.bs_plugin())
   cached = res[1][2]; ab = loss_params.age_bins
   # FOREST age-distribution, exactly as Sim B's tier-4 objective: aggregate AGB by
   # (cycle × eco/land-use × species × age-bin) across all plots — sim age-bins vs obs age-bins.

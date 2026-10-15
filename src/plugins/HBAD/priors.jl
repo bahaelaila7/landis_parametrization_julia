@@ -40,28 +40,25 @@ struct HBADPriors
   mort_key::Vector{String}
   sp::Vector{SpPrior}
 end
-const _EMPTY_PRIORS = HBADPriors(String[], String[], String[], String[], String[], SpPrior[])
-const PRIORS = Ref{HBADPriors}(_EMPTY_PRIORS)
 
 """Eco-local -> global species id table of the run (flat CSR); needed by `add_cohort!` which only sees (eco, local species)."""
 struct EcoGids
   off::Vector{Int32}   # eco e owns gid[off[e]+1 : off[e+1]]
   gid::Vector{Int32}
 end
-const ECO_GIDS = Ref{EcoGids}(EcoGids(Int32[0], Int32[]))
 
-function set_eco_species!(eco_species_ids::AbstractVector)
+"""EcoGids of an `eco_species_ids` table (eco e -> its global species ids)."""
+function eco_gids(eco_species_ids::AbstractVector)
   off = Int32[0]
   gid = Int32[]
   for ids in eco_species_ids
     append!(gid, Int32.(ids))
     push!(off, Int32(length(gid)))
   end
-  ECO_GIDS[] = EcoGids(off, gid)
-  return nothing
+  return EcoGids(off, gid)
 end
-@inline function global_species(eco::Integer, esp::Integer)::Int
-  g = ECO_GIDS[]
+Base.:(==)(a::EcoGids, b::EcoGids) = a.off == b.off && a.gid == b.gid
+@inline function global_species(g::EcoGids, eco::Integer, esp::Integer)::Int
   return @inbounds Int(g.gid[Int(g.off[eco]) + Int(esp)])
 end
 
@@ -174,44 +171,6 @@ function load_priors(species_list::AbstractVector{<:AbstractString}; priors_csv:
     tk[g] = ck; pk[g] = pkey; gk[g] = growth_key; mk[g] = mort_key
   end
   return HBADPriors(String.(species_list), tk, pk, gk, mk, sp)
-end
-
-"""
-    configure!(; species_list, eco_species_ids, priors_csv, coefs_csv, gmax, hmax, verbose=true)
-
-Load and resolve the fixed priors for `species_list` into `PRIORS[]` and set the eco-local -> global species table. Logs the mapping.
-"""
-function configure!(; species_list::AbstractVector{<:AbstractString}, eco_species_ids::AbstractVector=Vector{Int}[],
-                    priors_csv::AbstractString=DEFAULT_PRIORS_CSV, coefs_csv::AbstractString=DEFAULT_COEFS_CSV,
-                    gmax::Float64=3.0, hmax::Float64=0.3, verbose::Bool=true)
-  pri = load_priors(species_list; priors_csv=priors_csv, coefs_csv=coefs_csv, gmax=gmax, hmax=hmax)
-  PRIORS[] = pri
-  isempty(eco_species_ids) || set_eco_species!(eco_species_ids)
-  if verbose
-    exact_t = count(i -> pri.trans_key[i] == pri.species_list[i], eachindex(pri.species_list))
-    exact_p = count(i -> pri.prior_key[i] == pri.species_list[i], eachindex(pri.species_list))
-    guard_g = [pri.species_list[i] => pri.growth_key[i] for i in eachindex(pri.species_list) if pri.growth_key[i] != pri.prior_key[i]]
-    guard_m = [pri.species_list[i] => pri.mort_key[i] for i in eachindex(pri.species_list) if pri.mort_key[i] != pri.prior_key[i]]
-    @info "HBAD priors: $(length(pri.species_list)) species; translation exact=$(exact_t) group-fallback=$(length(pri.species_list) - exact_t); priors exact=$(exact_p) group-fallback=$(length(pri.species_list) - exact_p)" priors_csv coefs_csv
-    for (i, s) in enumerate(pri.species_list)
-      @debug "HBAD map $s -> translation[$(pri.trans_key[i])] priors[$(pri.prior_key[i])] growth[$(pri.growth_key[i])] mort[$(pri.mort_key[i])] SDImax p95=$(pri.sp[i].sdi_p95)"
-    end
-    isempty(guard_g) || @info "HBAD sanity guard: growth block replaced by group row for" guard_g
-    isempty(guard_m) || @info "HBAD sanity guard: mortality block replaced by group row for" guard_m
-    @info "HBAD species -> keys" mapping = join(["$(s)=>t:$(pri.trans_key[i])/p:$(pri.prior_key[i])" for (i, s) in enumerate(pri.species_list)], "  ")
-  end
-  return pri
-end
-
-"""Make sure `PRIORS[]` matches the species list of `species_list` (re-resolve from the default CSVs when not)."""
-function ensure_configured!(species_list::AbstractVector{<:AbstractString}, eco_species_ids::AbstractVector)
-  pri = PRIORS[]
-  if !(pri.species_list === species_list || pri.species_list == species_list)
-    configure!(; species_list=species_list, eco_species_ids=eco_species_ids, verbose=false)
-  elseif length(ECO_GIDS[].off) != length(eco_species_ids) + 1
-    set_eco_species!(eco_species_ids)
-  end
-  return nothing
 end
 
 # ---------------------------------------------------------------------------------------------------------------------

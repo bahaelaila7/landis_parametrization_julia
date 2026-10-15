@@ -4,8 +4,8 @@ using Pan, JLD2, Printf, Random, Statistics
 const P = Pan; const PU = P.PU
 cfgpath, ppath, outd = ARGS[1], ARGS[2], ARGS[3]; extra = ARGS[4:end]
 function run(d)
-  SP = P.succession_plugin_of(d.ref_soa); p0 = JLD2.load_object(ppath)
-  sp = P.with_establishment(SP, d.space; no_establishment=true, fit_establishment=false); slots = sp.slots   # the run's parameter space (pooling, floors) over the Sim A parameter subset
+  p0 = JLD2.load_object(ppath)
+  sp = P.with_establishment(d.plugin.ctx, d.space; no_establishment=true, fit_establishment=false); slots = sp.slots   # the run's parameter space (pooling, floors) over the Sim A parameter subset
   cg, labels = P._gd_groups(sp.dists, slots, d.eco_species_ids, d.species_list, d.eco_list)
   ix = P._gd_index(d.injection_cohorts, d.splots, cg, labels, d.scoring; real_only=true)
   gc = P._gd_groupcells(ix.cell_group, ix.ngroups)
@@ -19,7 +19,7 @@ function run(d)
     fill!(P.W_DIAG_CAT, 0)
     sco = P.with_options(d.scoring; loss_before_injection=lbi, w_diag=mode); fill!(P.W_DIAG_STATS, 0)
     r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=true, scales=sc, scoring=sco, simb=d.simb)
+      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=true, scales=sc, scoring=sco, simb=d.simb, plugin=d.plugin)
     L = P._gd_losses(ix, r[1][2])
     num, den = P._gd_cell_w(r[1][3], d.eco_species_ids, nvis, d.loss_params, sc)
     w = P._gd_group_w(num, den, gc, d.loss_params)

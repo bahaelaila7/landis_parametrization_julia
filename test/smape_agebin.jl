@@ -50,7 +50,7 @@ function paired_agebin(sp, label)
   max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   if _dm == "b"   # Sim-B free-regen: age-bin paired via the shared helper (coarse bins from THIS script's loss_params)
-    paired, _, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng; scoring=scoring)
+    paired, _, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng; scoring=scoring, plugin=P.bs_plugin())
     paired.cbin = paired.bin
     return DF.subset(paired, :sp => DF.ByRow(>(0)))
   end
@@ -59,7 +59,7 @@ function paired_agebin(sp, label)
   injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"), scoring, simb)
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=(get(ENV,"PAN_PREINJECT","1")!="0"), scoring, simb, plugin=P.bs_plugin())
   cached = res[1][2]
   # ONLY genuinely-simulated biomass: match pre-inject model cohorts to the OBSERVED injection set by
   # (plot, year, species, exact AGE) = sync survivor rule, drop disturbance-overwritten (drop>0), THEN bin by

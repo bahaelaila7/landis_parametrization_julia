@@ -28,7 +28,7 @@ Derived: `BA = pi/4 (dq/100)^2 tph` (m2/ha). Per site (scalars): `B = sum c_bio`
 
 ## 2. Fixed priors (not fitted)
 
-`HBADPlugin.configure!(; species_list, eco_species_ids, priors_csv, coefs_csv)` resolves, per GLOBAL species, one `SpPrior` (isbits, 28 Float64) from
+`HBADPlugin.HBADContext(species_list, eco_species_ids; priors_csv, coefs_csv, ...)` (an immutable per-run context, since Step 3d; it replaced the module Refs and `configure!`) resolves, per GLOBAL species, one `SpPrior` (isbits, 28 Float64) from
 `results/hbad/priors.csv` and `results/hbad/translation_coefs.csv` (+ `translation_selection.csv`, `species_group.csv`). Resolution (same rule as
 `tools/hbad_translate_lib.jl::hb_key`): exact species symbol if it has a row; else the pooled group row `_S` / `_H`; else `_ALL`. Pan catch-all names:
 `_S*` -> `_S`; `_H*` -> `_H`; `_GRP_<n>_*` -> `_S` if n <= 24 else `_H` (FIA SPGRPCD); other `_*` -> `_ALL`; plain symbols use `species_group.csv`
@@ -64,7 +64,7 @@ Performance/design: sites are independent; per-site work touches only that site'
 
 ## 4. Initialisation / injection
 
-`add_cohort!(site, esp, age, agb)` (module Refs `PRIORS[]`, `ECO_GIDS[]`, set by `configure!`/`set_eco_species!`) -> `translate(prior, age, agb)`, the selected translation of `tools/hbad_translate_lib.jl` (structure A, TPA-first, `mq`, Chapman-Richards height; no SI, natural):
+`add_cohort!(ctx, site, esp, age, agb)` (priors and eco table from the `HBADContext` `ctx`) -> `translate(prior, age, agb)`, the selected translation of `tools/hbad_translate_lib.jl` (structure A, TPA-first, `mq`, Chapman-Richards height; no SI, natural):
 
 ```
 x1 = ln(agb) - 6 ; x2 = ln(age) - 3.3
@@ -84,7 +84,7 @@ Deviation at tiny AGB: the lib clamps `dq` to [2.54, 170] (then AGB is no longer
 | `G_MULT` | EcoSpecies (`NestedIndexApplier`) | LogUniform[0.3, 3.0] (log-symmetric; default 1.0 at u ~ 0.52); sigma 0.1 | 1.0 | `:growth_hbad` (per eco / L3 block) |
 | `M_MULT` | EcoSpecies | LogUniform[0.2, 5.0] (median exactly 1); sigma 0.2 | 1.0 | `:growth_hbad` |
 | `SDIMAX` | Species (`IndexApplier`) | Uniform[200, 1500] global window, **clamped per species at decode to [0.7 p90, 1.3 p99]** of `sdimax_*_all` (`HBADPlugin.sdimax_range`); sigma 40 | p95 | `:hbad_species` (global block) |
-| `LONGEVITY` | fixed | as BiomassSuccession: `LONGEVITY_TABLE` (yaml `longevity_from_data`, `longevity_overrides`) / `fix_longevity` / 400 | - | - |
+| `LONGEVITY` | fixed | as BiomassSuccession: `BSTables.longevity` (yaml `longevity_from_data`, `longevity_overrides`) / `fix_longevity` / 400 | - | - |
 
 Notes: the per-species data range is applied by a clamp rather than a rescaled prior (simplest mechanism; costs a flat region in u-space at the edges, and the
 global window is ~2x wider than most species ranges). `HBAD_PER_ECO_GROUPS = {:growth_hbad}`. `param_pooling` works by parameter name (`G_MULT`, `M_MULT`), as for FolN/B_MAX.

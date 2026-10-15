@@ -7,8 +7,8 @@ mode, cfgpath, ppath, outp = ARGS[1], ARGS[2], ARGS[3], ARGS[4]; arch_dir = leng
 cfg = Pan.load_config(cfgpath)
 fam_name(s) = s === :ANPP_MAX_SPP ? "ANPP_ratio" : s === :B_MAX_SPP ? "B_MAX" : String(s)
 function check(d)
-  SP = P.succession_plugin_of(d.ref_soa); p = JLD2.load_object(ppath)
-  sp = P.with_establishment(SP, d.space; no_establishment=cfg["no_establishment"], fit_establishment=false); pd = sp.dists   # the run's parameter space (pooling, floors)
+  p = JLD2.load_object(ppath)
+  sp = P.with_establishment(d.plugin.ctx, d.space; no_establishment=cfg["no_establishment"], fit_establishment=false); pd = sp.dists   # the run's parameter space (pooling, floors)
   slots = sp.slots; u = PU.params_to_u(p, sp, slots)
   res = Dict{String,Any}("mode" => mode)
   # ---- 2. bound hugging per family: fraction of fitted dimensions with u <= 0.01 or >= 0.99
@@ -28,7 +28,7 @@ function check(d)
     msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
     acc = P.DeathAcc(d.eco_species_ids)
     P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
-      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], death_acc=acc, scoring=d.scoring, simb=d.simb)
+      debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], death_acc=acc, scoring=d.scoring, simb=d.simb, plugin=d.plugin)
     grid = exp.(range(log(1e-6), log(0.5); length=400)); erow = NamedTuple[]
     for (e, ids) in enumerate(d.eco_species_ids), (j, gsp) in enumerate(ids)
       nd = sum(acc.dhist[e][j]); ns = acc.n_surv[e][j]; expo = acc.surv_dt[e][j] + sum(k * acc.dhist[e][j][k] for k in 1:P.DEATH_MAXDT)

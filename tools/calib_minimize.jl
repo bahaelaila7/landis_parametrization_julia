@@ -33,8 +33,7 @@ d = CTX[]; d === nothing && error("training context was not captured")
 eco_list = d.eco_list; species_list = d.species_list; eco_species_ids = d.eco_species_ids
 include(joinpath(@__DIR__, "calib_levers.jl"))
 gdo = cfg["gdigel"]; spinup = cfg["spinup"]
-SP = P.succession_plugin_of(d.ref_soa)
-sp = P.with_establishment(SP, d.space; no_establishment=cfg["no_establishment"], fit_establishment=false)   # the run's parameter space (pooling, floors)
+sp = P.with_establishment(d.plugin.ctx, d.space; no_establishment=cfg["no_establishment"], fit_establishment=false)   # the run's parameter space (pooling, floors)
 cur = JLD2.load_object(start); slots = sp.slots
 cell_group, labels = P._gd_groups(sp.dists, slots, d.eco_species_ids, d.species_list, d.eco_list; group_param=gdo["group_param"])
 ix = P._gd_index(d.injection_cohorts, d.splots, cell_group, labels, d.scoring; real_only=gdo["real_only"])
@@ -48,7 +47,7 @@ seeds = P._fixed_seeds(P.RNGType(UInt64(cfg["seed"])), 1, d.scoring)
 function ev(p)
   dacc = USED ? P.DeathAcc(d.eco_species_ids) : nothing
   r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, spinup, d.spinup_cohorts, d.loss_params;
-    debug=false, search_tier=d.tier, seeds=seeds, injection=injection, cache_preinject=true, death_acc=dacc, scales=sc, scoring=d.scoring, simb=d.simb)
+    debug=false, search_tier=d.tier, seeds=seeds, injection=injection, cache_preinject=true, death_acc=dacc, scales=sc, scoring=d.scoring, simb=d.simb, plugin=d.plugin)
   _, _, k = P._agg_reps(r, d.loss_params, d.scoring)
   res = P._gd_losses(ix, r[k][2])
   num, den = P._gd_cell_w(r[k][3], d.eco_species_ids, nvis, d.loss_params, sc)

@@ -11,8 +11,9 @@ function diag(d)
   outd = d.output_dir
   ck = sort(filter(f -> occursin(r"^best_params@\d+\.jld2$", f), readdir(outd)); by=f -> parse(Int, match(r"@(\d+)", f)[1]))
   best = JLD2.load_object(joinpath(outd, last(ck)))
-  eps_ = PN.generate_pnet_eco_params(best)
-  cst = PN.FIXED[]
+  pc = d.plugin.ctx   # PnETContext of the run (constants, climate, scratch)
+  eps_ = PN.generate_pnet_eco_params(pc, best)
+  cst = pc.fixed
   println("DIAG PFT map: ", join(["$(s)=$(Int(p))" for (s, p) in zip(best.SPECIES_LIST, best.PFT)], " "))
   # (1) injected + initial cohorts, solved with the best params
   rows = d.splots   # observed cohorts incl. every measurement year; unique (plot, species, age) at first sight = what gets injected
@@ -35,7 +36,7 @@ function diag(d)
   for flag in (true, false)
     soa = P.PanCore.copy_and_reseed_soa(d.ref_soa, 1)
     cst2 = PN.PnETConst(; (f => (f === :init_biomass_death ? flag : getfield(cst, f)) for f in fieldnames(PN.PnETConst))...)
-    ctx = (eco=eps_, cst=cst2, clim=PN.CLIMATE[], scratch=PN.scratch_pool())
+    ctx = (eco=eps_, cst=cst2, clim=pc.climate, scratch=pc.scratch)
     l0 = sum(soa.scalar.live)
     P.PanCore.process_plugin!(soa, PN.PnET, 1; ctx=ctx)
     l1 = sum(soa.scalar.live)

@@ -3,7 +3,8 @@ module UnitParams
 using Test, Random, Pan
 const PU = Pan.PU
 const BSP = Pan.BSP
-const SP = Pan.Plugins.BiomassSuccessionPlugin.BiomassSuccession
+const BSPl = Pan.Plugins.BiomassSuccessionPlugin
+const PC0 = BSPl.BSTables()                          # the plugin context of the plain legacy space (no pins, no floors)
 import Distributions as Dists
 
 const SPECIES = ["A", "B", "C"]
@@ -12,12 +13,12 @@ const ESI = [[1, 2, 3], [1, 3]]                    # eco 1 has species 1,2,3 ; e
 const NESS = sum(length, ESI)                      # 5 eco-species cells
 
 # The parameter space is an explicit immutable ParamSpace (Step 3c): variants are built with `mkspace` / `retie` / `PU.with_floors`.
-mkspace(; no_establishment=false, opts=PU.ParamSpaceOptions(), tying=PU.ParamTying(), floors=PU.ParamFloors(), blocks=PU.CmaBlocks()) =
-  Pan.make_param_space(SP, SPECIES, ECOS, ESI; no_establishment=no_establishment, opts=opts, tying=tying, floors=floors, blocks=blocks)
+mkspace(; pc=PC0, no_establishment=false, opts=PU.ParamSpaceOptions(), tying=PU.ParamTying(), floors=PU.ParamFloors(), blocks=PU.CmaBlocks()) =
+  Pan.make_param_space(pc, SPECIES, ECOS, ESI; no_establishment=no_establishment, opts=opts, tying=tying, floors=floors, blocks=blocks)
 retie(sp; tying=sp.tying, blocks=sp.blocks) = PU.ParamSpace(sp.dists, sp.n_species, sp.eco_list, sp.eco_species_ids; opts=sp.opts, tying=tying, floors=sp.floors, blocks=blocks)
 setup(; no_establishment=false) = begin
   sp = mkspace(; no_establishment=no_establishment)
-  tpl = Pan.generate_params(SP, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1), no_establishment=no_establishment)
+  tpl = Pan.generate_params(PC0, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1), no_establishment=no_establishment)
   (sp, tpl, sp.slots)
 end
 pidx(pd, name) = findfirst(p -> p.name === name, pd.params)
@@ -199,29 +200,38 @@ end
 end
 
 @testset "build_param_floors: data floors from the plugin tables, B18 warning once per build" begin
-  BSPl = Pan.Plugins.BiomassSuccessionPlugin
-  saved = (BSPl.BMAX_FLOOR_TABLE[], BSPl.ANPP_FLOOR_TABLE[], BSPl.PROB_ESTAB_TABLE[])
-  try
-    ecos = ["8.3.5|lu=natural", "8.3.7|lu=artificial"]
-    BSPl.BMAX_FLOOR_TABLE[] = Dict(("A", "8.3.5", "natural") => 40000.0, ("B", "8.3.5", "natural") => 20000.0)
-    BSPl.ANPP_FLOOR_TABLE[] = Dict(("A", "8.3.5", "natural") => 900.0)
-    BSPl.PROB_ESTAB_TABLE[] = Dict(("A", "8.3.5", "natural") => 0.5, ("C", "8.3.7", "artificial") => 0.9)
-    o = PU.ParamSpaceOptions(prob_estab_lower_bound=true, prob_estab_lower_mult=0.8)
-    fl = nothing
-    @test_logs (:info, r"bmax_floor_from_data: B_MAX lower bound") (:warn, r"pinned at the floor") (:info, r"prob_estab_lower_bound") (:info, r"anpp_floor_from_data") match_mode=:any (fl = Pan.build_param_floors(o, ecos, SPECIES, ESI))
-    @test fl.bmax[(1, 1)] == 40000f0 && fl.bmax[(1, 2)] == 20000f0 && fl.bmax[(2, 1)] == 12000f0          # max(12000, table); (eco, sp_local)
-    @test fl.anpp[(1, 1)] == 900f0 && fl.anpp[(1, 2)] == 0f0
-    @test fl.prob_estab[(1, 1)] ≈ 0.4f0 && fl.prob_estab[(2, 2)] ≈ 0.72f0 && !haskey(fl.prob_estab, (1, 2))   # mult x data; absent cells keep the param's own bound
-    # floors off: no table or no lower-bound switch
-    BSPl.PROB_ESTAB_TABLE[] = nothing; BSPl.BMAX_FLOOR_TABLE[] = nothing; BSPl.ANPP_FLOOR_TABLE[] = nothing
-    f0 = Pan.build_param_floors(o, ecos, SPECIES, ESI)
-    @test f0.bmax === nothing && f0.anpp === nothing && f0.prob_estab === nothing
-    # the built floors decode: B_MAX of cell (1,1) is pinned above the box at the floor (B18)
-    sp = PU.with_floors(mkspace(), fl); tpl = Pan.generate_params(SP, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1))
-    @test PU.u_to_params(fill(0.5, length(sp.slots)), sp, sp.slots, tpl).B_MAX_SPP[1][1] == 40000f0
-  finally
-    BSPl.BMAX_FLOOR_TABLE[], BSPl.ANPP_FLOOR_TABLE[], BSPl.PROB_ESTAB_TABLE[] = saved
-  end
+  ecos = ["8.3.5|lu=natural", "8.3.7|lu=artificial"]
+  tb = BSPl.BSTables(bmax_floor=Dict(("A", "8.3.5", "natural") => 40000.0, ("B", "8.3.5", "natural") => 20000.0),
+                     anpp_floor=Dict(("A", "8.3.5", "natural") => 900.0),
+                     prob_estab=Dict(("A", "8.3.5", "natural") => 0.5, ("C", "8.3.7", "artificial") => 0.9))
+  o = PU.ParamSpaceOptions(prob_estab_lower_bound=true, prob_estab_lower_mult=0.8)
+  fl = nothing
+  @test_logs (:info, r"bmax_floor_from_data: B_MAX lower bound") (:warn, r"pinned at the floor") (:info, r"prob_estab_lower_bound") (:info, r"anpp_floor_from_data") match_mode=:any (fl = Pan.build_param_floors(tb, o, ecos, SPECIES, ESI))
+  @test fl.bmax[(1, 1)] == 40000f0 && fl.bmax[(1, 2)] == 20000f0 && fl.bmax[(2, 1)] == 12000f0          # max(12000, table); (eco, sp_local)
+  @test fl.anpp[(1, 1)] == 900f0 && fl.anpp[(1, 2)] == 0f0
+  @test fl.prob_estab[(1, 1)] ≈ 0.4f0 && fl.prob_estab[(2, 2)] ≈ 0.72f0 && !haskey(fl.prob_estab, (1, 2))   # mult x data; absent cells keep the param's own bound
+  # floors off: no table or no lower-bound switch
+  f0 = Pan.build_param_floors(BSPl.BSTables(), o, ecos, SPECIES, ESI)
+  @test f0.bmax === nothing && f0.anpp === nothing && f0.prob_estab === nothing
+  # the tables are an argument, not module state: the first build is unchanged by the second
+  @test fl.bmax[(1, 1)] == 40000f0
+  # the built floors decode: B_MAX of cell (1,1) is pinned above the box at the floor (B18)
+  sp = PU.with_floors(mkspace(), fl); tpl = Pan.generate_params(PC0, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1))
+  @test PU.u_to_params(fill(0.5, length(sp.slots)), sp, sp.slots, tpl).B_MAX_SPP[1][1] == 40000f0
+end
+
+@testset "BSTables: pins and seeds are arguments of the generators / the space" begin
+  # LONGEVITY pinned by a table (absent species -> default) or a fixed value: out of the search, seeded into generated params
+  tb = BSPl.BSTables(longevity=Dict("A" => 120.0), longevity_default=300.0, shade_tol=Dict("B" => 5), shade_tol_default=2)
+  p = Pan.generate_params(tb, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1))
+  @test p.LONGEVITY == Float32[120, 300, 300] && p.SHADE_TOL == UInt32[2, 5, 2]
+  names = [q.name for q in mkspace(; pc=tb).dists.params]
+  @test !(:LONGEVITY in names) && !(:SHADE_TOL in names) && :MATURITY in names
+  pf = Pan.generate_params(BSPl.BSTables(fixed_longevity=250.0), SPECIES, ECOS, ESI; rng=Random.Xoshiro(1))
+  @test all(==(250f0), pf.LONGEVITY) && !(:LONGEVITY in [q.name for q in mkspace(; pc=BSPl.BSTables(fixed_longevity=250.0)).dists.params])
+  @test all(==(400f0), Pan.generate_params(PC0, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1)).LONGEVITY) && :LONGEVITY in [q.name for q in mkspace().dists.params]
+  # the defaults are not shared between two table objects
+  @test BSPl.BSTables().longevity === nothing && BSPl.BSTables(longevity=Dict("A" => 1.0)).longevity == Dict("A" => 1.0) && BSPl.BSTables().longevity === nothing
 end
 
 @testset "slots: split sets / pooling / shared" begin
@@ -319,7 +329,7 @@ end
   s0 = mkspace(); s1 = PU.with_dists(s0, mkspace(; no_establishment=true).dists)
   @test length(s1.slots) == 2 * 3 + 3 * NESS && PU.with_floors(s0, PU.ParamFloors()).slots === s0.slots
   # the space is immutable and its slot layout equals build_slots of a template of the same data
-  @test !ismutabletype(PU.ParamSpace) && s0.slots == PU.build_slots(s0, Pan.generate_params(SP, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1)))
+  @test !ismutabletype(PU.ParamSpace) && s0.slots == PU.build_slots(s0, Pan.generate_params(PC0, SPECIES, ECOS, ESI; rng=Random.Xoshiro(1)))
 end
 
 @testset "dominance mask (explicit, allocation-free)" begin

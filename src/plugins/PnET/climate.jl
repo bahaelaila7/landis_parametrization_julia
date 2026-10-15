@@ -38,8 +38,6 @@ struct PnETClimate
   D::Array{Float32,4}   # (N_DV, 12, ny, ncl)
 end
 
-const CLIMATE = Ref{Union{Nothing,PnETClimate}}(nothing)
-
 @inline _vp(a, b, c, T) = a * exp(b * T / (T + c))
 function vpd_kpa(tday::Real, tmin::Real)
   es = tday < 0 ? _vp(0.61078, 21.87456, 265.5, tday) : _vp(0.61078, 17.26939, 237.3, tday)

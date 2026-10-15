@@ -73,7 +73,7 @@ function make_scatter(sp, label)
   injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   res = P.fit_params(rs, best, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=true, scoring, simb)  # pre-inject = pure model state (REQUIRED for the cohort match below)
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], cache_preinject=true, scoring, simb, plugin=P.bs_plugin())  # pre-inject = pure model state (REQUIRED for the cohort match below)
   cached = res[1][2]
   # ONLY genuinely-simulated biomass ends up in the scatter. Match the pre-inject model cohorts to the
   # OBSERVED injection set by (plot, year, species, AGE) — exactly the sync survivor rule. This drops
@@ -217,7 +217,7 @@ function make_scatter_B(sp, label)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   # Re-simulate the FREE Sim-B path EXACTLY as the run (disturb-only / year-0-vs-spinup / establishment ON;
   # frozen growth is baked into `best`), then pair sim vs obs by tier-4 age-bins. Shared with sMAPE/TOST.
-  paired, _cyc_map, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng; scoring=scoring)
+  paired, _cyc_map, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng; scoring=scoring, plugin=P.bs_plugin())
   # SPLIT BY CYCLE: one figure per (cycle × eco × mode); species panels; points = age bins (colour = bin).
   for mode in (:linear, :log, :weighted, :weightedlog), cy in sort(unique(paired.cyc)), e in sort(unique(paired.eco))
     pe = DF.subset(paired, :cyc => DF.ByRow(==(cy)), :eco => DF.ByRow(==(e)))
