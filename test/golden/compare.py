@@ -14,7 +14,7 @@ Exit code 0 = all scenarios match.
 import sys, os, json, math, re, argparse
 import duckdb, pandas as pd
 
-TIME_COL = re.compile(r"(time|wall|elapsed|sec\b|_s$|date|stamp|ns$)", re.I)
+TIME_COL = re.compile(r"(time|wall|elapsed|sec\b|_s$|date|stamp|ns$|^run_id$)", re.I)
 SKIP_EXT = (".jld2", ".png", ".pdf", ".log", ".svg", ".txt")
 
 
@@ -108,8 +108,9 @@ def cmp_scenario(ga, gb, rtol, atol):
                 out.append(f"{f}: tables {ta} vs {tb}")
             for t in sorted(set(ta) & set(tb)):
                 xa = ca.sql(f"select * from {t}").df(); xb = cb.sql(f"select * from {t}").df()
-                xa = xa.drop(columns=[c for c in xa.columns if c == "params_blob"])
-                xb = xb.drop(columns=[c for c in xb.columns if c == "params_blob"])
+                def _blob(df):  # serialized blobs (params_blob, ...) are not comparable across code versions
+                    return [c for c in df.columns if c == "params_blob" or (len(df) and isinstance(df[c].iloc[0], (bytes, bytearray, memoryview)))]
+                xa = xa.drop(columns=_blob(xa)); xb = xb.drop(columns=_blob(xb))
                 keys = list(xa.columns)
                 if keys == list(xb.columns) and len(keys):
                     xa = xa.sort_values(keys, kind="mergesort").reset_index(drop=True)
