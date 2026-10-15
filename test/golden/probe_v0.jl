@@ -1,5 +1,5 @@
 # Probe adapter for the pre-refactor API (Pan.POST_SEARCH_HOOK + fit_params positional signature; since step 3a the hook context carries `scale_seed`
-# and the probe passes the training reference's LossScales explicitly).
+# and the probe passes the training reference's LossScales explicitly; since step 3c it also carries the run's ParamSpace as `space`).
 # Evaluates ONE deterministic parameter set (fixed-seed template + fixed u) at tier 3 on the training context and writes:
 #   probe_eco_loss.csv  eco,species,sp_w_loss,sp_agb_loss     (per eco × global species; zero rows of absent species skipped)
 #   probe_summary.csv   key,value                              (totals, counts, u round-trip error)
@@ -10,15 +10,16 @@ const PU = Pan.PU
 function golden_probe(d, cfg, outdir)
   SP = Pan.succession_plugin_of(d.ref_soa)
   noest = Bool(get(cfg, "no_establishment", false))
-  pd = Pan.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=noest, fit_establishment=false)
+  space = Pan.with_establishment(SP, d.space; no_establishment=noest, fit_establishment=false)   # the run's parameter space (options, pooling, floors) over the probe's subset
+  pd = space.dists
   tmpl = Pan.generate_params(SP, d.species_list, d.eco_list, d.eco_species_ids; rng=Random.Xoshiro(7), no_establishment=noest)
-  slots = PU.build_slots(pd, tmpl)
+  slots = space.slots
   u = rand(Random.Xoshiro(11), length(slots))
-  p = PU.u_to_params(u, pd, slots, tmpl)
-  u2 = PU.params_to_u(p, pd, slots)
+  p = PU.u_to_params(u, space, slots, tmpl)
+  u2 = PU.params_to_u(p, space, slots)
   injection = Pan.build_injection_plan(d.injection_cohorts, d.ref_soa, d.eco_species_ids, d.loss_params, d.scoring)   # this reference's injection dict / shock / exclusions
   msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
-  sc = Pan.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, per_plot_mean=d.simb.t4_per_plot_mean)   # the training reference's loss scales
+  sc = Pan.compute_loss_scales(d.loss_params, 3, d.spdf_plts, nothing, d.eco_species_ids, d.n_species; cbal=d.scale_seed.cbal, ncoh=d.scale_seed.ncoh, dom=d.scale_seed.dom, per_plot_mean=d.simb.t4_per_plot_mean)   # the training reference's loss scales
   r = Pan.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
     debug=false, search_tier=3, injection=injection, seeds=[UInt64(1)], cache_preinject=true, scales=sc, scoring=d.scoring, simb=d.simb)
   run, state, eco = r[1]

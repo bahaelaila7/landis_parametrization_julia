@@ -163,7 +163,6 @@ end
   m = cerr(() -> L("override_injection" => true, "loss_before_injection" => true)); @test m !== nothing && occursin("loss_before_injection", m)
   @test cerr(() -> L(sync..., "override_injection_replace" => true, "loss_before_injection" => true)) !== nothing
   # scoring_from_config builds the immutable options from the config (no module state, nothing to leak between configs)
-  saved_pmort = Pan.BSP.DEATH_PMORT_SIMA[]
   try
     sc, sb = Pan.scoring_from_config(L(sync..., "disturbance_full_removals" => false, "exclude_recruits_at_entry" => false, "w_scope" => "survivors",
                                        "death_term" => "likelihood", "override_injection_noise" => 0.1, "override_injection_disturbance" => "scale",
@@ -172,19 +171,30 @@ end
     @test !sc.exclude_recruits_at_entry && sc.w_scope === :survivors && sc.death_term === :likelihood
     @test sc.noise == 0.1 && sc.disturbance === :scale && sc.init_perturb_frac == 0.05 && sc.init_perturb_cap == 25f0
     @test sb.dual_mode === :b && sb.t4_primary && !sb.simb_spinup && sb.tier_b == 4
-    @test Pan.BSP.DEATH_PMORT_SIMA[]                                                         # death_term likelihood: score-only PROB_MORT in Sim A
+    @test Pan.param_space_options(L("death_term" => "likelihood")).death_pmort_sima         # death_term likelihood: score-only PROB_MORT in Sim A
     sc0, sb0 = Pan.scoring_from_config(L())                                                  # a plain config gets the defaults (no leak between configs)
     @test !sc0.override && sc0.exclude_recruits_at_entry && sc0.w_scope === :all && sc0.death_term === :none && !Pan.shock_order(sc0)
     @test sb0.dual_mode === :off && !sb0.t4_primary && sb0.simb_spinup && !sb0.simb_disturb_only
-    @test !Pan.BSP.DEATH_PMORT_SIMA[]
+    @test !Pan.param_space_options(L()).death_pmort_sima
     @test Pan.scoring_from_config(Dict{String,Any}("w_scope" => "survivors"))[1].w_scope === :survivors    # a raw Dict is loaded through the same reader
     @test Pan.simb_options(L("tier" => 4)).t4_primary && !Pan.simb_options(L("tier" => 4, "dual_mode" => "joint")).t4_primary   # tier 4 without a dual, or dual b
     @test !ismutabletype(Pan.ScoringOptions) && !ismutabletype(Pan.SimBOptions) && all(isconcretetype, fieldtypes(Pan.ScoringOptions)) && all(isconcretetype, fieldtypes(Pan.SimBOptions))   # immutable, concretely typed: free to read in the site loop
     @test Pan.with_options(sc; w_scope=:all).w_scope === :all && Pan.with_options(sc; w_scope=:all).noise == 0.1
   finally
-    Pan.BSP.DEATH_PMORT_SIMA[] = saved_pmort
     Pan.Data.DISTURBANCE_FULL_PATH[] = ""
   end
+end
+
+@testset "param_space_options (the former BSP.* switches)" begin
+  o = Pan.param_space_options(L())
+  @test o == Pan.PU.ParamSpaceOptions()                                                      # a plain config gives the legacy defaults
+  @test !o.fix_growth && !o.fix_maturity && !o.fix_min_rel && !o.fix_pmort && !o.prob_estab_lower_bound
+  @test o.bmax_bounds == (12000, 35000) && o.anpp_ratio_bounds == (20f0, 35f0) && o.pmort_upper_a == 0.2f0 && o.pmort_upper_b == 0.02f0
+  o2 = Pan.param_space_options(L("fix_growth" => true, "fix_maturity" => true, "fix_min_rel" => true, "fix_pmort" => true, "pmort_upper" => 0.05, "pmort_upper_simA" => 0.1,
+                                 "bmax_upper" => 40000, "anpp_ratio_bounds" => [18, 30], "prob_estab_lower_bound" => true, "prob_estab_lower_bound_mult" => 0.8, "death_term" => "likelihood"))
+  @test o2.fix_growth && o2.fix_maturity && o2.fix_min_rel && o2.fix_pmort && o2.death_pmort_sima && o2.prob_estab_lower_bound
+  @test o2.bmax_bounds == (12000, 40000) && o2.anpp_ratio_bounds == (18f0, 30f0) && o2.pmort_upper_b == 0.05f0 && o2.pmort_upper_a == 0.1f0 && o2.prob_estab_lower_mult == 0.8
+  @test !ismutabletype(Pan.PU.ParamSpaceOptions) && all(isconcretetype, fieldtypes(Pan.PU.ParamSpaceOptions))
 end
 
 @testset "schema" begin

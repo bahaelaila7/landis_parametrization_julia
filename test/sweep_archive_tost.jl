@@ -73,7 +73,6 @@ end
 domset = let mode = lowercase(String(g("dominance_species", "exact")))
   mode == "all" ? Set{Int}() : Set(s for s in 1:n_species if P._dom_include_name(species_list[s], mode))
 end
-P.DOMINANCE_GSP[] = domset
 
 # reconstruct per-(global species) (ΣW_s, ΣAGB_s) from a candidate's fx.objectives by replaying the
 # _mo_objectives ordering (block = eco-block cycling eco_species_ids; pairs filtered to domset).
