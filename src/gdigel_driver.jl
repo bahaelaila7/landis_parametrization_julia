@@ -273,7 +273,7 @@ function _write_mo_archive(dir, nd, st, labels, dec)
   nothing
 end
 
-function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years,
+function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years,
     species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool,
     TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing,
     start_from::Union{Nothing,String}=nothing, n_reps::Int=1, no_establishment::Bool=false, injection_cohorts=nothing,
@@ -300,9 +300,9 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   isnothing(injection_cohorts) && error("gdigel needs override injection cohorts (Sim A)")
   mkpath(output_dir)
   SP = succession_plugin_of(ref_soa)
-  pd = make_param_dists(SP, length(species_list), length(eco_list), eco_species_ids; no_establishment=no_establishment, fit_establishment=false)
+  pd = space.dists   # gdigel is Sim A only (dual_mode off), so the run's space already has fit_establishment = false
   template = !isnothing(start_from) ? _load_params_from_path(start_from) : generate_params(SP, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
-  slots = PU.build_slots(pd, template); nd = length(slots)
+  slots = space.slots; nd = length(slots)
   cell_group, labels = _gd_groups(pd, slots, eco_species_ids, species_list, eco_list; group_param=o("group_param"))
   ix = _gd_index(injection_cohorts, splots, cell_group, labels, scoring; real_only=real_only)
   # blocks: u-coordinates grouped by the set of groups they affect
@@ -324,7 +324,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   groupcells = _gd_groupcells(ix.cell_group, ix.ngroups)
   nvis = MO ? _gd_cell_visits(spdf_plts, eco_species_ids, spinup ? 0 : 1) : nothing
   ws_t = [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()]
-  dec(u) = PU.u_to_params(clamp.(u, 0.0, 1.0), pd, slots, template)
+  dec(u) = PU.u_to_params(clamp.(u, 0.0, 1.0), space, slots, template)
   function ev(u; ws=ws_t[Threads.threadid()])
     pp = dec(u)
     dacc = USE_D ? DeathAcc(eco_species_ids) : nothing
@@ -394,7 +394,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
     mode = Symbol(o("mode"))
     lams = !MO ? Float64[] : M3 ? GDIgel.simplex_weights(o("weights")) : GDIgel.mo_lambdas(o("weights"))
     # :explore (anchor-and-explore, docs/cmaes_gdigel.md §4): behavioural threshold tau from the tolerated bias
-    u_anchor = start_from === nothing ? nothing : PU.params_to_u(template, pd, slots)
+    u_anchor = start_from === nothing ? nothing : PU.params_to_u(template, space, slots)
     mode === :explore && u_anchor === nothing && error("gdigel mode explore needs start_from (the anchor parameter set)")
     # per-group behavioural threshold: tau_g = max(log1p(explore_bias)², explore_slack × f_g(anchor)) — the anchor is
     # behavioural by construction, and groups the anchor already fits well get the absolute tolerance

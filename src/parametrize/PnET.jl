@@ -8,7 +8,7 @@ using ..PanCore
 using ....Plugins.PnETPlugin: PnETParams, BOUNDS_FOLN, BOUNDS_MAXFRACFOL, BOUNDS_FRACTWD, BOUNDS_SLWMAX, BOUNDS_TOWOOD, BOUNDS_PSNAGERED, BOUNDS_RDMULT
 using Distributions
 
-function make_pnet_param_dists(n_species::Int, n_ecoregions::Int, eco_species_ids::Vector{Vector{Int}}; no_establishment::Bool=false, fit_establishment::Bool=false)
+function make_pnet_param_dists(n_species::Int, n_ecoregions::Int, eco_species_ids::Vector{Vector{Int}}; no_establishment::Bool=false, fit_establishment::Bool=false, opts::ParamSpaceOptions=ParamSpaceOptions())   # `opts` (BS switches) is unused by this plugin
   n_ess = sum(length(s) for s in eco_species_ids)
   U(b) = Uniform(b[1], b[2])
   sp(name, b, sigma, group) = MutableParam(name, U(b), b, sigma, FloatType, SpeciesSampler(), IndexApplier(); group=group)

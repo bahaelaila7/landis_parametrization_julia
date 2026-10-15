@@ -7,7 +7,7 @@ using ..PanCore
 using ....Plugins.HBADPlugin: HBADParams, BOUNDS_GMULT, BOUNDS_MMULT, BOUNDS_SDIMAX
 using Distributions
 
-function make_hbad_param_dists(n_species::Int, n_ecoregions::Int, eco_species_ids::Vector{Vector{Int}}; no_establishment::Bool=false, fit_establishment::Bool=false)
+function make_hbad_param_dists(n_species::Int, n_ecoregions::Int, eco_species_ids::Vector{Vector{Int}}; no_establishment::Bool=false, fit_establishment::Bool=false, opts::ParamSpaceOptions=ParamSpaceOptions())   # `opts` (BS switches) is unused by this plugin
   n_ess = sum(length(s) for s in eco_species_ids)
   LU(b) = LogUniform(Float64(b[1]), Float64(b[2]))
   est = !no_establishment || fit_establishment

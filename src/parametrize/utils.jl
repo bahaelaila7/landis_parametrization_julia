@@ -1,5 +1,5 @@
 using ..PanCore
-export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, LossScales, CbalTables, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples, saltelli_design, wasserstein1d, find_age_bin, build_slots, u_to_params, params_to_u
+export MutableParam, SpeciesSampler, EcoSampler, GlobalSampler, EcoSpeciesSampler, GradientApplier, ScalarApplier, IndexApplier, NestedIndexApplier, ParamDists, SamplingContext, LossParams, LossScales, CbalTables, SiteLoss, AgeBins, get_smoothing_window, calculate_site_loss2, skipundef, MutationType, sobol_samples, saltelli_design, wasserstein1d, find_age_bin, build_slots, u_to_params, params_to_u, ParamSpace, ParamSpaceOptions, ParamFloors, ParamTying, CmaBlocks, with_floors, with_dists, slot_quanta, integer_u_min_std, params_to_nativevec, build_groups
 
 import Setfield
 import Sobol
@@ -29,24 +29,34 @@ MutableParam(name::Symbol, dist::Dists.Distribution, bounds::Tuple, sigma::T, ty
   MutableParam{S,T}(name, dist, bounds, sigma, type, sampler, applier, FloatType(quantum), group)
 
 # Partition the u-coordinates (one per `slots` entry) into BLOCK-DIAGONAL CMA-ES groups by each
-# parameter's `group`. Groups whose symbol is in `per_eco_groups` are FURTHER split per ecoregion (a
+# parameter's `group`. Groups whose symbol is in `blocks.per_eco_groups` are FURTHER split per ecoregion (a
 # separate block per eco) — so eco-scoped params (Eco/EcoSpecies) yield one block per ecoregion, giving
 # the "2 global + #ecoregion matrices" layout. Returns a Vector of u-index vectors (a partition of 1:d),
 # in first-seen order. A single group (the default) ⇒ one block = plain CMA-ES.
-# Covariance blocking mode. :eco (legacy) = one block per (group, eco cell); :l3 = one block per (group, L3)
-# where ECO_L3[eco_id] gives the cell's L3 index — pooled slots spanning several L3s go to a tail block (-1).
-const CMAES_BLOCKS = Ref(:eco)
-const ECO_L3 = Ref{Vector{Int}}(Int[])
-const ECO_L2 = Ref{Vector{Int}}(Int[])   # eco_id → L2 index; pooled slots spanning several L3s of ONE L2 get an L2 block
-function _block_eco(target)
-  if CMAES_BLOCKS[] === :l3 && !isempty(ECO_L3[])
-    target isa Tuple && return ECO_L3[][Int(target[1])]
-    target isa Integer && return ECO_L3[][Int(target)]
+# Covariance blocking mode (`CmaBlocks.mode`). :eco (legacy) = one block per (group, eco cell); :l3 = one block per (group, L3)
+# where `eco_l3[eco_id]` gives the cell's L3 index — pooled slots spanning several L3s go to a tail block (-1).
+"""
+    CmaBlocks
+
+The block-diagonal CMA-ES covariance layout of a parameter space: `mode` (`:eco` | `:l3`), the L3 / L2 index of every ecoregion cell
+(`eco_l3`, `eco_l2`; empty in `:eco` mode; pooled slots spanning several L3s of ONE L2 get an L2 block) and the plugin's per-eco groups
+(`per_eco_groups`, split once per ecoregion/L3; every other group is one global block).
+"""
+Base.@kwdef struct CmaBlocks
+  mode::Symbol = :eco
+  eco_l3::Vector{Int} = Int[]
+  eco_l2::Vector{Int} = Int[]
+  per_eco_groups::Set{Symbol} = Set{Symbol}()
+end
+function _block_eco(b::CmaBlocks, target)
+  if b.mode === :l3 && !isempty(b.eco_l3)
+    target isa Tuple && return b.eco_l3[Int(target[1])]
+    target isa Integer && return b.eco_l3[Int(target)]
     if target isa AbstractVector && !isempty(target)
-      ls = unique(ECO_L3[][Int(t[1])] for t in target)
+      ls = unique(b.eco_l3[Int(t[1])] for t in target)
       length(ls) == 1 && return ls[1]
-      if !isempty(ECO_L2[])
-        l2 = unique(ECO_L2[][Int(t[1])] for t in target)
+      if !isempty(b.eco_l2)
+        l2 = unique(b.eco_l2[Int(t[1])] for t in target)
         length(l2) == 1 && return 10_000 + l2[1]   # L2 block (offset keeps it apart from L3 indices)
       end
       return -1                                   # spans several L2s → region tail block
@@ -55,12 +65,12 @@ function _block_eco(target)
   end
   target isa Tuple ? Int(target[1]) : (target isa Integer ? Int(target) : 0)
 end
-function build_groups(param_dists, slots::Vector{Tuple{Int,Any}}, per_eco_groups)
+function _build_groups(param_dists, slots::Vector{Tuple{Int,Any}}, blocks::CmaBlocks)
   keyed = Dict{Tuple{Symbol,Int},Vector{Int}}()
   order = Tuple{Symbol,Int}[]
   for (dim, (pi, target)) in enumerate(slots)
     g = param_dists.params[pi].group
-    eco = (g in per_eco_groups) ? _block_eco(target) : 0
+    eco = (g in blocks.per_eco_groups) ? _block_eco(blocks, target) : 0
     key = (g, eco)
     if !haskey(keyed, key)
       keyed[key] = Int[]; push!(order, key)
@@ -78,6 +88,100 @@ struct ParamDists{T} # subtyping here to make different plugins have different P
 end
 
 @enum MutationType GaussianMutation RandomMutation BothMutations
+
+"""
+    ParamSpaceOptions
+
+The options that decide WHICH parameters a plugin searches and in what box (Step 3c; they were module `Ref`s of the Biomass Succession
+parametrization). Immutable, built once per run by `Pan.param_space_options(cfg)`; the defaults are the legacy defaults.
+
+  - `fix_growth`: stage B, pin the growth/decay params {D, S, ANPP_MAX, B_MAX} (drop them from the search); `fix_maturity`, `fix_min_rel`: pin MATURITY / MIN_REL_BIOMASS.
+  - `death_pmort_sima`: Sim A with the death term fits PROB_MORT_SPP (score-only there); `fix_pmort`: Sim B pins PROB_MORT (frozen from the seed).
+  - `pmort_upper_a`, `pmort_upper_b`: upper bound of the PROB_MORT_SPP box in Sim A (death term) / Sim B.
+  - `bmax_bounds`, `anpp_ratio_bounds`: the B_MAX box and the B_MAX/ANPP ratio box.
+  - `prob_estab_lower_bound`, `prob_estab_lower_mult`: use `mult` × the data PROB_ESTAB as the search's lower bound (builds `ParamFloors.prob_estab`).
+"""
+Base.@kwdef struct ParamSpaceOptions
+  fix_growth::Bool = false
+  fix_maturity::Bool = false
+  fix_min_rel::Bool = false
+  death_pmort_sima::Bool = false
+  fix_pmort::Bool = false
+  pmort_upper_a::Float32 = 0.2f0
+  pmort_upper_b::Float32 = 0.02f0
+  bmax_bounds::Tuple{Int,Int} = (12000, 35000)
+  anpp_ratio_bounds::Tuple{Float32,Float32} = (20.0f0, 35.0f0)
+  prob_estab_lower_bound::Bool = false
+  prob_estab_lower_mult::Float64 = 1.0
+end
+
+"""
+    ParamFloors
+
+Per-(eco_id, sp_local) data bounds of the decode (each `nothing` = feature off), built by `Pan.build_param_floors`:
+  - `bmax`: LOWER bound of `:B_MAX_SPP` (≥12000). `u_to_params` / `params_to_u` RESCALE the uniform prior onto [floor, upper] (no probability
+    pile-up at the floor). A floor above the upper bound pins the slot at the floor for every u (B18).
+  - `anpp`: LOWER bound of the DERIVED ANPP (g/m²/yr): ANPP = B_MAX/ratio is floored at decode, i.e. a per-cell UPPER bound on the ratio.
+    `params_to_u` is unchanged (recovering r = B_MAX/ANPP and re-decoding re-applies the floor: round-trip stable).
+  - `prob_estab`: LOWER bound of `:PROB_ESTAB_SPP` (window [floor, 1.0]); cells absent from the dict fall back to the param's own lower bound.
+"""
+Base.@kwdef struct ParamFloors
+  bmax::Union{Nothing,Dict{Tuple{Int,Int},FloatType}} = nothing
+  anpp::Union{Nothing,Dict{Tuple{Int,Int},FloatType}} = nothing
+  prob_estab::Union{Nothing,Dict{Tuple{Int,Int},FloatType}} = nothing
+end
+
+"""
+    ParamTying
+
+Which (eco, species) targets of an EcoSpecies parameter share ONE u-dimension (empty = every cell its own dim, the default):
+  - `labels` (param_pooling, region runs): param → (eco_id, sp_local) → pooling label ("cell:8.5.3|AB|PIEL", "l3:8.3.4|QURU", "l2:8.4|OXAR", "reg:R|_H_HST");
+    takes precedence over `split_sets` / `tier_merge` for that param. `floor_pooled_max`: a pooled slot's B_MAX / PROB_ESTAB data floor is the MAX
+    over its members (else the first member's: legacy, harmless when the members share one floor).
+  - `split_sets`: param → the GLOBAL species ids fit separately per ecoregion (stratum); every other species shares ONE value across all ecoregions.
+  - `tier_merge`: param → gsp → (site-cell → group label): a split species' per-eco slots are grouped by their site-cell's label, so cells sharing a
+    label share one fit value (e.g. PIEL {A,B}→"AB").
+"""
+Base.@kwdef struct ParamTying
+  labels::Dict{Symbol,Dict{Tuple{Int,Int},String}} = Dict{Symbol,Dict{Tuple{Int,Int},String}}()
+  floor_pooled_max::Bool = false
+  split_sets::Dict{Symbol,Set{Int}} = Dict{Symbol,Set{Int}}()
+  tier_merge::Dict{Symbol,Dict{Int,Dict{String,String}}} = Dict{Symbol,Dict{Int,Dict{String,String}}}()
+end
+
+"""
+    ParamSpace{T}
+
+Everything that defines the SEARCH SPACE of one run, built once from (config, species/eco lists, `eco_species_ids`, data tables) and passed
+explicitly to every driver, decoder and tool (no module state):
+`dists` (the plugin's `ParamDists`), `opts` (`ParamSpaceOptions`), `tying` (pooling / split sets / merges), `floors` (`ParamFloors`),
+`blocks` (`CmaBlocks`), the `slots` layout (one u-dimension each, see `build_slots`) and the lists the layout was derived from.
+Construct with `ParamSpace(dists, n_species, eco_list, eco_species_ids; opts, tying, floors, blocks)`; `with_floors` / `with_dists` derive variants.
+"""
+struct ParamSpace{T}
+  dists::ParamDists{T}
+  opts::ParamSpaceOptions
+  tying::ParamTying
+  floors::ParamFloors
+  blocks::CmaBlocks
+  slots::Vector{Tuple{Int,Any}}
+  n_species::Int
+  eco_list::Vector{String}
+  eco_species_ids::Vector{Vector{Int}}
+end
+function ParamSpace(dists::ParamDists{T}, n_species::Int, eco_list::AbstractVector{<:AbstractString}, eco_species_ids::Vector{Vector{Int}};
+                    opts::ParamSpaceOptions=ParamSpaceOptions(), tying::ParamTying=ParamTying(), floors::ParamFloors=ParamFloors(),
+                    blocks::CmaBlocks=CmaBlocks()) where {T}
+  el = String[String(e) for e in eco_list]
+  ParamSpace{T}(dists, opts, tying, floors, blocks, _build_slots(dists, tying, n_species, el, eco_species_ids), n_species, el, eco_species_ids)
+end
+"The same space with other data floors (the slot layout does not depend on them)."
+with_floors(sp::ParamSpace{T}, floors::ParamFloors) where {T} =
+  ParamSpace{T}(sp.dists, sp.opts, sp.tying, floors, sp.blocks, sp.slots, sp.n_species, sp.eco_list, sp.eco_species_ids)
+"The same space over other distributions (e.g. a driver that fits another parameter set); the slot layout is re-derived."
+with_dists(sp::ParamSpace{T}, dists::ParamDists{T}) where {T} =
+  ParamSpace{T}(dists, sp.opts, sp.tying, sp.floors, sp.blocks, _build_slots(dists, sp.tying, sp.n_species, sp.eco_list, sp.eco_species_ids),
+                sp.n_species, sp.eco_list, sp.eco_species_ids)
 
 abstract type AbstractSampler end
 struct GlobalSampler <: AbstractSampler end       # scalar field, no index needed
@@ -153,14 +257,15 @@ end
 # B9: the previous version picked parameter i+1's weight for i (findlast(cumsum .<= s); the LAST parameter was never mutated —
 # ANPP_MAX_SPP in Sim A), mutated single cells of pooled parameters, wrote the ANPP ratio prior's value (20–35) into ANPP,
 # and looped forever on pinned slots.
-function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation,
+function mutate_params(p::T, space::ParamSpace{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation,
                        slots::Union{Nothing,Vector{Tuple{Int,Any}}}=nothing, dynamic_cumsum::Union{Nothing,Vector{Float64}}=nothing,
                        ctx::Union{Nothing,SamplingContext}=nothing, max_tries::Int=50) where {T}
+  param_dists = space.dists
   wc = isnothing(dynamic_cumsum) ? param_dists.weights_cumsum : dynamic_cumsum
   s = rand(rng, Float64) * wc[end]
   param_idx = something(findfirst(>(s), wc), length(wc))
   param = param_dists.params[param_idx]
-  sl = isnothing(slots) ? build_slots(param_dists, p) : slots
+  sl = isnothing(slots) ? space.slots : slots
   dims = findall(t -> t[1] == param_idx, sl)
   isempty(dims) && return p, param_idx
   d = isnothing(ctx) ? dims[rand(rng, 1:length(dims))] : dims[_weighted_sample(FloatType[_slot_loss(ctx, p, sl[k], param.sampler) for k in dims], rng)]
@@ -176,14 +281,14 @@ function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG
     end
   end
   subslots = sl[sub]
-  u0 = params_to_u(p, param_dists, subslots)
+  u0 = params_to_u(p, space, subslots)
   lo, hi = param.bounds
   σu = (isnothing(lo) || isnothing(hi) || hi == lo) ? 0.1 : Float64(param.sigma) / Float64(hi - lo)
   cur = getproperty(p, param.name)
   for _ in 1:max_tries
     u = copy(u0)
     u[1] = mode == GaussianMutation ? clamp(u0[1] + σu * randn(rng), 0.0, 1.0) : rand(rng)
-    q = u_to_params(u, param_dists, subslots, p)
+    q = u_to_params(u, space, subslots, p)
     getproperty(q, param.name) != cur && return q, param_idx
   end
   return p, param_idx
@@ -285,7 +390,7 @@ const NO_CBAL = CbalTables(Matrix{Vector{FloatType}}(undef, 0, 0), Int[])
 
 The normalisation derived from ONE reference set (train Sim A, train Sim B, val Sim A, …), computed by `Pan.compute_loss_scales` and
 passed explicitly to `fit_params` / `_mo_objectives`. Defaults are neutral (no normalisation), so a hand-built `LossScales()` is valid.
-`rankw` and `cbal` are the run-wide TRAIN tables, shared (same object) by every reference including val.
+`rankw`, `cbal` and `dom` are the run-wide TRAIN tables, shared (same object) by every reference including val.
 """
 Base.@kwdef struct LossScales
   w_global::FloatType = one(FloatType)           # Σ per-reference-max W1 (agb/w_normalize)
@@ -297,6 +402,7 @@ Base.@kwdef struct LossScales
   softplus_beta_cell::Matrix{FloatType} = zeros(FloatType, 0, 0)  # [gsp,eco] reweight-aware β (auto-knee); empty ⇒ use the scalar
   cbal::CbalTables = NO_CBAL
   ncoh::Matrix{Int} = zeros(Int, 0, 0)                   # per-(species,eco) TRAIN cohort counts (input of rankw_mode = :cbal_pct)
+  dom::Vector{Bool} = Bool[]                             # [gsp] species that drive DOMINANCE (MO objectives, RANKW); empty ⇒ all species
 end
 
 Base.@kwdef struct SPDFRecord
@@ -987,29 +1093,29 @@ end
 
 # Flat enumeration of every tunable scalar dimension as (param_idx, target_idx), where
 # target_idx is nothing (Global), an Int (Species/Eco), or an (eco,sp) tuple (EcoSpecies).
-# `template` provides ECO_SPECIES_IDS, SPECIES_LIST, ECO_LIST. `length(build_slots(...))`
+# Built once per ParamSpace from the species count, the eco list and `eco_species_ids`; `length(space.slots)`
 # is the search-space dimensionality `d` shared by sobol_samples and the CMA-ES bridge.
 _eco_lu(s) = (p = split(String(s), "|lu="); length(p) == 2 ? String(p[2]) : "")  # eco "l3|lu=CELL" → "CELL"
 
-function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,Any}} where T
+function _build_slots(param_dists::ParamDists, tying::ParamTying, n_species::Int, eco_list::AbstractVector{<:AbstractString}, eco_species_ids::AbstractVector{<:AbstractVector{<:Integer}})::Vector{Tuple{Int,Any}}
   slots = Tuple{Int,Any}[]
   for (pi, param) in enumerate(param_dists.params)
     if param.sampler isa GlobalSampler
       push!(slots, (pi, nothing))
     elseif param.sampler isa SpeciesSampler
-      for i in 1:length(template.SPECIES_LIST)
+      for i in 1:n_species
         push!(slots, (pi, i))
       end
     elseif param.sampler isa EcoSampler
-      for i in 1:length(template.ECO_LIST)
+      for i in 1:length(eco_list)
         push!(slots, (pi, i))
       end
     elseif param.sampler isa EcoSpeciesSampler
-      pl = get(POOL_LABEL[], param.name, nothing)          # param_pooling: one u-dim per pooling label
-      ss = get(PARAM_SPLIT_SETS[], param.name, nothing)   # global-species ids kept per-eco; others shared
+      pl = get(tying.labels, param.name, nothing)          # param_pooling: one u-dim per pooling label
+      ss = get(tying.split_sets, param.name, nothing)   # global-species ids kept per-eco; others shared
       if pl !== nothing
         groups = Dict{String,Vector{Tuple{Int,Int}}}()
-        for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS), sp_local in eachindex(sp_ids)
+        for (eco_id, sp_ids) in enumerate(eco_species_ids), sp_local in eachindex(sp_ids)
           push!(get!(groups, pl[(eco_id, sp_local)], Tuple{Int,Int}[]), (eco_id, sp_local))
         end
         for lbl in sort!(collect(keys(groups)))
@@ -1017,17 +1123,17 @@ function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,
           push!(slots, (pi, length(g) == 1 ? g[1] : g))
         end
       elseif ss === nothing
-        for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS)
+        for (eco_id, sp_ids) in enumerate(eco_species_ids)
           for sp_id in eachindex(sp_ids)
             push!(slots, (pi, (eco_id, sp_id)))
           end
         end
       else
         pos = Dict{Int,Vector{Tuple{Int,Int}}}()          # global species → all its (eco, sp_local) positions
-        for (eco_id, sp_ids) in enumerate(template.ECO_SPECIES_IDS), sp_local in eachindex(sp_ids)
+        for (eco_id, sp_ids) in enumerate(eco_species_ids), sp_local in eachindex(sp_ids)
           push!(get!(pos, Int(sp_ids[sp_local]), Tuple{Int,Int}[]), (eco_id, sp_local))
         end
-        mp = get(PARAM_TIER_MERGE[], param.name, nothing)
+        mp = get(tying.tier_merge, param.name, nothing)
         for gsp in sort!(collect(keys(pos)))
           if gsp in ss
             mg = mp === nothing ? nothing : get(mp, gsp, nothing)
@@ -1036,7 +1142,7 @@ function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,
             else
               groups = Dict{String,Vector{Tuple{Int,Int}}}()  # merge the site-cells that share a label
               for t in pos[gsp]
-                cell = _eco_lu(template.ECO_LIST[t[1]])
+                cell = _eco_lu(eco_list[t[1]])
                 push!(get!(groups, get(mg, cell, cell), Tuple{Int,Int}[]), t)
               end
               for lbl in sort!(collect(keys(groups)))
@@ -1054,54 +1160,24 @@ function build_slots(param_dists::ParamDists{T}, template::T)::Vector{Tuple{Int,
   return slots
 end
 
+"The slot layout of `space` re-derived for the lists of `template` (a params struct); equals `space.slots` when the template belongs to the same data."
+build_slots(space::ParamSpace{T}, template::T) where {T} =
+  _build_slots(space.dists, space.tying, length(template.SPECIES_LIST), template.ECO_LIST, template.ECO_SPECIES_IDS)
+"The CMA-ES block-diagonal covariance groups over `slots` (default `space.slots`): a partition of the u-coordinates, see `CmaBlocks`."
+build_groups(space::ParamSpace, slots::Vector{Tuple{Int,Any}}=space.slots) = _build_groups(space.dists, slots, space.blocks)
+
+_slot_floor(fl, tgts, dflt, pooled_max::Bool) = pooled_max ? maximum(Float64(get(fl, t, dflt)) for t in tgts) : Float64(get(fl, first(tgts), dflt))
+
 # Map a u-vector in [0,1]^d to a params struct via each prior's quantile, then bounds-clip and
-# Per-(eco_id, sp_local) LOWER bound for :B_MAX_SPP — the data-derived floor (≥12000), set by
-# Pan._build_bmax_floor!. When non-nothing, u_to_params / params_to_u RESCALE the uniform prior onto
-# [floor, upper] for each B_MAX slot (so there is no probability pile-up at the floor) and mutate_params
-# clips to it. nothing = flat [12000,35000] window from the param bounds (feature off).
-const BMAX_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
-
-# Per-(eco_id, sp_local) LOWER bound for the DERIVED ANPP (g/m²/yr), set by Pan._build_anpp_floor!. Since
-# ANPP = B_MAX/ratio under the reparam, this floors it at decode: ANPP = max(B_MAX/ratio, floor). Equivalent
-# to a per-cell UPPER bound on the ratio (r ≤ B_MAX/floor). The params_to_u inverse is unchanged: recovering
-# r = B_MAX/ANPP and re-decoding re-applies the floor (round-trip stable). nothing = no floor (feature off).
-const ANPP_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
-
-# Per-(eco_id, sp_local) LOWER bound for PROB_ESTAB, set by Pan._build_prob_estab_floor! from the data table.
-# When non-nothing, u_to_params / params_to_u RESCALE the uniform prior onto [floor, 1.0] for each PROB_ESTAB
-# slot — so the search can never drive establishment BELOW the empirically-observed rate (it may go higher).
-# Cells absent from the dict fall back to the param's own lower bound. nothing = flat window (feature off).
-const PROB_ESTAB_FLOOR = Ref{Union{Nothing,Dict{Tuple{Int,Int},FloatType}}}(nothing)
-
-# Per-parameter SPLIT SET: for an EcoSpecies param, the set of GLOBAL species ids whose value is fit
-# separately per ecoregion (stratum); species NOT in the set share ONE value across all ecoregions.
-# `param.name ∉ keys` ⇒ every species split per-eco (the default, byte-identical to before). This lets
-# e.g. B_MAX vary by site-tier only for the responsive species while the rest are tied — transparent to
-# the plugin: u_to_params still fills every B_MAX_SPP[eco][sp] slot (shared species get the same value
-# broadcast across their ecos). A shared slot's target is the Vector of all its (eco, sp_local) positions.
-const PARAM_SPLIT_SETS = Ref{Dict{Symbol,Set{Int}}}(Dict{Symbol,Set{Int}}())
-
-# Per-parameter, per-species SITE-CELL MERGE map for a split (stratified) species: gsp → (cell → group label).
-# A split species' per-eco slots are grouped by their site-cell's label, so cells sharing a label share ONE
-# fit value (e.g. PIEL {A,B}→"AB" ties SITECLCD 1-3 and 4). Absent species/param ⇒ every cell its own group
-# (plain per-eco split). Lets different species use different site-productivity partitions off one plot label.
-const PARAM_TIER_MERGE = Ref{Dict{Symbol,Dict{Int,Dict{String,String}}}}(Dict{Symbol,Dict{Int,Dict{String,String}}}())
-
-# param_pooling (region runs): param → (eco_id, sp_local) → pooling label ("cell:8.5.3|AB|PIEL", "l3:8.3.4|QURU",
-# "l2:8.4|OXAR", "reg:R|_H_HST"). Takes precedence over PARAM_SPLIT_SETS/TIER_MERGE for that param in build_slots:
-# targets sharing a label share ONE u-dim. Empty ⇒ legacy. FLOOR_POOLED_MAX: a pooled slot's B_MAX/PROB_ESTAB data
-# floor is the MAX over its members (else the first member's — legacy; harmless when members share one floor).
-const POOL_LABEL = Ref{Dict{Symbol,Dict{Tuple{Int,Int},String}}}(Dict{Symbol,Dict{Tuple{Int,Int},String}}())
-const FLOOR_POOLED_MAX = Ref(false)
-_slot_floor(fl, tgts, dflt) = FLOOR_POOLED_MAX[] ? maximum(Float64(get(fl, t, dflt)) for t in tgts) : Float64(get(fl, first(tgts), dflt))
-
 # cast to the param's type — identical to the sobol_samples inner mapping. Bounds and discrete
 # priors (DiscreteUniform) are handled automatically by quantile, so any u is representable.
-function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}, template::T)::T where T
+function u_to_params(u::AbstractVector{<:Real}, space::ParamSpace{T}, slots::Vector{Tuple{Int,Any}}, template::T)::T where T
+  param_dists = space.dists
   p = template
-  bf = BMAX_FLOOR[]
-  af = ANPP_FLOOR[]
-  pef = PROB_ESTAB_FLOOR[]
+  bf = space.floors.bmax
+  af = space.floors.anpp
+  pef = space.floors.prob_estab
+  pmax = space.tying.floor_pooled_max
   for (dim, (pi, idx)) in enumerate(slots)
     param = param_dists.params[pi]
     min_, max_ = param.bounds
@@ -1121,10 +1197,10 @@ function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slot
     end
     lo_eff = min_   # effective lower bound for the clamp (raised to a per-cell data floor for B_MAX / PROB_ESTAB)
     raw = if bf !== nothing && param.name === :B_MAX_SPP
-      lo = _slot_floor(bf, tgts, 12000.0); lo_eff = lo; hi = Float64(max_)   # rescale uniform u onto [floor, upper]
+      lo = _slot_floor(bf, tgts, 12000.0, pmax); lo_eff = lo; hi = Float64(max_)   # rescale uniform u onto [floor, upper]
       lo + clamp(Float64(u[dim]), 0.0, 1.0) * (hi - lo)
     elseif pef !== nothing && param.name === :PROB_ESTAB_SPP
-      lo = _slot_floor(pef, tgts, Float64(min_)); lo_eff = lo; hi = Float64(max_)   # data lower bound → [floor, 1.0]
+      lo = _slot_floor(pef, tgts, Float64(min_), pmax); lo_eff = lo; hi = Float64(max_)   # data lower bound → [floor, 1.0]
       lo + clamp(Float64(u[dim]), 0.0, 1.0) * (hi - lo)
     else
       Dists.quantile(param.dist, clamp(Float64(u[dim]), 1e-10, 1 - 1e-10))
@@ -1145,13 +1221,18 @@ function u_to_params(u::AbstractVector{<:Real}, param_dists::ParamDists{T}, slot
   return p
 end
 
+"`u_to_params(u, space, space.slots, template)`."
+u_to_params(u::AbstractVector{<:Real}, space::ParamSpace{T}, template::T) where {T} = u_to_params(u, space, space.slots, template)
+
 # Inverse of u_to_params (on the prior-grid): map each tunable value to u = cdf(prior, value).
 # Used once to seed the CMA-ES mean from an initial params struct. Clamped off the open
 # endpoints so the round-trip through quantile stays inside the bounds.
-function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}})::Vector{Float64} where T
+function params_to_u(params::T, space::ParamSpace{T}, slots::Vector{Tuple{Int,Any}})::Vector{Float64} where T
+  param_dists = space.dists
   u = Vector{Float64}(undef, length(slots))
-  bf = BMAX_FLOOR[]
-  pef = PROB_ESTAB_FLOOR[]
+  bf = space.floors.bmax
+  pef = space.floors.prob_estab
+  pmax = space.tying.floor_pooled_max
   for (dim, (pi, idx)) in enumerate(slots)
     param = param_dists.params[pi]
     rep = idx isa Vector ? idx[1] : idx                 # shared slot ⇒ read the representative eco (all equal)
@@ -1162,10 +1243,10 @@ function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{
       ratio = anpp > 0 ? bmax / anpp : Float64(Dists.mean(param.dist))
       clamp(Float64(Dists.cdf(param.dist, ratio)), 1e-6, 1 - 1e-6)
     elseif bf !== nothing && param.name === :B_MAX_SPP
-      lo = _slot_floor(bf, tgts, 12000.0); hi = Float64(param.bounds[2])   # inverse of the u_to_params rescale
+      lo = _slot_floor(bf, tgts, 12000.0, pmax); hi = Float64(param.bounds[2])   # inverse of the u_to_params rescale
       clamp((Float64(cur) - lo) / (hi - lo), 1e-6, 1 - 1e-6)
     elseif pef !== nothing && param.name === :PROB_ESTAB_SPP
-      lo = _slot_floor(pef, tgts, Float64(param.bounds[1])); hi = Float64(param.bounds[2])   # inverse of the [floor,1] rescale
+      lo = _slot_floor(pef, tgts, Float64(param.bounds[1]), pmax); hi = Float64(param.bounds[2])   # inverse of the [floor,1] rescale
       clamp((Float64(cur) - lo) / (hi - lo), 1e-6, 1 - 1e-6)
     elseif param.dist isa Dists.DiscreteUnivariateDistribution
       # integer prior: encode to the MIDDLE of level k's mass interval (cdf(k-1), cdf(k)]. cdf(k) itself sits on the quantile
@@ -1179,11 +1260,15 @@ function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{
   return u
 end
 
+"`params_to_u(params, space, space.slots)`."
+params_to_u(params::T, space::ParamSpace{T}) where {T} = params_to_u(params, space, space.slots)
+
 # native parameter VALUE per slot — same layout as `params_to_u`, but WITHOUT the prior-CDF transform.
 # Used by parameter-space niching so decision distances are measured in native units (and thus in the
 # per-parameter `quantum`s), not in the CDF-warped u-space. Reads only slot dims, so it is identical
 # regardless of the `template`/`base` used to decode (frozen-growth-safe).
-function params_to_nativevec(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}})::Vector{Float64} where T
+function params_to_nativevec(params::T, space::ParamSpace{T}, slots::Vector{Tuple{Int,Any}})::Vector{Float64} where T
+  param_dists = space.dists
   v = Vector{Float64}(undef, length(slots))
   for (dim, (pi, idx)) in enumerate(slots)
     param = param_dists.params[pi]
@@ -1195,8 +1280,8 @@ end
 
 # per-slot semantic quantum in NATIVE units: the parameter's `quantum` if set, else its Gaussian `sigma`
 # (quantum-first, sigma-fallback). The scale below which a difference is deemed semantically irrelevant.
-slot_quanta(param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}) where T =
-  Float64[(p = param_dists.params[pi]; Float64(p.quantum > zero(FloatType) ? p.quantum : p.sigma)) for (pi, _) in slots]
+slot_quanta(space::ParamSpace, slots::Vector{Tuple{Int,Any}}=space.slots) =
+  Float64[(p = space.dists.params[pi]; Float64(p.quantum > zero(FloatType) ? p.quantum : p.sigma)) for (pi, _) in slots]
 
 # Hansen-style mixed-integer handling: a per-u-coordinate lower bound on the CMA-ES sampling
 # std-dev, so discrete coordinates keep flipping integers even as σ shrinks (otherwise a coarse
@@ -1205,10 +1290,10 @@ slot_quanta(param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}) where T =
 # 1/L; the floor is `factor/L`. Continuous priors get 0 (no floor). The floor self-targets coarse
 # discretes — for fine ones (large L) it is tiny and effectively never binds. Returns a length-d
 # vector aligned with `slots` (used to top up the marginal std in CMAES.ask).
-function integer_u_min_std(param_dists::ParamDists{T}, slots::Vector{Tuple{Int,Any}}, factor::Float64=0.3)::Vector{Float64} where T
+function integer_u_min_std(space::ParamSpace, slots::Vector{Tuple{Int,Any}}=space.slots, factor::Float64=0.3)::Vector{Float64}
   s = zeros(Float64, length(slots))
   for (dim, (pi, _)) in enumerate(slots)
-    p = param_dists.params[pi]
+    p = space.dists.params[pi]
     if p.dist isa Dists.DiscreteUniform
       span = Float64(Dists.maximum(p.dist) - Dists.minimum(p.dist))   # value-range width
       step = p.quantum > zero(FloatType) ? Float64(p.quantum) : 1.0   # effective grid step
@@ -1220,17 +1305,16 @@ function integer_u_min_std(param_dists::ParamDists{T}, slots::Vector{Tuple{Int,A
 end
 
 # Generate N quasi-random Sobol samples covering the full parameter space.
-# `param_dists` comes from e.g. BSP.make_biomass_param_dists(...).
-# `initial_params` is the template struct (provides ECO_SPECIES_IDS, SPECIES_LIST, ECO_LIST).
-function sobol_samples(param_dists::ParamDists{T}, initial_params::T, N::Int)::Vector{T} where T
-  slots = build_slots(param_dists, initial_params)
+# `space` is the run's ParamSpace (see Pan.build_param_space); `initial_params` is the decode template.
+function sobol_samples(space::ParamSpace{T}, initial_params::T, N::Int)::Vector{T} where T
+  slots = space.slots
   d = length(slots)
   seq = Sobol.SobolSeq(d)
   u = zeros(Float64, d)
   results = Vector{T}(undef, N)
   for n in 1:N
     Sobol.next!(seq, u)
-    results[n] = u_to_params(u, param_dists, slots, initial_params)
+    results[n] = u_to_params(u, space, slots, initial_params)
   end
   return results
 end
@@ -1239,13 +1323,13 @@ end
 # group per MutableParam name, whose eco/species/eco-species u-dims move together. Returns the N(K+2)
 # param structs in evaluation order plus a matching tag vector ("A", "B", "AB:<name>"), so the existing
 # sobol eval loop yields f(A), f(B), f(ABₖ) — enough for first-order Sᵢ and total-effect Sₜᵢ per type.
-function saltelli_design(param_dists::ParamDists{T}, initial_params::T, N::Int) where T
-  slots = build_slots(param_dists, initial_params)
+function saltelli_design(space::ParamSpace{T}, initial_params::T, N::Int) where T
+  slots = space.slots
   d = length(slots)
   groups = Tuple{Symbol,Vector{Int}}[]      # (param-name, u-dim indices), first-seen order
   gpos = Dict{Symbol,Int}()
   for (dim, (pi, _)) in enumerate(slots)
-    nm = param_dists.params[pi].name
+    nm = space.dists.params[pi].name
     haskey(gpos, nm) || (push!(groups, (nm, Int[])); gpos[nm] = length(groups))
     push!(groups[gpos[nm]][2], dim)
   end
@@ -1257,12 +1341,12 @@ function saltelli_design(param_dists::ParamDists{T}, initial_params::T, N::Int) 
   samples = Vector{T}(undef, N * (length(groups) + 2))
   tags = Vector{String}(undef, length(samples))
   k = 0
-  for n in 1:N; k += 1; samples[k] = u_to_params(@view(A[n, :]), param_dists, slots, initial_params); tags[k] = "A"; end
-  for n in 1:N; k += 1; samples[k] = u_to_params(@view(B[n, :]), param_dists, slots, initial_params); tags[k] = "B"; end
+  for n in 1:N; k += 1; samples[k] = u_to_params(@view(A[n, :]), space, slots, initial_params); tags[k] = "A"; end
+  for n in 1:N; k += 1; samples[k] = u_to_params(@view(B[n, :]), space, slots, initial_params); tags[k] = "B"; end
   for (nm, cols) in groups
     for n in 1:N
       u2 = Vector{Float64}(A[n, :]); @views u2[cols] .= B[n, cols]   # ABₖ: A with group-k cols from B
-      k += 1; samples[k] = u_to_params(u2, param_dists, slots, initial_params); tags[k] = "AB:" * String(nm)
+      k += 1; samples[k] = u_to_params(u2, space, slots, initial_params); tags[k] = "AB:" * String(nm)
     end
   end
   return samples, tags
