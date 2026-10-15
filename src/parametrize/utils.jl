@@ -112,36 +112,6 @@ function _weighted_sample(weights::AbstractVector{FloatType}, rng::Random.Abstra
   return n
 end
 
-sample_target(s::GlobalSampler, p, rng::Random.AbstractRNG) = nothing
-sample_target(s::SpeciesSampler, p, rng::Random.AbstractRNG) = rand(rng, 1:length(p.SPECIES_LIST))
-sample_target(s::EcoSampler, p, rng::Random.AbstractRNG) = rand(rng, 1:length(p.ECO_LIST))
-function sample_target(s::EcoSpeciesSampler, p, rng::Random.AbstractRNG)
-  eco_id = rand(rng, 1:length(p.ECO_SPECIES_IDS))
-  species_id = rand(rng, 1:length(p.ECO_SPECIES_IDS[eco_id]))
-  (eco_id, species_id)
-end
-
-# Context-aware overloads: species/eco-species selection proportional to sp_w_loss.
-sample_target(::GlobalSampler, p, rng::Random.AbstractRNG, ::SamplingContext) = nothing
-sample_target(::EcoSampler, p, rng::Random.AbstractRNG, ::SamplingContext) = rand(rng, 1:length(p.ECO_LIST))
-
-function sample_target(::SpeciesSampler, p, rng::Random.AbstractRNG, ctx::SamplingContext)
-  _weighted_sample(ctx.sp_w_loss, rng)
-end
-
-function sample_target(::EcoSpeciesSampler, p, rng::Random.AbstractRNG, ctx::SamplingContext)
-  # Stage 1: sample eco proportional to summed loss of its species.
-  eco_weights = FloatType[
-    sum(ctx.sp_w_loss[Int(gsp)] for gsp in p.ECO_SPECIES_IDS[eco_id])
-    for eco_id in 1:length(p.ECO_SPECIES_IDS)
-  ]
-  eco_id = _weighted_sample(eco_weights, rng)
-  # Stage 2: sample local species index proportional to its loss.
-  sp_weights = FloatType[ctx.sp_w_loss[Int(gsp)] for gsp in p.ECO_SPECIES_IDS[eco_id]]
-  sp_id = _weighted_sample(sp_weights, rng)
-  (eco_id, sp_id)
-end
-
 get_field_val(::ScalarApplier, field, idx) = field
 get_field_val(::IndexApplier, field, idx) = field[idx]
 function get_field_val(::NestedIndexApplier, field, idx)
@@ -165,64 +135,59 @@ function apply_mutation(a::GradientApplier, field, idx, val)
 end
 
 
-function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation, ctx::Union{Nothing,SamplingContext}=nothing, dynamic_cumsum::Union{Nothing,Vector{Float64}}=nothing) where {T}
-  s = rand(rng, Float64)
-  wcumsum = isnothing(dynamic_cumsum) ? param_dists.weights_cumsum : dynamic_cumsum
-  param_idx = something(findlast(wcumsum .<= s), 1)
-  param = param_dists.params[param_idx]
-  _mutation_mode = mutation_mode != BothMutations ? mutation_mode : (rand(rng) > 0.5 ? GaussianMutation : RandomMutation)
-
-  idx = isnothing(ctx) ? sample_target(param.sampler, p, rng) :
-        sample_target(param.sampler, p, rng, ctx)
-  field = getproperty(p, param.name)
-  val = begin
-    cur_val = get_field_val(param.applier, field, idx)
-    r = cur_val
-    min_, max_ = param.bounds
-    if (bf = BMAX_FLOOR[]) !== nothing && param.name === :B_MAX_SPP   # per-(eco,species) data floor (LBSA/SA path)
-      min_ = FloatType(get(bf, idx, 12000.0))
-    end
-    while r == cur_val
-      r = if _mutation_mode == GaussianMutation
-        sigma = param.sigma
-        #println(param, r, cur_val)
-        begin
-          if param.type == UIntType
-            if !isnothing(min_) && cur_val == min_
-              cur_val + param.sigma
-            elseif !isnothing(max_) && cur_val == max_
-              cur_val - param.sigma
-            else
-              rand(rng) > 0.5 ? cur_val + param.sigma : cur_val - param.sigma
-            end
-          else
-            rand(rng, Dists.Normal(FloatType(cur_val), sigma))
-          end
-        end |> param.type
-      else
-        rand(rng, param.dist) |> param.type
-      end
-      r = if !isnothing(min_) && FloatType(r) <= FloatType(min_)
-        FloatType(min_)
-      elseif !isnothing(max_) && FloatType(r) >= FloatType(max_)
-        FloatType(max_)
-      else
-        r
-      end |> param.type
-      r = _quantize(r, param.quantum, param.type)   # snap to the param's grid (e.g. B_MAX by 100)
-    end
-    r
-  end
-
-  new_field = apply_mutation(param.applier, field, idx, val)
-  #println(field)
-  #println(typeof(val))
-  #println(new_field)
-
-  Setfield.@set(p.$(param.name) = new_field), param_idx
+# loss mass of a slot's targets for loss-weighted slot choice (SamplingContext): species slots → sp_w_loss[species];
+# eco×species slots → Σ over their (eco, local species) targets; global / eco slots → 1 (uniform among themselves)
+function _slot_loss(ctx::SamplingContext, p, slot, sampler)::FloatType
+  idx = slot[2]
+  sampler isa SpeciesSampler && return ctx.sp_w_loss[idx]
+  sampler isa EcoSpeciesSampler || return one(FloatType)
+  tg = idx isa Vector ? idx : (idx,)
+  sum(FloatType(ctx.sp_w_loss[Int(p.ECO_SPECIES_IDS[e][j])]) for (e, j) in tg)
 end
 
-
+# One annealing move (LBSA / MOLBSA / SA): pick a parameter by its sampling weight, one of its u-slots uniformly, and move that
+# slot's u coordinate — Gaussian (σ = the parameter's native sigma over its box width) or a uniform redraw — then decode with
+# the SAME u_to_params the CMA-ES drivers use, so pooling, the ANPP ratio reparam, data floors and quantization all hold.
+# Mutating a B_MAX slot re-derives the ANPP of its targets at the unchanged ratio (as a full u decode would). Returns
+# (params, param_idx); a slot that cannot change (pinned by a floor, single level) returns `p` unchanged after max_tries.
+# B9: the previous version picked parameter i+1's weight for i (findlast(cumsum .<= s); the LAST parameter was never mutated —
+# ANPP_MAX_SPP in Sim A), mutated single cells of pooled parameters, wrote the ANPP ratio prior's value (20–35) into ANPP,
+# and looped forever on pinned slots.
+function mutate_params(p::T, param_dists::ParamDists{T}; rng::Random.AbstractRNG, mutation_mode::MutationType=RandomMutation,
+                       slots::Union{Nothing,Vector{Tuple{Int,Any}}}=nothing, dynamic_cumsum::Union{Nothing,Vector{Float64}}=nothing,
+                       ctx::Union{Nothing,SamplingContext}=nothing, max_tries::Int=50) where {T}
+  wc = isnothing(dynamic_cumsum) ? param_dists.weights_cumsum : dynamic_cumsum
+  s = rand(rng, Float64) * wc[end]
+  param_idx = something(findfirst(>(s), wc), length(wc))
+  param = param_dists.params[param_idx]
+  sl = isnothing(slots) ? build_slots(param_dists, p) : slots
+  dims = findall(t -> t[1] == param_idx, sl)
+  isempty(dims) && return p, param_idx
+  d = isnothing(ctx) ? dims[rand(rng, 1:length(dims))] : dims[_weighted_sample(FloatType[_slot_loss(ctx, p, sl[k], param.sampler) for k in dims], rng)]
+  mode = mutation_mode != BothMutations ? mutation_mode : (rand(rng) > 0.5 ? GaussianMutation : RandomMutation)
+  # the slot plus, for B_MAX, the ANPP slots sharing its targets (decoded after it, at their current ratio)
+  tg(t) = t[2] isa Vector ? t[2] : (t[2],)
+  sub = [d]
+  if param.name === :B_MAX_SPP
+    ai = findfirst(q -> q.name === :ANPP_MAX_SPP, param_dists.params)
+    if ai !== nothing
+      mine = Set(tg(sl[d]))
+      append!(sub, [k for k in eachindex(sl) if sl[k][1] == ai && any(in(mine), tg(sl[k]))])
+    end
+  end
+  subslots = sl[sub]
+  u0 = params_to_u(p, param_dists, subslots)
+  lo, hi = param.bounds
+  σu = (isnothing(lo) || isnothing(hi) || hi == lo) ? 0.1 : Float64(param.sigma) / Float64(hi - lo)
+  cur = getproperty(p, param.name)
+  for _ in 1:max_tries
+    u = copy(u0)
+    u[1] = mode == GaussianMutation ? clamp(u0[1] + σu * randn(rng), 0.0, 1.0) : rand(rng)
+    q = u_to_params(u, param_dists, subslots, p)
+    getproperty(q, param.name) != cur && return q, param_idx
+  end
+  return p, param_idx
+end
 
 @inline skipundef(xs::AbstractArray) = xs[filter(i -> isassigned(xs, i), eachindex(xs))]
 

@@ -308,4 +308,61 @@ end
     @test tags[1:4] == fill("A", 4) && tags[5:8] == fill("B", 4) && tags[9] == "AB:D" && tags[end] == "AB:MIN_REL_BIOMASS"
   end
 end
-end # module
+
+@testset "mutate_params: weights, pooling, ANPP ratio, pinned slots (B9)" begin
+  with_globals() do
+    pd, tpl, slots = setup()
+    p0 = PU.u_to_params(fill(0.5, length(slots)), pd, slots, tpl)
+    # 1. parameter choice follows the sampling weights — including the LAST parameter (never chosen before)
+    w = diff(vcat(0.0, pd.weights_cumsum)); n = 20_000; cnt = zeros(Int, length(w)); rng = Random.Xoshiro(3)
+    for _ in 1:n; _, k = PU.mutate_params(p0, pd; rng=rng, slots=slots); cnt[k] += 1; end
+    @test all(abs.(cnt ./ n .- w) .< 0.02)
+    @test cnt[end] > 0
+    # 2. ANPP stays ANPP: B_MAX / ratio with the ratio inside its box (the old code wrote ratio values 20–35 into ANPP)
+    ai = pidx(pd, :ANPP_MAX_SPP); bi = pidx(pd, :B_MAX_SPP)
+    one_param(k) = (c = zeros(length(pd.weights_cumsum)); c[k:end] .= 1.0; c)   # dynamic_cumsum that always picks param k
+    rng = Random.Xoshiro(5); p = p0
+    for _ in 1:200
+      p, k = PU.mutate_params(p, pd; rng=rng, slots=slots, dynamic_cumsum=one_param(ai), mutation_mode=PU.BothMutations)
+      @test k == ai
+    end
+    for (e, ids) in enumerate(ESI), j in eachindex(ids)
+      r = p.B_MAX_SPP[e][j] / p.ANPP_MAX_SPP[e][j]
+      @test 20 - 1e-3 <= r <= 35 + 1e-3
+    end
+    # 3. mutating B_MAX keeps each target's ratio (ANPP re-derived), and changes nothing else
+    q = p
+    for _ in 1:50; q, _ = PU.mutate_params(q, pd; rng=rng, slots=slots, dynamic_cumsum=one_param(bi)); end
+    @test q.B_MAX_SPP != p.B_MAX_SPP
+    for (e, ids) in enumerate(ESI), j in eachindex(ids)
+      @test isapprox(q.B_MAX_SPP[e][j] / q.ANPP_MAX_SPP[e][j], p.B_MAX_SPP[e][j] / p.ANPP_MAX_SPP[e][j]; rtol=1e-4)
+    end
+    @test q.S == p.S && q.D == p.D
+    # 4. pooled parameter: one move changes every cell of the pooled slot identically
+    PU.POOL_LABEL[] = Dict(:B_MAX_SPP => Dict((1, 1) => "a", (2, 1) => "a", (1, 2) => "b", (1, 3) => "c", (2, 2) => "c"))
+    sp = PU.build_slots(pd, tpl)
+    r = p0
+    for _ in 1:30
+      r, _ = PU.mutate_params(r, pd; rng=rng, slots=sp, dynamic_cumsum=one_param(bi))
+      @test r.B_MAX_SPP[1][1] == r.B_MAX_SPP[2][1] && r.B_MAX_SPP[1][3] == r.B_MAX_SPP[2][2]
+    end
+    PU.POOL_LABEL[] = typeof(PU.POOL_LABEL[])()
+    # 5. a slot pinned by a floor above the box cannot change: returns unchanged instead of looping forever
+    PU.BMAX_FLOOR[] = Dict{Tuple{Int,Int},Float32}((e, j) => 40000f0 for (e, ids) in enumerate(ESI) for j in eachindex(ids))
+    pin = PU.u_to_params(fill(0.5, length(slots)), pd, slots, tpl)
+    t = @elapsed (pp, _) = PU.mutate_params(pin, pd; rng=rng, slots=slots, dynamic_cumsum=one_param(bi))
+    @test pp.B_MAX_SPP == pin.B_MAX_SPP && t < 5
+    PU.BMAX_FLOOR[] = nothing
+    # 6. loss-weighted slot choice (SamplingContext): all moves land on the only species with loss
+    ctx = PU.SamplingContext(Float32[0, 1, 0])          # only species 2 ("B", eco 1 local 2) carries loss
+    m = p0
+    for _ in 1:30
+      m2, _ = PU.mutate_params(m, pd; rng=rng, slots=slots, dynamic_cumsum=one_param(bi), ctx=ctx)
+      changed = [(e, j) for (e, ids) in enumerate(ESI) for j in eachindex(ids) if m2.B_MAX_SPP[e][j] != m.B_MAX_SPP[e][j]]
+      @test isempty(changed) || changed == [(1, 2)]
+      m = m2
+    end
+  end
+end
+
+end
