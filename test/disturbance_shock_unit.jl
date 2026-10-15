@@ -115,5 +115,9 @@ P.EXCLUDE_RECRUITS_AT_ENTRY[] = false
 plan_r0 = P._build_excl_plan(P._SiteInjectionDict(2 => inj2, 5 => inj5c), soa, esids, lp)
 @check isempty(plan_r0.coh) "exclude_recruits_at_entry=false: no recruit exclusion"
 P.EXCLUDE_RECRUITS_AT_ENTRY[] = true
+# previous visit = year 0 (the initial state) is a valid previous visit: (sp1,20) is a recruit relative to year 0, (sp1,40)=35+5 is not
+inj0 = P._SiteInjectionYear([(1, Tuple{UI,FT,FT,FT}[(UI(1), FT(35), FT(90), FT(0))])])
+plan_0 = P._build_excl_plan(P._SiteInjectionDict(0 => inj0, 5 => inj5c), soa, esids, lp)
+@check haskey(plan_0.coh, 5) && plan_0.coh[5][1] == [(UI(1), FT(20))] "recruit test against a year-0 previous visit: $(get(plan_0.coh,5,nothing))"
 println("disturbance_shock_unit: $(npass[]) passed, $(nfail[]) failed")
 exit(nfail[] == 0 ? 0 : 1)

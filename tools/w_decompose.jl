@@ -1,0 +1,73 @@
+# DIAGNOSTIC: decompose / sensitivity of A and W (new vs legacy order). See docs/mo_gdigel.md.
+#   ./julia_gdal.sh --project=. --threads=8 tools/w_decompose.jl <config.yml> <start.jld2> <out_dir> [extra params jld2 ...]
+using Pan, JLD2, Printf, Random, Statistics
+const P = Pan; const PU = P.PU
+cfgpath, ppath, outd = ARGS[1], ARGS[2], ARGS[3]; extra = ARGS[4:end]
+function run(d)
+  SP = P.succession_plugin_of(d.ref_soa); p0 = JLD2.load_object(ppath)
+  pd = P.make_param_dists(SP, d.n_species, length(d.eco_list), d.eco_species_ids; no_establishment=true, fit_establishment=false)
+  slots = PU.build_slots(pd, p0)
+  cg, labels = P._gd_groups(pd, slots, d.eco_species_ids, d.species_list, d.eco_list)
+  ix = P._gd_index(d.injection_cohorts, d.splots, cg, labels; real_only=true)
+  gc = P._gd_groupcells(ix.cell_group, ix.ngroups)
+  idict = P._build_injection_dict(d.injection_cohorts, d.ref_soa); iy = Set(Int.(d.injection_cohorts.sim_year))
+  msy = maximum(maximum.(filter(!isempty, d.site_sim_years.sim_years)))
+  nvis = P._gd_cell_visits(d.spdf_plts, d.eco_species_ids, 1)
+  println("DIAG groups=$(ix.ngroups) pairs=$(length(ix.pair_group))")
+  P.W_DIAG_CTX[] = (d.spdf_plts, d.n_species, d.eco_species_ids, d.loss_params)
+  function ev(p; lbi=true, mode=:none)
+    fill!(P.W_DIAG_CAT, 0)
+    P.LOSS_BEFORE_INJECTION[] = lbi; P.W_DIAG[] = mode; fill!(P.W_DIAG_STATS, 0)
+    r = P.fit_params(d.ref_soa, p, msy, d.n_species, d.eco_species_ids, d.spdf_plts, d.site_sim_years, false, d.spinup_cohorts, d.loss_params;
+      debug=false, search_tier=3, injection_dict=idict, injection_years=iy, seeds=[UInt64(1)], cache_preinject=true)
+    P.W_DIAG[] = :none; P.LOSS_BEFORE_INJECTION[] = true
+    L = P._gd_losses(ix, r[1][2])
+    num, den = P._gd_cell_w(r[1][3], d.eco_species_ids, nvis)
+    w = P._gd_group_w(num, den, gc)
+    raw = sum(sum(num[e]) for e in eachindex(num)); dn = sum(sum(den[e]) for e in eachindex(den))
+    (A=sum(filter(!isnan, L.a)), W=sum(filter(!isnan, w)), rawnum=raw, den=dn, stats=copy(P.W_DIAG_STATS), cat=copy(P.W_DIAG_CAT))
+  end
+  function show(tag, r); @printf("DIAG %-34s SumA=%8.3f SumW=%9.3f  rawW=%11.2f  Wscale=%9.2f\n", tag, r.A, r.W, r.rawnum, r.den); end
+  # ---- 1. decomposition at the start point (p0) and at the first archive point of the v2 smoke
+  sets = Pair{String,Any}["start" => p0]
+  for f in extra; push!(sets, basename(f) => JLD2.load_object(f)); end
+  for (nm, p) in sets[1:min(2, end)]
+    println("DIAG ===== decomposition: $nm")
+    leg = ev(p; lbi=false);                 show("legacy order", leg)
+    new = ev(p; mode=:stats);               show("new order", new)
+    nd = ev(p; mode=:nodeath);              show("new, sim-only cohorts removed (oracle)", nd)
+    orc = ev(p; mode=:oracle);              show("new, sim set := obs set (oracle shape)", orc)
+    S = new.stats; C = new.cat
+    @printf("DIAG   ref-only species records: no previous visit n=%d W=%.1f | species observed at PREVIOUS visit n=%d W=%.1f | (rest = new species at this site)\n", C[5, 2], C[5, 1], C[6, 2], C[6, 1])
+    for (i, nm2) in enumerate(["both, same age set", "both, age sets differ (some overlap)", "ref only (species missing in sim)", "both, no age overlap"])
+      @printf("DIAG   per-species-record W[%s]: n=%d  sumW(unnormalised)=%.1f  mean=%.2f\n", nm2, C[i, 2], C[i, 1], C[i, 2] > 0 ? C[i, 1] / C[i, 2] : 0.0)
+    end
+    @printf("DIAG   W(b) natural-death sim-only cohorts  = %9.2f (%.1f%% of new rawW)\n", new.rawnum - nd.rawnum, 100 * (new.rawnum - nd.rawnum) / new.rawnum)
+    @printf("DIAG   W(c+d) obs-only cohorts+missing sp   = %9.2f (%.1f%%)\n", nd.rawnum - orc.rawnum, 100 * (nd.rawnum - orc.rawnum) / new.rawnum)
+    @printf("DIAG   W(a)  matched-set shape (oracle)     = %9.2f (%.1f%%)\n", orc.rawnum, 100 * orc.rawnum / new.rawnum)
+    @printf("DIAG   site-years=%d | matched n=%d simbio=%.4g obsbio=%.4g | sim-only n=%d bio=%.4g | obs-only n=%d bio=%.4g\n", S[15], S[1], S[2], S[3], S[4], S[5], S[6], S[7])
+    @printf("DIAG   missing-species (obs sp w/o sim) cohorts=%d obsbio=%.4g | extra-species sim cohorts=%d bio=%.4g | sim-only with |age diff|=1 obs mate: %d | excluded sim n=%d obs bio=%.4g\n", S[8], S[9], S[10], S[11], S[14], S[12], S[13])
+    @printf("DIAG   sim-only share of sim cohorts=%.1f%% of sim biomass=%.1f%% ; obs-only share of obs cohorts=%.1f%% of obs biomass=%.1f%%\n",
+      100 * S[4] / (S[1] + S[4]), 100 * S[5] / (S[2] + S[5]), 100 * S[6] / (S[1] + S[6]), 100 * S[7] / (S[3] + S[7]))
+  end
+  # ---- 2. sensitivity
+  println("DIAG ===== sensitivity (new order): components over parameter sets")
+  nd_ = length(slots); rng = Random.Xoshiro(7)
+  for k in 1:4; push!(sets, "uniform_u$k" => PU.u_to_params(rand(rng, nd_), pd, slots, p0)); end
+  rows = NamedTuple[]; dead = Tuple[]
+  for (nm, p) in sets
+    n = ev(p; mode=:stats); o = ev(p; mode=:oracle); x = ev(p; mode=:nodeath)
+    St = n.stats; push!(dead, (nm, St[4], St[5] / (St[2] + St[5]), St[5]))
+    push!(rows, (nm=nm, A=n.A, W=n.W, rawW=n.rawnum, rawW_nodeath=x.rawnum, rawW_oracle=o.rawnum))
+    @printf("DIAG %-26s SumA=%8.3f SumW=%9.3f | rawW new=%10.2f  nodeath=%10.2f  oracle(shape)=%10.2f | b=new-nodeath=%9.2f  c+d=nodeath-oracle=%9.2f\n", nm, n.A, n.W, n.rawnum, x.rawnum, o.rawnum, n.rawnum - x.rawnum, x.rawnum - o.rawnum)
+  end
+  for f in (:A, :W, :rawW, :rawW_nodeath, :rawW_oracle)
+    v = [getfield(r, f) for r in rows]
+    @printf("DIAG spread %-13s min=%10.2f max=%10.2f  (max-min)/mean=%.3f\n", String(f), minimum(v), maximum(v), (maximum(v) - minimum(v)) / mean(v))
+  end
+  for (nm, n, sh, b) in dead; @printf("DIAG dead %-26s sim-only cohorts=%d  biomass share of sim biomass=%.2f%%\n", nm, n, 100 * sh); end
+  bs = [r.rawW - r.rawW_nodeath for r in rows]; cds = [r.rawW_nodeath - r.rawW_oracle for r in rows]
+  @printf("DIAG spread b(natural death) min=%.2f max=%.2f ; c+d min=%.2f max=%.2f\n", minimum(bs), maximum(bs), minimum(cds), maximum(cds))
+end
+P.POST_SEARCH_HOOK[] = run
+P.run_from_yaml(cfgpath; overrides=Dict{String,Any}("output_dir" => outd, "trials" => 1, "igel_mu" => 2, "igel_sobol_init" => false, "search_mode" => "igelmo", "n_reps" => 1, "start_from" => ppath))

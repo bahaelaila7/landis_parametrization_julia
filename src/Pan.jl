@@ -338,11 +338,11 @@ function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)
   d0 = Dates.Date(2000, 1, 1)
   for yr in sort!(collect(keys(injection_dict))), (si, cohorts) in injection_dict[yr]
     ys = site_years[si]; k = searchsortedfirst(ys, yr)
-    py = k > 1 ? ys[k-1] : 0
+    py = k > 1 ? ys[k-1] : -1   # previous visit year (year 0 is a valid previous visit)
     ex = Tuple{UIntType,FloatType}[]
     for (sp, age, bio, drop) in cohorts
       isdist = dist_on && drop > zero(FloatType)
-      isrec = rec_on && py > 0 && !((sp, Int(age) - (yr - py)) in site_set[(si, py)])
+      isrec = rec_on && py >= 0 && !((sp, Int(age) - (yr - py)) in site_set[(si, py)])
       (isdist || isrec) && push!(ex, (sp, age))
     end
     isempty(ex) && continue
@@ -380,6 +380,84 @@ function _get_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params)::
     end
     pl
   end
+end
+
+# DIAGNOSTIC ONLY (default :none = no effect). W_DIAG[] at a measurement year, new order, just before scoring:
+#   :stats   — accumulate cohort-set statistics sim-vs-obs into W_DIAG_STATS (no state change)
+#   :nodeath — additionally REMOVE sim cohorts that are absent from the observed set (oracle natural deaths)
+#   :oracle  — run the sync injection BEFORE scoring (sim set := obs set; matched keep sim biomass): the shape-only W
+const W_DIAG = Ref(:none)
+const W_DIAG_STATS = zeros(Float64, 16)
+const W_DIAG_CAT = zeros(Float64, 6, 2)   # rows: 1 both-exact 2 both-mismatched 3 ref-only(missing species) 4 both-but-nothing-matched; cols: ΣW, count
+const W_DIAG_CTX = Ref{Any}(nothing)      # (spdf_plts, n_species, eco_species_ids, loss_params) set by tools/w_decompose.jl
+function _w_diag_apply!(soa, year, injection_dict, plan, mode::Symbol)
+  S = W_DIAG_STATS
+  for (si, cohorts) in injection_dict[year]
+    site = getsite(soa, si); site.active || continue
+    exl = plan === nothing ? nothing : (yd = get(plan.coh, year, nothing); yd === nothing ? nothing : get(yd, si, nothing))
+    isex(sp, age) = exl !== nothing && any(e -> e[1] == sp && e[2] == age, exl)
+    csp = site.c_species; cage = site.c_age; cbio = site.c_bio
+    S[15] += 1
+    obs_sp = Set{UIntType}(); sim_sp = Set{UIntType}()
+    for (sp, age, bio, _) in cohorts
+      isex(sp, age) && (S[13] += bio; continue)
+      push!(obs_sp, sp)
+      found = false
+      for j in 1:Int(site.live); csp[j] == sp && cage[j] == age && (found = true; break); end
+      if found; S[1] += 1; S[3] += bio; else
+        S[6] += 1; S[7] += bio
+      end
+    end
+    for j in 1:Int(site.live)
+      isex(csp[j], cage[j]) && (S[12] += 1; continue)
+      push!(sim_sp, csp[j])
+      inobs = false
+      for (sp, age, _, _) in cohorts; (csp[j] == sp && cage[j] == age) && (inobs = true; break); end
+      if inobs; S[2] += cbio[j]; else
+        S[4] += 1; S[5] += cbio[j]
+        for (sp, age, _, _) in cohorts   # age near-miss: same species, |age diff| == 1 present in obs
+          (csp[j] == sp && abs(cage[j] - age) == 1) && (S[14] += 1; break)
+        end
+      end
+    end
+    for (sp, age, bio, _) in cohorts; isex(sp, age) && continue; sp in sim_sp || (S[8] += 1; S[9] += bio); end
+    for j in 1:Int(site.live); isex(csp[j], cage[j]) && continue; csp[j] in obs_sp || (S[10] += 1; S[11] += cbio[j]); end
+    if W_DIAG_CTX[] !== nothing && mode === :stats
+      (spdf_plts, n_species, esids, lpar) = W_DIAG_CTX[]
+      gt = spdf_plts[(site.ref_cn, site.eco_id)][year]; ecl = nothing
+      if exl !== nothing; gt = plan.ref[year][si]; ecl = exl; end
+      sl = PU.calculate_site_loss2(year, site, n_species, esids, gt, lpar; excl_c=ecl)
+      smap = esids[Int(site.eco_id)]
+      for spj in 1:length(gt.keys)
+        gt.keys[spj] || continue
+        w = Float64(sl.sp_w_loss[smap[spj]])
+        simset = Set{Float64}(Float64(cage[j]) for j in 1:Int(site.live) if csp[j] == spj && !isex(csp[j], cage[j]))
+        obsset = Set{Float64}(Float64(a) for (sp, a, _, _) in cohorts if sp == spj && !isex(sp, a))
+        c = isempty(simset) ? 3 : (simset == obsset ? 1 : (isempty(intersect(simset, obsset)) ? 4 : 2))
+        W_DIAG_CAT[c, 1] += w; W_DIAG_CAT[c, 2] += 1
+        if c == 3   # why is the species absent in the sim? look at the site's previous observed visit
+          py = -1
+          for (y2, lst) in injection_dict; y2 < year && y2 > py && any(t -> t[1] == si, lst) && (py = y2); end
+          if py < 0; W_DIAG_CAT[5, 2] += 1; W_DIAG_CAT[5, 1] += w   # no previous visit
+          else
+            prev = first(t[2] for t in injection_dict[py] if t[1] == si)
+            if any(t -> t[1] == spj, prev); W_DIAG_CAT[6, 2] += 1; W_DIAG_CAT[6, 1] += w   # species WAS observed at the previous visit
+            else; W_DIAG_CAT[2, 1] += 0; end
+          end
+        end
+      end
+    end
+    if mode === :nodeath
+      j = 1
+      while j <= Int(site.live)
+        inobs = false
+        for (sp, age, _, _) in cohorts; (csp[j] == sp && cage[j] == age) && (inobs = true; break); end
+        inobs ? (j += 1) : _shock_remove_cohort!(site, j)
+      end
+    end
+  end
+  mode === :oracle && _inject_observed_cohorts!(soa, injection_dict[year]; override=true, sync=true, skip_scale=true)
+  nothing
 end
 
 # Swap-remove sim cohort i (same mechanics as the sync's Pass A).
@@ -2085,6 +2163,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
       if !LOSS_BEFORE_INJECTION[] && !isnothing(injection_dict) && current_sim_year in injection_years   # legacy order: inject, then score
         _inject_observed_cohorts!(soa, injection_dict[current_sim_year]; override=OVERRIDE_INJECTION[], replace=OVERRIDE_INJECTION_REPLACE[], sync=OVERRIDE_INJECTION_SYNC[])
       end
+      (W_DIAG[] !== :none && LOSS_BEFORE_INJECTION[] && _do_shock && current_sim_year in injection_years) && _w_diag_apply!(soa, current_sim_year, injection_dict, _excl_plan, W_DIAG[])
       if search_tier == 1
         @maybe_threads PARALLEL_SITES[] for i in 1:soa.n
           @inbounds begin
