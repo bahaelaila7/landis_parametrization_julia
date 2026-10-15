@@ -64,4 +64,13 @@ end
   @test r(Pair{String,Any}[]) === true                                   # no injection: flag has no effect, keep the default
 end
 
+
+@testset "B11 a scale matrix that does not cover a cell is an error, not 0" begin
+  FT = Pan.PanCore.FloatType
+  M = FT[1 2; 3 4]
+  @test Pan._cell(M, 2, 1) == 3
+  @test_throws ErrorException Pan._cell(M, 3, 1)
+  @test_throws ErrorException Pan._cell(zeros(FT, 0, 0), 1, 1)
+end
+
 end

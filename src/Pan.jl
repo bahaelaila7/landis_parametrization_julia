@@ -5197,8 +5197,14 @@ _dom_include_name(name::AbstractString, mode::AbstractString) =
 
 # Safe per-cell table lookup: 0 when the matrix isn't sized for this cell (e.g. an empty A table under a
 # B-only dual) → the caller then falls back to the raw (un-normalized) term instead of indexing out of range.
-@inline _cell(M::Matrix{FloatType}, gsp::Int, e::Int)::FloatType =
-  (size(M, 1) >= gsp && size(M, 2) >= e) ? @inbounds(M[gsp, e]) : zero(FloatType)
+# per-(species, eco) entry of a scale / rank-weight matrix. A matrix that does not cover the cell means the scales were not
+# set for this reference (B11: this used to return 0, silently mixing normalised and raw terms or zeroing the objective).
+@inline function _cell(M::Matrix{FloatType}, gsp::Int, e::Int)::FloatType
+  (size(M, 1) >= gsp && size(M, 2) >= e) || _cell_error(M, gsp, e)
+  @inbounds M[gsp, e]
+end
+@noinline _cell_error(M, gsp, e) = error("loss scale/weight matrix of size $(size(M)) does not cover (species=$gsp, eco=$e): " *
+                                         "the cell scales / RANKW were not set for this reference (call _set_loss_scales! first)")
 
 function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}})::Vector{FloatType}
   # 4 GROUPED objectives for the dual: [ΣA_W, ΣA_AGB, ΣB_W, ΣB_AGB] — sum each over its eco-blocks and
