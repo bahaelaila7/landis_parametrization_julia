@@ -1,6 +1,6 @@
 module PanCore
 
-export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, swap_cohort!, simulate_timestep!, FloatType, UIntType, Plugins, with_thread_sync, soa_nbytes, copy_and_reseed_soa, reset_soa!, current_rss_gb, gc_and_trim!, @maybe_threads, PARALLEL_SITES
+export AbstractPlugin, SiteSoA, SiteView, getsite, scalar_arrays, csr_fields, csr_arrays, process_plugin!, swap_cohort!, FloatType, UIntType, Plugins, with_thread_sync, copy_and_reseed_soa, reset_soa!, current_rss_gb, gc_and_trim!, @maybe_threads, PARALLEL_SITES
 
 # Parallelism toggle for the site loops. PARALLEL_SITES[]=true → `@maybe_threads` threads over sites (SoA-level
 # parallelism, needed for single-eval spatial/raster runs). false → serial sites, so an OUTER driver can instead
@@ -83,45 +83,6 @@ end
 
 @inline function build_refs(counts::Vector{Int32})::Vector{Int32}
   build_refs!(Vector{Int32}(undef, length(counts) + 1), counts)
-end
-
-function _build_refs_expr(plugin_types)
-  seen_keys = Set{Symbol}() # keys are the counts like cohort counts per site
-  ref_pairs_keys = Symbol[]
-  ref_pairs_vals = Expr[]
-  for P in plugin_types
-    for (field, key) in pairs(csr_fields(P))
-      if key ∉ seen_keys
-        push!(seen_keys, key)
-        push!(ref_pairs_keys, key)
-        push!(ref_pairs_vals, :(build_refs(counts[$(QuoteNode(key))])))
-      end
-    end
-  end
-  isempty(ref_pairs_keys) && return :(NamedTuple())
-  :(NamedTuple{$(Tuple(ref_pairs_keys))}(tuple($(ref_pairs_vals...))))
-  #refs :: NamedTuple{(:cohort, :species), Tuple{Vector{Int32}, Vector{Int32}}}
-end
-
-function _build_refs_expr2(plugin_types)
-  ref_pairs_keys = Symbol[]
-  ref_pairs_vals = Expr[]
-  for P in plugin_types
-    for (field, key) in pairs(csr_fields(P))
-      push!(ref_pairs_keys, field)
-      push!(ref_pairs_vals, :(build_refs(counts[$(QuoteNode(key))])))
-    end
-  end
-  isempty(ref_pairs_keys) && return :(NamedTuple())
-  :(NamedTuple{$(Tuple(ref_pairs_keys))}(tuple($(ref_pairs_vals...))))
-end
-
-function _build_scalar_expr(plugin_types)
-  foldl(
-    (a, b) -> :(merge($a, $b)),
-    [:(scalar_arrays($P, n)) for P in plugin_types];
-    init=:(NamedTuple())
-  )
 end
 
 function _field_to_key_map(plugin_types)
@@ -398,7 +359,7 @@ end
 
 @generated function csr_count_key(::AnySoA{P}, ::Val{F}) where {P,F}
   plugin_types = P.parameters
-  for PT in Plugins
+  for PT in plugin_types
     for (field, key) in pairs(csr_fields(PT))
       field === F && return QuoteNode(key)
     end
@@ -408,32 +369,6 @@ end
 
 
 
-function _build_getproperty_expr(scalar_names, csr_names)
-  expr = :(error("field ", f, " not found in SiteView"))
-  for fn in reverse(csr_names)
-    expr = quote
-      if f === $(QuoteNode(fn))
-        refs = getfield(getfield(soa, :refs), $(QuoteNode(fn)))
-        csr_field = getfield(getfield(soa, :csr), $(QuoteNode(fn)))
-        lo = Int(refs[i])
-        hi = Int(refs[i+1]) - 1
-        return @view csr_field[lo:hi]
-      else
-        $expr
-      end
-    end
-  end
-  for fn in reverse(scalar_names)
-    expr = quote
-      if f === $(QuoteNode(fn))
-        return getfield(getfield(soa, :scalar), $(QuoteNode(fn)))[i]
-      else
-        $expr
-      end
-    end
-  end
-  expr
-end
 function _build_setproperty_expr(scalar_names, csr_names)
   expr = :(error("field ", f, " not found in SiteView"))
 
@@ -483,17 +418,6 @@ end
 @generated function get_ctx(ctx::C, ::Type{P}) where {C<:NamedTuple,P}
   key = nameof(P)   # e.g. :CarbonPlugin
   hasfield(C, key) ? :(getfield(ctx, $(QuoteNode(key)))) : :(NamedTuple())
-end
-
-@generated function process_soa!(soa::AnySoA{P}, t::Int; ctx::C=NamedTuple()) where {P,C<:NamedTuple}
-  plugin_types = P.parameters
-  calls = [:(process_plugin!(soa, $PT, t; ctx=get_ctx(ctx, $PT))) for PT in plugin_types]
-  quote
-    $(calls...)
-  end
-end
-function simulate_timestep!(soa::AnySoA{P}, t::Int; ctx::C=NamedTuple()) where {P,C<:NamedTuple}
-  process_soa!(soa, t; ctx=ctx)
 end
 
 function copy_and_reseed_soa(soa, seed)

@@ -207,11 +207,10 @@ end
   # default process_plugin! for an unknown plugin is a no-op
   struct DummyPlugin <: PC.AbstractPlugin end
   @test PC.process_plugin!(soa, DummyPlugin, 1; ctx=NamedTuple()) === nothing
-  # DISCREPANCY (documented, src/PanCore.jl:3): `soa_nbytes` is in the export list but never defined.
-  @test :soa_nbytes in names(PC)
-  @test !isdefined(PC, :soa_nbytes)
-  # DISCREPANCY (src/PanCore.jl ~line 366): csr_count_key iterates the undefined name `Plugins` instead of its type parameter -> unusable.
-  @test_throws Exception PC.csr_count_key(soa, Val(:c_age))
+  # B10 (fixed): the never-defined `soa_nbytes` is no longer exported; csr_count_key maps a CSR field to its count key
+  @test !(:soa_nbytes in names(PC))
+  @test PC.csr_count_key(soa, Val(:c_age)) === :cohort
+  @test_throws ErrorException PC.csr_count_key(soa, Val(:no_such_field))
   # with_thread_sync runs f once and returns its value, in both parallel modes
   for flag in (true, false)
     old = PC.PARALLEL_SITES[]; PC.PARALLEL_SITES[] = flag
