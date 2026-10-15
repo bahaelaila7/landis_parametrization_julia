@@ -424,6 +424,16 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, output_dir::AbstractString, splo
   st_ref = Ref{Any}(nothing)
   if resume_from !== nothing
     saved = JLD2.load_object(resume_from); st = saved.st; append!(archive, saved.archive)
+    # the run-fixed references live next to the checkpoints; restore them, or the resumed objectives use the defaults
+    if TANDEM
+      rf = joinpath(dirname(resume_from), "tandem_refs.txt"); isfile(rf) || error("gdigel tandem resume: $(rf) missing")
+      kv = Dict(Symbol(first(split(l, '='))) => parse(Float64, last(split(l, '='))) for l in eachline(rf) if occursin('=', l))
+      TREF[] = (A0=kv[:A0], W0=kv[:W0], D0=kv[:D0], BW0=kv[:BW0], BA0=kv[:BA0]); @info "gdigel tandem: restored refs $(TREF[])"
+    end
+    if DEATH_FOLD
+      kf = joinpath(dirname(resume_from), "kappa.txt"); isfile(kf) || error("gdigel death_fold resume: $(kf) missing")
+      kappa[] = parse(Float64, strip(read(kf, String))); @info "gdigel death_fold: restored κ = $(kappa[])"
+    end
     MO && hasproperty(saved, :nd) && append!(ndarc, saved.nd)
     st_ref[] = st
     @info "gdigel: resumed $(basename(resume_from)) at gen $(st.gen), $(st.n_evals) evals, $(length(st.solutions)) solutions"
