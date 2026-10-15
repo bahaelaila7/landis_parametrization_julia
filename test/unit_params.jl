@@ -56,21 +56,16 @@ dims_of(slots, pi) = [d for (d, (p, _)) in enumerate(slots) if p == pi]
   end
 end
 
-const DRIFT_SHADE = (3,)            # levels k of DiscreteUniform(1,5)  for which quantile(cdf(k)) == k+1 (floating point at the boundary)
-const DRIFT_MATURITY = (7, 14, 28) # same, DiscreteUniform(1,50)
-
-@testset "integer-level round trip drift (documents current behaviour)" begin
+# B17 (fixed): levels whose cdf(k) sat on a quantile boundary used to decode to k+1 (SHADE_TOL 3; MATURITY 7, 14, 28).
+# params_to_u now encodes integer levels at the middle of their mass interval, so every level round-trips exactly.
+@testset "integer-level round trip is exact (B17)" begin
   with_globals() do
     pd, tpl, slots = setup()
-    for (f, drift, lvls) in ((:SHADE_TOL, DRIFT_SHADE, 1:5), (:MATURITY, DRIFT_MATURITY, 1:50))
+    for (f, lvls) in ((:SHADE_TOL, 1:5), (:MATURITY, 1:50))
       for k in lvls
         t = deepcopy(tpl); getproperty(t, f)[1] = k
         k2 = Int(getproperty(PU.u_to_params(PU.params_to_u(t, pd, slots), pd, slots, tpl), f)[1])
-        if k in drift
-          @test k2 == k + 1                  # BUG-LIKE: seeding the optimizer from SHADE_TOL=3 / MATURITY in (7,14,28) shifts it one level up
-        else
-          @test k2 == k
-        end
+        @test k2 == k
       end
     end
     # LONGEVITY (quantum 50) and B_MAX (quantum 100) are exact on their grids
@@ -103,11 +98,9 @@ end
       for f in (:D, :LONGEVITY, :S, :B_MAX_SPP, :PROB_MORT_SPP, :PROB_ESTAB_SPP, :MIN_REL_BIOMASS)
         @test getproperty(p2, f) == getproperty(p, f)
       end
-      # DISCREPANCY (see the dedicated testset below): for a few integer levels cdf(k) sits exactly on a quantile boundary and the
-      # floating-point quantile lands on k+1, so encode->decode is NOT the identity there. Allow exactly that drift.
-      for (f, drift) in ((:SHADE_TOL, DRIFT_SHADE), (:MATURITY, DRIFT_MATURITY))
-        a, b = getproperty(p, f), getproperty(p2, f)
-        @test all(i -> b[i] == a[i] || (Int(a[i]) in drift && Int(b[i]) == Int(a[i]) + 1), eachindex(a))
+      # integer levels round-trip exactly (B17)
+      for f in (:SHADE_TOL, :MATURITY)
+        @test getproperty(p2, f) == getproperty(p, f)
       end
       @test all(isapprox.(reduce(vcat, p2.ANPP_MAX_SPP), reduce(vcat, p.ANPP_MAX_SPP); rtol=1e-5))
       # decoded values respect bounds, quantum and types

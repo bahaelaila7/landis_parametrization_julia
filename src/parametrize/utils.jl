@@ -1206,6 +1206,11 @@ function params_to_u(params::T, param_dists::ParamDists{T}, slots::Vector{Tuple{
     elseif pef !== nothing && param.name === :PROB_ESTAB_SPP
       lo = _slot_floor(pef, tgts, Float64(param.bounds[1])); hi = Float64(param.bounds[2])   # inverse of the [floor,1] rescale
       clamp((Float64(cur) - lo) / (hi - lo), 1e-6, 1 - 1e-6)
+    elseif param.dist isa Dists.DiscreteUnivariateDistribution
+      # integer prior: encode to the MIDDLE of level k's mass interval (cdf(k-1), cdf(k)]. cdf(k) itself sits on the quantile
+      # boundary, and floating point decoded it to k+1 for some levels (SHADE_TOL 3, MATURITY 7/14/28) — B17.
+      k = Float64(cur)
+      clamp(0.5 * (Float64(Dists.cdf(param.dist, k - 1)) + Float64(Dists.cdf(param.dist, k))), 1e-6, 1 - 1e-6)
     else
       clamp(Float64(Dists.cdf(param.dist, Float64(cur))), 1e-6, 1 - 1e-6)
     end
