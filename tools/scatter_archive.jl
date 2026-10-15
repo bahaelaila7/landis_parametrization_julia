@@ -4,26 +4,25 @@
 # 4-panel linear-scatter PNG per candidate and prints an R²/slope table.
 #   ./julia_gdal.sh --project=. tools/scatter_archive.jl <config.yml> <candidates_dir> [out_subdir]
 using Pan
-import JLD2, YAML, CairoMakie, Statistics, DataFrames, CSV
+import JLD2, CairoMakie, Statistics, DataFrames, CSV
 const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames
 
-cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
+cfg = P.load_config(ARGS[1])
 CANDDIR = ARGS[2]
 OUTSUB = length(ARGS) >= 3 ? ARGS[3] : "archive_scatter"
 outdir = joinpath(cfg["output_dir"], OUTSUB); mkpath(outdir)
 
-P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true)); P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
-P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false)); P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
-D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false)); P.INIT_PERTURB_FRAC[] = 0.0
-no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("seed", 1))))
+P.apply_scoring_flags!(cfg)   # the scoring rule of the run (injection mode, loss_before_injection, recruits, w_scope, death_term, disturbance shock)
+D.USE_FIA_CYCLE[] = cfg["fia_cycle"]; P.INIT_PERTURB_FRAC[] = 0.0
+no_estab = cfg["no_establishment"]; rng = P.RNGType(UInt64(cfg["seed"]))
 
 # data-prep once (train split) via the SAME code path as training (Pan.prepare_from_cfg): honors the run's outlier
 # exclusions, region/site-class filters and split so candidates are evaluated on the plot universe they were fit on;
 # reference + sites built once (candidate-independent)
 splots, eco_list, species_list, eco_species_ids, _ = P.prepare_from_cfg(cfg)[1:5]
 n_species = length(species_list)
-bins = Int.(g("bins_idx", [20, 60, 120]))
-loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))
+bins = cfg["bins_idx"]
+loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(cfg["loss_lambda"]))
 sp = splots
 max_age = Int(maximum(sp.age_calc))
 spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)

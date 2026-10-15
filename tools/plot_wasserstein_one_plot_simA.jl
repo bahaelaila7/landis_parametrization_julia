@@ -5,32 +5,29 @@
 # fit_params (tier-3) Sim-A pipeline + the single-cov best params, so the right-panel sim is genuine drift.
 #   Run: [PAN_PARAMS=params.jld2] ./julia_gdal.sh --project=. tools/plot_wasserstein_one_plot_simA.jl <config.yml>
 using Pan
-import JLD2, YAML, CairoMakie, Statistics, DataFrames
+import JLD2, CairoMakie, Statistics, DataFrames
 const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames
 
-cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
-P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true))
-P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
-P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
-P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
-D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
+cfg = P.load_config(ARGS[1])
+P.apply_scoring_flags!(cfg)   # the run's scoring rule (all scoring globals, one shared function)
+D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
 P.INIT_PERTURB_FRAC[] = 0.0
-no_estab = Bool(g("no_establishment", false))
-rng = P.RNGType(UInt64(Int(g("seed", 1))))
-val_frac = Float64(g("val_frac", 0.0)); split_rng = val_frac > 0 ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing
+no_estab = cfg["no_establishment"]
+rng = P.RNGType(UInt64(cfg["seed"]))
+val_frac = cfg["val_frac"]; split_rng = val_frac > 0 ? P.RNGType(UInt64(cfg["split_seed"])) : nothing
 splots, eco_list, species_list, eco_species_ids, splots_val = D.prepare_parametrization_data(;
-  cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=String(g("filter_eco_field", "epa_l4")),
-  eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]), output_dir=String(cfg["tablename"]),
-  skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=val_frac, split_rng=split_rng,
-  min_trees=Int(g("min_trees", 100)), min_agb_frac=Float64(g("min_agb_frac", 0.05)),
-  stratify_eco_mixed=Bool(g("stratify_eco_mixed", false)),
-  single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)),
-  filter_extent=(haskey(cfg, "filter_extent") ? String(cfg["filter_extent"]) : nothing),
-  filter_ecos=String.(get(cfg, "filter_ecos", String[])),
-  filter_plots=NTuple{4,Int}[NTuple{4,Int}(Int.(p)) for p in get(cfg, "filter_plots", [])], RNG=rng)
+  cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=cfg["filter_eco_field"],
+  eco_field=cfg["eco_field"], tablename=cfg["tablename"], output_dir=cfg["tablename"],
+  skip_disturbances=cfg["skip_disturbances"], spinup=false, val_frac=val_frac, split_rng=split_rng,
+  min_trees=cfg["min_trees"], min_agb_frac=cfg["min_agb_frac"],
+  stratify_eco_mixed=cfg["stratify_eco_mixed"],
+  single_ecoregion=cfg["single_ecoregion"], stratify_landuse=cfg["stratify_landuse"],
+  filter_extent=cfg["filter_extent"],
+  filter_ecos=cfg["filter_ecos"],
+  filter_plots=cfg["filter_plots"], RNG=rng)
 n_species = length(species_list)
-bins = Int.(g("bins_idx", [20, 60, 120]))
-loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))
+bins = cfg["bins_idx"]
+loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(cfg["loss_lambda"]))
 best = if haskey(ENV, "PAN_PARAMS")
   JLD2.load_object(ENV["PAN_PARAMS"])
 else

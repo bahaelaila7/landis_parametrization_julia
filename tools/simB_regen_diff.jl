@@ -4,10 +4,10 @@
 # the cache (fast). Pass --resim (or change REPS) to re-simulate; otherwise the cache is reused so metric
 # tweaks re-plot in seconds. Drives the real Sim B via fit_params + Pan.CAPTURE_T4SIM.
 #   Run: ./julia_gdal.sh --project=. tools/simB_regen_diff.jl runs/...stageB_joint.yml [REPS=50] [--resim]
-using Pan, YAML, DataFrames, JLD2, CairoMakie, Statistics
+using Pan, DataFrames, JLD2, CairoMakie, Statistics
 const P = Pan; const D = P.Data; const PU = P.PU; const BSP = P.BiomassSuccessionPlugin
 const MK = CairoMakie; const DF = DataFrames
-cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
+cfg = P.load_config(ARGS[1])
 outdir = cfg["output_dir"]
 REPS = let a = filter(x -> tryparse(Int, x) !== nothing, ARGS); isempty(a) ? 50 : parse(Int, a[1]); end
 RESIM = "--resim" in ARGS
@@ -26,30 +26,28 @@ if isfile(CACHE) && !RESIM
   species_list = cc["species_list"]; eco_species_ids = cc["eco_species_ids"]; n_cycles = cc["n_cycles"]; bins = cc["bins"]
   println("loaded cache $CACHE — $(length(allsims)) candidates × $(length(allsims[1])) reps (pass --resim to redo)")
 else
-  P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true)); P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
-  P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
-  P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
-  D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
-  P.DUAL_MODE[] = P._parse_dual_mode(g("dual_mode", false))
-  P.TIER_B[] = Int(g("tier_b", 4)); PU.CELL_NORM[] = Bool(g("cell_normalize", false))
-  P.SIMB_SPINUP[] = Bool(g("simB_spinup", true))   # honor non-spinup Sim B (start from observed cohorts)
-  no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("seed", 1))))
+  P.apply_scoring_flags!(cfg)   # the run's scoring rule (all scoring globals, one shared function)
+  D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
+  P.DUAL_MODE[] = cfg["dual_mode"]
+  P.TIER_B[] = cfg["tier_b"]; PU.CELL_NORM[] = cfg["cell_normalize"]
+  P.SIMB_SPINUP[] = cfg["simB_spinup"]   # honor non-spinup Sim B (start from observed cohorts)
+  no_estab = cfg["no_establishment"]; rng = P.RNGType(UInt64(cfg["seed"]))
   splots, eco_list, species_list, eco_species_ids, _ = D.prepare_parametrization_data(;
-    cohorts_db_path=cfg["cohorts_db_path"], eco_field=String(cfg["eco_field"]), tablename=String(cfg["tablename"]),
-    output_dir=String(cfg["tablename"]), filter_eco_field=String(g("filter_eco_field", "epa_l4")),
-    filter_ecos=String.(get(cfg, "filter_ecos", String[])), filter_plots=NTuple{4,Int}[],
-    min_trees=Int(g("min_trees", 100)), min_agb_frac=Float64(g("min_agb_frac", 0.05)),
-    skip_disturbances=Bool(g("skip_disturbances", true)), spinup=false, val_frac=0.0,
-    single_ecoregion=Bool(g("single_ecoregion", false)), stratify_landuse=Bool(g("stratify_landuse", false)), RNG=rng)
+    cohorts_db_path=cfg["cohorts_db_path"], eco_field=cfg["eco_field"], tablename=cfg["tablename"],
+    output_dir=cfg["tablename"], filter_eco_field=cfg["filter_eco_field"],
+    filter_ecos=cfg["filter_ecos"], filter_plots=NTuple{4,Int}[],
+    min_trees=cfg["min_trees"], min_agb_frac=cfg["min_agb_frac"],
+    skip_disturbances=cfg["skip_disturbances"], spinup=false, val_frac=0.0,
+    single_ecoregion=cfg["single_ecoregion"], stratify_landuse=cfg["stratify_landuse"], RNG=rng)
   n_species = length(species_list)
-  bins = Int.(g("bins_idx", [10, 20, 30, 40, 50, 60, 80, 100, 120, 150]))
-  loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))
+  bins = cfg["bins_idx"]
+  loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(cfg["loss_lambda"]))
   n_bins = length(bins) + 1
-  spinup = Bool(g("spinup", false)); max_age = Int(maximum(splots.age_calc))
+  spinup = cfg["spinup"]; max_age = Int(maximum(splots.age_calc))
   spdf = PU.smoothen_ref_years(splots, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(splots)
   inj = (no_estab || P.OVERRIDE_INJECTION[]) ? D.get_injection_cohorts(splots; all_cohorts=P.OVERRIDE_INJECTION[]) : nothing
-  cycle_map, n_cycles = D.build_cycle_map(splots; cycle_years=Float64(g("cycle_years", 8)))
+  cycle_map, n_cycles = D.build_cycle_map(splots; cycle_years=cfg["cycle_years"])
   t4_ref = [[zeros(P.FloatType, length(eco_species_ids[e]), n_bins) for _ in 1:n_cycles] for e in eachindex(eco_list)]
   for ((plot_id, eco_id), yd) in spdf_plts, (sy, gt) in yd
     cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue

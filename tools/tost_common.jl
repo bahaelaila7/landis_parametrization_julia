@@ -1,16 +1,13 @@
 # Shared by tools/tost_select.jl and tools/calib_coord.jl: data prep (identical to training via Pan.prepare_from_cfg),
 # matched sim/obs cohort pairs (same rule as test/tost_sim_obs.jl), species-group labels, TOST.
 using Pan
-import JLD2, YAML, Statistics, DataFrames, HypothesisTests, CSV
+import JLD2, Statistics, DataFrames, HypothesisTests, CSV
 const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames; const HT = HypothesisTests
-# caller defines: cfg (Dict), SPLIT ("train"|"val"|"test") before including this file
-g(k, d) = get(cfg, k, d)
+# caller defines: cfg (Pan.load_config), SPLIT ("train"|"val"|"test") before including this file
 ALPHA = 0.05
-P.OVERRIDE_INJECTION[] = Bool(g("override_injection", true)); P.OVERRIDE_INJECTION_SYNC[] = Bool(g("override_injection_sync", true))
-P.OVERRIDE_INJECTION_REPLACE[] = Bool(g("override_injection_replace", false))
-P.OVERRIDE_INJECTION_DISTURBANCE[] = Symbol(g("override_injection_disturbance", "off"))
-D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false)); P.INIT_PERTURB_FRAC[] = 0.0
-no_estab = Bool(g("no_establishment", false)); rng0 = Int(g("seed", 1))
+P.apply_scoring_flags!(cfg)   # the scoring rule of the run (injection mode, loss_before_injection, recruits, w_scope, death_term, disturbance shock)
+D.USE_FIA_CYCLE[] = cfg["fia_cycle"]; P.INIT_PERTURB_FRAC[] = 0.0
+no_estab = cfg["no_establishment"]; rng0 = cfg["seed"]
 splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = P.prepare_from_cfg(cfg)
 # SPLIT: "train" | "val" | "test", or several joined by "+" (e.g. "train+val"): pairs of every listed split are pooled
 # (plot ids offset per split so they stay unique). Each split keeps its own simulation inputs.
@@ -22,11 +19,11 @@ SP = isdefined(P, :setup_plugin_from_cfg) ? P.setup_plugin_from_cfg(cfg, eco_lis
 _mk_sites(sp_; kw...) = SP === nothing ? P.make_sites(sp_, eco_species_ids; kw...) : P.make_sites_like(SP, sp_, eco_species_ids; kw...)
 # grouping identical to tost_sim_obs.jl (tiered = param_split_species ∪ param_pooling cell_split, with merges)
 tiered = Set{String}(); merge_map = Dict{String,Dict{String,String}}()
-for (_, syms) in get(cfg, "param_split_species", Dict()), s in syms; push!(tiered, uppercase(strip(String(s)))); end
-for (_, spmap) in get(cfg, "param_tier_merge", Dict()), (s_, cm) in spmap
+for (_, syms) in cfg["param_split_species"], s in syms; push!(tiered, uppercase(strip(String(s)))); end
+for (_, spmap) in cfg["param_tier_merge"], (s_, cm) in spmap
   d = get!(merge_map, uppercase(strip(String(s_))), Dict{String,String}()); for (c, gp) in cm; d[String(c)] = String(gp); end
 end
-let pp = get(cfg, "param_pooling", Dict())
+let pp = cfg["param_pooling"]
   for (_, spec) in get(pp, "params", Dict()), s in get(spec, "cell_split", String[]); push!(tiered, uppercase(strip(String(s)))); end
   for (s_, cm) in get(pp, "cell_merge", Dict())
     d = get!(merge_map, uppercase(strip(String(s_))), Dict{String,String}()); for (c, gp) in cm; d[String(c)] = String(gp); end
@@ -36,8 +33,8 @@ eco_cell(e) = (q = split(String(eco_list[e]), "|lu="); length(q) == 2 ? String(q
 is_tiered(s) = uppercase(species_list[s]) in tiered
 grp(s, e) = is_tiered(s) ? get(get(merge_map, uppercase(species_list[s]), Dict{String,String}()), eco_cell(e), eco_cell(e)) : "pooled"
 label(s, gp) = is_tiered(s) ? "$(species_list[s])·$(gp)" : species_list[s]
-bins = Int.(g("bins_idx", [20, 60, 120]))
-loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(g("loss_lambda", 1.0)))
+bins = cfg["bins_idx"]
+loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(cfg["loss_lambda"]))
 function _split_ctx(sp)
   max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
@@ -65,7 +62,7 @@ CTXS = [_split_ctx(_split_df(nm)) for nm in SPLITS]
 sp = CTXS[1].sp   # (first split; used by callers for counts)
 # Sim B (dual_mode: b): free simulation from year-0 cohorts with establishment; pairs = Σ AGB per (cycle, eco cell,
 # species, age bin), sim vs obs (Pan.resim_simB_paired, same as test/tost_sim_obs.jl). Cells are landscape aggregates.
-SIMB = P._parse_dual_mode(g("dual_mode", "off")) === :b
+SIMB = cfg["dual_mode"] === :b
 # SIMB_MIN_BIN (default 3 = cohorts older than 20 yr with bins_idx [10,20,…]): Sim B observed cohorts are timber-only
 # (DIA ≥ 5 in; saplings dropped), while the simulation has no size cutoff ⇒ the youngest bins are not comparable (D12).
 SIMB_MIN_BIN = parse(Int, get(ENV, "SIMB_MIN_BIN", "3"))
