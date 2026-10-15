@@ -114,7 +114,7 @@ Design and pass criteria: `docs/simAB_options_experiment.md`. All of this needs 
   so Sim A stays deterministic; Sim B (`dual_mode: b`) applies it as before (box `pmort_upper`, default 0.02; `fix_pmort: true` pins it to the seed's value).
   The survive/die classification does not depend on p, so a candidate's d_g costs one pass of bookkeeping (histograms per cell and Δt, `DeathAcc`).
 * **m objectives** (`gdigel: {objective: mo, m: 2|3}`). `m: 2` (default) is the A–W scalarisation of §3, byte-for-byte the same arithmetic
-  (the m=2 smoke reproduces the previous run to ~1e-9 in the logged sums). `m: 3`: objective vector per group `(a_g, w_g, d_g)`, Chebyshev `F = max_i w_i·S_i/S_i,ref`
+  (the m=2 smoke gd_log.csv / mo_archive.csv are byte-identical to those of the pre-change commit c184e00 run on the same data; the earlier `smoke_mo_v3_bs` run itself differs from both by ≤ 5.4e-8 relative, a run-to-run difference of that earlier run, not of the code). `m: 3`: objective vector per group `(a_g, w_g, d_g)`, Chebyshev `F = max_i w_i·S_i/S_i,ref`
   with `S = (ΣA, ΣW, ΣD)`; weights = uniform simplex lattice with `weights: H` divisions per edge — all `(i, j, l)/H`, `i+j+l = H`, `(H+1)(H+2)/2` points
   (H = 4 → 15); lineages cycle the grid. References `D_ref` like `A_ref`, `W_ref` (median of the μ start points or the `start_from` point; `dref` overrides).
   ND archive over (ΣA, ΣW, ΣD); when it exceeds `archive_cap` the point with the smallest nearest-neighbour distance (in ref-normalised objectives; the three
