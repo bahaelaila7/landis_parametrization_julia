@@ -2156,8 +2156,11 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
   _mor_hist = _mor ? [[zeros(FloatType, length(eco_species_ids[e]), size(t4_ref[1][1], 2)) for _ in 1:n_cycles] for e in eachindex(eco_species_ids)] : nothing
   _mor_counts = Ref{Any}(nothing)
   resA = map(eachindex(seeds)) do ri
+    # this evaluation's site-loop parallelism (false inside a candidate-parallel batch) is set on the SoA it owns BEFORE anything threads over it
+    # (reset_soa! loops over the CSR arrays with dst.parallel); no process state.
+    work_soa === nothing || (work_soa.parallel = parallel_sites)
     soa = work_soa === nothing ? copy_and_reseed_soa(ref_soa, seeds[ri]) : reset_soa!(work_soa, ref_soa; seed=seeds[ri])
-    soa.parallel = parallel_sites   # this evaluation's site-loop parallelism (false inside a candidate-parallel batch); owned by `soa`, no process state
+    soa.parallel = parallel_sites
     if init_scales[ri] != one(FloatType)       # perturb the sim-year-0 population (not scored, only propagated)
       sc = init_scales[ri]; cap = scoring.init_perturb_cap; 
       @maybe_threads soa.parallel for i in 1:soa.n     # per-site independent → parallel in SoA mode

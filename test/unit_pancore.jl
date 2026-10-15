@@ -211,6 +211,17 @@ end
   @test !(:soa_nbytes in names(PC))
   @test PC.csr_count_key(soa, Val(:c_age)) === :cohort
   @test_throws ErrorException PC.csr_count_key(soa, Val(:no_such_field))
+  # step 3e: a sites-serial work SoA can be reset / resized from INSIDE an outer threaded candidate loop (no nested @threads :static); the flag is
+  # the SoA's own, so parallel and serial SoAs of one process never interfere
+  let src = make_bs([3, 2, 4, 1]), wss = [PC.copy_and_reseed_soa(src, nothing) for _ in 1:Threads.maxthreadid()], ok = Threads.Atomic{Int}(0)
+    for w in wss; w.parallel = false; end
+    Threads.@threads :static for k in 1:4
+      w = wss[Threads.threadid()]
+      PC.reset_soa!(w, src; seed=k); PC.readjust_soa!(w, (cohort=Int32[2, 2, 2, 2],))
+      Threads.atomic_add!(ok, 1)
+    end
+    @test ok[] == 4 && all(w -> !w.parallel, wss) && src.parallel
+  end
   # with_thread_sync runs f once and returns its value, in both parallel modes
   for flag in (true, false)
     @test PC.with_thread_sync(() -> 42, flag) == 42
