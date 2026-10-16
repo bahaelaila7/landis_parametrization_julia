@@ -4066,7 +4066,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     return search_state
   end
 
-  mo_val!(env; dual=false)   # legacy: the val objective of this driver is Sim A only
+  mo_val!(env)
   loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
   gio = loop.gio
 
@@ -4230,7 +4230,7 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
     return search_state
   end
 
-  mo_val!(env; dual=false)   # legacy: the val objective of this driver is Sim A only
+  mo_val!(env)
   loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
   gio = loop.gio
 
