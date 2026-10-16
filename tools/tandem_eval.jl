@@ -86,8 +86,9 @@ for i in pick
     for c in sort(collect(keys(cyc))); row[Symbol("B_$(nm)_cyc$(c)_bias")] = round(cyc[c]; digits=2); end
   end
   push!(rows, (; row...))
-  @printf("TEVAL %3d %-8s local=%.3f global=%.3f | A val ±20=%d/%d mab=%.1f%% | B val ±20=%d/%d mab=%.1f%%\n", r.idx, row[:role], r.sumA, r.sumW,
-          row[:A_val_p20], row[:A_val_ng], row[:A_val_mab], row[:B_val_p20], row[:B_val_ng], row[:B_val_mab])
+  s1 = SPLITS[1]; gk(k) = row[Symbol("$(k[1])_$(s1)_$(k[2])")]
+  @printf("TEVAL %3d %-8s local=%.3f global=%.3f | A %s ±20=%d/%d mab=%.1f%% | B %s ±20=%d/%d mab=%.1f%%\n", r.idx, row[:role], r.sumA, r.sumW,
+          s1, gk(("A", "p20")), gk(("A", "ng")), gk(("A", "mab")), s1, gk(("B", "p20")), gk(("B", "ng")), gk(("B", "mab")))
 end
 allk = union((collect(keys(x)) for x in rows)...)
 CSV.write(outcsv, DF.DataFrame([Dict(k => get(x, k, missing) for k in allk) for x in rows]))
