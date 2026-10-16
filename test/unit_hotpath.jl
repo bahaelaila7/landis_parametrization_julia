@@ -55,7 +55,7 @@ function _ssa_uses(x, used::Set{Int})
   end
   used
 end
-function red_flags(tt::Type; seen=Set{Any}(), depth=0)
+function red_flags(tt::Type; seen=Set{Any}(), depth=0, follow::Bool=true)
   bad = Any[]
   depth > 6 && return bad
   tt in seen && return bad
@@ -72,7 +72,7 @@ function red_flags(tt::Type; seen=Set{Any}(), depth=0)
       if T === Any || (T isa Union ? any(!isconcretetype, Base.uniontypes(T)) : (!isconcretetype(T) && !(T <: Type) && !(T <: Tuple)))
         push!(bad, (T, st))
       end
-      if st isa Expr && st.head === :invoke && st.args[1] isa Core.MethodInstance
+      if follow && st isa Expr && st.head === :invoke && st.args[1] isa Core.MethodInstance
         mi = st.args[1]
         parentmodule(mi.def.module) === parentmodule(@__MODULE__) || mi.def.module in (Pan, PU, PC, Pan.Plugins.BiomassSuccessionPlugin, Pan.Plugins.BaseSitePlugin, Pan.Plugins.HBADPlugin, Pan.Plugins.PnETPlugin) || continue
         append!(bad, red_flags(mi.specTypes; seen=seen, depth=depth + 1))
@@ -255,5 +255,106 @@ end
       @test isempty(red_flags(Tuple{typeof(Pan.set_cohort_bio!), typeof(pc), typeof(site), Int, Float32}))
     end
   end
+end
+# ------------------------------------------------------------------------------------------------------------------------------------------------
+# fit_params (Step 4a): ONE site loop per simulated year with a statically dispatched tier accumulator (Tier1Acc .. Tier5Acc, src/tier_acc.jl).
+#   * the per-year loop (`_run_rep!`, `_score_sites!`, the accumulators' `site_visit!`, the cohort log) is specialised on the accumulator: no `Core.Box`
+#     (the pre-4a fit_params boxed variables it reassigned while closures captured them) and no `Any`-typed used locals;
+#   * the simulated cohorts (`sites_data`, a push per cohort per measurement and evaluation) are built only on request (`collect_cohorts` /
+#     `cache_preinject`).
+# Measured on the pre-4a commit 9e2f769 with THIS fixture: 48 Core.Box statements and 144 Any-typed used locals in the compiled fit_params body and its
+# closures (the golden subset: 24 / 74 in the body alone); after 4a: 0 and 0 in the loop functions. FP_BASE_BYTES: bytes of one tier-3 evaluation of THIS
+# fixture on 9e2f769 (tiers 1 / 2 / 4 / 5: 71464 / 108552 / 77736 / 109416).
+# ------------------------------------------------------------------------------------------------------------------------------------------------
+const FP_BASE_BYTES = 64920
+function fp_fixture(; n=6)
+  esi = [[1, 2, 3], [1, 3]]
+  pc = BSM.BSTables()
+  params = Pan.generate_params(pc, ["A", "B", "C"], ["e1", "e2"], esi; rng=Random.Xoshiro(1))
+  soa = Pan.soa_type(BS)((cohort=fill(Int32(8), n), species=Int32[length(esi[1 + i % 2]) for i in 1:n]))
+  for i in 1:n
+    s = PC.getsite(soa, i)
+    s.active = true; s.rng = Random.Xoshiro(UInt64(i)); s.mapcode = i; s.ecocode = 1; s.eco_id = 1 + i % 2; s.ref_cn = i; s.old = 0; s.live = 0
+    Pan._init_site_plugin!(BS, s, false)
+    for k in 1:2; Pan.add_cohort!(pc, s, UInt32(k), Float32(10k), Float32(300k)); end
+    s.B = sum(s.c_bio)
+  end
+  lp = PU.LossParams(age_bins=PU.AgeBins(bins_idx=[10, 20, 40, 80], last_bin_open=true), smoothing_weights=FT[1], lambda=FT(1),
+    w_hinge=true, agb_hinge=true, w_softplus=false, cbal_on=false, cell_norm=false, w_normalize=true, agb_normalize=true, w_p=FT(2))
+  rng = Random.Xoshiro(9); nb = 5
+  spdf = Dict{Tuple{UT,UT},Dict{Int,PU.SPDFGroundTruth}}()
+  for i in 1:n
+    e = 1 + i % 2; ne = length(esi[e])
+    spdf[(UT(i), UT(e))] = Dict(y => make_ref(rng, lp; nsp=ne, keys=fill(true, ne)) for y in (3, 6))
+  end
+  ssy = (; sim_years=[[3, 6] for _ in 1:n])
+  cmap = Dict{Tuple{Int,Int},Int}(); for i in 1:n; cmap[(i, 3)] = 1; cmap[(i, 6)] = 2; end
+  t1 = [rand(rng, FT, length(esi[e]), nb) .* 100 for e in 1:2]
+  t2 = (bins=[[rand(rng, FT, 3) for _ in 1:length(esi[e]), _ in 1:nb] for e in 1:2], total=[[rand(rng, FT, 3) for _ in 1:length(esi[e])] for e in 1:2])
+  t4 = [[rand(rng, FT, length(esi[e]), nb) .* 100 for _ in 1:2] for e in 1:2]
+  sc = PU.LossScales(w_global=FT(3), agb_global=FT(1000))
+  (; pc, soa, params, lp, spdf, ssy, cmap, t1, t2, t4, sc, esi, plugin=Pan.PluginConfig(pc), scoring=Pan.ScoringOptions(), simb=Pan.SimBOptions())
+end
+fp_eval(fx, tier; kw...) = Pan.fit_params(fx.soa, fx.params, 6, 3, fx.esi, fx.spdf, fx.ssy, false, nothing, fx.lp; debug=false, search_tier=tier, seeds=[UInt64(1)],
+  t1_ref=tier == 1 ? fx.t1 : nothing, t2_ref=tier == 2 ? fx.t2 : nothing, t4_ref=tier in (4, 5) ? fx.t4 : nothing, cycle_map=tier in (4, 5) ? fx.cmap : nothing,
+  n_cycles=tier in (4, 5) ? 2 : 0, scales=fx.sc, scoring=fx.scoring, simb=fx.simb, plugin=fx.plugin, parallel_sites=false, kw...)
+
+# statements of the inferred code that box a variable (Core.Box creation / `.contents` access)
+function box_statements(tt::Type)
+  n = 0
+  for (ci, _) in Base.code_typed_by_type(tt; optimize=true)
+    ci isa Core.CodeInfo || continue
+    for st in ci.code
+      st isa Expr || continue
+      s = string(st)
+      (occursin("Core.Box", s) || occursin(":contents", s)) && (n += 1)
+    end
+  end
+  n
+end
+const FP_LOOP_FUNCS = ("_run_rep!", "_score_sites!", "site_visit!", "_log_site!", "_site_exclusions", "_t4_visit!", "_snapshot_pre!", "begin_year!", "end_year!",
+  "_apply_free_disturbance!", "_perturb_init!", "_mor_add!", "_cohorts")
+function compiled_loop_specs()    # the compiled, concrete specialisations of the per-year loop functions (the threaded closures included)
+  out = Core.MethodInstance[]
+  for nm in names(Pan, all=true)
+    isdefined(Pan, nm) || continue
+    v = getfield(Pan, nm); v isa Function || continue
+    occursin(Regex("(" * join(FP_LOOP_FUNCS, "|") * ")"), String(nm)) || continue
+    for m in methods(v)
+      m.module === Pan || continue
+      for mi in Base.specializations(m)
+        mi isa Core.MethodInstance && isdefined(mi, :cache) && Base.isdispatchtuple(mi.specTypes) && push!(out, mi)
+      end
+    end
+  end
+  out
+end
+
+@testset "hot path: fit_params one site loop with static tier accumulators" begin
+  fx = fp_fixture()
+  # every tier runs and returns [(run_result, cohorts, eco_losses)]; the cohorts are opt-in
+  for tier in (1, 2, 3, 4, 5)
+    r = fp_eval(fx, tier); r = fp_eval(fx, tier)
+    @test length(r) == 1 && r[1][1] isa PU.SiteLoss && r[1][3] isa Vector{PU.SiteLoss}
+    @test isempty(r[1][2])                                              # default: no cohort log
+    rc = fp_eval(fx, tier; collect_cohorts=true); rp = fp_eval(fx, tier; cache_preinject=true)
+    @test length(rc[1][2]) == length(rp[1][2]) > 0                     # one row per cohort per measurement either way
+    @test rc[1][1].sp_w_loss == r[1][1].sp_w_loss == rp[1][1].sp_w_loss   # the log does not touch the scores
+    @test eltype(rc[1][2]) == Pan.CohortRow
+  end
+  # no Core.Box and no Any-typed used locals in the specialised per-year loop (all tiers compiled above)
+  specs = compiled_loop_specs()
+  @test length(specs) >= 20
+  nbox = sum(box_statements(mi.specTypes) for mi in specs)
+  flags = Any[]; for mi in specs; append!(flags, red_flags(mi.specTypes; follow=false)); end
+  println("  fit_params per-year loop: $(length(specs)) compiled specialisations, $nbox Core.Box statements, $(length(flags)) Any/abstract-typed used locals (before 4a: 48 / 144 in the fit_params body + closures)")
+  @test nbox == 0
+  @test isempty(flags)
+  # allocations of one evaluation (bytes): not more than before 4a, and the cohort log is what the default no longer pays
+  fp_eval(fx, 3); a_off = @allocated fp_eval(fx, 3)
+  fp_eval(fx, 3; collect_cohorts=true); a_on = @allocated fp_eval(fx, 3; collect_cohorts=true)
+  println("  fit_params tier 3 (6 sites, serial): $a_off bytes default, $a_on bytes with collect_cohorts (before 4a: $FP_BASE_BYTES bytes, the cohort log always on)")
+  @test a_off <= FP_BASE_BYTES
+  @test a_off < a_on
 end
 end # module
