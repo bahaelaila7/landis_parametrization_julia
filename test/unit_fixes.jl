@@ -9,7 +9,7 @@ using Test, Pan
   @test pm("b") === :b && pm("B") === :b
   @test_throws ErrorException pm("bogus")
   # the disturbance-shock config reader used to call String(::Bool) on `dual_mode: true`
-  @test (Pan._configure_disturbance_shock!(Dict{String,Any}("dual_mode" => true, "loss_before_injection" => false)); true)
+  @test (Pan._disturbance_shock_path(Dict{String,Any}("dual_mode" => true, "loss_before_injection" => false)); true)
 end
 
 @testset "B1 injection flags do not leak between configs" begin
@@ -18,8 +18,9 @@ end
   @test on.override && on.sync
   off = Pan.scoring_options(Dict{String,Any}("loss_before_injection" => true))                 # no injection keys ⇒ the schema defaults
   @test !off.override && !off.sync && !off.replace && off.disturbance === :off
-  @test Pan._configure_disturbance_shock!(Dict{String,Any}("loss_before_injection" => true)) == ""   # no sync in this config ⇒ no shock
-  @test Pan._configure_disturbance_shock!(Dict{String,Any}("override_injection" => true, "override_injection_sync" => true)) != ""
+  @test Pan._disturbance_shock_path(Dict{String,Any}("loss_before_injection" => true)) == ""   # no sync in this config ⇒ no shock
+  @test Pan._disturbance_shock_path(Dict{String,Any}("override_injection" => true, "override_injection_sync" => true)) != ""
+  @test Pan.data_options(Dict{String,Any}("loss_before_injection" => true)).disturbance_path == "" && Pan.scoring_options(Dict{String,Any}("fia_cycle" => true, "fia_cycle_merge" => 2)).cycle == Pan.Data.CycleOptions(use_fia_cycle=true, merge=2)
   @test !isdefined(Pan, :OVERRIDE_INJECTION) && !isdefined(Pan, :OVERRIDE_INJECTION_SYNC)      # no module-level flag left to leak
 end
 

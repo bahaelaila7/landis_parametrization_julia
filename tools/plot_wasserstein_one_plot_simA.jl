@@ -10,7 +10,6 @@ const MK = CairoMakie; const P = Pan; const PU = P.PU; const D = P.Data; const D
 
 cfg = P.load_config(ARGS[1])
 scoring, simb = P.scoring_from_config(cfg); scoring = P.with_options(scoring; init_perturb_frac=0.0)   # nominal sim (no perturbation); the run's scoring rule (all scoring globals, one shared function)
-D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
 no_estab = cfg["no_establishment"]
 rng = P.RNGType(UInt64(cfg["seed"]))
 val_frac = cfg["val_frac"]; split_rng = val_frac > 0 ? P.RNGType(UInt64(cfg["split_seed"])) : nothing

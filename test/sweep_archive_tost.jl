@@ -15,8 +15,7 @@ ALPHA = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : 0.05
 Δ = log1p(EQM)
 outdir = cfg["output_dir"]
 scoring = P.ScoringOptions(; override=Bool(g("override_injection", true)), sync=Bool(g("override_injection_sync", true)), replace=Bool(g("override_injection_replace", false)), disturbance=Symbol(g("override_injection_disturbance", "off"))); simb = P.SimBOptions()
-D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
-D.FIA_CYCLE_MERGE[] = Int(g("fia_cycle_merge", 1))
+scoring = P.with_options(scoring; cycle=D.CycleOptions(use_fia_cycle=Bool(g("fia_cycle", false)), merge=Int(g("fia_cycle_merge", 1))))   # tier-4/5 cycle bucketing (was the Data.USE_FIA_CYCLE/FIA_CYCLE_MERGE globals)
 no_estab = Bool(g("no_establishment", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
 val_frac = Float64(g("val_frac", 0.0))

@@ -12,7 +12,6 @@ const P = Pan; const D = P.Data; const DF = DataFrames
 
 cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
 β = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : Float64(g("rankw_beta", 0.999))
-D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
 val_frac = Float64(g("val_frac", 0.0)); n_folds = Int(g("n_folds", 1))
 split_rng = (val_frac > 0 || n_folds > 1) ? P.RNGType(UInt64(Int(g("split_seed", 42)))) : nothing

@@ -14,7 +14,7 @@ base_outdir = cfg["output_dir"]
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
 TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""   # candidate id in titles
 scoring = P.ScoringOptions(; override=Bool(g("override_injection", true)), sync=Bool(g("override_injection_sync", true)), replace=Bool(g("override_injection_replace", false)), disturbance=Symbol(g("override_injection_disturbance", "off"))); simb = P.SimBOptions()
-D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false))
+scoring = P.with_options(scoring; cycle=D.CycleOptions(use_fia_cycle=Bool(g("fia_cycle", false))))   # tier-4/5 cycle bucketing (was the Data.USE_FIA_CYCLE/FIA_CYCLE_MERGE globals)
 # nominal sim (no perturbation) for the scatter
 no_estab = Bool(g("no_establishment", false))
 rng = P.RNGType(UInt64(Int(g("seed", 1))))
@@ -213,7 +213,7 @@ function make_scatter_B(sp, label)
   cached = res[1][2]; ab = loss_params.age_bins
   # FOREST age-distribution, exactly as Sim B's tier-4 objective: aggregate AGB by
   # (cycle × eco/land-use × species × age-bin) across all plots — sim age-bins vs obs age-bins.
-  cyc_map, _ = D.build_cycle_map(sp; cycle_years=Float64(g("cycle_years", 8)))
+  cyc_map, _ = D.build_cycle_map(sp; cycle_years=Float64(g("cycle_years", 8)), cycle=scoring.cycle)
   simdf = DF.DataFrame(cyc=Int[], eco=Int[], esp=Int[], bin=Int[], agb=Float64[])
   for (pid, sy, esp, age, bio) in cached
     haskey(plot2eco, Int(pid)) || continue

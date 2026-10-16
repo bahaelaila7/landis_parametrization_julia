@@ -16,6 +16,7 @@ initial-condition perturbation. Defaults are the legacy module defaults (no inje
   - `w_scope` (`:all` | `:survivors`) and `death_term` (`:none` | `:likelihood`): the natural-death part of the Sim A score.
   - `w_diag` (`:none` | `:stats` | `:nodeath` | `:oracle`): diagnostic mode of tools/w_decompose.jl (no effect by default).
   - `init_perturb_frac`, `init_perturb_cap`: initial-biomass perturbation reps (see `_init_scales`).
+  - `cycle`: how tier-4/5 measurements are bucketed into calendar cycles (`Data.CycleOptions`: FIA `cycle` column vs computed, merge width).
 """
 Base.@kwdef struct ScoringOptions
   override::Bool = false
@@ -30,6 +31,7 @@ Base.@kwdef struct ScoringOptions
   w_diag::Symbol = :none
   init_perturb_frac::Float64 = 0.0
   init_perturb_cap::FloatType = FloatType(Inf)
+  cycle::Data.CycleOptions = Data.CycleOptions()
 end
 
 """

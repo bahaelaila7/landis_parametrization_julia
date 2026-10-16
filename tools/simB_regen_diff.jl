@@ -27,7 +27,6 @@ if isfile(CACHE) && !RESIM
   println("loaded cache $CACHE — $(length(allsims)) candidates × $(length(allsims[1])) reps (pass --resim to redo)")
 else
   scoring, simb = P.scoring_from_config(cfg); scoring = P.with_options(scoring; init_perturb_frac=0.0)   # the run's scoring rule and Sim B options
-  D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
   no_estab = cfg["no_establishment"]; rng = P.RNGType(UInt64(cfg["seed"]))
   splots, eco_list, species_list, eco_species_ids, _ = D.prepare_parametrization_data(;
     cohorts_db_path=cfg["cohorts_db_path"], eco_field=cfg["eco_field"], tablename=cfg["tablename"],
@@ -44,7 +43,7 @@ else
   spdf = PU.smoothen_ref_years(splots, loss_params, max_age; debug=false)
   spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(splots)
   inj = (no_estab || scoring.override) ? D.get_injection_cohorts(splots; all_cohorts=scoring.override) : nothing
-  cycle_map, n_cycles = D.build_cycle_map(splots; cycle_years=cfg["cycle_years"])
+  cycle_map, n_cycles = D.build_cycle_map(splots; cycle_years=cfg["cycle_years"], cycle=scoring.cycle)
   t4_ref = [[zeros(P.FloatType, length(eco_species_ids[e]), n_bins) for _ in 1:n_cycles] for e in eachindex(eco_list)]
   for ((plot_id, eco_id), yd) in spdf_plts, (sy, gt) in yd
     cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue

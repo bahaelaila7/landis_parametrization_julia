@@ -145,13 +145,44 @@ end
 # RNG draws, no spatial bias toward low FIPS). cap: Int, or "auto" = max(train_cap_min, ceil(train_cap_k × median
 # stratum size in that eco cell)). Returns (surplus_val_sites, surplus_test_sites).
 _median(v) = (w = sort(v); n = length(w); isodd(n) ? Float64(w[(n+1)÷2]) : (w[n÷2] + w[n÷2+1]) / 2)
-const LAST_SPLIT_DOM = Ref{Union{Nothing,DataFrame}}(nothing)
-const LAST_SPECIES_MAP = Ref{Union{Nothing,DataFrame}}(nothing)   # species_symbol → effective_species (this run's tiering)   # id_cols + eco_id + dom + set (for split_plots.csv)
+
+"""
+    DataOutputs(split_dom, species_map)
+
+The by-products of data preparation that the run writes next to its results (returned by `make_splots` / `prepare_parametrization_data` as the 7th value):
+`split_dom` = id_cols + eco_id + dom of every plot when a species-balanced train cap ran (else `nothing`; for split_plots.csv), `species_map` =
+species_symbol → effective_species of this run's tiering (species_map.csv).
+"""
+struct DataOutputs
+  split_dom::Union{Nothing,DataFrame}
+  species_map::DataFrame
+end
+
+"""
+    CycleOptions(; use_fia_cycle=false, merge=3)
+
+How measurements are bucketed into calendar cycles by `build_cycle_map`. `use_fia_cycle`: take cycles from the FIA inventory `cycle` column
+verbatim (else computed `cycle_years`-wide buckets from the first visit); `merge`: merge this many consecutive FIA cycles into one group
+(1 = none; e.g. 3 gives {7,8,9},{10,11,12}); a plot measured in more than one cycle of a group contributes a duplicate measurement to that group.
+"""
+Base.@kwdef struct CycleOptions
+  use_fia_cycle::Bool = false
+  merge::Int = 3
+end
+
+"""
+    DataOptions(; disturbance_path="")
+
+Inputs of data preparation that are not plain prep kwargs. `disturbance_path`: parquet of per-(subplot, species, visit, age) disturbance rows
+(tools/export_cohort_disturbance.py; partial AND full removals); empty = off. Built by `Pan.data_options` from a config.
+"""
+Base.@kwdef struct DataOptions
+  disturbance_path::String = ""
+end
 
 # ---- disturbance shock data (tools/export_cohort_disturbance.py) ---------------------------------------------
 # Parquet of per-(subplot, species, visit T, age) disturbance rows (partial AND full removals). Empty path = off.
-# Set by Pan.run_from_yaml (`disturbance_full_removals`); only used with the new scoring order (loss_before_injection).
-const DISTURBANCE_FULL_PATH = Ref("")
+# Path comes from `DataOptions.disturbance_path` (config `disturbance_full_removals`); only used with the new scoring order (loss_before_injection).
 const _K0_W_TO_AGB = 1.0 / 4046.86     # tree_trajectories w = drybio_g*tpa  →  curated cohort `agb` (g/m²): agb = w / 4046.86
 
 function _load_disturbance_rows(path::AbstractString)::DataFrame
@@ -241,14 +272,12 @@ function _cap_train_sites(df::DataFrame, id_cols::Vector{Symbol}, parts, three_w
   @info "train_cap ($(train_cap)): train $(nrow(tr)) → $(count(keep)); surplus → val $(nrow(sv)), test $(nrow(st))"
   show(stdout, MIME("text/plain"), sort(tab[tab.n_before .> tab.n_after, :], :n_before, rev=true); allrows=true); println()
   dd = select(dom, vcat(id_cols, [:eco_id, :dom]))
-  LAST_SPLIT_DOM[] = dd
-  return sv, st
+  return sv, st, dd
 end
 
 function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
   val_frac::Float64, rng::Random.AbstractRNG; n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0,
   train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20)
-  LAST_SPLIT_DOM[] = nothing
   three_way = test_frac > 0.0            # train/val/test single split — a SEPARATE mode from K-fold CV
   three_way && n_folds > 1 && error("test_frac>0 (3-way train/val/test split) is incompatible with n_folds>1 (cross-validation) — pick one")
   site_sp = unique(select(df, vcat(id_cols, [:eco_id, :effective_species])))
@@ -285,9 +314,10 @@ function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
   ]
   val_sites  = vcat([p[1] for p in parts]...)
   test_sites = three_way ? vcat([p[2] for p in parts]...) : nothing
+  split_dom = nothing   # id_cols + eco_id + dom of every plot, set when the species-balanced train cap ran (for split_plots.csv)
   if train_cap !== nothing
     n_folds > 1 && error("train_cap (species-balanced training set) is not supported with n_folds>1 cross-validation")
-    sv, st = _cap_train_sites(df, id_cols, parts, three_way; train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min)
+    sv, st, split_dom = _cap_train_sites(df, id_cols, parts, three_way; train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min)
     val_sites = vcat(val_sites, sv)
     three_way && (test_sites = vcat(test_sites, st))
   end
@@ -297,7 +327,7 @@ function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
   df_test = three_way ? semijoin(df, test_sites, on=id_cols) : nothing
   df_train = antijoin(df, val_sites, on=id_cols)
   three_way && (df_train = antijoin(df_train, test_sites, on=id_cols))
-  return df_train, df_val, df_test
+  return df_train, df_val, df_test, split_dom
 end
 
 # Tag each plot with :mixed_plot over its entire (loaded) history. true = mixed stand:
@@ -326,7 +356,8 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   single_ecoregion::Bool=false, stratify_landuse::Bool=false,
   tree_stats::Union{Nothing,DataFrame}=nothing, shade_tier::Union{Nothing,Dict{String,String}}=nothing,
   max_exact::Int=12, max_group::Int=4,
-  train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20)
+  train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20,
+  data_opts::DataOptions=DataOptions())
   # eco_field can be any column of the loaded cohorts (epa_l4/epa_l3/ecosubcd, or a curated
   # stratifier like land_use). Falls back to ecosubcd only for the legacy unspecified case.
   eco_field = if eco in ("epa_l4", "epa_l3", "ecosubcd", "land_use")
@@ -339,7 +370,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   hasproperty(df, eco_field) || error("make_splots: eco_field :$eco_field is not a column of the cohorts table")
 
   assign_tiered_species!(df; max_exact=max_exact, max_group=max_group, min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats, shade_tier=shade_tier)
-  LAST_SPECIES_MAP[] = sort!(unique(select(df, [:species_symbol, :effective_species])), :species_symbol)
+  species_map = sort!(unique(select(df, [:species_symbol, :effective_species])), :species_symbol)
   if !isempty(filter_species)
     fs = Set(filter_species)
     filter!(row -> row.effective_species in fs, df)
@@ -382,7 +413,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   df.age_calc = df.age_calc .|> UIntType
   # Per-cohort partial-disturbance biomass-drop fraction (from curation; 0 where absent/un-attached).
   # The override-sync scales matched cohorts by (1-drop) at the disturbance year.
-  shock_rows = isempty(DISTURBANCE_FULL_PATH[]) ? nothing : _load_disturbance_rows(DISTURBANCE_FULL_PATH[])
+  shock_rows = isempty(data_opts.disturbance_path) ? nothing : _load_disturbance_rows(data_opts.disturbance_path)
   if hasproperty(df, :disturbance_drop_pct)
     df.disturbance_drop_pct = Float32.(coalesce.(df.disturbance_drop_pct, 0.0))
   elseif shock_rows !== nothing
@@ -394,7 +425,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
     end
     df.disturbance_drop_pct = Float32[get(pd, (Int(a), Int(b), Int(c), Int(d), Int(e), String(f), Dates.Date(g), Int(h)), 0f0)
       for (a, b, c, d, e, f, g, h) in zip(df.statecd, df.unitcd, df.countycd, df.plot, df.subp, df.species_symbol, df.measdate, df.age_calc)]
-    println("disturbance_drop_pct attached from $(basename(DISTURBANCE_FULL_PATH[])): $(sum(df.disturbance_drop_pct .> 0)) / $(nrow(df)) cohort rows > 0")
+    println("disturbance_drop_pct attached from $(basename(data_opts.disturbance_path)): $(sum(df.disturbance_drop_pct .> 0)) / $(nrow(df)) cohort rows > 0")
   else
     df.disturbance_drop_pct = zeros(Float32, nrow(df))
   end
@@ -417,12 +448,11 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   # Split right here — after mapping, before aggregation — so each half gets its
   # own contiguous plot_ids and is fully self-contained.
   do_split = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) && !isnothing(split_rng)
-  LAST_SPLIT_DOM[] = nothing   # never let a previous call's split dominance leak into this call's split_plots.csv
   train_cap !== nothing && !do_split &&
     @warn "train_cap=$(train_cap) is IGNORED: no train/val/test split is active (set val_frac/test_frac)"
-  df_train, df_val_raw, df_test_raw = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
+  df_train, df_val_raw, df_test_raw, split_dom = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
                            train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min) :
-                         (df, nothing, nothing)
+                         (df, nothing, nothing, nothing)
 
   # Aggregate a raw cohort df into a splots DataFrame with contiguous plot_ids.
   function _agg(df_sub::DataFrame)
@@ -453,7 +483,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
     if by_subplot
       @warn "disturbance_full_removals: ignored with by_subplot=true (plot-level aggregation only)"
     else
-      sym2sid = Dict{String,Int}(String(r.species_symbol) => species_symbol_map_dict[r.effective_species] for r in eachrow(LAST_SPECIES_MAP[]) if haskey(species_symbol_map_dict, r.effective_species))
+      sym2sid = Dict{String,Int}(String(r.species_symbol) => species_symbol_map_dict[r.effective_species] for r in eachrow(species_map) if haskey(species_symbol_map_dict, r.effective_species))
       for (nm, spx) in (("train", splots_train), ("val", splots_val), ("test", splots_test))
         spx === nothing && continue
         println("  [$(nm)]")
@@ -461,7 +491,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
       end
     end
   end
-  return splots_train, eco_vals, species_symbol_map_vals, ddf.species_ids, splots_val, splots_test
+  return splots_train, eco_vals, species_symbol_map_vals, ddf.species_ids, splots_val, splots_test, DataOutputs(split_dom, species_map)
 end
 
 function build_padded_sim_years(splots_subset::DataFrame, n_plots_total::Int)
@@ -571,19 +601,15 @@ end
 # Maps each (plot_id, sim_year) measurement to a 1-based calendar cycle index, using the
 # same epoch (earliest measdate) and width as print_cycle_coverage. Used by the tier-4
 # population loss to bucket measurements into calendar snapshots. Returns (map, n_cycles).
-# When USE_FIA_CYCLE[] is set, cycles come from the FIA inventory `cycle` column verbatim (raw value
+# When `cycle.use_fia_cycle` is set, cycles come from the FIA inventory `cycle` column verbatim (raw value
 # as the 1-based index, so train and val share the same mapping; empty low slots cost a little memory
 # but add zero loss). Otherwise cycles are the calculated cycle_years-wide buckets from the first visit.
-const USE_FIA_CYCLE = Ref{Bool}(false)
-# Merge this many consecutive FIA cycles into one group (1 = no merge). e.g. 3 ⇒ {7,8,9},{10,11,12}.
-# A plot measured in >1 cycle of a group contributes a (duplicate) measurement to that group.
-const FIA_CYCLE_MERGE = Ref{Int}(3)
-function build_cycle_map(splots::DataFrame; cycle_years::Real=8)
-  if USE_FIA_CYCLE[] && hasproperty(splots, :cycle)
+function build_cycle_map(splots::DataFrame; cycle_years::Real=8, cycle::CycleOptions=CycleOptions())
+  if cycle.use_fia_cycle && hasproperty(splots, :cycle)
     meas = unique(select(splots, [:plot_id, :sim_year, :cycle]))
     vals = Int[Int(r.cycle) for r in eachrow(meas) if !ismissing(r.cycle)]
     isempty(vals) && return Dict{Tuple{Int,Int},Int}(), 0
-    mn = minimum(vals); mrg = max(1, FIA_CYCLE_MERGE[])   # merge mrg consecutive FIA cycles into one group
+    mn = minimum(vals); mrg = max(1, cycle.merge)   # merge mrg consecutive FIA cycles into one group
     cmap = Dict{Tuple{Int,Int},Int}()
     n_cycles = 0
     for r in eachrow(meas)
@@ -754,7 +780,7 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   return cohorts_df[keep, :]
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", shade_tier_csv::Union{Nothing,String}=nothing, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, filter_states::Vector{Int}=Int[], siteclass_l3s::Vector{String}=String[], max_exact::Int=12, max_group::Int=4, drop_phantom::Bool=false, train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20, RNG::Union{Nothing,Random.AbstractRNG})
+function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", shade_tier_csv::Union{Nothing,String}=nothing, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, filter_states::Vector{Int}=Int[], siteclass_l3s::Vector{String}=String[], max_exact::Int=12, max_group::Int=4, drop_phantom::Bool=false, train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20, RNG::Union{Nothing,Random.AbstractRNG}, data_opts::DataOptions=DataOptions())
   println("Connecting to: $(cohorts_db_path) ")
   # In-memory main DB + ATTACH the file READ-ONLY: a killed run can never corrupt the file (a mid-write
   # checkpoint was the corruption cause), yet df registrations (loaded_subplots) still land in the writable
@@ -881,12 +907,12 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
     println("shade_tier: $(length(shade_tier)) species → LST/HST from $(basename(shade_tier_csv))")
   end
 
-  @time splots, eco_list, species_list, eco_species_ids, splots_val, splots_test =
+  @time splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs =
     make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
       by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng, n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
       min_trees=min_trees, min_agb_frac=min_agb_frac,
       stratify_eco_mixed=stratify_eco_mixed, single_ecoregion=single_ecoregion, stratify_landuse=stratify_landuse, tree_stats=tree_stats, shade_tier=shade_tier,
-      max_exact=max_exact, max_group=max_group, train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min)
+      max_exact=max_exact, max_group=max_group, train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min, data_opts=data_opts)
   mark_estab_year!(splots)
   isnothing(splots_val) || mark_estab_year!(splots_val)
   isnothing(splots_test) || mark_estab_year!(splots_test)
@@ -894,5 +920,5 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   n_viol = check_cohort_continuity(splots)
   println("Cohort continuity violations: $n_viol")
 
-  return splots, eco_list, species_list, eco_species_ids, splots_val, splots_test
+  return splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs
 end

@@ -13,7 +13,6 @@ OUTSUB = length(ARGS) >= 3 ? ARGS[3] : "archive_scatter"
 outdir = joinpath(cfg["output_dir"], OUTSUB); mkpath(outdir)
 
 scoring, simb = P.scoring_from_config(cfg); scoring = P.with_options(scoring; init_perturb_frac=0.0)   # nominal sim (no perturbation); the scoring rule of the run (injection mode, loss_before_injection, recruits, w_scope, death_term, disturbance shock)
-D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
 no_estab = cfg["no_establishment"]; rng = P.RNGType(UInt64(cfg["seed"]))
 
 # data-prep once (train split) via the SAME code path as training (Pan.prepare_from_cfg): honors the run's outlier

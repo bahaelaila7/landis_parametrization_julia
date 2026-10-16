@@ -11,7 +11,7 @@ cfg = YAML.load_file(ARGS[1]); g(k, d) = get(cfg, k, d)
 outdir = cfg["output_dir"]
 dbpath = String(g("sobol_candidates_db", joinpath(outdir, "losses.duckdb")))
 scoring = P.ScoringOptions(; override=Bool(g("override_injection", true)), sync=Bool(g("override_injection_sync", true)), replace=Bool(g("override_injection_replace", false)), disturbance=Symbol(g("override_injection_disturbance", "off"))); simb = P.SimBOptions(; dual_mode=let v = g("dual_mode", "off"); v === true ? :joint : v === false ? :off : Symbol(lowercase(String(v))) end, tier_b=Int(g("tier_b", 4)))
-D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false)); D.FIA_CYCLE_MERGE[] = Int(g("fia_cycle_merge", 1))
+scoring = P.with_options(scoring; cycle=D.CycleOptions(use_fia_cycle=Bool(g("fia_cycle", false)), merge=Int(g("fia_cycle_merge", 1))))   # tier-4/5 cycle bucketing (was the Data.USE_FIA_CYCLE/FIA_CYCLE_MERGE globals)
 no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("seed", 1))))
 splots, eco_list, species_list, eco_species_ids, _ = D.prepare_parametrization_data(;
   cohorts_db_path=cfg["cohorts_db_path"], filter_eco_field=String(g("filter_eco_field", "epa_l4")),
@@ -54,7 +54,7 @@ cycle_years = Real(g("cycle_years", 8))
 # n_bins must match sp_age_cdf length, which derives from loss_params.age_bins (1:400 when unbinned_w,
 # else the coarse `bins`) — mirror parametrize() line 1731, not the config `bins`, or the t4_ref build mismatches.
 n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-cmap, ncyc = D.build_cycle_map(splots; cycle_years=cycle_years)
+cmap, ncyc = D.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
 t4_ref = [[zeros(P.FloatType, length(eco_species_ids[e]), n_bins) for _ in 1:ncyc] for e in eachindex(eco_list)]
 for ((pid, eid), yd) in spdf_plts, (sy, gt) in yd
   c = get(cmap, (Int(pid), Int(sy)), 0); c == 0 && continue

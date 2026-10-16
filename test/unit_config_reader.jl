@@ -163,7 +163,6 @@ end
   m = cerr(() -> L("override_injection" => true, "loss_before_injection" => true)); @test m !== nothing && occursin("loss_before_injection", m)
   @test cerr(() -> L(sync..., "override_injection_replace" => true, "loss_before_injection" => true)) !== nothing
   # scoring_from_config builds the immutable options from the config (no module state, nothing to leak between configs)
-  try
     sc, sb = Pan.scoring_from_config(L(sync..., "disturbance_full_removals" => false, "exclude_recruits_at_entry" => false, "w_scope" => "survivors",
                                        "death_term" => "likelihood", "override_injection_noise" => 0.1, "override_injection_disturbance" => "scale",
                                        "init_perturb_frac" => 0.05, "init_perturb_cap" => 25, "dual_mode" => "b", "tier_b" => 4, "simB_spinup" => false))
@@ -180,9 +179,6 @@ end
     @test Pan.simb_options(L("tier" => 4)).t4_primary && !Pan.simb_options(L("tier" => 4, "dual_mode" => "joint")).t4_primary   # tier 4 without a dual, or dual b
     @test !ismutabletype(Pan.ScoringOptions) && !ismutabletype(Pan.SimBOptions) && all(isconcretetype, fieldtypes(Pan.ScoringOptions)) && all(isconcretetype, fieldtypes(Pan.SimBOptions))   # immutable, concretely typed: free to read in the site loop
     @test Pan.with_options(sc; w_scope=:all).w_scope === :all && Pan.with_options(sc; w_scope=:all).noise == 0.1
-  finally
-    Pan.Data.DISTURBANCE_FULL_PATH[] = ""
-  end
 end
 
 @testset "param_space_options (the former BSP.* switches)" begin

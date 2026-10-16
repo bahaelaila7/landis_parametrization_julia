@@ -12,7 +12,7 @@ base_outdir = get(ENV, "PAN_OUT", "") != "" ? joinpath(ENV["PAN_OUT"], basename(
 outdir = haskey(ENV, "PAN_OUTSUB") ? (let d = joinpath(base_outdir, ENV["PAN_OUTSUB"]); mkpath(d); d end) : base_outdir
 TAG = haskey(ENV, "PAN_OUTSUB") ? replace(basename(ENV["PAN_OUTSUB"]), "candidate_" => "cand ") * " — " : ""   # candidate id in titles
 scoring = P.ScoringOptions(; override=Bool(g("override_injection", true)), sync=Bool(g("override_injection_sync", true)), replace=Bool(g("override_injection_replace", false)), disturbance=Symbol(g("override_injection_disturbance", "off"))); simb = P.SimBOptions(); 
-D.USE_FIA_CYCLE[] = Bool(g("fia_cycle", false)); D.FIA_CYCLE_MERGE[] = Int(g("fia_cycle_merge", 1))
+scoring = P.with_options(scoring; cycle=D.CycleOptions(use_fia_cycle=Bool(g("fia_cycle", false)), merge=Int(g("fia_cycle_merge", 1))))   # tier-4/5 cycle bucketing (was the Data.USE_FIA_CYCLE/FIA_CYCLE_MERGE globals)
 no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("seed", 1))))
 val_frac = Float64(g("val_frac", 0.0))
 test_frac = Float64(g("test_frac", 0.0))               # 3-way split: reproduce the run's held-out TEST set too

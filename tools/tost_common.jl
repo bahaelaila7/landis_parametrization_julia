@@ -6,7 +6,6 @@ const P = Pan; const PU = P.PU; const D = P.Data; const DF = DataFrames; const H
 # caller defines: cfg (Pan.load_config), SPLIT ("train"|"val"|"test") before including this file
 ALPHA = 0.05
 scoring, simb = P.scoring_from_config(cfg); scoring = P.with_options(scoring; init_perturb_frac=0.0)   # nominal sim (no perturbation); the scoring rule of the run (injection mode, loss_before_injection, recruits, w_scope, death_term, disturbance shock)
-D.USE_FIA_CYCLE[] = cfg["fia_cycle"]
 no_estab = cfg["no_establishment"]; rng0 = cfg["seed"]
 splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = P.prepare_from_cfg(cfg)
 # SPLIT: "train" | "val" | "test", or several joined by "+" (e.g. "train+val"): pairs of every listed split are pooled

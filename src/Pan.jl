@@ -1271,7 +1271,7 @@ end
 
 # Persist the exact train/val/test plot assignment (+ eco cell, + dominant species when train_cap ran) so floor
 # builders / analysis scripts reuse the run's split instead of re-deriving it (scripts drift from training kwargs).
-function _write_split_plots(output_dir::AbstractString, eco_list, splots, sv, st)
+function _write_split_plots(output_dir::AbstractString, eco_list, splots, sv, st, outs::Data.DataOutputs)
   mkpath(output_dir)
   ids = [:statecd, :unitcd, :countycd, :plot]
   parts = DataFrame[]
@@ -1283,12 +1283,11 @@ function _write_split_plots(output_dir::AbstractString, eco_list, splots, sv, st
   end
   isempty(parts) && return
   out = vcat(parts...)
-  dd = Data.LAST_SPLIT_DOM[]
+  dd = outs.split_dom
   out = dd === nothing ? out : leftjoin(out, select(dd, vcat(ids, [:dom])), on=ids)
   sort!(out, vcat([:set], ids))
   CSV.write(joinpath(output_dir, "split_plots.csv"), out)
-  sm = Data.LAST_SPECIES_MAP[]
-  sm === nothing || CSV.write(joinpath(output_dir, "species_map.csv"), sm)   # symbol → category (for floor builders)
+  CSV.write(joinpath(output_dir, "species_map.csv"), outs.species_map)   # symbol → category (for floor builders)
   @info "split_plots.csv: $(nrow(out)) plots → $(output_dir)"
 end
 
@@ -1405,6 +1404,7 @@ function parametrize(; cohorts_db_path::String,
   loss_piecewise::Bool=false,
   w_pivot::Float64=1.0,
   agb_pivot::Float64=1.0,
+  data_opts::Data.DataOptions=Data.DataOptions(),   # data-preparation inputs (disturbance-shock parquet); see `data_options`
   scoring::ScoringOptions=ScoringOptions(),   # the scoring rule + initial-biomass perturbation (see `scoring_from_config`)
   simb::SimBOptions=SimBOptions(),            # Sim B / dual-mode options
   space_opts::PU.ParamSpaceOptions=PU.ParamSpaceOptions(),   # which parameters are searched and their boxes (see `param_space_options`)
@@ -1498,13 +1498,13 @@ function parametrize(; cohorts_db_path::String,
     _loss_params(PU.AgeBins(bins_idx=collect(1:400), last_bin_open=true), FloatType[one(FloatType)]) :
     _loss_params(PU.AgeBins(bins_idx=bins_idx .|> Int, last_bin_open=true), smoothing_window)
   unbinned_w && @info "Sim-A W = UNBINNED per-year EMD (bins 1:400, no age-smoothing); softplus β + cell W_SCALE recompute on this grid"
-  splots, eco_list, species_list, eco_species_ids, splots_val_raw, splots_test_raw =
-    Data.prepare_parametrization_data(; _prep_kwargs(; cohorts_db_path, eco_field, tablename, filter_eco_field, filter_ecos,
+  splots, eco_list, species_list, eco_species_ids, splots_val_raw, splots_test_raw, data_outs =
+    Data.prepare_parametrization_data(; data_opts, _prep_kwargs(; cohorts_db_path, eco_field, tablename, filter_eco_field, filter_ecos,
       filter_plots, exclude_plots, filter_species, filter_planted, skip_disturbances, spinup, by_subplot,
       val_frac, split_seed, n_folds, fold_index, test_frac, min_trees, min_agb_frac, stratify_eco_mixed,
       single_ecoregion, stratify_landuse, site_class_strata, siteclass_hi_max, siteclass_scheme, shade_tier_csv,
       filter_extent, filter_states, siteclass_l3s, max_exact, max_group, train_cap, train_cap_k, train_cap_min, rng, drop_phantom)...)
-  _write_split_plots(output_dir, eco_list, splots, splots_val_raw, splots_test_raw)
+  _write_split_plots(output_dir, eco_list, splots, splots_val_raw, splots_test_raw, data_outs)
   n_species = length(species_list)
   # --- succession plugin selection (static type; everything downstream dispatches on succession_plugin_of(soa)) ---
   SUCC = succession_plugin_type(succession_plugin)
@@ -2619,7 +2619,7 @@ function parametrize_sobol(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif eval_tier == 4 || eval_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts
       for (sy, spdf_gt) in year_dict
@@ -2881,7 +2881,7 @@ function resim_simB_paired(cfg0, params, sp, spdf_plts, site_sim_years, spinup_c
     simb_disturb_only=cfg["simB_disturb_only"], t4_per_plot_mean=cfg["simB_per_plot_mean"], t4_mean_over_reps=cfg["simB_rep_mean"])
   n_species = length(species_list)
   inj = (simb.simb_disturb_only || scoring.override) ? Data.get_injection_cohorts(sp; all_cohorts=true) : nothing
-  cycle_map, n_cycles = Data.build_cycle_map(sp; cycle_years=cfg["cycle_years"])
+  cycle_map, n_cycles = Data.build_cycle_map(sp; cycle_years=cfg["cycle_years"], cycle=scoring.cycle)
   n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
   t4_ref = [[zeros(FloatType, length(eco_species_ids[e]), n_bins) for _ in 1:n_cycles] for e in eachindex(eco_list)]
   for ((pid, eid), yd) in spdf_plts, (sy, gt) in yd
@@ -2926,7 +2926,7 @@ end
 function _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years,
     val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring::ScoringOptions, simb::SimBOptions, plugin::PluginConfig)
   simb.dual_mode == :off && return nothing
-  vcm, vnc = Data.build_cycle_map(val_splots; cycle_years=cycle_years)
+  vcm, vnc = Data.build_cycle_map(val_splots; cycle_years=cycle_years, cycle=scoring.cycle)
   nb = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
   vt4 = [[zeros(FloatType, length(eco_species_ids[e]), nb) for _ in 1:vnc] for e in eachindex(eco_list)]
   for ((pid, eid), yd) in val_spdf_plts, (sy, gt) in yd
@@ -2998,7 +2998,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plug
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts
       for (sy, spdf_gt) in year_dict
@@ -3300,7 +3300,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts
       for (sy, spdf_gt) in year_dict
@@ -3985,7 +3985,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts
       for (sy, spdf_gt) in year_dict
@@ -4278,7 +4278,7 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
       cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
@@ -4578,7 +4578,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
       cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
@@ -4819,7 +4819,7 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
       cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
@@ -4956,7 +4956,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
       cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
@@ -5074,7 +5074,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   val_t4_ref = nothing; val_cycle_map = nothing; val_n_cycles = 0
   if have_val && (search_tier == 4 || search_tier == 5)
     _vnb = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    val_cycle_map, val_n_cycles = Data.build_cycle_map(val_splots; cycle_years=cycle_years)
+    val_cycle_map, val_n_cycles = Data.build_cycle_map(val_splots; cycle_years=cycle_years, cycle=scoring.cycle)
     val_t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), _vnb) for _ in 1:val_n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in val_spdf_plts, (sy, spdf_gt) in year_dict
       cyc = get(val_cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
@@ -5451,7 +5451,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
   elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
     n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years)
+    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
     t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
     for ((plot_id, eco_id), year_dict) in spdf_plts
       for (sy, spdf_gt) in year_dict
@@ -5992,9 +5992,9 @@ function _resolve_loss_before_injection(g)::Bool
 end
 
 # Disturbance-shock data source (yaml `disturbance_full_removals: <parquet>`, default data/cohort_disturbance_full.parquet in the
-# repo if present). Active only with the new scoring order + sync injection; otherwise Data.DISTURBANCE_FULL_PATH[] = "" (legacy
-# behaviour byte-identical: no partial-drop attach, no shock rows).
-function _configure_disturbance_shock!(cfg0::AbstractDict)
+# repo if present). Active only with the new scoring order + sync injection; otherwise "" (legacy behaviour byte-identical: no
+# partial-drop attach, no shock rows). Pure: returns the path, sets nothing.
+function _disturbance_shock_path(cfg0::AbstractDict)
   cfg = _as_config(cfg0)
   lbi = cfg["loss_before_injection"]   # resolved by load_config (_resolve_loss_before_injection)
   dual = cfg["dual_mode"] !== :off
@@ -6013,9 +6013,16 @@ function _configure_disturbance_shock!(cfg0::AbstractDict)
       isfile(path) || (@warn "disturbance_full_removals: $(path) not found — disturbance shocks disabled"; path = "")
     end
   end
-  Data.DISTURBANCE_FULL_PATH[] = path
   path
 end
+
+"""
+    data_options(cfg) -> Data.DataOptions
+
+The data-preparation inputs of a run, read from a loaded config (the disturbance-shock parquet). Pure; pass the result as
+`parametrize(data_opts=...)` / `Data.prepare_parametrization_data(data_opts=...)` (`prepare_from_cfg` does it for you).
+"""
+data_options(cfg0::AbstractDict)::Data.DataOptions = Data.DataOptions(disturbance_path=_disturbance_shock_path(cfg0))
 
 """
     scoring_options(cfg) -> ScoringOptions
@@ -6032,7 +6039,8 @@ function scoring_options(cfg0::AbstractDict)::ScoringOptions
     noise=cfg["override_injection_noise"], disturbance=cfg["override_injection_disturbance"],
     loss_before_injection=cfg["loss_before_injection"], exclude_recruits_at_entry=cfg["exclude_recruits_at_entry"],
     w_scope=w_scope, death_term=death_term,
-    init_perturb_frac=cfg["init_perturb_frac"], init_perturb_cap=FloatType(cfg["init_perturb_cap"]))
+    init_perturb_frac=cfg["init_perturb_frac"], init_perturb_cap=FloatType(cfg["init_perturb_cap"]),
+    cycle=Data.CycleOptions(use_fia_cycle=cfg["fia_cycle"], merge=cfg["fia_cycle_merge"]))
 end
 
 """
@@ -6055,14 +6063,12 @@ end
 The ONE place the scoring and Sim B options are built. `run_from_yaml` and the analysis tools (tost, scatter, plots) all call it, so a tool
 scores exactly the way the run was trained; the options are then passed explicitly to `parametrize`, `fit_params` and the helpers.
 
-One piece of state that is NOT an option yet is still configured here (its owner is Step 3f): the disturbance-shock data path
-(`Data.DISTURBANCE_FULL_PATH`, read when the injection cohorts are built). The parameter-space switches live in `param_space_options`.
+The data-preparation inputs live in `data_options`, the parameter-space switches in `param_space_options`.
 """
 function scoring_from_config(cfg0::AbstractDict)
   cfg = _as_config(cfg0)
   scoring = scoring_options(cfg)
   simb = simb_options(cfg)
-  _configure_disturbance_shock!(cfg)
   return scoring, simb
 end
 
@@ -6079,18 +6085,17 @@ Per-fold scripts can override with `prepare_from_cfg(cfg; fold_index=k)`.
 """
 function prep_kwargs_from_cfg(cfg0::AbstractDict; split_rng_seed_override=nothing, rng::Union{Nothing,Random.AbstractRNG}=nothing)
   cfg = _as_config(cfg0)
-  _configure_disturbance_shock!(cfg)
   din = _cfg_data_inputs(cfg)
   split_seed = split_rng_seed_override === nothing ? din.split_seed : Int(split_rng_seed_override)
   rng_ = rng === nothing ? RNGType(rand(Random.Xoshiro(cfg["seed"]), UInt64)) : rng   # == run_from_yaml's RNGType(rand(UInt64)) after Random.seed!(seed)
-  return _prep_kwargs(; din..., split_seed=split_seed, rng=rng_)
+  return merge(_prep_kwargs(; din..., split_seed=split_seed, rng=rng_), (; data_opts=data_options(cfg)))
 end
 
 """
     prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw...)
 
 `Data.prepare_parametrization_data(; prep_kwargs_from_cfg(cfg)..., kw...)` — returns
-`(splots, eco_list, species_list, eco_species_ids, splots_val, splots_test)`. Extra `kw` override individual arguments.
+`(splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs::Data.DataOutputs)`. Extra `kw` override individual arguments.
 """
 function prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw...)
   return Data.prepare_parametrization_data(; prep_kwargs_from_cfg(cfg; split_rng_seed_override=split_rng_seed_override)..., kw...)
@@ -6132,6 +6137,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
 
   # Fields shared by parametrize, plot_sample, and plot_sample_sobol
   common_kw = (
+    data_opts=data_opts,
     cohorts_db_path=_db_path,
     filter_eco_field=din.filter_eco_field,
     eco_field=din.eco_field,
@@ -6166,8 +6172,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   search_mode = cfg["search_mode"]
 
   scoring, simb = scoring_from_config(cfg)   # scoring rule + Sim B options (shared with the analysis tools), passed explicitly below
-  Data.USE_FIA_CYCLE[] = cfg["fia_cycle"]   # tier-4/5 cycles from FIA `cycle` vs computed split
-  Data.FIA_CYCLE_MERGE[] = cfg["fia_cycle_merge"]   # merge N consecutive FIA cycles into one group
+  data_opts = data_options(cfg)   # data-preparation inputs (disturbance-shock parquet), passed to parametrize
   search = search_options_from_config(cfg)   # LBSA / Igel / MO-CMA-ES-ranking knobs of the run, passed to the drivers explicitly
   search.mocmaes_nds && @info "MO-CMA-ES offspring ranking: TRUE NSGA-II non-dominated sorting (Pareto fronts + crowding)"
   tables = bs_tables_from_cfg(cfg, _db_path)   # the Biomass Succession data tables of the run, passed explicitly (parametrize(tables=...))
