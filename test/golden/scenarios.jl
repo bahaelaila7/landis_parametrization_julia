@@ -31,6 +31,8 @@ const SCENARIOS = Dict{String,Tuple{String,Dict{String,Any},Int}}(
   "bs_igelmo"      => (A, Dict{String,Any}(), 12),
   "bs_split3"      => (A, Dict{String,Any}("n_folds" => 1, "test_frac" => 0.25, "train_cap" => "auto"), 8),
   "bs_gd_mo"       => (A, gd(objective="mo"), 12),
+  "bs_gd_m3"       => (A, merge(gd(objective="mo", m=3), Dict{String,Any}("w_scope" => "survivors", "death_term" => "likelihood")), 12),      # B31 coverage
+  "bs_gd_deathfold"=> (A, merge(gd(objective="mo", death_fold=true), Dict{String,Any}("w_scope" => "survivors", "death_term" => "likelihood")), 12),
   "bs_gd_bias"     => (A, gd(objective="bias"), 12),
   "bs_lbsa"        => (A, Dict{String,Any}("search_mode" => "lbsa"), 10),
   "bs_molbsa"      => (A, Dict{String,Any}("search_mode" => "molbsa"), 10),

@@ -1,6 +1,6 @@
 # Golden harness (refactor safety net)
 
-`scenarios.jl` defines 44 small scenarios. Together they cover every search driver, tier, injection mode and loss knob, all three
+`scenarios.jl` defines 46 small scenarios. Together they cover every search driver, tier, injection mode and loss knob, all three
 plugins, Sim B and plot_only. Each runs on the 80 fixed GA+FL plots in `plots.csv` with seed 1337, n_reps 1, a 2-fold split (fold 1)
 and a handful of evaluations.
 
