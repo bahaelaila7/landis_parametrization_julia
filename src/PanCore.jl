@@ -22,6 +22,13 @@ end
 
 abstract type AbstractPlugin end
 
+"A file path as the body of a SQL string literal (ATTACH takes a literal, not a bound parameter): quotes doubled, control characters refused."
+function sql_quote_path(p::AbstractString)::String
+  any(iscntrl, p) && error("path contains control characters: $(repr(p))")
+  replace(String(p), "'" => "''")
+end
+
+
 include("types.jl")
 
 function scalar_arrays end

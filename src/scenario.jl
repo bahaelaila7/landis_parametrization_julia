@@ -113,7 +113,7 @@ _species_codes(scen::ScenarioConfig) = get_cached!(scen.cache, :species_codes) d
   db = DuckDB.DB(scen.fia_db; readonly=true); con = DuckDB.DBInterface.connect(db)
   d = Dict{String,Int}()
   try
-    for r in DuckDB.DBInterface.execute(con, "SELECT UPPER(TRIM(SPECIES_SYMBOL)) s, SPCD c FROM REF_SPECIES WHERE SPECIES_SYMBOL IS NOT NULL")
+    for r in DuckDB.DBInterface.execute(con, "SELECT UPPER(TRIM(SPECIES_SYMBOL)) s, SPCD c FROM REF_SPECIES WHERE SPECIES_SYMBOL IS NOT NULL ORDER BY SPCD")
       d[String(r.s)] = Int(r.c)
     end
   finally
@@ -591,7 +591,8 @@ function scenario_climate(scen::ScenarioConfig, l4s::Vector{String}, y1::Int, y2
     lst = join(("'" * replace(l, "'" => "") * "'" for l in l4s), ",")
     for (tbl, yrs, store) in (("observed_monthly", oy, obs), ("forecast_monthly", fy, fc))
       df = DataFrame(DuckDB.DBInterface.execute(con, """SELECT l4, var, year, month, value FROM $(tbl)
-          WHERE l4 IN ($(lst)) AND var IN ('tmin','tmax','ppt') AND year BETWEEN $(yrs[1]) AND $(yrs[end])"""))
+          WHERE l4 IN ($(lst)) AND var IN ('tmin','tmax','ppt') AND year BETWEEN $(yrs[1]) AND $(yrs[end])
+          ORDER BY l4, var, year, month"""))
       for r in eachrow(df)
         d = get!(store, String(r.l4), Dict{String,Matrix{Float64}}())
         M = get!(d, String(r.var)) do; fill(NaN, 12, length(yrs)); end

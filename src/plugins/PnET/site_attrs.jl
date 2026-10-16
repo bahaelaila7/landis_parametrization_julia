@@ -25,8 +25,8 @@ function read_species_sftwd(db_path::Union{Nothing,AbstractString})
   (db_path !== nothing && isfile(db_path)) || return out
   db = DuckDB.DB(); con = DuckDB.connect(db)
   try
-    DuckDB.execute(con, "ATTACH '$(db_path)' AS src (READ_ONLY);")
-    df = DuckDB.execute(con, "SELECT UPPER(TRIM(SPECIES_SYMBOL)) AS s, SFTWD_HRDWD AS t FROM src.REF_SPECIES") |> DataFrame
+    DuckDB.execute(con, "ATTACH '$(PanCore.sql_quote_path(db_path))' AS src (READ_ONLY);")
+    df = DuckDB.execute(con, "SELECT UPPER(TRIM(SPECIES_SYMBOL)) AS s, SFTWD_HRDWD AS t FROM src.REF_SPECIES ORDER BY SPCD") |> DataFrame
     out = Dict{String,String}(String(r.s) => String(coalesce(r.t, "")) for r in eachrow(df) if !ismissing(r.s))
   catch e
     @warn "PnET: could not read REF_SPECIES.SFTWD_HRDWD; PFT falls back to genus heuristics" exception = e
@@ -54,12 +54,13 @@ function build_site_attrs(clim::PnETClimate, db_path::AbstractString, tablename:
   db = DuckDB.DB(); con = DuckDB.connect(db)
   l4 = Dict{NTuple{4,Int},String}(); lat = Dict{NTuple{4,Int},Float64}()
   try
-    DuckDB.execute(con, "ATTACH '$(db_path)' AS src (READ_ONLY);")
-    a = DuckDB.execute(con, "SELECT statecd, unitcd, countycd, plot, min(epa_l4) AS epa_l4 FROM src.$(tablename) GROUP BY ALL") |> DataFrame
+    DuckDB.execute(con, "ATTACH '$(PanCore.sql_quote_path(db_path))' AS src (READ_ONLY);")
+    occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", tablename) || error("PnET site attrs: $(repr(tablename)) is not a valid table name")
+    a = DuckDB.execute(con, "SELECT statecd, unitcd, countycd, plot, min(epa_l4) AS epa_l4 FROM src.$(tablename) GROUP BY ALL ORDER BY statecd, unitcd, countycd, plot") |> DataFrame
     for r in eachrow(a)
       ismissing(r.epa_l4) || (l4[(Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot))] = String(r.epa_l4))
     end
-    b = DuckDB.execute(con, "SELECT STATECD AS s, UNITCD AS u, COUNTYCD AS c, PLOT AS p, avg(LAT) AS lat FROM src.PLOT WHERE LAT IS NOT NULL GROUP BY ALL") |> DataFrame
+    b = DuckDB.execute(con, "SELECT STATECD AS s, UNITCD AS u, COUNTYCD AS c, PLOT AS p, avg(LAT) AS lat FROM src.PLOT WHERE LAT IS NOT NULL GROUP BY ALL ORDER BY s, u, c, p") |> DataFrame
     for r in eachrow(b)
       lat[(Int(r.s), Int(r.u), Int(r.c), Int(r.p))] = Float64(r.lat)
     end
