@@ -17,7 +17,7 @@ import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
 import .Parametrization.PnETParametrization as PNP
 import .Parametrization.HBADParametrization as HBP
-using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel, GDIgel
+using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel, GDIgel, Common
 import .Data as Data
 import .Spatial
 import Dates
@@ -2840,13 +2840,8 @@ function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plug
       generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     end
 
-  writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
-
-  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
-  losses_db = DuckDB.connect(losses_db_file)
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, params_blob BLOB)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
+  loop, losses_db = scalar_loop_open(search_state; output_dir)
+  writer_ch = loop.writer_ch
 
   # Dense convergence + restart/reheat trace: one row per trial — best-so-far & incumbent loss, max
   # temperature, the frozen-reheat counter, and a restart flag (1 when a restart fired this trial).
@@ -2860,154 +2855,118 @@ function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plug
   sensitivity_ema_alpha = 0.1    # EMA weight for chosen param's sensitivity update
   sensitivity_lambda = 3.0       # max weight boost at full sensitivity (baseline × (1 + λ))
 
-  # A Ctrl-C inside a @threads region (e.g. mid-resize in readjust_soa!) surfaces as a
-  # TaskFailedException wrapping an InterruptException, not a bare InterruptException.
-  # Recurse through the task/composite wrappers to recognize it.
-  caused_by_interrupt(e) =
-    e isa InterruptException ? true :
-    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
-    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) :
-    false
-
-  try
-
-    TProgress.@track for trial in (search_state.i+1):TRIALS
-      dynamic_weights = baseline_weights .* (1.0 .+ sensitivity_lambda .* param_sensitivities)
-      dynamic_weights ./= sum(dynamic_weights)
-      dynamic_cumsum = cumsum(dynamic_weights)
-      bio_params, chosen_param_idx = PU.mutate_params(bio_params, space; rng=rng, mutation_mode=PU.BothMutations)
-      #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)),
-      #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss),
-      # dynamic_cumsum=dynamic_cumsum)
-      for _ in 0:rand(rng, 0:2)
-        bio_params, _ = PU.mutate_params(bio_params, space; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
-      end
-
-      rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-      run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
-      cached_sites_state = _median_rep_cached(rep_results, loss_params, scoring)
-      next_loss = _norm_loss(run_result, eco_losses)
-
-      current_loss = convert(Float64, search_state.current.fx)
-      delta_loss = abs(next_loss - current_loss)
-      norm_delta = delta_loss / (current_loss + 1e-10)
-      param_sensitivities .*= sensitivity_decay
-      param_sensitivities[chosen_param_idx] = (1.0 - sensitivity_ema_alpha) * param_sensitivities[chosen_param_idx] + sensitivity_ema_alpha * min(norm_delta, 1.0)
-
-      next = LBSA.LBSACandidate(bio_params, next_loss)
-
-      is_new_best = LBSA.search_cmp!(next, search_state)
-      #if is_new_best
-      #  put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), merged_sites_state))
-      #  plot(cached_sites_state)
-      #end
-      did_restart = LBSA.should_restart(search_state)
-      if did_restart
-        @info "Restarting @ $(search_state.i)"
-        bio_params = next_candidate()
-        rst_rr, rst_el, _ = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, scales=scales, scoring, simb, plugin=plugin), loss_params, scoring)
-        is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, _norm_loss(rst_rr, rst_el)))
-      end
-      val_sim_sample = nothing
-      if is_new_best
-        iter = search_state.best_iteration
-        total = convert(Float64, search_state.best.fx)
-        @info "New best @ $iter | loss=$total"
-        try
-          test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
-          println("Train stats:")
-          show(test_df; allrows=true, allcols=true)
-          println()
-        catch e
-          @warn "simulate_and_test (train) failed" exception = (e, catch_backtrace())
+  run_search_loop(loop; get_state=() -> search_state, close_extra=() -> close(conv_io), unit="trial") do
+      TProgress.@track for trial in (search_state.i+1):TRIALS
+        dynamic_weights = baseline_weights .* (1.0 .+ sensitivity_lambda .* param_sensitivities)
+        dynamic_weights ./= sum(dynamic_weights)
+        dynamic_cumsum = cumsum(dynamic_weights)
+        bio_params, chosen_param_idx = PU.mutate_params(bio_params, space; rng=rng, mutation_mode=PU.BothMutations)
+        #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss .+ search_state.current.fx.sp_agb_loss .+ (search_state.current.fx.sp_w_loss .* search_state.current.fx.sp_agb_loss)),
+        #ctx=PU.SamplingContext(search_state.current.fx.sp_w_loss),
+        # dynamic_cumsum=dynamic_cumsum)
+        for _ in 0:rand(rng, 0:2)
+          bio_params, _ = PU.mutate_params(bio_params, space; rng=rng, mutation_mode=PU.BothMutations)#,  #BothMutations,
         end
-        if have_val
+
+        rep_results = fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
+        run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
+        cached_sites_state = _median_rep_cached(rep_results, loss_params, scoring)
+        next_loss = _norm_loss(run_result, eco_losses)
+
+        current_loss = convert(Float64, search_state.current.fx)
+        delta_loss = abs(next_loss - current_loss)
+        norm_delta = delta_loss / (current_loss + 1e-10)
+        param_sensitivities .*= sensitivity_decay
+        param_sensitivities[chosen_param_idx] = (1.0 - sensitivity_ema_alpha) * param_sensitivities[chosen_param_idx] + sensitivity_ema_alpha * min(norm_delta, 1.0)
+
+        next = LBSA.LBSACandidate(bio_params, next_loss)
+
+        is_new_best = LBSA.search_cmp!(next, search_state)
+        #if is_new_best
+        #  put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), merged_sites_state))
+        #  plot(cached_sites_state)
+        #end
+        did_restart = LBSA.should_restart(search_state)
+        if did_restart
+          @info "Restarting @ $(search_state.i)"
+          bio_params = next_candidate()
+          rst_rr, rst_el, _ = _agg_reps(fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, scales=scales, scoring, simb, plugin=plugin), loss_params, scoring)
+          is_new_best = LBSA.restart(search_state, LBSA.LBSACandidate(bio_params, _norm_loss(rst_rr, rst_el)))
+        end
+        val_sim_sample = nothing
+        if is_new_best
+          iter = search_state.best_iteration
+          total = convert(Float64, search_state.best.fx)
+          @info "New best @ $iter | loss=$total"
           try
-            val_result = only(fit_params(val_ref_soa, search_state.best.x, max_sim_year, n_species,
-              eco_species_ids, val_spdf_plts, val_site_sim_years,
-              spinup, val_spinup_cohorts, loss_params;
-              debug=false, search_tier=3,
-              injection=inj_val,
-              seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0))
-            val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
-            @info "Val loss @ $iter | loss=$val_total"
-            try
-              val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
-              println("Val stats:")
-              show(val_test_df; allrows=true, allcols=true)
-              println()
-            catch e
-              @warn "simulate_and_test (val) failed" exception = (e, catch_backtrace())
-            end
-            val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
+            test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
+            println("Train stats:")
+            show(test_df; allrows=true, allcols=true)
+            println()
           catch e
-            @warn "val fit_params failed" exception = (e, catch_backtrace())
+            @warn "simulate_and_test (train) failed" exception = (e, catch_backtrace())
           end
-        end
-        let buf = IOBuffer()
-          Serialization.serialize(buf, search_state.best.x)
-          DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, run_result.num_sites, run_result.num_obs, total, take!(buf)])
-        end
-        if !isnothing(eco_losses)
-          for (eco_id, eco_loss) in enumerate(eco_losses)
-            eco_name = _eco_name(eco_list, eco_id)
-            eco_total = convert(Float64, PU.get_total_loss(eco_loss, loss_params))
-            DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
-            n = max(1, eco_loss.num_sites)
-            for gsp in 1:n_species
-              eco_loss.sp_w_loss[gsp] == 0f0 && continue
-              DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+          if have_val
+            try
+              val_result = only(val_fit_params(search_state.best.x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+                injection=inj_val, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin, collect_cohorts=n_output_plots > 0))
+              val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
+              @info "Val loss @ $iter | loss=$val_total"
+              try
+                val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
+                println("Val stats:")
+                show(val_test_df; allrows=true, allcols=true)
+                println()
+              catch e
+                @warn "simulate_and_test (val) failed" exception = (e, catch_backtrace())
+              end
+              val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
+            catch e
+              @warn "val fit_params failed" exception = (e, catch_backtrace())
             end
           end
+          let buf = IOBuffer()
+            Serialization.serialize(buf, search_state.best.x)
+            DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, run_result.num_sites, run_result.num_obs, total, take!(buf)])
+          end
+          if !isnothing(eco_losses)
+            for (eco_id, eco_loss) in enumerate(eco_losses)
+              eco_name = _eco_name(eco_list, eco_id)
+              eco_total = convert(Float64, PU.get_total_loss(eco_loss, loss_params))
+              DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
+              n = max(1, eco_loss.num_sites)
+              for gsp in 1:n_species
+                eco_loss.sp_w_loss[gsp] == 0f0 && continue
+                DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+              end
+            end
 
-          # Raw per-eco / per-species SiteLoss breakdown (ecoregions and species sorted by
-          # contribution) so you can see where the remaining error concentrates.
-          println("Raw SiteLoss breakdown @ $iter (total=$(round(total, sigdigits=6))):")
-          for eco_id in sort(collect(eachindex(eco_losses)); by=e -> -convert(Float64, PU.get_total_loss(eco_losses[e], loss_params)))
-            el = eco_losses[eco_id]
-            println("  [$(_eco_name(eco_list, eco_id))] eco_total=$(round(convert(Float64, PU.get_total_loss(el, loss_params)), sigdigits=5))  sites=$(el.num_sites) obs=$(el.num_obs)")
-            for gsp in sort([g for g in 1:n_species if el.sp_w_loss[g] != 0f0]; by=g -> -el.sp_w_loss[g])
-              println("      $(rpad(species_list[gsp], 10)) w=$(round(el.sp_w_loss[gsp], sigdigits=4))  agb=$(round(el.sp_agb_loss[gsp], sigdigits=4))")
+            # Raw per-eco / per-species SiteLoss breakdown (ecoregions and species sorted by
+            # contribution) so you can see where the remaining error concentrates.
+            println("Raw SiteLoss breakdown @ $iter (total=$(round(total, sigdigits=6))):")
+            for eco_id in sort(collect(eachindex(eco_losses)); by=e -> -convert(Float64, PU.get_total_loss(eco_losses[e], loss_params)))
+              el = eco_losses[eco_id]
+              println("  [$(_eco_name(eco_list, eco_id))] eco_total=$(round(convert(Float64, PU.get_total_loss(el, loss_params)), sigdigits=5))  sites=$(el.num_sites) obs=$(el.num_obs)")
+              for gsp in sort([g for g in 1:n_species if el.sp_w_loss[g] != 0f0]; by=g -> -el.sp_w_loss[g])
+                println("      $(rpad(species_list[gsp], 10)) w=$(round(el.sp_w_loss[gsp], sigdigits=4))  agb=$(round(el.sp_agb_loss[gsp], sigdigits=4))")
+              end
             end
           end
         end
+        let tmax = (isempty(search_state._t_list) || search_state._t_max_idx > length(search_state._t_list)) ? NaN : search_state._t_list[search_state._t_max_idx]
+          println(conv_io, string(trial, ",", convert(Float64, search_state.best.fx), ",", convert(Float64, search_state.current.fx), ",", tmax, ",", search_state._frozen_no_best_reheats, ",", did_restart ? 1 : 0))
+          (trial % 50 == 0 || did_restart) && flush(conv_io)
+        end
+        if is_new_best || search_state.i % 50 == 0
+          cached_sites_state_df = _cohorts_df(cached_sites_state)
+          sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(cached_sites_state, sampled_ids) : nothing
+          put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample, is_new_best ? emp_sample_val : nothing, val_sim_sample))
+        end
+        if LBSA.is_search_over(search_state)
+          break
+        end
+        #println(convert(Float64,run_result))
       end
-      let tmax = (isempty(search_state._t_list) || search_state._t_max_idx > length(search_state._t_list)) ? NaN : search_state._t_list[search_state._t_max_idx]
-        println(conv_io, string(trial, ",", convert(Float64, search_state.best.fx), ",", convert(Float64, search_state.current.fx), ",", tmax, ",", search_state._frozen_no_best_reheats, ",", did_restart ? 1 : 0))
-        (trial % 50 == 0 || did_restart) && flush(conv_io)
-      end
-      if is_new_best || search_state.i % 50 == 0
-        cached_sites_state_df = _cohorts_df(cached_sites_state)
-        sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(cached_sites_state, sampled_ids) : nothing
-        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample, is_new_best ? emp_sample_val : nothing, val_sim_sample))
-      end
-      if LBSA.is_search_over(search_state)
-        break
-      end
-      #println(convert(Float64,run_result))
-    end
-  catch e
-    # Swallow a user interrupt (possibly wrapped by a @threads region) and let `finally`
-    # save the checkpoint; rethrow anything that isn't an interrupt.
-    if caused_by_interrupt(e)
-      @info "Search interrupted by user @ trial $(search_state.i); finalizing checkpoint…"
-    else
-      rethrow()
-    end
-  finally
-    stop_writer(writer_ch, writer_task)
-    close(losses_db_file); close(conv_io)
-    try
-      mkpath(output_dir)
-      fname = "search_state@$(search_state.i).jld2"
-      JLD2.save_object(joinpath(output_dir, fname), search_state)
-      link_path = joinpath(output_dir, "search_state_latest.jld2")
-      islink(link_path) && rm(link_path)
-      symlink(fname, link_path)
-      @info "Search state saved @ $(search_state.i)"
-    catch e
-      @error "Failed to save search state on exit" exception = (e, catch_backtrace())
-    end
   end
 
   return search_state
@@ -3145,21 +3104,8 @@ function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
     return search_state
   end
 
-  writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
-
-  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
-  losses_db = DuckDB.connect(losses_db_file)
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, params_blob BLOB)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
-
-  # A Ctrl-C inside a @threads region (e.g. mid-resize in readjust_soa!) surfaces as a
-  # TaskFailedException wrapping an InterruptException, not a bare InterruptException.
-  caused_by_interrupt(e) =
-    e isa InterruptException ? true :
-    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
-    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) :
-    false
+  loop, losses_db = scalar_loop_open(search_state; output_dir)
+  writer_ch = loop.writer_ch
 
   stagnation = 0
   barren_restarts = 0             # consecutive IPOP restarts with no new best (barren-restart stop)
@@ -3168,132 +3114,108 @@ function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
   # Upper bound on generations needed to exhaust the budget (λ never shrinks: IPOP only grows it,
   # which only spends the budget faster). The `evals_done >= TRIALS` break is the real stop.
   est_gens = max(1, cld(TRIALS - evals_done, search_state.lambda))
-  try
-    TProgress.@track for _gen in 1:est_gens
-      evals_done >= TRIALS && break
-      xs_u = CMAES.ask(search_state)
-      λ = search_state.lambda
-      fitnesses = Vector{Float64}(undef, λ)
-      gen_best_f = Inf
-      local gen_best_params, gen_best_run, gen_best_eco, gen_best_cached
-      # SERIAL on purpose: fit_params already parallelizes internally with Threads.@threads :static
-      # over sites and deep-copies ref_soa per call. Wrapping this loop in @spawn/@threads would
-      # nest :static regions and oversubscribe cores; one fit_params call already saturates threads.
-      for k in 1:λ
-        cand = PU.u_to_params(xs_u[k], space, slots, bio_params)
-        rep_results = fit_params(ref_soa, cand, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-        run_result, eco_losses_k, _ = _agg_reps(rep_results, loss_params, scoring)
-        fitnesses[k] = convert(Float64, PU.get_total_loss(run_result, loss_params))
-        evals_done += 1
-        if fitnesses[k] < gen_best_f
-          gen_best_f = fitnesses[k]
-          gen_best_params = cand
-          gen_best_run = run_result
-          gen_best_eco = eco_losses_k
-          gen_best_cached = _median_rep_cached(rep_results, loss_params, scoring)
+  run_search_loop(loop; get_state=() -> search_state) do
+      TProgress.@track for _gen in 1:est_gens
+        evals_done >= TRIALS && break
+        xs_u = CMAES.ask(search_state)
+        λ = search_state.lambda
+        fitnesses = Vector{Float64}(undef, λ)
+        gen_best_f = Inf
+        local gen_best_params, gen_best_run, gen_best_eco, gen_best_cached
+        # SERIAL on purpose: fit_params already parallelizes internally with Threads.@threads :static
+        # over sites and deep-copies ref_soa per call. Wrapping this loop in @spawn/@threads would
+        # nest :static regions and oversubscribe cores; one fit_params call already saturates threads.
+        for k in 1:λ
+          cand = PU.u_to_params(xs_u[k], space, slots, bio_params)
+          rep_results = fit_params(ref_soa, cand, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
+          run_result, eco_losses_k, _ = _agg_reps(rep_results, loss_params, scoring)
+          fitnesses[k] = convert(Float64, PU.get_total_loss(run_result, loss_params))
+          evals_done += 1
+          if fitnesses[k] < gen_best_f
+            gen_best_f = fitnesses[k]
+            gen_best_params = cand
+            gen_best_run = run_result
+            gen_best_eco = eco_losses_k
+            gen_best_cached = _median_rep_cached(rep_results, loss_params, scoring)
+          end
         end
-      end
 
-      CMAES.tell!(search_state, fitnesses, xs_u)
-      search_state.n_evals = evals_done
+        CMAES.tell!(search_state, fitnesses, xs_u)
+        search_state.n_evals = evals_done
 
-      is_new_best = CMAES.note_best!(search_state, CMAES.CMAESCandidate(gen_best_params, gen_best_f))
-      stagnation = is_new_best ? 0 : stagnation + 1
-      improved_since_restart |= is_new_best
+        is_new_best = CMAES.note_best!(search_state, CMAES.CMAESCandidate(gen_best_params, gen_best_f))
+        stagnation = is_new_best ? 0 : stagnation + 1
+        improved_since_restart |= is_new_best
 
-      val_sim_sample = nothing
-      if is_new_best
-        iter = search_state.best_iteration
-        total = convert(Float64, search_state.best.fx)
-        @info "New best @ gen $iter | loss=$total | σ=$(search_state.sigma)"
-        try
-          test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
-          println("Train stats:")
-          show(test_df; allrows=true, allcols=true)
-          println()
-        catch e
-          @warn "simulate_and_test (train) failed" exception = (e, catch_backtrace())
-        end
-        if have_val
+        val_sim_sample = nothing
+        if is_new_best
+          iter = search_state.best_iteration
+          total = convert(Float64, search_state.best.fx)
+          @info "New best @ gen $iter | loss=$total | σ=$(search_state.sigma)"
           try
-            val_result = only(fit_params(val_ref_soa, search_state.best.x, max_sim_year, n_species,
-              eco_species_ids, val_spdf_plts, val_site_sim_years,
-              spinup, val_spinup_cohorts, loss_params;
-              debug=false, search_tier=3,
-              injection=inj_val,
-              seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0))
-            val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
-            @info "Val loss @ gen $iter | loss=$val_total"
-            try
-              val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
-              println("Val stats:")
-              show(val_test_df; allrows=true, allcols=true)
-              println()
-            catch e
-              @warn "simulate_and_test (val) failed" exception = (e, catch_backtrace())
-            end
-            val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
+            test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
+            println("Train stats:")
+            show(test_df; allrows=true, allcols=true)
+            println()
           catch e
-            @warn "val fit_params failed" exception = (e, catch_backtrace())
+            @warn "simulate_and_test (train) failed" exception = (e, catch_backtrace())
           end
-        end
-        let buf = IOBuffer()
-          Serialization.serialize(buf, search_state.best.x)
-          DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, gen_best_run.num_sites, gen_best_run.num_obs, total, take!(buf)])
-        end
-        if !isnothing(gen_best_eco)
-          for (eco_id, eco_loss) in enumerate(gen_best_eco)
-            eco_name = _eco_name(eco_list, eco_id)
-            eco_total = convert(Float64, PU.get_total_loss(eco_loss, loss_params))
-            DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
-            n = max(1, eco_loss.num_sites)
-            for gsp in 1:n_species
-              eco_loss.sp_w_loss[gsp] == 0f0 && continue
-              DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+          if have_val
+            try
+              val_result = only(val_fit_params(search_state.best.x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+              injection=inj_val, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin, collect_cohorts=n_output_plots > 0))
+              val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
+              @info "Val loss @ gen $iter | loss=$val_total"
+              try
+                val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
+                println("Val stats:")
+                show(val_test_df; allrows=true, allcols=true)
+                println()
+              catch e
+                @warn "simulate_and_test (val) failed" exception = (e, catch_backtrace())
+              end
+              val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], sampled_ids_val) : nothing
+            catch e
+              @warn "val fit_params failed" exception = (e, catch_backtrace())
+            end
+          end
+          let buf = IOBuffer()
+            Serialization.serialize(buf, search_state.best.x)
+            DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, gen_best_run.num_sites, gen_best_run.num_obs, total, take!(buf)])
+          end
+          if !isnothing(gen_best_eco)
+            for (eco_id, eco_loss) in enumerate(gen_best_eco)
+              eco_name = _eco_name(eco_list, eco_id)
+              eco_total = convert(Float64, PU.get_total_loss(eco_loss, loss_params))
+              DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
+              n = max(1, eco_loss.num_sites)
+              for gsp in 1:n_species
+                eco_loss.sp_w_loss[gsp] == 0f0 && continue
+                DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+              end
             end
           end
         end
-      end
-      cached_sites_state_df = _cohorts_df(gen_best_cached)
-      sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(gen_best_cached, sampled_ids) : nothing
-      put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample, is_new_best ? emp_sample_val : nothing, val_sim_sample))
+        cached_sites_state_df = _cohorts_df(gen_best_cached)
+        sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(gen_best_cached, sampled_ids) : nothing
+        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, cached_sites_state_df, emp_sample, sim_sample, is_new_best ? emp_sample_val : nothing, val_sim_sample))
 
-      # IPOP restart: re-seed the distribution (with doubled λ) on σ-collapse or stagnation.
-      if ipop && (search_state.sigma < 1e-11 || stagnation >= ipop_stagnation)
-        # Barren-restart stop: count consecutive IPOP restarts that produced no new best; stop after N.
-        barren_restarts = improved_since_restart ? 0 : barren_restarts + 1
-        improved_since_restart = false
-        if ipop_max_barren_restarts > 0 && barren_restarts >= ipop_max_barren_restarts
-          @info "Stopping search @ gen $(search_state.i): $barren_restarts consecutive IPOP restarts with no improvement (≥ $ipop_max_barren_restarts)"
-          break
+        # IPOP restart: re-seed the distribution (with doubled λ) on σ-collapse or stagnation.
+        if ipop && (search_state.sigma < 1e-11 || stagnation >= ipop_stagnation)
+          # Barren-restart stop: count consecutive IPOP restarts that produced no new best; stop after N.
+          barren_restarts = improved_since_restart ? 0 : barren_restarts + 1
+          improved_since_restart = false
+          if ipop_max_barren_restarts > 0 && barren_restarts >= ipop_max_barren_restarts
+            @info "Stopping search @ gen $(search_state.i): $barren_restarts consecutive IPOP restarts with no improvement (≥ $ipop_max_barren_restarts)"
+            break
+          end
+          new_lambda = search_state.lambda * 2
+          @info "IPOP restart @ gen $(search_state.i): λ $(search_state.lambda) → $new_lambda"
+          bio_params = next_candidate()
+          CMAES.restart!(search_state, PU.params_to_u(bio_params, space, slots), cmaes_sigma0; lambda=new_lambda)
+          stagnation = 0
         end
-        new_lambda = search_state.lambda * 2
-        @info "IPOP restart @ gen $(search_state.i): λ $(search_state.lambda) → $new_lambda"
-        bio_params = next_candidate()
-        CMAES.restart!(search_state, PU.params_to_u(bio_params, space, slots), cmaes_sigma0; lambda=new_lambda)
-        stagnation = 0
       end
-    end
-  catch e
-    if caused_by_interrupt(e)
-      @info "Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…"
-    else
-      rethrow()
-    end
-  finally
-    stop_writer(writer_ch, writer_task)
-    close(losses_db_file)
-    try
-      mkpath(output_dir)
-      fname = "search_state@$(search_state.i).jld2"
-      JLD2.save_object(joinpath(output_dir, fname), search_state)
-      link_path = joinpath(output_dir, "search_state_latest.jld2")
-      islink(link_path) && rm(link_path)
-      symlink(fname, link_path)
-      @info "Search state saved @ $(search_state.i)"
-    catch e
-      @error "Failed to save search state on exit" exception = (e, catch_backtrace())
-    end
   end
 
   return search_state
@@ -3694,17 +3616,10 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
 end
 
 function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmaes_warmstart_seeds::Int=20, ipop::Bool=false, ipop_stagnation::Int=20, ipop_max_barren_restarts::Int=4, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
-  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
-
-  all_plot_ids = UIntType.(unique(splots.plot_id))
-  sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
-  emp_sample = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
-
-  n_species = length(species_list)
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
-  # Candidate pool for the initial point + IPOP restarts. seed_archive_from pours a PRIOR run's Pareto
-  # archive (its members' params) into this pool — e.g. seed Sim B's MO-CMA-ES from the single-cov Sim A
-  # archive so each restart re-centers on a diverse good-A solution (params are re-evaluated on use).
+  env = mo_env(; ref_soa, plugin, splots, spdf_plts, spinup_cohorts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, spinup, rng, debug,
+    search_tier, n_reps, n_output_plots, no_establishment, injection_cohorts, cycle_years, scale_seed, exec,
+    val_splots, val_ref_soa, val_spdf_plts, val_site_sim_years, val_spinup_cohorts, val_injection_cohorts,
+    val_dual_early=true)   # this driver built the validation Sim B before the val plot sample (RNG order)
   _sobol_cands = if !isnothing(seed_archive_from)
     _seed_st = JLD2.load_object(seed_archive_from)
     _arch = hasproperty(_seed_st, :archive) ? [c.x for c in _seed_st.archive] : []
@@ -3715,83 +3630,19 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
   else
     load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   end
-  injection = build_injection_plan(injection_cohorts, ref_soa, eco_species_ids, loss_params, scoring)   # this reference's injection dict, shock and exclusions
-
-  have_val = !isnothing(val_ref_soa) && !exec.skip_val   # ExecOptions.skip_val (PAN_SKIP_VAL) disables all held-out val re-sim during training
-  inj_val = have_val ? build_injection_plan(val_injection_cohorts, val_ref_soa, eco_species_ids, loss_params, scoring) : nothing   # the val reference's own plan
-  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb, plugin=plugin) : nothing
-  sampled_ids_val = (have_val && n_output_plots > 0) ?
-                    _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) :
-                    Set{UIntType}()
-  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
-
-  # Per-tier reference setup (identical to the other drivers).
-  t4_ref = nothing
-  cycle_map = nothing
-  n_cycles = 0
-  t1_ref = nothing
-  t2_ref = nothing
-  if search_tier == 1
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts
-      for (_, spdf_gt) in year_dict
-        for (sp_eco, rec) in spdf_gt.records
-          t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
-        end
-      end
-    end
-  elseif search_tier == 2
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
-    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts
-      for (_, spdf_gt) in year_dict
-        for (sp_eco, rec) in spdf_gt.records
-          bin_probs = diff([0f0; rec.sp_age_cdf])
-          for b in 1:n_bins
-            push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum)
-          end
-          push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
-        end
-      end
-    end
-    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
-    t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
-    for ((plot_id, eco_id), year_dict) in spdf_plts
-      for (sy, spdf_gt) in year_dict
-        cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0)
-        cyc == 0 && continue
-        for (sp_eco, rec) in spdf_gt.records
-          t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
-        end
-      end
-    end
-  end
-  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
-  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb, plugin=plugin)
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
-  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales, simb) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
-
+  n_species = env.n_species; max_sim_year = env.max_sim_year
+  mo_val!(env; serial_val=false)
 
   if exec.cv_reselect   # skip the search; just re-score the 10 reselection positions (5 per archive) on the (frozen-norm) val set
-    have_val || (@warn "ExecOptions.cv_reselect set but no val split — nothing to do"; return)
+    env.have_val || (@warn "ExecOptions.cv_reselect set but no val split — nothing to do"; return)
     _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
       val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
-      inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, species_list, plugin)
+      env.inj_val, env.val_dual_b, env.val_scales, env.fixed_seeds, val_splots, species_list, plugin)
     return
   end
 
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, dual_b=dual_b, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-  # Score a candidate's repetitions into one MOFitness (eco_losses summed over reps) + aux.
-  function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
-    objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
-    MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
-  end
+  _run(p; ws=env.work_soa) = run_candidate(env, p; ws)
+  _fitness(rep_results) = candidate_fitness(env, rep_results)
 
   sobol_idx = Ref(1)
   next_candidate() =
@@ -3867,22 +3718,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
     return search_state
   end
 
-  writer_ch, writer_task = start_mo_writer(typeof(search_state), output_dir)
-
-  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
-  losses_db = DuckDB.connect(losses_db_file)
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
-
-  # Per-generation trajectory CSV (best representative train + val loss), like the CMA-MAE driver.
-  # On resume: APPEND (don't truncate generations 1..i from the prior run) and skip re-writing the header.
-  # metrics.csv, initial rep val-loss seeding, best_val_params@0 and the per-generation checkpoint/val bookkeeping
-  # are all handled by the shared mo_gen_open / mo_gen_finalize! (below), same as every other MO engine.
-  # VAL REPLAY (ENV VAL_REPLAY=1): recompute val for every saved best_params@N.jld2 in output_dir — recovers
-  # val for runs where it was never computed live (the Sim-A val regression). Reuses the val setup above; NO
-  # search, does not touch losses.duckdb. Writes val_replay.csv (iteration,val_loss) and returns.
-  if have_val && get(ENV, "VAL_REPLAY", "") == "1"
+  if env.have_val && get(ENV, "VAL_REPLAY", "") == "1"
     ckpts = filter(f -> occursin(r"^best_params@\d+\.jld2$", f), readdir(output_dir))
     sort!(ckpts, by = f -> parse(Int, match(r"@(\d+)", f).captures[1]))
     @info "VAL_REPLAY: recomputing val for $(length(ckpts)) checkpoints in $output_dir"
@@ -3892,11 +3728,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
         it = parse(Int, match(r"@(\d+)", f).captures[1])
         try
           p = JLD2.load_object(joinpath(output_dir, f))
-          _vr = _agg_reps(fit_params(val_ref_soa, p, max_sim_year, n_species, eco_species_ids,
-            val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params;
-            debug=false, search_tier=3, injection=inj_val,
-            dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin=plugin), loss_params, scoring)
-          vl = _mo_val_loss((_vr[1], nothing, _vr[2]), eco_species_ids, loss_params, val_scales, val_dual_b)
+          vl = _mo_val_loss(val_eval(env, p), eco_species_ids, loss_params, env.val_scales, env.val_dual_b)
           println(io, "$it,$vl"); flush(io); @info "val-replay @ $it = $vl"
         catch e
           @warn "val-replay failed @ $it" exception = (e, catch_backtrace())
@@ -3907,110 +3739,77 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
     return nothing
   end
 
-  caused_by_interrupt(e) =
-    e isa InterruptException ? true :
-    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
-    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) :
-    false
-
   stagnation = 0
   barren_restarts = 0             # consecutive IPOP restarts with no new best (barren-restart stop)
   improved_since_restart = false  # any new best found in the current IPOP epoch?
-  val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-      v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
-    end : nothing
-  gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
-    resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
-    eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
-    no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b, plugin=plugin, exec=exec)
+  loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
+  gio = loop.gio
   evals_done = search_state.n_evals
   est_gens = max(1, cld(TRIALS - evals_done, search_state.lambda))
-  try
-    TProgress.@track for _gen in 1:est_gens
-      evals_done >= TRIALS && break
-      xs_u = CMAES.ask(search_state)
-      λ = search_state.lambda
-      fxs = Vector{MOLBSA.MOFitness}(undef, λ)
-      cands = Vector{typeof(bio_params)}(undef, λ)
-      gen_best_agg = Inf
-      local gb_run, gb_eco, gb_cached, gb_idx
-      # SERIAL: fit_params already threads internally over sites (see parametrize_CMAES note).
-      for k in 1:λ
-        cand = PU.u_to_params(xs_u[k], space, slots, bio_params)
-        rep_results = _run(cand)
-        fx_k, run_k, eco_k = _fitness(rep_results)
-        cands[k] = cand
-        fxs[k] = fx_k
-        evals_done += 1
-        if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined; isless ⇒ NaN ranks worst
-          gen_best_agg = fx_k.aggregate
-          gb_idx = k
-          gb_run = run_k
-          gb_eco = eco_k
-          gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
+  run_search_loop(loop; get_state=() -> search_state) do
+      TProgress.@track for _gen in 1:est_gens
+        evals_done >= TRIALS && break
+        xs_u = CMAES.ask(search_state)
+        λ = search_state.lambda
+        fxs = Vector{MOLBSA.MOFitness}(undef, λ)
+        cands = Vector{typeof(bio_params)}(undef, λ)
+        gen_best_agg = Inf
+        local gb_run, gb_eco, gb_cached, gb_idx
+        # SERIAL: fit_params already threads internally over sites (see parametrize_CMAES note).
+        for k in 1:λ
+          cand = PU.u_to_params(xs_u[k], space, slots, bio_params)
+          rep_results = _run(cand)
+          fx_k, run_k, eco_k = _fitness(rep_results)
+          cands[k] = cand
+          fxs[k] = fx_k
+          evals_done += 1
+          if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined; isless ⇒ NaN ranks worst
+            gen_best_agg = fx_k.aggregate
+            gb_idx = k
+            gb_run = run_k
+            gb_eco = eco_k
+            gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
+          end
+        end
+
+        MOCMAES.tell!(search_state, fxs, xs_u; nds=search.mocmaes_nds)
+        search_state.n_evals = evals_done
+
+        is_new_best = false
+        for k in 1:λ
+          _upd = MOCMAES.update_archive!(search_state, MOLBSA.MOCandidate(cands[k], fxs[k]))
+          is_new_best |= _upd.improved
+        end
+        search_state.current = MOLBSA.MOCandidate(cands[gb_idx], fxs[gb_idx])
+        stagnation = is_new_best ? 0 : stagnation + 1
+        improved_since_restart |= is_new_best
+        mo_gen_finalize!(gio, search_state, search_state.lambda, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
+
+        if ipop && (search_state.sigma < 1e-11 || stagnation >= ipop_stagnation)
+          # Barren-restart stop: count consecutive IPOP restarts that produced no new best; stop after N.
+          barren_restarts = improved_since_restart ? 0 : barren_restarts + 1
+          improved_since_restart = false
+          if ipop_max_barren_restarts > 0 && barren_restarts >= ipop_max_barren_restarts
+            @info "Stopping search @ gen $(search_state.i): $barren_restarts consecutive IPOP restarts with no improvement (≥ $ipop_max_barren_restarts)"
+            break
+          end
+          new_lambda = search_state.lambda * 2
+          @info "IPOP restart @ gen $(search_state.i): λ $(search_state.lambda) → $new_lambda"
+          bio_params = next_candidate()
+          _apply_frozen_growth!(bio_params, frozen_ref, space.opts)   # keep fix_growth frozen at the Sim-A seed across restarts
+          _seed_prob_estab!(bs_tables(plugin), bio_params, eco_list, species_list, eco_species_ids)   # re-seed the calibration params
+          _seed_maturity!(bs_tables(plugin), bio_params, species_list)
+          _seed_min_rel!(bio_params, eco_list, space.opts)   # keep MIN_REL pinned across IPOP restarts
+          MOCMAES.restart!(search_state, PU.params_to_u(bio_params, space, slots), cmaes_sigma0; lambda=new_lambda)
+          stagnation = 0
         end
       end
-
-      MOCMAES.tell!(search_state, fxs, xs_u; nds=search.mocmaes_nds)
-      search_state.n_evals = evals_done
-
-      is_new_best = false
-      for k in 1:λ
-        _upd = MOCMAES.update_archive!(search_state, MOLBSA.MOCandidate(cands[k], fxs[k]))
-        is_new_best |= _upd.improved
-      end
-      search_state.current = MOLBSA.MOCandidate(cands[gb_idx], fxs[gb_idx])
-      stagnation = is_new_best ? 0 : stagnation + 1
-      improved_since_restart |= is_new_best
-      mo_gen_finalize!(gio, search_state, search_state.lambda, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
-
-      if ipop && (search_state.sigma < 1e-11 || stagnation >= ipop_stagnation)
-        # Barren-restart stop: count consecutive IPOP restarts that produced no new best; stop after N.
-        barren_restarts = improved_since_restart ? 0 : barren_restarts + 1
-        improved_since_restart = false
-        if ipop_max_barren_restarts > 0 && barren_restarts >= ipop_max_barren_restarts
-          @info "Stopping search @ gen $(search_state.i): $barren_restarts consecutive IPOP restarts with no improvement (≥ $ipop_max_barren_restarts)"
-          break
-        end
-        new_lambda = search_state.lambda * 2
-        @info "IPOP restart @ gen $(search_state.i): λ $(search_state.lambda) → $new_lambda"
-        bio_params = next_candidate()
-        _apply_frozen_growth!(bio_params, frozen_ref, space.opts)   # keep fix_growth frozen at the Sim-A seed across restarts
-        _seed_prob_estab!(bs_tables(plugin), bio_params, eco_list, species_list, eco_species_ids)   # re-seed the calibration params
-        _seed_maturity!(bs_tables(plugin), bio_params, species_list)
-        _seed_min_rel!(bio_params, eco_list, space.opts)   # keep MIN_REL pinned across IPOP restarts
-        MOCMAES.restart!(search_state, PU.params_to_u(bio_params, space, slots), cmaes_sigma0; lambda=new_lambda)
-        stagnation = 0
-      end
-    end
-  catch e
-    if caused_by_interrupt(e)
-      @info "Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…"
-    else
-      rethrow()
-    end
-  finally
-    stop_writer(writer_ch, writer_task)
-    close(losses_db_file); close(gio.metrics_io)
-    try
-      mkpath(output_dir)
-      fname = "search_state@$(search_state.i).jld2"
-      JLD2.save_object(joinpath(output_dir, fname), search_state)
-      link_path = joinpath(output_dir, "search_state_latest.jld2")
-      islink(link_path) && rm(link_path)
-      symlink(fname, link_path)
-      @info "Search state saved @ $(search_state.i)"
-    catch e
-      @error "Failed to save search state on exit" exception = (e, catch_backtrace())
-    end
   end
 
-  have_val && try   # CV: held-out front metrics under THIS fold's live (train-frozen) loss — see _dump_cv_front
+  env.have_val && try   # CV: held-out front metrics under THIS fold's live (train-frozen) loss — see _dump_cv_front
     _dump_cv_front(search_state, output_dir, eco_list, eco_species_ids, n_species, max_sim_year,
       val_ref_soa, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params, scoring, simb,
-      inj_val, val_dual_b, val_scales, fixed_seeds, val_splots, val_injection_cohorts, plugin)
+      env.inj_val, env.val_dual_b, env.val_scales, env.fixed_seeds, val_splots, val_injection_cohorts, plugin)
   catch e; @error "cv front dump failed" exception = (e, catch_backtrace()); end
 
   return search_state
@@ -4021,64 +3820,14 @@ end
 # (IgelMOCMAES) rather than one distribution — better front spread/extreme coverage. μ candidates
 # are evaluated per generation (serially); the initial population is a Sobol design.
 function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_mu::Int=20, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_sobol_pool_k::Int=1, igel_sobol_raw_mult::Int=2, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_reseed_random_frac::Float64=0.0, igel_maturity::Int=0, igel_seed_maturity::Bool=false, igel_warm_start::Bool=false, igel_freeze_seed_growth::Bool=false, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
-  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
-  all_plot_ids = UIntType.(unique(splots.plot_id))
-  sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
-  emp_sample = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
-  n_species = length(species_list)
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  env = mo_env(; ref_soa, plugin, splots, spdf_plts, spinup_cohorts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, spinup, rng, debug,
+    search_tier, n_reps, n_output_plots, no_establishment, injection_cohorts, cycle_years, scale_seed, exec,
+    val_splots, val_ref_soa, val_spdf_plts, val_site_sim_years, val_spinup_cohorts, val_injection_cohorts,
+    train_sites_parallel=!candidate_parallel(exec))   # candidate mode: sites go serial for EVERY eval of this driver (init population, gen loop, val)
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
-  injection = build_injection_plan(injection_cohorts, ref_soa, eco_species_ids, loss_params, scoring)   # this reference's injection dict, shock and exclusions
-  have_val = !isnothing(val_ref_soa) && !exec.skip_val   # ExecOptions.skip_val (PAN_SKIP_VAL) disables all held-out val re-sim during training
-  inj_val = have_val ? build_injection_plan(val_injection_cohorts, val_ref_soa, eco_species_ids, loss_params, scoring) : nothing   # the val reference's own plan
-  sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
-  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
-  t4_ref = nothing; cycle_map = nothing; n_cycles = 0; t1_ref = nothing; t2_ref = nothing
-  if search_tier == 1
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
-      t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
-    end
-  elseif search_tier == 2
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
-    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
-      bin_probs = diff([0f0; rec.sp_age_cdf])
-      for b in 1:n_bins; push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum); end
-      push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
-    end
-    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
-    t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
-    for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
-      cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
-      for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
-    end
-  end
-  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
-  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb, plugin=plugin)
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
-  # ONE reusable working SoA per reference — candidates/reps run serially, so reset_soa! reuses these
-  # buffers each eval instead of deep-copying the reference (removes the serial per-eval deepcopy + its churn).
-  _work_soa = deepcopy(ref_soa)
-  _work_soa_val = have_val ? deepcopy(val_ref_soa) : nothing
-  # candidate mode: one work SoA PER THREAD (each candidate eval runs single-threaded on its own, NUMA-local)
-  _work_soa_t = candidate_parallel(exec) ? [deepcopy(ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
-  # Candidate mode: sites go serial for EVERY eval in this driver (init population, gen loop, val), so each eval is
-  # single-threaded/deterministic and the gen loop parallelizes over candidates. The flag travels with each evaluation
-  # (fit_params `parallel_sites`), so nothing is set on the process and nothing needs restoring.
-  _sites_parallel = !candidate_parallel(exec)
-  _timer = run_timer(exec)   # nothing unless exec.timing; accumulates the sim time of site-parallel evaluations and the writer-blocked time
-  _run(p; ws=_work_soa) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, dual_b=dual_b, work_soa=ws, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0, parallel_sites=_sites_parallel, timer=(_sites_parallel ? _timer : nothing))
-  function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
-    objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
-    MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
-  end
+  n_species = env.n_species; _work_soa_t = env.work_soa_t; _timer = env.timer
+  _run(p; ws=env.work_soa) = run_candidate(env, p; ws)
+  _fitness(rep_results) = candidate_fitness(env, rep_results)
   if isnothing(resume_from)
     template = !isnothing(start_from) ? _load_params_from_path(start_from, plugin.ctx) : generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     slots = space.slots
@@ -4158,19 +3907,12 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
     end
   else
     @info "Resuming from $resume_from"
-    search_state = JLD2.load_object(resume_from)
+    # (RANKW is the TRAIN reference's, carried explicitly by `scales`/`val_scales` from the start — no throwaway train eval needed on resume.)
+    _resumed = IgelMOCMAES.load_state(IgelMOCMAES.IgelSearch, resume_from; dir=output_dir, bases=igel_freeze_seed_growth)   # state (+ per-lineage bases sidecar from output_dir)
+    search_state = IgelMOCMAES.state(_resumed); bases = _resumed.bases
     bio_params = search_state.representative.x
     slots = space.slots
-    # (RANKW is the TRAIN reference's, carried explicitly by `scales`/`val_scales` from the start — no throwaway train eval needed on resume.)
-    if igel_freeze_seed_growth
-      _bpath = joinpath(output_dir, "igel_bases@$(search_state.i).jld2")
-      isfile(_bpath) || error("igel_freeze_seed_growth resume: missing sidecar $_bpath (per-lineage frozen growth cannot be reconstructed from the checkpoint alone)")
-      bases = JLD2.load_object(_bpath)
-      length(bases) == length(search_state.pop) || error("igel_bases sidecar has $(length(bases)) entries but pop has $(length(search_state.pop))")
-      @info "igelmo per-lineage frozen growth: reloaded $(length(bases)) lineage bases from $(basename(_bpath))"
-    else
-      bases = nothing
-    end
+    bases === nothing || @info "igelmo per-lineage frozen growth: reloaded $(length(bases)) lineage bases from igel_bases@$(search_state.i).jld2"
   end
 
   # Engine options of this run (explicit, not state fields → they apply on fresh AND resume): the config-derived ones of `search.igel` + this
@@ -4182,39 +3924,17 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
         u -> PU.params_to_nativevec(PU.u_to_params(u, space, slots, bp), space, slots),
         p -> PU.params_to_nativevec(p, space, slots)) : base
   end
+  isearch = IgelMOCMAES.IgelSearch(search_state, igel_opts; bases=bases)   # the resumable search: engine state + run options + per-lineage bases
   igel_niche_radius > 0 && @info "igelmo parameter-space niching ON: radius=$(igel_niche_radius) native-quanta (L∞) over $(length(slots)) slots"
 
   if TRIALS < 1 || search_state.n_evals >= TRIALS
     return search_state
   end
 
-  writer_ch, writer_task = start_mo_writer(typeof(search_state), output_dir)
-  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
-  losses_db = DuckDB.connect(losses_db_file)
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
   # Held-out val must measure the SAME objective as train: Sim B (dual_b) when dual_mode≠off, else Sim A.
-  # (val_dual_b = nothing when dual_mode==:off ⇒ val_fit falls back to the tier-3 Sim-A path.) Previously this
-  # driver hardcoded dual_b=nothing here, so a dual_mode:b run measured VAL on Sim A — inconsistent with the
-  # Sim-B train loss (and sensitive to init_perturb via the Sim-A rep-combination). Fixed to use val_dual_b.
-  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb, plugin=plugin) : nothing
-  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales, simb) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
-  # candidate mode: per-thread val buffers so val_fit can run concurrently across archive members (val is sites-serial)
-  _val_work_t = (have_val && candidate_parallel(exec)) ? [deepcopy(val_ref_soa) for _ in 1:Threads.maxthreadid()] : nothing
-  val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
-      _vws = _val_work_t === nothing ? _work_soa_val : _val_work_t[Threads.threadid()]
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, work_soa=_vws, scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0, parallel_sites=_sites_parallel)
-      v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
-    end : nothing
-  gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
-    resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
-    eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
-    no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b, plugin=plugin, exec=exec, timer=_timer)
-  caused_by_interrupt(e) = e isa InterruptException ? true :
-    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
-    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
+  mo_val!(env)
+  loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
+  gio = loop.gio
 
   evals_done = search_state.n_evals
   est_gens = max(1, cld(TRIALS - evals_done, igel_mu))
@@ -4225,88 +3945,67 @@ function parametrize_IgelMOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugi
   _reseed_path = joinpath(output_dir, "reseed_trace.csv"); _reseed_new = !isfile(_reseed_path) || filesize(_reseed_path) == 0
   _reseed_io = open(_reseed_path, _reseed_new ? "w" : "a")
   _reseed_new && (println(_reseed_io, "iteration,mean_sigma,min_sigma,n_below_floor,n_reseed"); flush(_reseed_io))
-  try
-    _first_gen = true
-    TProgress.@track for _gen in 1:total_gens                # _gen = ABSOLUTE generation number
-      _gen <= done_gens && continue                          # RESUME: fast-skip completed gens (bar jumps to the resumed position, then continues)
-      evals_done >= TRIALS && break
-      if _timer !== nothing
-        _first_gen && (println("[timing] startup→first gen: $(_tsec(time_ns()-exec.t0))s"); _first_gen = false)
-        reset!(_timer)
-      end
-      _tg = time_ns()
-      offs = IgelMOCMAES.ask(search_state, igel_opts)
-      _t_ask = time_ns() - _tg
-      off_fxs = Vector{MOLBSA.MOFitness}(undef, igel_mu)
-      off_params = Vector{typeof(bio_params)}(undef, igel_mu)
-      off_run = Vector{Any}(undef, igel_mu); off_eco = Vector{Any}(undef, igel_mu)   # retained per-candidate loss/eco (cheap) → gen-best needs no serial re-sim
-      gen_best_agg = Inf; local gb_run, gb_eco, gb_cached, gb_idx
-      _te = time_ns()
-      if candidate_parallel(exec)
-        # candidate×rep is the parallel unit: each candidate's sim runs single-threaded on a thread-local SoA
-        # (NUMA-local, no shared-array contention). Sites are serial here (`_sites_parallel` is false in candidate mode).
-        Threads.@threads :static for k in 1:igel_mu
-          p = PU.u_to_params(offs[k], space, slots, bases === nothing ? bio_params : bases[k])
-          off_params[k] = p
-          fx_k, run_k, eco_k = _fitness(_run(p; ws=_work_soa_t[Threads.threadid()]))
-          off_fxs[k] = fx_k; off_run[k] = run_k; off_eco[k] = eco_k   # keep the batch's run/eco (self-contained loss structs; no SoA aliasing)
+  run_search_loop(loop; get_state=() -> search_state, save_exit=() -> (IgelMOCMAES.save_state(isearch, output_dir); @info "Search state saved @ $(search_state.i)"), close_extra=() -> close(_reseed_io)) do
+      _first_gen = true
+      TProgress.@track for _gen in 1:total_gens                # _gen = ABSOLUTE generation number
+        _gen <= done_gens && continue                          # RESUME: fast-skip completed gens (bar jumps to the resumed position, then continues)
+        evals_done >= TRIALS && break
+        if _timer !== nothing
+          _first_gen && (println("[timing] startup→first gen: $(_tsec(time_ns()-exec.t0))s"); _first_gen = false)
+          reset!(_timer)
         end
-        evals_done += igel_mu
-        for k in 1:igel_mu                              # serial best-pick (gen argmin aggregate)
-          (k == 1 || isless(off_fxs[k].aggregate, gen_best_agg)) && (gen_best_agg = off_fxs[k].aggregate; gb_idx = k)
-        end
-        gb_run = off_run[gb_idx]; gb_eco = off_eco[gb_idx]  # already computed in the parallel batch (identical to a re-sim: fixed seeds) — no serial full-sim
-        gb_cached = n_output_plots > 0 ? _median_rep_cached(_run(off_params[gb_idx]; ws=_work_soa_t[1]), loss_params, scoring) : nothing  # cohort cache only feeds output plots; unused otherwise
-      else
-        for k in 1:igel_mu                              # SoA mode: serial candidates, sites parallel (fit_params threads)
-          p = PU.u_to_params(offs[k], space, slots, bases === nothing ? bio_params : bases[k])
-          rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
-          off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
-          if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
-            gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
+        _tg = time_ns()
+        offs = IgelMOCMAES.ask(isearch)
+        _t_ask = time_ns() - _tg
+        off_fxs = Vector{MOLBSA.MOFitness}(undef, igel_mu)
+        off_params = Vector{typeof(bio_params)}(undef, igel_mu)
+        off_run = Vector{Any}(undef, igel_mu); off_eco = Vector{Any}(undef, igel_mu)   # retained per-candidate loss/eco (cheap) → gen-best needs no serial re-sim
+        gen_best_agg = Inf; local gb_run, gb_eco, gb_cached, gb_idx
+        _te = time_ns()
+        if candidate_parallel(exec)
+          # candidate×rep is the parallel unit: each candidate's sim runs single-threaded on a thread-local SoA
+          # (NUMA-local, no shared-array contention). Sites are serial here (`_sites_parallel` is false in candidate mode).
+          Threads.@threads :static for k in 1:igel_mu
+            p = PU.u_to_params(offs[k], space, slots, isearch.bases === nothing ? bio_params : isearch.bases[k])
+            off_params[k] = p
+            fx_k, run_k, eco_k = _fitness(_run(p; ws=_work_soa_t[Threads.threadid()]))
+            off_fxs[k] = fx_k; off_run[k] = run_k; off_eco[k] = eco_k   # keep the batch's run/eco (self-contained loss structs; no SoA aliasing)
+          end
+          evals_done += igel_mu
+          for k in 1:igel_mu                              # serial best-pick (gen argmin aggregate)
+            (k == 1 || isless(off_fxs[k].aggregate, gen_best_agg)) && (gen_best_agg = off_fxs[k].aggregate; gb_idx = k)
+          end
+          gb_run = off_run[gb_idx]; gb_eco = off_eco[gb_idx]  # already computed in the parallel batch (identical to a re-sim: fixed seeds) — no serial full-sim
+          gb_cached = n_output_plots > 0 ? _median_rep_cached(_run(off_params[gb_idx]; ws=_work_soa_t[1]), loss_params, scoring) : nothing  # cohort cache only feeds output plots; unused otherwise
+        else
+          for k in 1:igel_mu                              # SoA mode: serial candidates, sites parallel (fit_params threads)
+            p = PU.u_to_params(offs[k], space, slots, isearch.bases === nothing ? bio_params : isearch.bases[k])
+            rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
+            off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
+            if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
+              gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
+            end
           end
         end
+        _t_eval = time_ns() - _te; _sim = _timer === nothing ? UInt64(0) : _timer.sim
+        _tt = time_ns()
+        is_new_best = IgelMOCMAES.tell!(isearch, off_fxs, off_params)   # also realigns the per-lineage frozen-growth bases with the survivors
+        _t_tell = time_ns() - _tt
+        search_state.n_evals = evals_done
+        _tf = time_ns()
+        _save_ckpt = mo_gen_finalize!(gio, search_state, igel_mu, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
+        # sidecar the per-lineage bases WHENEVER a checkpoint is saved, tagged with the same gen so resume loads
+        # the exact pop↔bases alignment (search_state.pop is not mutated between here and the next ask).
+        _save_ckpt && try; IgelMOCMAES.save_aux(isearch, output_dir); catch e; @warn "igel_bases sidecar save failed" exception=e; end
+        let _sg = Float64[ind.sigma for ind in search_state.pop], _nr = count(search_state._reseed)   # reseed/σ signal
+          println(_reseed_io, string(search_state.i, ",", round(search_state.t, sigdigits=6), ",", round(minimum(_sg), sigdigits=6), ",", count(<(igel_reseed_sigma), _sg), ",", _nr))
+          (_nr > 0 || search_state.i % 100 == 0) && flush(_reseed_io)
+          _nr > 0 && @info "igelmo gen $(search_state.i): $_nr reseed(s) — mean_σ=$(round(search_state.t, sigdigits=3)) min_σ=$(round(minimum(_sg), sigdigits=3))"
+        end
+        if _timer !== nothing
+          println("[timing] gen $_gen: $(_tsec(time_ns()-_tg))s | ask=$(_tsec(_t_ask)) eval=$(_tsec(_t_eval))(sim=$(_tsec(_sim)) loss+oth=$(_tsec(_t_eval-_sim))) tell=$(_tsec(_t_tell)) final=$(_tsec(time_ns()-_tf))(io=$(_tsec(_timer.io)))")
+        end
       end
-      _t_eval = time_ns() - _te; _sim = _timer === nothing ? UInt64(0) : _timer.sim
-      _tt = time_ns()
-      # capture the parent Individual objects BEFORE tell! reorders the population; offspring k descends from
-      # parent k, so both carry lineage k's frozen growth (bases[k]). After selection the same objects survive
-      # by reference, so we realign bases by object identity — no change to IgelMOCMAES needed.
-      _pre_pop = bases === nothing ? nothing : copy(search_state.pop)
-      is_new_best = IgelMOCMAES.tell!(search_state, off_fxs, off_params, igel_opts)
-      if bases !== nothing
-        objbase = IdDict{Any,Any}()
-        for k in 1:igel_mu; objbase[_pre_pop[k]] = bases[k]; objbase[search_state._off[k]] = bases[k]; end
-        bases = Any[objbase[ind] for ind in search_state.pop]   # survivors → their lineage's frozen growth
-      end
-      _t_tell = time_ns() - _tt
-      search_state.n_evals = evals_done
-      _tf = time_ns()
-      _save_ckpt = mo_gen_finalize!(gio, search_state, igel_mu, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
-      # sidecar the per-lineage bases WHENEVER a checkpoint is saved, tagged with the same gen so resume loads
-      # the exact pop↔bases alignment (search_state.pop is not mutated between here and the next ask).
-      bases !== nothing && _save_ckpt && try; JLD2.save_object(joinpath(output_dir, "igel_bases@$(search_state.i).jld2"), bases); catch e; @warn "igel_bases sidecar save failed" exception=e; end
-      let _sg = Float64[ind.sigma for ind in search_state.pop], _nr = count(search_state._reseed)   # reseed/σ signal
-        println(_reseed_io, string(search_state.i, ",", round(search_state.t, sigdigits=6), ",", round(minimum(_sg), sigdigits=6), ",", count(<(igel_reseed_sigma), _sg), ",", _nr))
-        (_nr > 0 || search_state.i % 100 == 0) && flush(_reseed_io)
-        _nr > 0 && @info "igelmo gen $(search_state.i): $_nr reseed(s) — mean_σ=$(round(search_state.t, sigdigits=3)) min_σ=$(round(minimum(_sg), sigdigits=3))"
-      end
-      if _timer !== nothing
-        println("[timing] gen $_gen: $(_tsec(time_ns()-_tg))s | ask=$(_tsec(_t_ask)) eval=$(_tsec(_t_eval))(sim=$(_tsec(_sim)) loss+oth=$(_tsec(_t_eval-_sim))) tell=$(_tsec(_t_tell)) final=$(_tsec(time_ns()-_tf))(io=$(_tsec(_timer.io)))")
-      end
-    end
-  catch e
-    caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
-  finally
-    stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
-    try; close(_reseed_io); catch; end
-    try
-      mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
-      JLD2.save_object(joinpath(output_dir, fname), search_state)
-      bases !== nothing && JLD2.save_object(joinpath(output_dir, "igel_bases@$(search_state.i).jld2"), bases)   # keep the sidecar aligned with the exit checkpoint
-      link_path = joinpath(output_dir, "search_state_latest.jld2"); islink(link_path) && rm(link_path); symlink(fname, link_path)
-      @info "Search state saved @ $(search_state.i)"
-    catch e; @error "Failed to save search state on exit" exception = (e, catch_backtrace()); end
   end
   return search_state
 end
@@ -4321,58 +4020,17 @@ end
 # n_evals and log a light progress line). Schedule: cc_cycles × [spec cc_spec_gens + integ cc_integ_gens],
 # then integration until the TRIALS budget is exhausted.
 function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, igel_sigma0::Float64=0.3, igel_sobol_init::Bool=true, igel_niche_radius::Float64=0.0, igel_reseed_sigma::Float64=0.0, igel_maturity::Int=0, single_cov::Bool=false, cc_group_size::Int=2, cc_spec_gens::Int=20, cc_integ_gens::Int=20, cc_cycles::Int=5, cc_fix_others::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
-  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
-  all_plot_ids = UIntType.(unique(splots.plot_id))
-  sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
-  emp_sample = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
-  n_species = length(species_list)
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  env = mo_env(; ref_soa, plugin, splots, spdf_plts, spinup_cohorts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, spinup, rng, debug,
+    search_tier, n_reps, n_output_plots, no_establishment, injection_cohorts, cycle_years, scale_seed, exec,
+    val_splots, val_ref_soa, val_spdf_plts, val_site_sim_years, val_spinup_cohorts, val_injection_cohorts)
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
-  injection = build_injection_plan(injection_cohorts, ref_soa, eco_species_ids, loss_params, scoring)   # this reference's injection dict, shock and exclusions
-  have_val = !isnothing(val_ref_soa) && !exec.skip_val   # ExecOptions.skip_val (PAN_SKIP_VAL) disables all held-out val re-sim during training
-  inj_val = have_val ? build_injection_plan(val_injection_cohorts, val_ref_soa, eco_species_ids, loss_params, scoring) : nothing   # the val reference's own plan
-  sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
-  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
-  t4_ref = nothing; cycle_map = nothing; n_cycles = 0; t1_ref = nothing; t2_ref = nothing
-  if search_tier == 1
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
-      t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
-    end
-  elseif search_tier == 2
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
-    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
-      bin_probs = diff([0f0; rec.sp_age_cdf])
-      for b in 1:n_bins; push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum); end
-      push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
-    end
-    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
-    t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
-    for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
-      cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
-      for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
-    end
-  end
-  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
-  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb, plugin=plugin)
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
-  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales, simb)) : nothing   # the VAL reference scales (RANKW = the train one)
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, dual_b=dual_b, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-  function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
-    objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
-    MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
-  end
+  n_species = env.n_species
+  _run(p; ws=env.work_soa) = run_candidate(env, p; ws)
+  _fitness(rep_results) = candidate_fitness(env, rep_results)
   # per-species objective (specialization scoring): score species g only, aggregate = Σ of its 2 objectives.
   function _fitness_species(rep_results, gsp::Int)
     _, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
-    objs = _mo_objectives_species(eco_losses, eco_species_ids, loss_params, scales, dual_b, gsp)
+    objs = _mo_objectives_species(eco_losses, eco_species_ids, loss_params, env.scales, env.dual_b, gsp)
     MOLBSA.MOFitness(objs, Float64(sum(objs)))
   end
   next_param() = !isempty(_sobol_cands) && length(_sobol_cands) >= 1 ? popfirst!(_sobol_cands) :
@@ -4408,24 +4066,9 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     return search_state
   end
 
-  writer_ch, writer_task = start_mo_writer(typeof(search_state), output_dir)
-  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
-  losses_db = DuckDB.connect(losses_db_file)
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
-  val_fit = have_val ? function (x)
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=nothing, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-      v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
-    end : nothing
-  gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
-    resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
-    eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
-    no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=nothing, plugin=plugin, exec=exec)
-  caused_by_interrupt(e) = e isa InterruptException ? true :
-    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
-    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
+  mo_val!(env; dual=false, serial_val=false)   # legacy: the val objective of this driver is Sim A only; val sites stay threaded
+  loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
+  gio = loop.gio
 
   evals_done = search_state.n_evals
 
@@ -4522,94 +4165,43 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   cc_fix_others && push!(schedule, :integ)                 # leading aggregate phase (provides the background)
   for _c in 1:cc_cycles; push!(schedule, :spec); push!(schedule, :integ); end
 
-  try
-    _cyc = 0
-    TProgress.@track for _phase in 1:length(schedule)
-      evals_done >= TRIALS && break
-      if schedule[_phase] == :spec
-        _cyc += 1
-        cc = build_cc_groups()
-        bg = cc_fix_others ? PU.params_to_u(search_state.representative.x, space, slots) : nothing
-        for _g in 1:cc_spec_gens
-          evals_done >= TRIALS && break
-          m = spec_gen!(cc, bg)
-          @info "CC-Igel spec cycle $_cyc gen $_g | mean-species-best=$(round(m; sigdigits=4)) | evals=$evals_done | fix_others=$cc_fix_others"
-        end
-        recombine!(cc)                                     # → fresh integration population
-      else
-        for _g in 1:cc_integ_gens
-          evals_done >= TRIALS && break
-          integ_gen!()
+  run_search_loop(loop; get_state=() -> search_state) do
+      _cyc = 0
+      TProgress.@track for _phase in 1:length(schedule)
+        evals_done >= TRIALS && break
+        if schedule[_phase] == :spec
+          _cyc += 1
+          cc = build_cc_groups()
+          bg = cc_fix_others ? PU.params_to_u(search_state.representative.x, space, slots) : nothing
+          for _g in 1:cc_spec_gens
+            evals_done >= TRIALS && break
+            m = spec_gen!(cc, bg)
+            @info "CC-Igel spec cycle $_cyc gen $_g | mean-species-best=$(round(m; sigdigits=4)) | evals=$evals_done | fix_others=$cc_fix_others"
+          end
+          recombine!(cc)                                     # → fresh integration population
+        else
+          for _g in 1:cc_integ_gens
+            evals_done >= TRIALS && break
+            integ_gen!()
+          end
         end
       end
-    end
-    # remainder: pure integration until the budget is exhausted
-    while evals_done < TRIALS
-      integ_gen!()
-    end
-  catch e
-    caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
-  finally
-    stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
-    try
-      mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
-      JLD2.save_object(joinpath(output_dir, fname), search_state)
-      link_path = joinpath(output_dir, "search_state_latest.jld2"); islink(link_path) && rm(link_path); symlink(fname, link_path)
-      @info "Search state saved @ $(search_state.i)"
-    catch e; @error "Failed to save search state on exit" exception = (e, catch_backtrace()); end
+      # remainder: pure integration until the budget is exhausted
+      while evals_done < TRIALS
+        integ_gen!()
+      end
   end
   return search_state
 end
 
 function parametrize_NSGA2(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, nsga2_pop::Int=48, nsga2_offspring::Union{Nothing,Int}=nothing, nsga2_eta_c::Float64=20.0, nsga2_eta_m::Float64=20.0, nsga2_pc::Float64=0.9, nsga2_pm::Float64=-1.0, sobol_init::Bool=true, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
-  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
-  all_plot_ids = UIntType.(unique(splots.plot_id))
-  sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
-  emp_sample = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
-  n_species = length(species_list)
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  env = mo_env(; ref_soa, plugin, splots, spdf_plts, spinup_cohorts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, spinup, rng, debug,
+    search_tier, n_reps, n_output_plots, no_establishment, injection_cohorts, cycle_years, scale_seed, exec,
+    val_splots, val_ref_soa, val_spdf_plts, val_site_sim_years, val_spinup_cohorts, val_injection_cohorts)
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
-  injection = build_injection_plan(injection_cohorts, ref_soa, eco_species_ids, loss_params, scoring)   # this reference's injection dict, shock and exclusions
-  have_val = !isnothing(val_ref_soa) && !exec.skip_val   # ExecOptions.skip_val (PAN_SKIP_VAL) disables all held-out val re-sim during training
-  inj_val = have_val ? build_injection_plan(val_injection_cohorts, val_ref_soa, eco_species_ids, loss_params, scoring) : nothing   # the val reference's own plan
-  sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
-  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
-  t4_ref = nothing; cycle_map = nothing; n_cycles = 0; t1_ref = nothing; t2_ref = nothing
-  if search_tier == 1
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
-      t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
-    end
-  elseif search_tier == 2
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
-    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
-      bin_probs = diff([0f0; rec.sp_age_cdf])
-      for b in 1:n_bins; push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum); end
-      push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
-    end
-    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
-    t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
-    for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
-      cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
-      for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
-    end
-  end
-  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
-  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb, plugin=plugin)
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
-  val_scales = have_val ? first(build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; train=scales, simb)) : nothing   # the VAL reference scales (RANKW = the train one)
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, dual_b=dual_b, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-  function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
-    objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
-    MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
-  end
+  n_species = env.n_species
+  _run(p; ws=env.work_soa) = run_candidate(env, p; ws)
+  _fitness(rep_results) = candidate_fitness(env, rep_results)
   next_param() = !isempty(_sobol_cands) && length(_sobol_cands) >= 1 ? popfirst!(_sobol_cands) :
                  generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
 
@@ -4638,56 +4230,31 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
     return search_state
   end
 
-  writer_ch, writer_task = start_mo_writer(typeof(search_state), output_dir)
-  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
-  losses_db = DuckDB.connect(losses_db_file)
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
-  val_fit = have_val ? function (x)            # (run, cached, eco_losses) on the val split, aggregated over n_reps like train
-      vreps = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=nothing, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-      v = _agg_reps(vreps, loss_params, scoring); (v[1], vreps[v[3]][2], v[2])
-    end : nothing
-  gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
-    resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
-    eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
-    no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=nothing, plugin=plugin, exec=exec)
-  caused_by_interrupt(e) = e isa InterruptException ? true :
-    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
-    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
+  mo_val!(env; dual=false, serial_val=false)   # legacy: the val objective of this driver is Sim A only; val sites stay threaded
+  loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
+  gio = loop.gio
 
   evals_done = search_state.n_evals
   est_gens = max(1, cld(TRIALS - evals_done, λ))
-  try
-    TProgress.@track for _gen in 1:est_gens
-      evals_done >= TRIALS && break
-      offs = NSGA2.ask(search_state)                  # λ offspring u-vectors (tournament + SBX + polynomial mutation)
-      off_fxs = Vector{MOLBSA.MOFitness}(undef, λ)
-      off_params = Vector{typeof(bio_params)}(undef, λ)
-      gen_best_agg = Inf; local gb_run, gb_eco, gb_cached, gb_idx
-      for k in 1:λ                                     # SERIAL (fit_params threads internally)
-        p = PU.u_to_params(offs[k], space, slots, bio_params)
-        rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
-        off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
-        if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
-          gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
+  run_search_loop(loop; get_state=() -> search_state) do
+      TProgress.@track for _gen in 1:est_gens
+        evals_done >= TRIALS && break
+        offs = NSGA2.ask(search_state)                  # λ offspring u-vectors (tournament + SBX + polynomial mutation)
+        off_fxs = Vector{MOLBSA.MOFitness}(undef, λ)
+        off_params = Vector{typeof(bio_params)}(undef, λ)
+        gen_best_agg = Inf; local gb_run, gb_eco, gb_cached, gb_idx
+        for k in 1:λ                                     # SERIAL (fit_params threads internally)
+          p = PU.u_to_params(offs[k], space, slots, bio_params)
+          rep_results = _run(p); fx_k, run_k, eco_k = _fitness(rep_results)
+          off_params[k] = p; off_fxs[k] = fx_k; evals_done += 1
+          if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
+            gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
+          end
         end
+        is_new_best = NSGA2.tell!(search_state, off_fxs, off_params, offs)   # (μ+λ) non-dom-sort + crowding selection
+        search_state.n_evals = evals_done
+        mo_gen_finalize!(gio, search_state, search_state.mu, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
       end
-      is_new_best = NSGA2.tell!(search_state, off_fxs, off_params, offs)   # (μ+λ) non-dom-sort + crowding selection
-      search_state.n_evals = evals_done
-      mo_gen_finalize!(gio, search_state, search_state.mu, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
-    end
-  catch e
-    caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
-  finally
-    stop_writer(writer_ch, writer_task); close(losses_db_file); try; close(gio.metrics_io); catch; end
-    try
-      mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
-      JLD2.save_object(joinpath(output_dir, fname), search_state)
-      link_path = joinpath(output_dir, "search_state_latest.jld2"); islink(link_path) && rm(link_path); symlink(fname, link_path)
-      @info "Search state saved @ $(search_state.i)"
-    catch e; @error "Failed to save search state on exit" exception = (e, catch_backtrace()); end
   end
   return search_state
 end
@@ -4699,53 +4266,13 @@ end
 # vector, writer, archive logging and losses.duckdb schema as parametrize_MOCMAES; the emitter re-seeds
 # itself on convergence/stagnation (no external IPOP). Grid bounds are auto-scaled from the seed loss.
 function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, cmaes_lambda::Union{Nothing,Int}=nothing, cmaes_sigma0::Float64=0.3, cmame_alpha::Float64=0.02, cmame_grid::Int=15, cmame_reseed_explore::Float64=1.0, cmame_restart_patience::Int=6, cmame_sobol_reseed::Bool=false, balanced_quality::Bool=false, cmame_mo_rank::Bool=false, archive_by_sp::Bool=false, bounds_by_sobol::Bool=false, top_seeds::Float64=0.2, integer_handling::Bool=false, integer_std_factor::Float64=0.3, single_cov::Bool=false, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
-  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
-  all_plot_ids = UIntType.(unique(splots.plot_id))
-  sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
-  emp_sample = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
-  n_species = length(species_list)
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  env = mo_env(; ref_soa, plugin, splots, spdf_plts, spinup_cohorts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, spinup, rng, debug,
+    search_tier, n_reps, n_output_plots, no_establishment, injection_cohorts, cycle_years, scale_seed, exec,
+    val_splots, val_ref_soa, val_spdf_plts, val_site_sim_years, val_spinup_cohorts, val_injection_cohorts)
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
-  injection = build_injection_plan(injection_cohorts, ref_soa, eco_species_ids, loss_params, scoring)   # this reference's injection dict, shock and exclusions
-  have_val = !isnothing(val_ref_soa) && !exec.skip_val   # ExecOptions.skip_val (PAN_SKIP_VAL) disables all held-out val re-sim during training
-  inj_val = have_val ? build_injection_plan(val_injection_cohorts, val_ref_soa, eco_species_ids, loss_params, scoring) : nothing   # the val reference's own plan
-  sampled_ids_val = (have_val && n_output_plots > 0) ? _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) : Set{UIntType}()
-  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
-  t4_ref = nothing; cycle_map = nothing; n_cycles = 0; t1_ref = nothing; t2_ref = nothing
-  if search_tier == 1
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
-      t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
-    end
-  elseif search_tier == 2
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
-    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts, (_, spdf_gt) in year_dict, (sp_eco, rec) in spdf_gt.records
-      bin_probs = diff([0f0; rec.sp_age_cdf])
-      for b in 1:n_bins; push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum); end
-      push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
-    end
-    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
-    t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
-    for ((plot_id, eco_id), year_dict) in spdf_plts, (sy, spdf_gt) in year_dict
-      cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
-      for (sp_eco, rec) in spdf_gt.records; t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
-    end
-  end
-  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
-  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb, plugin=plugin)
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, dual_b=dual_b, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-  function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
-    objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
-    MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
-  end
+  n_species = env.n_species
+  _run(p; ws=env.work_soa) = run_candidate(env, p; ws)
+  _fitness(rep_results) = candidate_fitness(env, rep_results)
   sobol_idx = Ref(1)
   next_candidate() =
     if sobol_idx[] <= length(_sobol_cands)
@@ -4836,110 +4363,74 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     return search_state
   end
 
-  writer_ch, writer_task = start_mo_writer(typeof(search_state), output_dir)
-  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
-  losses_db = DuckDB.connect(losses_db_file)
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
-  # Per-generation trajectory: best (representative) train+val loss, emitter population size, archive size.
-  # Validation mirrors the TRAINING tier so the held-out loss ranks candidates by the SAME objective
-  # (tier 5 ⇒ tier-5 val). Tier 4/5 need per-cycle bins built from the validation split.
-  val_t4_ref = nothing; val_cycle_map = nothing; val_n_cycles = 0
-  if have_val && (search_tier == 4 || search_tier == 5)
-    _vnb = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    val_cycle_map, val_n_cycles = Data.build_cycle_map(val_splots; cycle_years=cycle_years, cycle=scoring.cycle)
-    val_t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), _vnb) for _ in 1:val_n_cycles] for eco_id in eachindex(eco_list)]
-    for ((plot_id, eco_id), year_dict) in val_spdf_plts, (sy, spdf_gt) in year_dict
-      cyc = get(val_cycle_map, (Int(plot_id), Int(sy)), 0); cyc == 0 && continue
-      for (sp_eco, rec) in spdf_gt.records; val_t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum; end
-    end
-  end
-  # Validation Sim B so held-out loss measures the SAME A⊕B objective as training (dual modes only).
-  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb, plugin=plugin) : nothing
-  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, search_tier, val_spdf_plts, val_t4_ref, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales, simb) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
-  val_fit = have_val ? (x -> only(fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection=inj_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0))) : nothing
-  gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
-    resuming=false, splots=splots, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids,
-    n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params, no_establishment=no_establishment,
-    n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots, sampled_ids=sampled_ids,
-    sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b, plugin=plugin, exec=exec)
-  caused_by_interrupt(e) = e isa InterruptException ? true :
-    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
-    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) : false
+  # Validation mirrors the TRAINING tier so the held-out loss ranks candidates by the SAME objective (tier 5 ⇒ tier-5 val; tier 4/5 need
+  # per-cycle bins built from the validation split) and, in dual modes, the same A⊕B objective. Legacy: a fresh seed per val evaluation.
+  mo_val!(env; dual=true, tier=search_tier, seeds=:rng, serial_val=false)
+  loop = mo_loop_open(env, search_state; output_dir, resuming=false)
+  gio = loop.gio
 
   evals_done = search_state.n_evals
   est_gens = max(1, cld(TRIALS - evals_done, search_state.engine.emitter.lambda))
-  try
-    TProgress.@track for _gen in 1:est_gens
-      evals_done >= TRIALS && break
-      xs_u = CMAMAE.ask(search_state)
-      λ = search_state.engine.emitter.lambda
-      fxs = Vector{MOLBSA.MOFitness}(undef, λ)
-      cands = Vector{MOLBSA.MOCandidate{typeof(bio_params)}}(undef, λ)
-      meas = Vector{Tuple{Float64,Float64}}(undef, λ)
-      sp_meas = Vector{Vector{Vector{Float64}}}(undef, λ)   # archive_by_sp: per-candidate breadth-column cells
-      sp_qual = Vector{Vector{Float64}}(undef, λ)
-      gen_best_agg = Inf
-      local gb_run, gb_eco, gb_cached, gb_idx
-      for k in 1:λ                                    # SERIAL (fit_params threads internally over sites)
-        cand = PU.u_to_params(xs_u[k], space, slots, bio_params)
-        rep_results = _run(cand)
-        fx_k, run_k, eco_k = _fitness(rep_results)
-        cands[k] = MOLBSA.MOCandidate(cand, fx_k)
-        fxs[k] = fx_k
-        evals_done += 1
-        if archive_by_sp
-          Ws, As = _sp_wa(eco_k)
-          b = 0
-          @inbounds for (p, s) in enumerate(inc_sp); _nd_on(sp_fronts[p], Ws[s], As[s]) && (b += 1); end   # breadth vs running fronts
-          @inbounds for (p, s) in enumerate(inc_sp); _ins_front!(sp_fronts[p], Ws[s], As[s]); end          # then update the fronts
-          gW = sum(Ws[s] for s in inc_sp); gA = sum(As[s] for s in inc_sp)   # position over the dominance species (matches measure())
-          wn = clamp((gW - gwlo) / (gwhi - gwlo), 0.0, 1 - 1e-9); an = clamp((gA - galo) / (gahi - galo), 0.0, 1 - 1e-9)
-          # cell quality: balanced (rescaled ΣW+ΣAGB ≡ wn+an, scale-fair) OR raw aggregate (legacy)
-          aggq = balanced_quality ? (wn + an) : Float64(fx_k.aggregate)
-          sp_meas[k] = [[wn, an, (j - 0.5) / n_inc] for j in 1:b]  # fill breadth-levels 1..b at this (W,AGB) cell
-          sp_qual[k] = fill(aggq, b)                               # quality at every filled level
-        else
-          m = CMAMAE.measure(fx_k); meas[k] = (Float64(m[1]), Float64(m[2]))
-        end
-        if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
-          gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
-        end
-      end
-
-      is_new_best = archive_by_sp ? CMAMAE.tell_species_mo!(search_state, cands, sp_meas, sp_qual, xs_u) :
-                    CMAMAE.tell_mo!(search_state, cands, meas, xs_u; nds=search.mocmaes_nds)
-      search_state.n_evals = evals_done
-      search_state.current = cands[gb_idx]
-
-      mo_gen_finalize!(gio, search_state, search_state.engine.emitter.lambda, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
-    end
-  catch e
-    caused_by_interrupt(e) ? @info("Search interrupted by user @ gen $(search_state.i); finalizing checkpoint…") : rethrow()
-  finally
-    try; close(gio.metrics_io); catch; end
-    stop_writer(writer_ch, writer_task); close(losses_db_file)
-    try
-      mkpath(output_dir); fname = "search_state@$(search_state.i).jld2"
-      JLD2.save_object(joinpath(output_dir, fname), search_state)
-      link_path = joinpath(output_dir, "search_state_latest.jld2"); islink(link_path) && rm(link_path); symlink(fname, link_path)
-      @info "Search state saved @ $(search_state.i)"
-    catch e; @error "Failed to save search state on exit" exception = (e, catch_backtrace()); end
+  run_search_loop(loop; get_state=() -> search_state, after_exit=() -> begin
     # Re-evaluate every archive elite on the held-out validation set so each carries train+val loss
     # (aligned to the saved archive order). train_loss is the elite's stored aggregate.
-    if have_val
+    if env.have_val
       try
         open(joinpath(output_dir, "archive_eval.csv"), "w") do io
           println(io, "candidate,train_loss,val_loss")
           for (ci, m) in enumerate(search_state.archive)
-            vr = only(fit_params(val_ref_soa, m.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=search_tier, t4_ref=val_t4_ref, cycle_map=val_cycle_map, n_cycles=val_n_cycles, injection=inj_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin=plugin))
-            println(io, "$ci,$(Float64(m.fx.aggregate)),$(_mo_val_loss(vr, eco_species_ids, loss_params, val_scales, val_dual_b))")
+            vr = env.val_fit(m.x)
+            println(io, "$ci,$(Float64(m.fx.aggregate)),$(_mo_val_loss(vr, eco_species_ids, loss_params, env.val_scales, env.val_dual_b))")
           end
         end
         @info "Wrote archive_eval.csv (train+val loss per archive elite)"
       catch e; @warn "archive validation eval failed" exception = (e, catch_backtrace()); end
     end
+  end) do
+      TProgress.@track for _gen in 1:est_gens
+        evals_done >= TRIALS && break
+        xs_u = CMAMAE.ask(search_state)
+        λ = search_state.engine.emitter.lambda
+        fxs = Vector{MOLBSA.MOFitness}(undef, λ)
+        cands = Vector{MOLBSA.MOCandidate{typeof(bio_params)}}(undef, λ)
+        meas = Vector{Tuple{Float64,Float64}}(undef, λ)
+        sp_meas = Vector{Vector{Vector{Float64}}}(undef, λ)   # archive_by_sp: per-candidate breadth-column cells
+        sp_qual = Vector{Vector{Float64}}(undef, λ)
+        gen_best_agg = Inf
+        local gb_run, gb_eco, gb_cached, gb_idx
+        for k in 1:λ                                    # SERIAL (fit_params threads internally over sites)
+          cand = PU.u_to_params(xs_u[k], space, slots, bio_params)
+          rep_results = _run(cand)
+          fx_k, run_k, eco_k = _fitness(rep_results)
+          cands[k] = MOLBSA.MOCandidate(cand, fx_k)
+          fxs[k] = fx_k
+          evals_done += 1
+          if archive_by_sp
+            Ws, As = _sp_wa(eco_k)
+            b = 0
+            @inbounds for (p, s) in enumerate(inc_sp); _nd_on(sp_fronts[p], Ws[s], As[s]) && (b += 1); end   # breadth vs running fronts
+            @inbounds for (p, s) in enumerate(inc_sp); _ins_front!(sp_fronts[p], Ws[s], As[s]); end          # then update the fronts
+            gW = sum(Ws[s] for s in inc_sp); gA = sum(As[s] for s in inc_sp)   # position over the dominance species (matches measure())
+            wn = clamp((gW - gwlo) / (gwhi - gwlo), 0.0, 1 - 1e-9); an = clamp((gA - galo) / (gahi - galo), 0.0, 1 - 1e-9)
+            # cell quality: balanced (rescaled ΣW+ΣAGB ≡ wn+an, scale-fair) OR raw aggregate (legacy)
+            aggq = balanced_quality ? (wn + an) : Float64(fx_k.aggregate)
+            sp_meas[k] = [[wn, an, (j - 0.5) / n_inc] for j in 1:b]  # fill breadth-levels 1..b at this (W,AGB) cell
+            sp_qual[k] = fill(aggq, b)                               # quality at every filled level
+          else
+            m = CMAMAE.measure(fx_k); meas[k] = (Float64(m[1]), Float64(m[2]))
+          end
+          if k == 1 || isless(fx_k.aggregate, gen_best_agg)   # k==1 ⇒ gb_* always defined (all-NaN gen); NaN ranks worst
+            gen_best_agg = fx_k.aggregate; gb_idx = k; gb_run = run_k; gb_eco = eco_k; gb_cached = _median_rep_cached(rep_results, loss_params, scoring)
+          end
+        end
+
+        is_new_best = archive_by_sp ? CMAMAE.tell_species_mo!(search_state, cands, sp_meas, sp_qual, xs_u) :
+                      CMAMAE.tell_mo!(search_state, cands, meas, xs_u; nds=search.mocmaes_nds)
+        search_state.n_evals = evals_done
+        search_state.current = cands[gb_idx]
+
+        mo_gen_finalize!(gio, search_state, search_state.engine.emitter.lambda, is_new_best, gb_run, gb_eco, gb_cached)   # shared: ckpt on ANY archive change (train+val)
+      end
   end
   return search_state
 end
@@ -5145,83 +4636,14 @@ end
 # vector is built from.
 function parametrize_MOLBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=1, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, archive_cap::Int=200, seed_archive_from::Union{Nothing,String}=nothing, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   search_tier in (1, 2, 3, 4, 5) || error("parametrize_MOLBSA: unknown search_tier=$search_tier (expected 1, 2, 3, 4, or 5)")
-  splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
-
-  all_plot_ids = UIntType.(unique(splots.plot_id))
-  sampled_ids = _sample_plot_ids(all_plot_ids, n_output_plots, rng; injection_cohorts=injection_cohorts)
-  emp_sample = n_output_plots > 0 ? _make_emp_df(splots, sampled_ids) : nothing
-
-  n_species = length(species_list)
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  env = mo_env(; ref_soa, plugin, splots, spdf_plts, spinup_cohorts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, spinup, rng, debug,
+    search_tier, n_reps, n_output_plots, no_establishment, injection_cohorts, cycle_years, scale_seed, exec,
+    val_splots, val_ref_soa, val_spdf_plts, val_site_sim_years, val_spinup_cohorts, val_injection_cohorts,
+    val_dual_early=true)   # this driver built the validation Sim B before the val plot sample (RNG order)
   _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
-  injection = build_injection_plan(injection_cohorts, ref_soa, eco_species_ids, loss_params, scoring)   # this reference's injection dict, shock and exclusions
-
-  have_val = !isnothing(val_ref_soa) && !exec.skip_val   # ExecOptions.skip_val (PAN_SKIP_VAL) disables all held-out val re-sim during training
-  inj_val = have_val ? build_injection_plan(val_injection_cohorts, val_ref_soa, eco_species_ids, loss_params, scoring) : nothing   # the val reference's own plan
-  val_dual_b0 = have_val ? _build_val_dual_b(val_splots, eco_species_ids, eco_list, val_spdf_plts, loss_params, cycle_years, val_injection_cohorts, val_spinup_cohorts, rng, no_establishment; scoring, simb, plugin=plugin) : nothing
-  sampled_ids_val = (have_val && n_output_plots > 0) ?
-                    _sample_plot_ids(UIntType.(unique(val_splots.plot_id)), n_output_plots, rng; injection_cohorts=val_injection_cohorts) :
-                    Set{UIntType}()
-  emp_sample_val = (have_val && n_output_plots > 0) ? _make_emp_df(val_splots, sampled_ids_val) : nothing
-
-  # Per-tier reference setup (mirrors parametrize_LBSA; tier 3 needs no reference and falls through).
-  t4_ref = nothing
-  cycle_map = nothing
-  n_cycles = 0
-  t1_ref = nothing
-  t2_ref = nothing
-  if search_tier == 1
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t1_ref = [zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts
-      for (_, spdf_gt) in year_dict
-        for (sp_eco, rec) in spdf_gt.records
-          t1_ref[eco_id][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
-        end
-      end
-    end
-  elseif search_tier == 2
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    t2_ref_bins = [[FloatType[] for sp in 1:length(eco_species_ids[eco_id]), b in 1:n_bins] for eco_id in eachindex(eco_list)]
-    t2_ref_total = [[FloatType[] for _ in 1:length(eco_species_ids[eco_id])] for eco_id in eachindex(eco_list)]
-    for ((_, eco_id), year_dict) in spdf_plts
-      for (_, spdf_gt) in year_dict
-        for (sp_eco, rec) in spdf_gt.records
-          bin_probs = diff([0f0; rec.sp_age_cdf])
-          for b in 1:n_bins
-            push!(t2_ref_bins[eco_id][Int(sp_eco), b], bin_probs[b] * rec.sp_agb_sum)
-          end
-          push!(t2_ref_total[eco_id][Int(sp_eco)], rec.sp_agb_sum)
-        end
-      end
-    end
-    t2_ref = (bins=t2_ref_bins, total=t2_ref_total)
-  elseif search_tier == 4 || search_tier == 5 || simb.dual_mode != :off
-    n_bins = length(loss_params.age_bins.bins_idx) + Int(loss_params.age_bins.last_bin_open)
-    cycle_map, n_cycles = Data.build_cycle_map(splots; cycle_years=cycle_years, cycle=scoring.cycle)
-    t4_ref = [[zeros(FloatType, length(eco_species_ids[eco_id]), n_bins) for _ in 1:n_cycles] for eco_id in eachindex(eco_list)]
-    for ((plot_id, eco_id), year_dict) in spdf_plts
-      for (sy, spdf_gt) in year_dict
-        cyc = get(cycle_map, (Int(plot_id), Int(sy)), 0)
-        cyc == 0 && continue
-        for (sp_eco, rec) in spdf_gt.records
-          t4_ref[eco_id][cyc][sp_eco, :] .+= diff([0f0; rec.sp_age_cdf]) .* rec.sp_agb_sum
-        end
-      end
-    end
-  end
-  fixed_seeds = _fixed_seeds(rng, n_reps, scoring)
-
-  dual_b0 = simb.dual_mode == :off ? nothing : _build_dual_b(splots, eco_species_ids, eco_list, spdf_plts, loss_params, t4_ref, cycle_map, n_cycles, injection_cohorts, spinup_cohorts, rng, no_establishment; b_only=(simb.dual_mode == :b), scoring, simb, plugin=plugin)
-  scales, dual_b = build_split_scales(loss_params, scale_seed, search_tier, spdf_plts, t4_ref, eco_species_ids, n_species; dual_b=dual_b0, simb)   # the TRAIN reference scales (RANKW defined here)
-  val_scales, val_dual_b = have_val ? build_split_scales(loss_params, scale_seed, 3, val_spdf_plts, nothing, eco_species_ids, n_species; dual_b=val_dual_b0, train=scales, simb) : (nothing, nothing)   # the VAL reference scales (RANKW = the train one)
-  _run(p) = fit_params(ref_soa, p, max_sim_year, n_species, eco_species_ids, spdf_plts, site_sim_years, spinup, spinup_cohorts, loss_params; debug, search_tier, t1_ref, t2_ref, t4_ref, cycle_map, n_cycles, seeds=fixed_seeds, injection=injection, dual_b=dual_b, scales=scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0)
-  # Score a candidate's repetitions into one MOFitness (eco_losses summed over reps).
-  function _fitness(rep_results)
-    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
-    objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, scales, dual_b)
-    MOLBSA.MOFitness(objs, _mo_aggregate(objs, run_result, loss_params)), run_result, eco_losses
-  end
+  n_species = env.n_species
+  _run(p; ws=env.work_soa) = run_candidate(env, p; ws)
+  _fitness(rep_results) = candidate_fitness(env, rep_results)
 
   if isnothing(resume_from) && !isnothing(seed_archive_from)
     # Local-refinement mode: pour a prior run's (e.g. CMA-MAE) sorted archive into MOLBSA's Pareto archive,
@@ -5277,69 +4699,33 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
       generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     end
 
-  writer_ch, writer_task = start_mo_writer(typeof(search_state), output_dir)
+  mo_val!(env; seeds=:rng, serial_val=false)   # legacy: a fresh seed per val evaluation; val sites stay threaded
+  loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
+  gio = loop.gio
 
-  losses_db_file = DuckDB.DB(joinpath(output_dir, "losses.duckdb"))
-  losses_db = DuckDB.connect(losses_db_file)
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS total_loss (iteration INTEGER, n_sites INTEGER, n_obs INTEGER, total_loss DOUBLE, archive_size INTEGER, params_blob BLOB)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS ecoregion_loss (iteration INTEGER, ecoregion VARCHAR, eco_num_sites INTEGER, eco_num_obs INTEGER, ecoregion_total_loss DOUBLE)")
-  DuckDB.execute(losses_db, "CREATE TABLE IF NOT EXISTS species_loss (iteration INTEGER, ecoregion VARCHAR, species VARCHAR, age_dist_loss DOUBLE, agb_loss DOUBLE)")
-  val_fit = have_val ? (x -> only(fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=val_dual_b, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=n_output_plots>0))) : nothing
-  gio = mo_gen_open(search_state; output_dir=output_dir, writer_ch=writer_ch, losses_db=losses_db,
-    resuming=!isnothing(resume_from), splots=splots, eco_list=eco_list, species_list=species_list,
-    eco_species_ids=eco_species_ids, n_species=n_species, site_sim_years=site_sim_years, loss_params=loss_params,
-    no_establishment=no_establishment, n_reps=n_reps, rng=rng, have_val=have_val, n_output_plots=n_output_plots,
-    sampled_ids=sampled_ids, sampled_ids_val=sampled_ids_val, emp_sample=emp_sample, emp_sample_val=emp_sample_val, val_fit=val_fit, val_scales=val_scales, val_dual_b=val_dual_b, plugin=plugin, exec=exec)
-
-  caused_by_interrupt(e) =
-    e isa InterruptException ? true :
-    e isa TaskFailedException ? any(en -> caused_by_interrupt(en.exception), Base.current_exceptions(e.task)) :
-    e isa CompositeException ? any(caused_by_interrupt, e.exceptions) :
-    false
-
-  try
-    TProgress.@track for trial in (search_state.i+1):TRIALS
-      bio_params, _ = PU.mutate_params(bio_params, space; rng=rng, mutation_mode=PU.BothMutations)
-      for _ in 0:rand(rng, 0:2)
+  run_search_loop(loop; get_state=() -> search_state, unit="trial") do
+      TProgress.@track for trial in (search_state.i+1):TRIALS
         bio_params, _ = PU.mutate_params(bio_params, space; rng=rng, mutation_mode=PU.BothMutations)
+        for _ in 0:rand(rng, 0:2)
+          bio_params, _ = PU.mutate_params(bio_params, space; rng=rng, mutation_mode=PU.BothMutations)
+        end
+
+        rep_results = _run(bio_params)
+        fx, run_result, eco_losses = _fitness(rep_results)
+        cached_sites_state = _median_rep_cached(rep_results, loss_params, scoring)
+
+        next = MOLBSA.MOCandidate(bio_params, fx)
+        is_new_best = MOLBSA.search_cmp!(next, search_state)
+        if MOLBSA.should_restart(search_state)
+          @info "Restarting @ $(search_state.i)"
+          bio_params = next_candidate()
+          rfx, _, _ = _fitness(_run(bio_params))
+          is_new_best = MOLBSA.restart(search_state, MOLBSA.MOCandidate(bio_params, rfx))
+        end
+
+        mo_gen_finalize!(gio, search_state, 1, is_new_best, run_result, eco_losses, cached_sites_state)   # shared: ckpt on ANY archive change (train+val)
+        MOLBSA.is_search_over(search_state) && break
       end
-
-      rep_results = _run(bio_params)
-      fx, run_result, eco_losses = _fitness(rep_results)
-      cached_sites_state = _median_rep_cached(rep_results, loss_params, scoring)
-
-      next = MOLBSA.MOCandidate(bio_params, fx)
-      is_new_best = MOLBSA.search_cmp!(next, search_state)
-      if MOLBSA.should_restart(search_state)
-        @info "Restarting @ $(search_state.i)"
-        bio_params = next_candidate()
-        rfx, _, _ = _fitness(_run(bio_params))
-        is_new_best = MOLBSA.restart(search_state, MOLBSA.MOCandidate(bio_params, rfx))
-      end
-
-      mo_gen_finalize!(gio, search_state, 1, is_new_best, run_result, eco_losses, cached_sites_state)   # shared: ckpt on ANY archive change (train+val)
-      MOLBSA.is_search_over(search_state) && break
-    end
-  catch e
-    if caused_by_interrupt(e)
-      @info "Search interrupted by user @ trial $(search_state.i); finalizing checkpoint…"
-    else
-      rethrow()
-    end
-  finally
-    stop_writer(writer_ch, writer_task)
-    close(losses_db_file); try; close(gio.metrics_io); catch; end
-    try
-      mkpath(output_dir)
-      fname = "search_state@$(search_state.i).jld2"
-      JLD2.save_object(joinpath(output_dir, fname), search_state)
-      link_path = joinpath(output_dir, "search_state_latest.jld2")
-      islink(link_path) && rm(link_path)
-      symlink(fname, link_path)
-      @info "Search state saved @ $(search_state.i)"
-    catch e
-      @error "Failed to save search state on exit" exception = (e, catch_backtrace())
-    end
   end
 
   return search_state
@@ -7130,6 +6516,7 @@ function landis_main()
   )
 end
 
+include("search_loop.jl")
 include("gdigel_driver.jl")
 
 include("climate_scenario.jl")

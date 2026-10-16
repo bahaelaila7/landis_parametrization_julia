@@ -21,7 +21,8 @@
 module GDIgel
 import LinearAlgebra, Random, Sobol
 const LA = LinearAlgebra
-import ..Common: Common, AbstractSearch, cma11_psucc, cma11_sigma, cma11_path, cma11_cov
+import JLD2
+import ..Common: Common, AbstractSearch, ask, tell!, state, save_state, load_state, cma11_psucc, cma11_sigma, cma11_path, cma11_cov
 
 mutable struct BlockState
   sigma::Float64
@@ -260,4 +261,53 @@ function finish!(st::GDState, fxps::Vector{Any}, restart_eval)
 end
 
 mean_sigma(L::Lineage) = sum(B.sigma for B in L.bs) / length(L.bs)
+
+# ---- search interface (Common.AbstractSearch) ---------------------------------------------------------------------------------
+"""
+    GDSearch(st; archive, nd, meta)
+
+gdigel as a resumable search: the engine `GDState` plus the run's two archives (`archive` = TOST-gated behavioural archive, `nd` = the
+non-dominated archive of every evaluated point) and `meta` = the run constants a checkpoint carries (labels, slots, template).
+
+  - `ask(s)`   → one offspring u-vector per lineage;
+  - `tell!(s, ys, fys, evalx; restart_eval, between)` → per-block success decisions, evaluation of the assembled points
+    (`evalx(xs)` → one objective vector per point; `between(xps, need)` runs after they are evaluated and before the parents are installed),
+    parent installation and restarts of converged lineages;
+  - `state(s)` → the `GDState`; `save_state(s, path)` / `load_state(GDSearch, path)` → the `gd_state@gen.jld2` checkpoint
+    `(st, archive, labels, slots, template, nd)`.
+"""
+mutable struct GDSearch <: AbstractSearch
+  st::GDState
+  archive::Vector{NamedTuple}
+  nd::Vector{NamedTuple}
+  meta::NamedTuple
+end
+GDSearch(st::GDState; archive=NamedTuple[], nd=NamedTuple[], meta=(labels=String[], slots=Any[], template=nothing)) =
+  GDSearch(st, convert(Vector{NamedTuple}, archive), convert(Vector{NamedTuple}, nd), meta)   # convert: the driver's own vectors are shared, not copied
+
+ask(s::GDSearch) = ask(s.st)
+state(s::GDSearch) = s.st
+
+function tell!(s::GDSearch, ys::Vector{Vector{Float64}}, fys::Vector{Vector{Float64}}, evalx; restart_eval, between=nothing)
+  st = s.st
+  xps = assemble!(st, ys, fys)
+  need = findall(!isnothing, xps)
+  fneed = isempty(need) ? Any[] : evalx([xps[k] for k in need])
+  fxps = Vector{Any}(nothing, length(st.lineages))
+  for (j, k) in enumerate(need); fxps[k] = fneed[j]; end
+  between === nothing || between(xps, need)
+  finish!(st, fxps, restart_eval)
+  return st
+end
+
+function save_state(s::GDSearch, path::AbstractString)
+  JLD2.save_object(path, (st=s.st, archive=s.archive, labels=s.meta.labels, slots=s.meta.slots, template=s.meta.template, nd=s.nd))
+  return path
+end
+
+function load_state(::Type{GDSearch}, path::AbstractString)
+  saved = JLD2.load_object(path)
+  return GDSearch(saved.st; archive=saved.archive, nd=hasproperty(saved, :nd) ? saved.nd : NamedTuple[],
+                  meta=(labels=saved.labels, slots=saved.slots, template=saved.template))
+end
 end

@@ -11,10 +11,11 @@ import LinearAlgebra
 import Sobol
 const LA = LinearAlgebra
 import ..MOLBSA: MOFitness, MOCandidate, dominates
-import ..Common: Common, AbstractSearch, crowding_distance, nd_fronts, pareto_prune!, evict_most_crowded,
+import JLD2
+import ..Common: Common, AbstractSearch, ask, tell!, state, save_state, load_state, crowding_distance, nd_fronts, pareto_prune!, evict_most_crowded,
   cma11_psucc, cma11_sigma, cma11_path, cma11_cov
 
-export IgelState, IgelOptions, ask, tell!, is_search_over
+export IgelState, IgelOptions, IgelSearch, ask, tell!, is_search_over, state, save_state, load_state, save_aux
 
 """
     IgelOptions
@@ -318,4 +319,63 @@ end
 
 # mean σ across the population — a benign progress field for the writer's log line.
 @inline Statistics_mean_sigma(st::IgelState)::Float64 = sum(ind.sigma for ind in st.pop) / st.mu
+
+# ---- search interface (Common.AbstractSearch) ---------------------------------------------------------------------------------
+"""
+    IgelSearch(st, opts; bases=nothing)
+
+The igelmo engine as a resumable search: the `IgelState` (population, archive, rng, Sobol stream), the run options `opts` (not serialized: a
+stop→resume may retune them) and the optional per-lineage frozen-growth parameter sets `bases` (`igel_freeze_seed_growth`), kept aligned with
+`st.pop` across selection. `ask(s)` → μ offspring u-vectors; `tell!(s, fxs, params)` → whether the archive's representative improved;
+`state(s)` → the `IgelState`; `save_state(s, dir)` writes `search_state@i.jld2` (+ `igel_bases@i.jld2` when `bases` are used) and the
+`search_state_latest.jld2` link; `load_state(IgelSearch, path; opts, dir, bases)` is the inverse. Checkpoint format = the pre-5a one.
+"""
+mutable struct IgelSearch <: AbstractSearch
+  st::IgelState
+  opts::IgelOptions
+  bases::Any                      # nothing | Vector of per-lineage parameter sets (aligned with st.pop)
+end
+IgelSearch(st::IgelState, opts::IgelOptions=IgelOptions(); bases=nothing) = IgelSearch(st, opts, bases)
+
+ask(s::IgelSearch) = ask(s.st, s.opts)
+state(s::IgelSearch) = s.st
+
+function tell!(s::IgelSearch, off_fxs::Vector{MOFitness}, off_params::Vector)::Bool
+  # offspring k descends from parent k, so both carry lineage k's frozen growth. Selection reorders the population but the surviving
+  # Individual objects are the same ones, so realign `bases` by object identity (captured BEFORE tell! reorders pop).
+  pre = s.bases === nothing ? nothing : copy(s.st.pop)
+  is_new = tell!(s.st, off_fxs, off_params, s.opts)
+  if s.bases !== nothing
+    objbase = IdDict{Any,Any}()
+    for k in 1:s.st.mu; objbase[pre[k]] = s.bases[k]; objbase[s.st._off[k]] = s.bases[k]; end
+    s.bases = Any[objbase[ind] for ind in s.st.pop]
+  end
+  return is_new
+end
+
+"Write only the `igel_bases@i.jld2` sidecar (the engine state itself is written by the async checkpoint writer)."
+function save_aux(s::IgelSearch, dir::AbstractString)
+  s.bases === nothing && return nothing
+  JLD2.save_object(joinpath(dir, "igel_bases@$(s.st.i).jld2"), s.bases)
+end
+
+function save_state(s::IgelSearch, dir::AbstractString)
+  mkpath(dir); fname = "search_state@$(s.st.i).jld2"
+  JLD2.save_object(joinpath(dir, fname), s.st)
+  save_aux(s, dir)   # keep the sidecar aligned with the exit checkpoint
+  link_path = joinpath(dir, "search_state_latest.jld2"); islink(link_path) && rm(link_path); symlink(fname, link_path)
+  return joinpath(dir, fname)
+end
+
+function load_state(::Type{IgelSearch}, path::AbstractString; opts::IgelOptions=IgelOptions(), dir::AbstractString=dirname(path), bases::Bool=false)
+  st = JLD2.load_object(path)
+  b = nothing
+  if bases
+    bpath = joinpath(dir, "igel_bases@$(st.i).jld2")
+    isfile(bpath) || error("igel_freeze_seed_growth resume: missing sidecar $bpath (per-lineage frozen growth cannot be reconstructed from the checkpoint alone)")
+    b = JLD2.load_object(bpath)
+    length(b) == length(st.pop) || error("igel_bases sidecar has $(length(b)) entries but pop has $(length(st.pop))")
+  end
+  return IgelSearch(st, opts, b)
+end
 end

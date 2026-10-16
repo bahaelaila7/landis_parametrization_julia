@@ -369,22 +369,18 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   end
   # objective :mo — non-dominated archive on (ΣA, ΣW) of EVERY evaluated point (no TOST gating), capped by archive_cap
   ndarc = NamedTuple[]
+  _weakdom(a, b) = all(i -> a[i] <= b[i], eachindex(a))   # weak dominance: an equal point is rejected (the first one stays)
+  _nd_objs = M3 ? (e -> (e.A, e.W, e.D)) : (e -> (e.A, e.W))
   function offer_nd!(u, r, gen, lid, lam)
     sm = sums_of(r); A, W = sm[1], sm[2]; D = M3 ? sm[3] : 0.0
-    if M3
-      any(e -> e.A <= A && e.W <= W && e.D <= D, ndarc) && return
-      filter!(e -> !(A <= e.A && W <= e.W && D <= e.D), ndarc)
-    else
-      any(e -> e.A <= A && e.W <= W, ndarc) && return
-      filter!(e -> !(A <= e.A && W <= e.W), ndarc)
-    end
+    Common.pareto_prune!(ndarc, M3 ? (A, W, D) : (A, W), _nd_objs, _weakdom) || return
     push!(ndarc, (gen=gen, lineage=lid, lam=lam, u=copy(u), A=A, W=W, D=D, a=copy(r.a), w=copy(r.w), d=(USE_D ? copy(r.d) : Float64[])))
     length(ndarc) > cap && deleteat!(ndarc, M3 ? _nd_most_crowded3(ndarc, st_ref[].aref, st_ref[].wref, st_ref[].dref) : _nd_most_crowded(ndarc, st_ref[].aref, st_ref[].wref))
   end
   st_ref = Ref{Any}(nothing)
   if resume_from !== nothing
-    saved = JLD2.load_object(resume_from); st = saved.st; append!(archive, saved.archive)
-    MO && hasproperty(saved, :nd) && append!(ndarc, saved.nd)
+    saved = GDIgel.load_state(GDIgel.GDSearch, resume_from); st = saved.st; append!(archive, saved.archive)
+    MO && append!(ndarc, saved.nd)
     st_ref[] = st
     @info "gdigel: resumed $(basename(resume_from)) at gen $(st.gen), $(st.n_evals) evals, $(length(st.solutions)) solutions"
   else
@@ -433,29 +429,31 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     for k in 1:mu; GDIgel.add_lineage!(st, starts[k], fvec(r0[k])); offer!(starts[k], r0[k], 0, k); MO && offer_nd!(starts[k], r0[k], 0, k, st.lineages[k].lam); end
     st.n_evals = mu
   end
+  gds = GDIgel.GDSearch(st; archive=archive, nd=ndarc, meta=(labels=labels, slots=slots, template=template))   # the resumable search (shares `archive`/`ndarc`)
   logf = joinpath(output_dir, "gd_log.csv")
   isfile(logf) || open(io -> println(io, "gen,n_evals,lineage,born,total,n05,n10,n20,median_abs_bias_pct,mean_sigma,min_sigma,max_sigma" * (MO ? ",lambda,sumA,sumW" * (M3 ? ",sumD" : "") : "")), logf, "w")
   last_r = Dict{Int,Any}()
   t_start = time()
   while st.n_evals < TRIALS
-    ys = GDIgel.ask(st)
+    ys = GDIgel.ask(gds)
     rys = evbatch(ys)
-    xps = GDIgel.assemble!(st, ys, [fvec(r) for r in rys])
-    need = findall(!isnothing, xps)
-    rxp = isempty(need) ? Any[] : evbatch([xps[k] for k in need])
-    fxps = Vector{Any}(nothing, length(st.lineages)); rmap = Dict{Int,Any}()
-    for (j, k) in enumerate(need); fxps[k] = fvec(rxp[j]); rmap[k] = rxp[j]; end
-    for (k, L) in enumerate(st.lineages)
-      offer!(ys[k], rys[k], st.gen + 1, L.id); haskey(rmap, k) && offer!(xps[k], rmap[k], st.gen + 1, L.id)
-      if MO
-        offer_nd!(ys[k], rys[k], st.gen + 1, L.id, L.lam); haskey(rmap, k) && offer_nd!(xps[k], rmap[k], st.gen + 1, L.id, L.lam)
+    rxp = Any[]; rmap = Dict{Int,Any}(); cand = Any[]
+    evalx(xs) = (rxp = evbatch(xs); Any[fvec(r) for r in rxp])
+    # runs after the assembled points are evaluated and before the new parents are installed (restarts replace lineages in finish!)
+    function between(xps, need)
+      for (j, k) in enumerate(need); rmap[k] = rxp[j]; end
+      for (k, L) in enumerate(st.lineages)
+        offer!(ys[k], rys[k], st.gen + 1, L.id); haskey(rmap, k) && offer!(xps[k], rmap[k], st.gen + 1, L.id)
+        if MO
+          offer_nd!(ys[k], rys[k], st.gen + 1, L.id, L.lam); haskey(rmap, k) && offer_nd!(xps[k], rmap[k], st.gen + 1, L.id, L.lam)
+        end
       end
+      # which evaluated result is the new parent (for logging): resolved after finish!
+      cand = [(ys[k], rys[k], haskey(rmap, k) ? (xps[k], rmap[k]) : nothing) for k in eachindex(ys)]
     end
-    # which evaluated result is the new parent (for logging): resolved after finish!
-    cand = [(ys[k], rys[k], haskey(rmap, k) ? (xps[k], rmap[k]) : nothing) for k in eachindex(ys)]
     restart_eval(x, lam) = (r = only(evbatch([x])); offer!(x, r, st.gen, -1); MO && offer_nd!(x, r, st.gen, -1, lam); fvec(r))
     restart_eval(x) = restart_eval(x, M3 ? [1/3, 1/3, 1/3] : 0.5)
-    GDIgel.finish!(st, fxps, restart_eval)
+    GDIgel.tell!(gds, ys, Vector{Float64}[fvec(r) for r in rys], evalx; restart_eval=restart_eval, between=between)
     open(logf, "a") do io
       for (k, L) in enumerate(st.lineages)
         r = nothing
@@ -478,11 +476,11 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     best = minimum(L.tot for L in st.lineages)
     @info "gdigel gen $(st.gen): evals $(st.n_evals), best total $(round(best, sigdigits=4)), solutions $(length(st.solutions)), archive $(MO ? length(ndarc) : length(archive)), $(round((time() - t_start) / st.gen, digits=1)) s/gen"
     if st.gen % ckpt_every == 0
-      JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels, slots=slots, template=template, nd=ndarc))
+      GDIgel.save_state(gds, joinpath(output_dir, "gd_state@$(st.gen).jld2"))
       MO && (M3 ? _write_mo_archive3(output_dir, ndarc, st, labels, dec) : _write_mo_archive(output_dir, ndarc, st, labels, dec))
     end
   end
-  JLD2.save_object(joinpath(output_dir, "gd_state@$(st.gen).jld2"), (st=st, archive=archive, labels=labels, slots=slots, template=template, nd=ndarc))
+  GDIgel.save_state(gds, joinpath(output_dir, "gd_state@$(st.gen).jld2"))
   MO && (M3 ? _write_mo_archive3(output_dir, ndarc, st, labels, dec) : _write_mo_archive(output_dir, ndarc, st, labels, dec))
   # final solutions: converged lineages + the current lineages (as unconverged end points)
   sols = vcat([(kind="converged", lineage=s.lineage, gen=s.gen, x=s.x, lam=s.lam) for s in st.solutions],
