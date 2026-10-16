@@ -4366,7 +4366,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   # Validation mirrors the TRAINING tier so the held-out loss ranks candidates by the SAME objective (tier 5 ⇒ tier-5 val; tier 4/5 need
   # per-cycle bins built from the validation split) and, in dual modes, the same A⊕B objective. Legacy: a fresh seed per val evaluation.
   mo_val!(env; dual=true, tier=search_tier, seeds=:rng)
-  loop = mo_loop_open(env, search_state; output_dir, resuming=false)
+  loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
   gio = loop.gio
 
   evals_done = search_state.n_evals

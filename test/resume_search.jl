@@ -57,4 +57,18 @@ end
     @test a.st.gen == b.st.gen > mid.st.gen
     @test isequal(sig_gd(a), sig_gd(b))
   end
+  @testset "cmame: a resumed run appends to metrics.csv (B27)" begin
+    base = Dict{String,Any}("search_mode" => "cmame", "cmaes_lambda" => 4)
+    dir = joinpath(tmp, "cmame")
+    run_cfg(merge(base, Dict{String,Any}("output_dir" => dir, "trials" => 9)))
+    f = joinpath(fold_dir(dir), "metrics.csv")
+    leg1 = readlines(f); @test length(leg1) >= 3 && startswith(leg1[1], "iteration,")
+    ck = joinpath(fold_dir(dir), "search_state_latest.jld2")
+    run_cfg(merge(base, Dict{String,Any}("output_dir" => dir, "trials" => 17, "resume_from" => ck)))
+    leg2 = readlines(f)
+    @test leg2[1:length(leg1)] == leg1                          # the pre-resume rows survive (the file used to be truncated)
+    @test count(l -> startswith(l, "iteration,"), leg2) == 1    # one header
+    its = [parse(Int, split(l, ',')[1]) for l in leg2[2:end]]
+    @test length(leg2) > length(leg1) && issorted(its) && allunique(its)
+  end
 end
