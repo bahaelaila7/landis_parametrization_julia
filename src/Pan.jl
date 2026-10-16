@@ -2719,6 +2719,42 @@ function _filter_cached_to_df(cached, sampled_ids::Set)
   DataFrame(filtered, [:plot_id, :sim_year, :species_id, :age, :agb])
 end
 
+"""
+    record_best_losses!(losses_db, iter, total, run_result, eco_losses, params; eco_list, species_list, n_species, loss_params, print_breakdown=false)
+
+The `losses.duckdb` rows of a new best of a single-objective driver (LBSA, CMA-ES, SA): `total_loss` (with the serialized parameters), one
+`ecoregion_loss` row per ecoregion and one `species_loss` row per (ecoregion, species) with a nonzero age-distribution loss. `print_breakdown`
+also prints the raw per-ecoregion / per-species breakdown, sorted by contribution, to see where the remaining error concentrates.
+"""
+function record_best_losses!(losses_db, iter, total, run_result, eco_losses, params; eco_list, species_list, n_species, loss_params, print_breakdown::Bool=false)
+  let buf = IOBuffer()
+    Serialization.serialize(buf, params)
+    DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, run_result.num_sites, run_result.num_obs, total, take!(buf)])
+  end
+  isnothing(eco_losses) && return nothing
+  for (eco_id, eco_loss) in enumerate(eco_losses)
+    eco_name = _eco_name(eco_list, eco_id)
+    eco_total = convert(Float64, PU.get_total_loss(eco_loss, loss_params))
+    DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
+    n = max(1, eco_loss.num_sites)
+    for gsp in 1:n_species
+      eco_loss.sp_w_loss[gsp] == 0f0 && continue
+      DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
+    end
+  end
+  if print_breakdown
+    println("Raw SiteLoss breakdown @ $iter (total=$(round(total, sigdigits=6))):")
+    for eco_id in sort(collect(eachindex(eco_losses)); by=e -> -convert(Float64, PU.get_total_loss(eco_losses[e], loss_params)))
+      el = eco_losses[eco_id]
+      println("  [$(_eco_name(eco_list, eco_id))] eco_total=$(round(convert(Float64, PU.get_total_loss(el, loss_params)), sigdigits=5))  sites=$(el.num_sites) obs=$(el.num_obs)")
+      for gsp in sort([g for g in 1:n_species if el.sp_w_loss[g] != 0f0]; by=g -> -el.sp_w_loss[g])
+        println("      $(rpad(species_list[gsp], 10)) w=$(round(el.sp_w_loss[gsp], sigdigits=4))  agb=$(round(el.sp_agb_loss[gsp], sigdigits=4))")
+      end
+    end
+  end
+  return nothing
+end
+
 function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
   splots.sim_year .= Dates.value.(Dates.Day.(splots.measdate - splots.start_measdate)) ./ 365.25 .|> round .|> Int
 
@@ -2929,33 +2965,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plug
               @warn "val fit_params failed" exception = (e, catch_backtrace())
             end
           end
-          let buf = IOBuffer()
-            Serialization.serialize(buf, search_state.best.x)
-            DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, run_result.num_sites, run_result.num_obs, total, take!(buf)])
-          end
-          if !isnothing(eco_losses)
-            for (eco_id, eco_loss) in enumerate(eco_losses)
-              eco_name = _eco_name(eco_list, eco_id)
-              eco_total = convert(Float64, PU.get_total_loss(eco_loss, loss_params))
-              DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
-              n = max(1, eco_loss.num_sites)
-              for gsp in 1:n_species
-                eco_loss.sp_w_loss[gsp] == 0f0 && continue
-                DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
-              end
-            end
-
-            # Raw per-eco / per-species SiteLoss breakdown (ecoregions and species sorted by
-            # contribution) so you can see where the remaining error concentrates.
-            println("Raw SiteLoss breakdown @ $iter (total=$(round(total, sigdigits=6))):")
-            for eco_id in sort(collect(eachindex(eco_losses)); by=e -> -convert(Float64, PU.get_total_loss(eco_losses[e], loss_params)))
-              el = eco_losses[eco_id]
-              println("  [$(_eco_name(eco_list, eco_id))] eco_total=$(round(convert(Float64, PU.get_total_loss(el, loss_params)), sigdigits=5))  sites=$(el.num_sites) obs=$(el.num_obs)")
-              for gsp in sort([g for g in 1:n_species if el.sp_w_loss[g] != 0f0]; by=g -> -el.sp_w_loss[g])
-                println("      $(rpad(species_list[gsp], 10)) w=$(round(el.sp_w_loss[gsp], sigdigits=4))  agb=$(round(el.sp_agb_loss[gsp], sigdigits=4))")
-              end
-            end
-          end
+          record_best_losses!(losses_db, iter, total, run_result, eco_losses, search_state.best.x; eco_list, species_list, n_species, loss_params, print_breakdown=true)
         end
         let tmax = (isempty(search_state._t_list) || search_state._t_max_idx > length(search_state._t_list)) ? NaN : search_state._t_list[search_state._t_max_idx]
           println(conv_io, string(trial, ",", convert(Float64, search_state.best.fx), ",", convert(Float64, search_state.current.fx), ",", tmax, ",", search_state._frozen_no_best_reheats, ",", did_restart ? 1 : 0))
@@ -3185,22 +3195,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
               @warn "val fit_params failed" exception = (e, catch_backtrace())
             end
           end
-          let buf = IOBuffer()
-            Serialization.serialize(buf, search_state.best.x)
-            DuckDB.execute(losses_db, "INSERT INTO total_loss VALUES (?, ?, ?, ?, ?)", [iter, gen_best_run.num_sites, gen_best_run.num_obs, total, take!(buf)])
-          end
-          if !isnothing(gen_best_eco)
-            for (eco_id, eco_loss) in enumerate(gen_best_eco)
-              eco_name = _eco_name(eco_list, eco_id)
-              eco_total = convert(Float64, PU.get_total_loss(eco_loss, loss_params))
-              DuckDB.execute(losses_db, "INSERT INTO ecoregion_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, eco_loss.num_sites, eco_loss.num_obs, eco_total])
-              n = max(1, eco_loss.num_sites)
-              for gsp in 1:n_species
-                eco_loss.sp_w_loss[gsp] == 0f0 && continue
-                DuckDB.execute(losses_db, "INSERT INTO species_loss VALUES (?, ?, ?, ?, ?)", [iter, eco_name, species_list[gsp], eco_loss.sp_w_loss[gsp] / n, eco_loss.sp_agb_loss[gsp] / n])
-              end
-            end
-          end
+          record_best_losses!(losses_db, iter, total, gen_best_run, gen_best_eco, search_state.best.x; eco_list, species_list, n_species, loss_params)
         end
         cached_sites_state_df = _cohorts_df(gen_best_cached)
         sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(gen_best_cached, sampled_ids) : nothing
