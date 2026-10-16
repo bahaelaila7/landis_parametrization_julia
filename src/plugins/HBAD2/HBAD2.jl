@@ -7,14 +7,14 @@
 #                 cohort's CURRENT size on its curve (state form dX/dt = c r X ((Xmax/X)^{1/c} − 1)), so a suppressed cohort keeps the vigour of
 #                 its size (release possible). Competition: dD = dD_pot·exp(−gOD·O + gRD·RD), dH = dH_pot·exp(−gOH·O + gRH·RD)
 #                 (asymmetric overtopping vs symmetric crowding; the data say crowding shifts growth from diameter to height).
-#   3. mortality  hazard h = exp(mbg + mD ln(D/20) + mD2 D/20) + msup·(1 − e^{−gOD·O}) + exp(mA (A/LONGEVITY − 1));  N ← N e^{−h·Δ}
+#   3. mortality  hazard h = exp(mbg + mD ln(D/20) + mD2 D/20) + msup·(1 − e^{−gOD·O})·(D/20)^mSD + exp(mA (A/LONGEVITY − 1));  N ← N e^{−h·Δ}
 #                 (background, growth-suppression [same overtopping that slows diameter growth], age-related as in Biomass Succession)
 #   4. self-thinning  while RD > 1: remove SDI from cohorts in proportion to SDI_i·(1 − v_i), v_i = e^{−gOD·O_i} (suppressed first)
 #   5. A ← A + Δ
 # Δ = 1 for full years; a fractional last step (Δ < 1) scales every rate, so an interval of 5.4 yr is integrated exactly.
 module HBAD2
 
-export SpP, Sites, simulate!, N_SP_PARAMS, SP_PARAM_NAMES
+export SpP, Sites, simulate!, N_SP_PARAMS, SP_PARAM_NAMES, RecP, FreeSites, run_free!
 
 const SP_PARAM_NAMES = (:Hmax, :rH, :cH, :Dmax, :rD, :cD, :gOD, :gRD, :gOH, :gRH, :mbg, :mD, :msup, :sdimax, :longevity)
 const N_SP_PARAMS = length(SP_PARAM_NAMES)
@@ -29,8 +29,12 @@ struct GlobP
   pH::Float64      # planted cohorts: ln multiplier of height-growth rate
   pD::Float64      # planted cohorts: ln multiplier of diameter-growth rate
   pM::Float64      # planted cohorts: ln multiplier of the background + suppression hazard
+  form::Int        # potential-growth form: 1 = Chapman–Richards state form; 2 = power-exponential r (X/X0)^c e^{−X/Xmax}
+  mSD::Float64     # size exponent of the suppression hazard: msup (1 − v) (D/20)^mSD (small suppressed trees die more if < 0)
 end
-GlobP(mD2, mA) = GlobP(mD2, mA, 0.0, 0.0, 0.0)
+GlobP(mD2, mA) = GlobP(mD2, mA, 0.0, 0.0, 0.0, 1, 0.0)
+GlobP(mD2, mA, pH, pD, pM) = GlobP(mD2, mA, pH, pD, pM, 1, 0.0)
+GlobP(mD2, mA, pH, pD, pM, form) = GlobP(mD2, mA, pH, pD, pM, form, 0.0)
 
 "SoA store: CSR over sites; initial state (N0,D0,H0,A0) and working state (N,D,H,A); per-site years (whole) + fractional remainder."
 struct Sites
@@ -55,6 +59,11 @@ nsites(S::Sites) = length(S.off) - 1
   c * r * X * ((Xmax / X)^(1 / c) - 1)
 end
 
+# power-exponential potential increment (form 2): r (X/X0)^c exp(−X/Xmax); peak at X = c·Xmax; X0 = 20 cm (D) / 15 m (H)
+@inline dpow(X, X0, Xmax, r, c) = X <= 0 ? 0.0 : r * exp(c * log(X / X0) - X / Xmax)
+@inline potD(G, D, p, f) = G.form == 1 ? dpot(D, p.Dmax, p.rD * f, p.cD) : dpow(D, 20.0, p.Dmax, p.rD * f, p.cD)
+@inline potH(G, H, p, f) = G.form == 1 ? dpot(H, p.Hmax, p.rH * f, p.cH) : dpow(H, 15.0, p.Hmax, p.rH * f, p.cH)
+
 @inline function step_site!(S::Sites, P::AbstractVector{SpP}, G::GlobP, lo::Int, hi::Int, Δ::Float64, pl::Bool)
   N, D, H, A, O, SD, V, sp = S.N, S.D, S.H, S.A, S.O, S.S, S.V, S.sp
   tot = 0.0; wmax = 0.0
@@ -75,9 +84,10 @@ end
   @inbounds for i in lo:hi
     p = P[sp[i]]; o = O[i]
     v = exp(-p.gOD * o); V[i] = v
-    dD = dpot(D[i], p.Dmax, p.rD * fD, p.cD) * v * exp(p.gRD * RD)
-    dH = dpot(H[i], p.Hmax, p.rH * fH, p.cH) * exp(-p.gOH * o + p.gRH * RD)
-    h = fM * (exp(p.mbg + p.mD * log(D[i] / 20) + G.mD2 * D[i] / 20) + p.msup * (1 - v)) + exp(G.mA * (A[i] / p.longevity - 1))
+    dD = potD(G, D[i], p, fD) * v * exp(p.gRD * RD)
+    dH = potH(G, H[i], p, fH) * exp(-p.gOH * o + p.gRH * RD)
+    lD = log(D[i] / 20)
+    h = fM * (exp(p.mbg + p.mD * lD + G.mD2 * D[i] / 20) + p.msup * (1 - v) * exp(G.mSD * lD)) + exp(G.mA * (A[i] / p.longevity - 1))
     N[i] *= exp(-h * Δ)
     D[i] += dD * Δ; H[i] += dH * Δ
   end
@@ -108,5 +118,69 @@ function simulate!(S::Sites, P::AbstractVector{SpP}, G::GlobP)
     S.frac[s] > 0 && step_site!(S, P, G, lo, hi, S.frac[s], pl)
   end
   S
+end
+
+# ---------------------------------------------------------------- free runs (Sim B / scenarios): recruitment into the 1-in tally
+"Recruitment parameters per species: R [trees/ha/yr] = rscale · exp(ρ0 + ρS ln(1 + BA_sp(D ≥ dseed)) + ρL·SDI/RD_REF); recruits enter at (D0, H0, A0).
+The light index is stand SDI / RD_REF (the scale the coefficients were fitted on), NOT the SDImax-relative RD of the growth kernel."
+struct RecP
+  rho0::Float64; rhoS::Float64; rhoL::Float64; D0::Float64; H0::Float64; A0::Float64
+end
+const RD_REF = 600.0          # SDI scale of the recruitment light index (tools/hbad2/recruitment_check.jl)
+const RSCALE = 185.2          # one FIA microplot sapling in trees/ha (rates were fitted as microplot counts)
+const DSEED = 12.7            # seed-source trees: D ≥ 5 in
+const RCLASS = 5              # recruits of one species within RCLASS years form one cohort (its N only decreases once the class closes)
+
+"Free-run store: Sites with per-site capacity (off spans the capacity), live counts and the open recruit slot per (species, site)."
+struct FreeSites
+  S::Sites
+  live::Vector{Int}
+  open_slot::Matrix{Int}       # nsp × nsites, 0 = none
+  open_year::Matrix{Int}
+  dropped::Vector{Int}         # recruits not placed for lack of a free slot (diagnostic; should stay 0)
+end
+FreeSites(S::Sites, live::Vector{Int}, nsp::Int) = FreeSites(S, live, zeros(Int, nsp, length(live)), zeros(Int, nsp, length(live)), zeros(Int, length(live)))
+
+@inline function recruit_site!(F::FreeSites, R::AbstractVector{RecP}, P::AbstractVector{SpP}, s::Int, yr::Int, Δ::Float64, nsp::Int)
+  S = F.S; lo = S.off[s]; cap = S.off[s+1] - S.off[s]; n = F.live[s]; hi = lo + n - 1
+  tot = 0.0
+  @inbounds for i in lo:hi; tot += sdi(S.N[i], S.D[i]); end
+  RD = tot / RD_REF
+  @inbounds for k in 1:nsp
+    r = R[k]; ba = 0.0
+    for i in lo:hi; (S.sp[i] == k && S.D[i] >= DSEED) && (ba += 7.853981633974483e-5 * S.D[i]^2 * S.N[i]); end
+    rate = RSCALE * exp(r.rho0 + r.rhoS * log1p(ba) + r.rhoL * RD) * Δ
+    j = F.open_slot[k, s]
+    if j == 0 || yr - F.open_year[k, s] >= RCLASS
+      if n < cap
+        n += 1; j = lo + n - 1; F.open_slot[k, s] = j; F.open_year[k, s] = yr
+        S.sp[j] = k; S.N[j] = rate; S.D[j] = r.D0; S.H[j] = r.H0; S.A[j] = r.A0; S.N0[j] = rate
+      else
+        F.dropped[s] += 1; F.open_slot[k, s] = 0
+      end
+    else
+      n0 = S.N[j]; m = n0 + rate
+      S.D[j] = sqrt((n0 * S.D[j]^2 + rate * r.D0^2) / m); S.H[j] = (n0 * S.H[j] + rate * r.H0) / m; S.N[j] = m; S.N0[j] += rate
+    end
+  end
+  F.live[s] = n
+  nothing
+end
+
+"Free run of every site for `years[s]` years from its current state (whole years), recruitment after each annual step; `obs_at[s]`
+lists the run years at which `snap(s, yr)` is called (single-threaded callback after the threaded run would need storage, so the
+callback is invoked inside the site loop and must only write site-private data)."
+function run_free!(F::FreeSites, P::AbstractVector{SpP}, G::GlobP, R::AbstractVector{RecP}, years::Vector{Int}, snap)
+  S = F.S; nsp = length(P)
+  Threads.@threads :static for s in 1:length(F.live)
+    lo = S.off[s]
+    for y in 1:years[s]
+      n = F.live[s]
+      n > 0 && step_site!(S, P, G, lo, lo + n - 1, 1.0, S.planted[s])
+      recruit_site!(F, R, P, s, y, 1.0, nsp)
+      snap(s, y)
+    end
+  end
+  F
 end
 end # module

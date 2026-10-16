@@ -63,3 +63,65 @@ Each interval is an independent site initialised from the observed (N, D, H, A) 
 Objective = joint NLL: binomial survival of tree counts (p = N2/N1) + Gaussian ln D2 and ln H2 of the survivors (weight = survivors, σ profiled out).
 
 ## 5. Results log
+
+### 5.1 v2a (fit_simA.jl v2a: 13 params/species + 1 global, CMA-ES λ 32, 20k evals from the data-based start)
+Joint NLL (lower is better; mortality = binomial tree counts, D/H = profiled Gaussian on ln of survivor QMD / mean H):
+
+| model (same tracked cohorts) | val total | mort | ln D | ln H | val deaths sim/obs |
+|---|---|---|---|---|---|
+| null (no growth, per-species constant survival) | −57,281 | 34,324 | −50,027 | −41,578 | |
+| HBAD v1 kernel as designed (FIA regressions, SDImax p95, smallest-first thinning), init from observed N/D/H | −35,976 | 107,035 | −79,611 | −63,400 | 16,151 / 9,570 |
+| HBAD v1 kernel without self-thinning | −109,570 | 33,493 | −79,661 | −63,402 | |
+| **v2a** | **−120,438** | 33,688 | **−81,265** | **−72,861** | 9,7xx / 9,570 |
+
+(train v2a −128,582; σ_D 0.158, σ_H 0.192 on val.) v1 findings on real tracked trees: its smallest-first self-thinning kills
+1.7× the observed trees; its H–D-ratio height rule under-predicts height growth by 35 % (0.25 vs 0.39 m/yr) — exactly the
+"height needs its own process" result of E1b/E2. v2a residuals (val): mortality by size U-shaped wrong (saplings −15 %, 13–20 cm
++24 %, > 45 cm −32 %), planted stands taller/less mortality than predicted → v2b adds a per-species ln-size mortality slope, a
+global linear size term, and planted multipliers (pH, pD, pM).
+
+### 5.2 Recruitment (tools/hbad2/recruitment_check.jl → results/hbad2/recruitment_coefs.csv)
+Sapling ingrowth into the 1-in tally (microplot, 185.2 trees/ha per tree), NATURAL undisturbed intervals, Poisson per species:
+E[count] = dt · exp(ρ0 + ρS ln(1 + BA_sp ≥ 5 in) + ρL SDI/600). The light coefficient reproduces the Biomass-Succession shade
+logic from data: ρL pines −3.5/−3.6, LITU −3.0, oaks −2.0/−2.3, LIST2 −2.0, tolerant ACRU −1.5, NYBI −1.3, MAVI2 −0.8, _H −0.8.
+Seed term helps for most species (VAL deviance). A conspecific-sapling term ("advance regeneration") lowers deviance a lot more
+but would make recruitment self-reinforcing in the kernel (not used). PITA/LIST2 are under-predicted on VAL (353 vs 828): the
+recruitment surface is very heterogeneous (and planting-affected; fitted on natural stands only).
+
+### 5.3 Long run from bare ground (tools/hbad2/longrun.jl, intermediate v2a, recruitment incl. planted plots — superseded)
+BA plateau ~45 m²/ha at 90–110 yr, top height 37 m at 150 yr, QMD(≥5 in) 32 cm, RD ≈ 0.6 (density regulated by suppression
+mortality; self-thinning cap never binds); PITA ~65 % of BA throughout (recruitment then fitted including planted plots).
+
+### 5.4 Sim B — free stand runs on real plots (tools/hbad2/simB.jl; VAL, 465 clean natural plots, 1,723 later visits)
+Whole observed stand (all live trees ≥ 1 in, ingrowth included) vs a free run from the first visit with recruitment; baseline =
+persistence. Median |ln(sim/obs)| (bias), all gaps; v2a parameters:
+
+| variant | BA | N ≥ 5 in | N all | QMD | Lorey H | composition (½Σ|Δshare|) |
+|---|---|---|---|---|---|---|
+| persistence | 25.6 % (−40) | 21.5 % (−37) | 33.4 % (−24) | 19.0 % (−7) | 13.6 % (−17) | 0.134 |
+| v2a, 10-yr birth cohorts, RD-units bug in recruitment | 12.7 % (+7) | 26.2 % (−6) | 60.6 % (+74) | 30.5 % (−33) | 7.5 % (−4) | 0.145 |
+| + size-split initial cohorts (5/12.7/25/40 cm) + recruitment light index fixed to SDI/600 | 12.8 % (+4) | 24.1 % (−6) | 42.0 % (+51) | 21.3 % (−23) | 6.4 % (−2) | 0.141 |
+| + lognormal within-cohort D observation operator σ 0.16 (data: 0.16 lumped / 0.11 split) | 12.8 % (+4) | 21.5 % (0) | 38.5 % (+45) | 19.8 % (−20) | 6.5 % (−2) | 0.140 |
+
+BA change: corr(sim Δ, obs Δ) 0.62; Lorey-H change 0.69. Bug found and fixed: the kernel's recruitment light index used the
+SDImax-relative RD of the growth kernel while the coefficients were fitted on SDI/600 → up to 2× too many pine recruits.
+Remaining failure = dynamics of small trees: after > 21 yr the 5–12.7 cm class holds 284 trees/ha (obs 94) and 12.7–25 cm 161
+(obs 244) — recruits stall as suppressed poles instead of dying or growing through (Sim A also under-predicts small-tree mortality).
+
+### 5.5 v2b (per-species ln-size mortality slope, global linear size term, planted multipliers; warm start v2a, σ 0.03, 25k evals)
+VAL total **−122,232** (mort 33,477 · ln D −81,914 · ln H −73,795; σ_D 0.156, σ_H 0.188); train −130,067. Every part improves on v2a;
+mortality is now better than the best v1 variant (33,493). Planted multipliers (fitted): height-growth rate ×e^0.353 = 1.42,
+diameter-growth rate ×1.32, background+suppression hazard ×0.78 (genetic improvement / site preparation — management, not
+succession). (First v2b attempt with σ 0.15 from the warm start stopped after 1,953 evals without a better sample: in 172
+dimensions the v2a optimum is sharp; σ 0.03 + a 150-generation stall window works.)
+Sim B (σ_obs 0.16, size split): BA 12.9 % (+0 bias), N ≥ 5 in 22.3 % (−4), N all 37.9 % (+44), QMD 20.0 %, Lorey H 6.7 % — the pole stall
+persists (> 21 yr: 5–12.7 cm 275 vs obs 94 trees/ha).
+Small tracked trees (D < 12.7 cm) by overtopping (VAL): deaths obs/sim O 0.2–0.35 1,028/839, 0.35–0.5 618/467, 0.5–0.75 271/193 —
+suppressed small trees die 20–40 % more than the size-independent suppression hazard allows, and their survivors grow 1–5 % more
+(the slowest die: within-cohort selection). → v2d: suppression hazard × (D/20)^mSD.
+
+Species timing implied by the fitted curves (tools/hbad2/timing_curves.jl; model increments at the E3 free-growing class means, O 0.15,
+RD 0.4): corr with observed dH 0.94, dD 0.77; the dH:dD allocation decline is reproduced for oaks (QUNI obs 1.1→0.4, model 1.1→0.3),
+pines, MAVI2, NYBI, ACRU. Failure at large sizes for LIST2 / LITU / TAAS / PIEL: the Chapman–Richards diameter asymptote is low
+(LIST2 Dmax 38 cm) so diameter growth stalls at old ages; several Chapman–Richards shape parameters sit at their bound (cD = 4,
+SDIMAX = 2000, ACRU Hmax = 70) → v2c tests a power-exponential potential r (X/X0)^c e^{−X/Xmax} (its free-growth age curve follows by integration).

@@ -7,7 +7,7 @@ tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
 TR = build_cohorts(tr, "train", keys_); VA = build_cohorts(tr, "val", keys_)
-lg(@sprintf("species keys %d: %s", nsp, join(keys_, ",")))
+lg(@sprintf("species keys %d: %s | growth form %d | size split %s", nsp, join(keys_, ","), FORM, string(SIZE_BREAKS)))
 lg(@sprintf("train: %d sites, %d cohorts (%d trees) | val: %d sites, %d cohorts | birth class %d yr", length(TR.S.off) - 1, length(TR.S.sp), sum(TR.coh.n1),
             length(VA.S.off) - 1, length(VA.S.sp), BIRTH_W))
 # ---- data-based start
@@ -20,10 +20,14 @@ function init_theta()
     Hmax = 1.1 * quantile(t.ht_m, 0.99); Dmax = 1.3 * quantile(t.dia_cm, 0.99); c = 1.3
     Dm = median(f.dia_cm); Hm = median(f.ht_m)
     tD = mean(max.(f.dia2_cm .- f.dia_cm, 0) ./ f.dt); tH = mean(max.(f.ht2_m .- f.ht_m, 0) ./ f.dt)
-    rD = tD / (c * Dm * ((Dmax / Dm)^(1 / c) - 1)); rH = tH / (c * Hm * ((Hmax / Hm)^(1 / c) - 1))
+    rD = tD / (c * Dm * ((Dmax / Dm)^(1 / c) - 1)); rH = tH / (c * Hm * ((Hmax / Hm)^(1 / c) - 1)); cH = c; cD = c
+    if FORM == 2                                # power-exponential start: dD peaks at 0.5·40 = 20 cm, dH declines with H
+      cD = 0.5; Dmax = 40.0; rD = tD / ((Dm / 20)^cD * exp(-Dm / Dmax))
+      cH = 0.3; Hmax = 10.0; rH = tH / ((Hm / 15)^cH * exp(-Hm / Hmax))
+    end
     mort = sum(t.out .== "dead") / sum(t.out .!= "missing") / mean(t.dt)
     sdm = haskey(pk, k) && !ismissing(pk[k].sdimax_p95_all) ? pk[k].sdimax_p95_all : pk["_" * (k[1] == '_' ? k[2:2] : first(t.grp))].sdimax_p95_all
-    v = Dict(:Hmax => Hmax, :rH => rH, :cH => c, :Dmax => Dmax, :rD => rD, :cD => c, :gOD => 1.0, :gRD => 0.0, :gOH => 0.5, :gRH => 0.2,
+    v = Dict(:Hmax => Hmax, :rH => rH, :cH => cH, :Dmax => Dmax, :rD => rD, :cD => cD, :gOD => 1.0, :gRD => 0.0, :gOH => 0.5, :gRH => 0.2,
              :mbg => log(0.7 * mort), :mD => -0.3, :msup => 0.02, :sdimax => sdm)
     for (j, nm) in enumerate(FREE); θ[(s-1)*NF+j] = enc(nm, dec(nm, enc(nm, v[nm]))); end
   end
@@ -59,4 +63,4 @@ lg(@sprintf("FIT   train total %.1f (mort %.1f D %.1f H %.1f σD %.4f σH %.4f) 
             pt.total, pt.mort, pt.D, pt.H, pt.sigD, pt.sigH, pv.total, pv.mort, pv.D, pv.H, pv.sigD, pv.sigH, res.evals))
 P, G = decode(res.x, nsp, longev)
 pdf = DataFrame([nm => [getfield(P[s], nm) for s in 1:nsp] for nm in HBAD2.SP_PARAM_NAMES]); insertcols!(pdf, 1, :key => keys_)
-CSV.write(joinpath(OUTD, "params.csv"), pdf); lg(string(pdf)); lg(@sprintf("global mD2 %.3f pH %.3f pD %.3f pM %.3f", G.mD2, G.pH, G.pD, G.pM))
+CSV.write(joinpath(OUTD, "params.csv"), pdf); lg(string(pdf)); lg(@sprintf("global mD2 %.3f pH %.3f pD %.3f pM %.3f mSD %.3f", G.mD2, G.pH, G.pD, G.pM, G.mSD))

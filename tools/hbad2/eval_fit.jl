@@ -33,6 +33,10 @@ for set in sets
                 [:s, :eD] => ((s, e) -> sum(s[s.>0] .* e[s.>0]) / sum(s)) => :mean_lnD_resid, [:s, :eH] => ((s, e) -> sum(s[s.>0] .* e[s.>0]) / sum(s)) => :mean_lnH_resid)
     sort!(t, :c, by=x -> parse(Float64, x[4:end])); println("-- by ", nm); show(stdout, t; allrows=true, summary=false, eltypes=false); println()
   end
+  sm = df[df.D .< 12.7, :]; sm.c = cls(sm.O, [0.1, 0.2, 0.35, 0.5, 0.75, 1e9])
+  t = combine(groupby(sm, :c), nrow => :coh, :n1 => sum => :trees, [:n1, :s] => ((n, s) -> sum(n .- s)) => :dead_obs,
+              [:n1, :ps] => ((n, p) -> sum(n .* (1 .- p))) => :dead_sim, [:s, :eD] => ((s, e) -> sum(s[s.>0] .* e[s.>0]) / sum(s)) => :lnD_resid)
+  sort!(t, :c, by=x -> parse(Float64, x[4:end])); println("-- SMALL trees (D < 12.7 cm) by overtopping O"); show(stdout, t; allrows=true, summary=false, eltypes=false); println()
   for col in (:pl, :l3)
     t = combine(groupby(df, col), nrow => :coh, [:n1, :s] => ((n, s) -> sum(n .- s)) => :dead_obs, [:n1, :ps] => ((n, p) -> sum(n .* (1 .- p))) => :dead_sim,
                 [:s, :eD] => ((s, e) -> sum(s[s.>0] .* e[s.>0]) / sum(s)) => :lnD_resid, [:s, :eH] => ((s, e) -> sum(s[s.>0] .* e[s.>0]) / sum(s)) => :lnH_resid)

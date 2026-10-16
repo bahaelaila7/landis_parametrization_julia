@@ -1,7 +1,7 @@
 # Compact (μ/μ_w, λ)-CMA-ES (Hansen 2016 tutorial defaults), full covariance; minimises f(x). Deterministic for a given rng.
 using LinearAlgebra, Random, Printf
 function cmaes(f, x0::Vector{Float64}, σ0::Float64; λ=4 + floor(Int, 3log(length(x0))), maxevals=10_000, rng=Xoshiro(1),
-               ftol=1e-9, log_every=20, logf=println, callback=nothing)
+               ftol=1e-9, stall=150, log_every=20, logf=println, callback=nothing)
   n = length(x0); μ = λ ÷ 2
   w = log(μ + 0.5) .- log.(1:μ); w ./= sum(w); μeff = 1 / sum(abs2, w)
   cc = (4 + μeff / n) / (n + 4 + 2μeff / n); cs = (μeff + 2) / (n + μeff + 5)
@@ -33,7 +33,7 @@ function cmaes(f, x0::Vector{Float64}, σ0::Float64; λ=4 + floor(Int, 3log(leng
     push!(hist, fbest)
     gen % log_every == 0 && logf(@sprintf("CMA gen %d evals %d fbest %.4f fgen %.4f σ %.3g cond %.2g", gen, evals, fbest, fx[o[1]], σ, (maximum(Dg) / minimum(Dg))^2))
     callback === nothing || callback(gen, best, fbest)
-    if length(hist) > 60 && hist[end-60] - fbest < ftol * max(1, abs(fbest)); break; end
+    if length(hist) > stall && hist[end-stall] - fbest < ftol * max(1, abs(fbest)); break; end
     σ * maximum(Dg) < 1e-8 && break
   end
   (x=best, f=fbest, evals=evals, m=m, σ=σ)

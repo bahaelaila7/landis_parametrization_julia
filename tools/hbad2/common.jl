@@ -4,6 +4,15 @@ include(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD2", "HBAD2.jl")); 
 const R2DIR = joinpath(@__DIR__, "..", "..", "results", "hbad2")
 const BIRTH_W = parse(Int, get(ENV, "HBAD2_BIRTH_W", "10"))      # cohort = (plot, species key, birth-year class of this width)
 const MIN_SP_TREES = parse(Int, get(ENV, "HBAD2_MIN_SP_TREES", "3000"))
+# optional split of a birth-year class by initial diameter class (cm breaks), e.g. "5,12.7,25,40": sub-cohorts of one age class that
+# differ in size are kept apart instead of being lumped into one quadratic mean (mean-field threshold artefact, docs/hbad_v2.md §5)
+const BOUNDS_OVERRIDE = Dict{Symbol,Tuple{Float64,Float64}}()
+const SIZE_BREAKS = (b = get(ENV, "HBAD2_SIZE_SPLIT", ""); isempty(b) ? Float64[] : parse.(Float64, split(b, ",")))
+dclass(D) = searchsortedfirst(SIZE_BREAKS, D)
+const FORM = parse(Int, get(ENV, "HBAD2_FORM", "1"))          # potential-growth form (HBAD2.GlobP.form)
+if FORM == 2   # power-exponential: rX = increment at the reference size [cm/yr | m/yr], cX = size exponent, Xmax = decay scale
+  merge!(BOUNDS_OVERRIDE, Dict(:rD => (0.01, 3.0), :cD => (-1.5, 3.0), :Dmax => (5.0, 300.0), :rH => (0.005, 3.0), :cH => (-1.5, 3.0), :Hmax => (2.0, 200.0)))
+end
 
 "Tracked trees of undisturbed intervals with their species key (own key if ≥ MIN_SP_TREES train trees, else _S/_H)."
 function load_trees()
@@ -22,7 +31,7 @@ end
 function build_cohorts(tr::DataFrame, set::AbstractString, keys_::Vector{String})
   kix = Dict(k => i for (i, k) in enumerate(keys_))
   d = filter(r -> r.set == set, tr)
-  d.bc = floor.(Int, (d.y1 .- d.age) ./ BIRTH_W)
+  d.bc = floor.(Int, (d.y1 .- d.age) ./ BIRTH_W) .* 100 .+ dclass.(d.dia_cm)
   d.alive = d.out .== "alive"; d.counted = d.out .!= "missing"
   g = combine(groupby(d, [:iid, :key, :bc]),
     :w_ha => sum => :N1, [:w_ha, :dia_cm] => ((w, x) -> sqrt(sum(w .* x .^ 2) / sum(w))) => :D1,
@@ -64,12 +73,14 @@ end
 # ---------------- parameter vector ⇄ species parameters
 # per species (14 free, log-space where positive): Hmax rH cH Dmax rD cD gOD gRD gOH gRH mbg mD msup sdimax ; global: mD2 pH pD pM
 const FREE = (:Hmax, :rH, :cH, :Dmax, :rD, :cD, :gOD, :gRD, :gOH, :gRH, :mbg, :mD, :msup, :sdimax)
-const NGLOB = 4
+const NGLOB = 5
 const LOGP = Set([:Hmax, :rH, :cH, :Dmax, :rD, :cD, :msup, :sdimax])
 const BOUNDS = Dict(:Hmax => (8.0, 70.0), :rH => (1e-3, 0.5), :cH => (0.3, 4.0), :Dmax => (15.0, 250.0), :rD => (1e-3, 0.5), :cD => (0.3, 4.0),
                     :gOD => (-1.0, 8.0), :gRD => (-3.0, 3.0), :gOH => (-1.0, 8.0), :gRH => (-3.0, 3.0), :mbg => (-9.0, -1.0), :mD => (-4.0, 4.0),
                     :msup => (1e-4, 1.0), :sdimax => (250.0, 2000.0))
 const NF = length(FREE)
+for (k, v) in BOUNDS_OVERRIDE; BOUNDS[k] = v; end
+FORM == 2 && (delete!(LOGP, :cD); delete!(LOGP, :cH))
 enc(nm, x) = nm in LOGP ? log(x) : x
 function dec(nm, z)
   lo, hi = BOUNDS[nm]; clamp(nm in LOGP ? exp(z) : z, lo, hi)
@@ -81,7 +92,7 @@ function decode(θ::AbstractVector, nsp::Int, longevity::Vector{Float64})
     P[s] = SpP(v..., longevity[s])
   end
   g = θ[nsp*NF+1:end]
-  P, HBAD2.GlobP(clamp(g[1], -3, 3), 10.0, clamp(g[2], -1, 1), clamp(g[3], -1, 1), clamp(g[4], -2, 2))
+  P, HBAD2.GlobP(clamp(g[1], -3, 3), 10.0, clamp(g[2], -1, 1), clamp(g[3], -1, 1), clamp(g[4], -2, 2), FORM, clamp(g[5], -4, 2))
 end
 
 "Per-species diagnostics: observed vs predicted deaths (tree counts), mean annual ΔD and ΔH of survivors (obs vs sim), RD at start."
@@ -107,10 +118,11 @@ end
 function read_theta(path, nsp)
   θi = vec(CSV.read(path, DataFrame).theta)
   length(θi) == nsp * NF + NGLOB && return θi
+  length(θi) == nsp * NF + 4 && return vcat(θi, 0.0)           # before mSD (v2b/v2c)
   length(θi) == nsp * 13 + 1 || error("θ length $(length(θi)) not recognised")
   θ = zeros(nsp * NF + NGLOB)
   for s in 1:nsp
-    o = (s - 1) * 13; n = (s - 1) * NF
+    o = (s - 1) * 13   # v2a layout; n = (s - 1) * NF
     θ[n+1:n+11] = θi[o+1:o+11]; θ[n+12] = θi[end]; θ[n+13] = θi[o+12]; θ[n+14] = θi[o+13]
   end
   θ
