@@ -52,6 +52,7 @@ const SCHEMA_LIST = KeySpec[
   KeySpec("spinup", :bool, false, "start sites from a 2-cohort spinup instead of the observed first-visit cohorts"),
   KeySpec("by_subplot", :bool, false, "treat each subplot as a plot"),
   KeySpec("drop_phantom", :bool, false, "drop intro_type=phantom_backfill rows at load"),
+  KeySpec("data_on_missing", :string, "warn", "data preparation: a default substituted for missing data (species without shade tier / tree stats / softwood-hardwood class, plots without site class, NULL land_use, filter values matching nothing) is logged (warn) or stops the run (error)"; choices=("warn", "error")),
   KeySpec("min_trees", :int, 100, "minimum trees per plot"),
   KeySpec("min_agb_frac", :float, 0.05, "minimum share of plot AGB a species needs to count"),
   # ---- split / strata / tiering -------------------------------------------------------------------------------------

@@ -8,6 +8,11 @@ import StatsBase
 import Dates
 
 const AG = ArchGDAL
+# Names that are interpolated into SQL (they cannot be bound parameters) must be plain identifiers.
+function _ident(s::AbstractString, what::AbstractString)::String
+  occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", s) || error("$what: $(repr(s)) is not a valid SQL identifier")
+  String(s)
+end
 const AttrDict = Dict{String,Any}
 const AttrTable = Dict{Int64,AttrDict}
 
@@ -88,6 +93,7 @@ function load_treemap_cohorts(
   eco_ecocode_override::Union{Nothing,DataFrame}=nothing,
 )
   stratify_eco_mixed && error("stratify_eco_mixed is only supported with simple_match=true (load_treemap_cohorts_simple)")
+  _ident(eco_field, "eco_field")
   species_field = if eco_field == "epa_l4"
     "species_symbol_map_l4"
   elseif eco_field == "epa_l3"
@@ -340,6 +346,7 @@ function load_treemap_cohorts_simple(
   stratify_eco_mixed::Bool=false,
   eco_ecocode_override::Union{Nothing,DataFrame}=nothing,
 )
+  _ident(plot_table, "plot_table")
   # eco_ecocode_override lets the caller supply an already-stratified mapping (stratified
   # ecocode → "<eco>_mixed"/"_pure") and pass stratify_eco_mixed=false — used by the
   # downsample+stratify path, where the stratum is baked into the ecocode and majority-voted.
@@ -461,6 +468,7 @@ end
 # table / curated_cohorts_landis are not in the dict.
 function load_plot_mixed(cn_raster::Array{Union{Missing,Int64}}, db_path::String;
   plot_table::String="PLOT")
+  _ident(plot_table, "plot_table")
   cns = unique(Int64[c for c in cn_raster if !ismissing(c)])
   cn_df = DataFrame(CN=cns)
   db = DuckDB.DB(db_path)
@@ -789,7 +797,7 @@ end
 function load_duckdb_communities(db_path::String; tablename::String="communities")::DataFrame
   db = DuckDB.DB(db_path)
   con = DuckDB.connect(db)
-  df = DuckDB.execute(con, "SELECT * FROM $(tablename)") |> DataFrame
+  df = DuckDB.execute(con, "SELECT * FROM $(_ident(tablename, "tablename"))") |> DataFrame
   DuckDB.close(db)
   return df
 end

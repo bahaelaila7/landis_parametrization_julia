@@ -5,6 +5,7 @@ include("Plugins.jl")
 include("Parametrization.jl")
 include("Search.jl")
 include("Data.jl")
+include("SpatialData.jl")
 include("Spatial.jl")
 #for file in filter(f -> endswith(f,"Plugin.jl"), readdir("src/plugins";join=false))
 #    println("including plugin $(file)")
@@ -19,6 +20,7 @@ import .Parametrization.PnETParametrization as PNP
 import .Parametrization.HBADParametrization as HBP
 using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel, GDIgel, Common
 import .Data as Data
+import .SpatialData
 import .Spatial
 import Dates
 import LinearAlgebra
@@ -1361,17 +1363,8 @@ function _check_search_mode(m::AbstractString)
   error("unknown search_mode $(repr(m)); valid: $(join(SEARCH_MODES, ", ")), sobol, plot_only, plot_only_sobol")
 end
 
-function parametrize(; cohorts_db_path::String,
-  eco_field=:epa_l4,
-  tablename::String="data_eco_cohorts_g",
+function parametrize(; data::Data.DataConfig,
   output_dir::String="./outputs",
-  filter_eco_field::String,
-  filter_ecos::Vector{String}=String[],
-  filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[],
-  exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[],
-  filter_species::Vector{String}=String[],
-  filter_planted::Bool=false,
-  skip_disturbances::Bool=true,
   bins_idx::Vector{Int64}=1:180 .|> Int64,
   smoothing_window::Vector{FloatType}=FloatType[one(FloatType)],
   unbinned_w::Bool=false,   # Sim A: compute W as the EXACT per-year EMD (no binning, no smoothing). bins_idx applies to Sim B only.
@@ -1399,7 +1392,6 @@ function parametrize(; cohorts_db_path::String,
   hbad_cycle_years::Float64=8.0,                       # hbad: remeasurement interval for the per-cycle -> annual PROB_ESTAB conversion
   hbad_init::String="jitter",                          # hbad: start candidates default | jitter | prior (see HBADPlugin.INIT_MODE)
   cmaes_blocks::String="eco",                          # CMA-ES covariance blocks: "eco" (per cell, legacy) | "l3" (per L3 + tail)
-  spinup::Bool=true,
   search_mode::String="lbsa",
   context_only::Bool=false,   # prepare the training context exactly as a search would, hand it to `post_search_hook` (if any), skip the search
   post_search_hook=nothing,   # optional diagnostic callback `f(ctx)`: called with the prepared training context right after the search driver returns (tools, test/pnet_smoke_diag.jl); nothing ⇒ no call
@@ -1414,30 +1406,8 @@ function parametrize(; cohorts_db_path::String,
   sobol_candidates_db::Union{Nothing,String}=nothing,
   sobol_top_frac::Float64=0.5,
   n_output_plots::Int=0,
-  by_subplot::Bool=false,
   no_establishment::Bool=false,
-  val_frac::Float64=0.0,
-  split_seed::Int=42,
-  n_folds::Int=1,
-  fold_index::Int=1,
-  test_frac::Float64=0.0,               # >0 ⇒ 3-way train/val/test single split (held-out test); mutually exclusive with n_folds>1 CV
 
-  min_trees::Int=100,
-  min_agb_frac::Float64=0.05,
-  stratify_eco_mixed::Bool=false,
-  single_ecoregion::Bool=false,
-  stratify_landuse::Bool=false,
-  site_class_strata::Bool=false,        # replace land_use with a per-plot site-productivity tier (from COND.SITECLCD)
-  siteclass_hi_max::Int=4,              # hi = SITECLCD ≤ this, lo = above (2-way default)
-  siteclass_scheme::String="2way",      # "2way" (hi/lo) or "4cell" (A=1-3,B=4,C=5,D=6-7) site-tier label
-  shade_tier_csv::Union{Nothing,String}=nothing,  # species→shade_class CSV; splits grouping key by LST(1-3)/HST(4-5)
-  filter_extent::Union{Nothing,String}=nothing,
-  filter_states::Vector{Int}=Int[],        # region = state ∩ filter_ecos (FIPS, e.g. EPA Region 4); empty ⇒ no state filter
-  siteclass_l3s::Vector{String}=String[],  # site-class cells only in these ecos; others → one cell "X" (empty ⇒ all)
-  max_exact::Int=12, max_group::Int=4,     # species tiering caps (own-param species / pooled groups)
-  drop_phantom::Bool=false,                # drop intro_type=phantom_backfill rows (synthetic pre-debut biomass) at load
-  train_cap::Union{Nothing,Int,String}=nothing,  # species-balanced TRAIN: cap plots per (eco cell × dominant species); Int | "auto"; surplus → val/test
-  train_cap_k::Float64=1.5, train_cap_min::Int=20, # "auto" cap = max(train_cap_min, ceil(k × median stratum size per eco cell))
   split_only::Bool=false,                  # write split_plots.csv + species_map.csv (+ pool_map.csv) and stop (floor-building pass)
   loss_lambda::Float64=1.0,
   loss_alpha::Float64=1.0,
@@ -1466,7 +1436,6 @@ function parametrize(; cohorts_db_path::String,
   loss_piecewise::Bool=false,
   w_pivot::Float64=1.0,
   agb_pivot::Float64=1.0,
-  data_opts::Data.DataOptions=Data.DataOptions(),   # data-preparation inputs (disturbance-shock parquet); see `data_options`
   scoring::ScoringOptions=ScoringOptions(),   # the scoring rule + initial-biomass perturbation (see `scoring_from_config`)
   simb::SimBOptions=SimBOptions(),            # Sim B / dual-mode options
   space_opts::PU.ParamSpaceOptions=PU.ParamSpaceOptions(),   # which parameters are searched and their boxes (see `param_space_options`)
@@ -1518,6 +1487,7 @@ function parametrize(; cohorts_db_path::String,
   search::SearchOptions=SearchOptions(),   # config-derived knobs of the search engines (LBSA, Igel, MO-CMA-ES ranking); see SearchOptions
   rng::Random.AbstractRNG)
   _check_search_mode(search_mode)   # fail fast, before data preparation
+  spinup = data.spinup; cohorts_db_path = data.cohorts_db_path; tablename = data.tablename   # (the rest of `data` is read by Data.prepare_parametrization_data)
 
   # Pin BLAS to 1 thread: the search does hundreds of tiny per-offspring covariance eigendecomps per gen —
   # multi-threaded OpenBLAS spawns all cores per call and oversubscribes catastrophically at high --threads.
@@ -1561,11 +1531,7 @@ function parametrize(; cohorts_db_path::String,
     _loss_params(PU.AgeBins(bins_idx=bins_idx .|> Int, last_bin_open=true), smoothing_window)
   unbinned_w && @info "Sim-A W = UNBINNED per-year EMD (bins 1:400, no age-smoothing); softplus β + cell W_SCALE recompute on this grid"
   splots, eco_list, species_list, eco_species_ids, splots_val_raw, splots_test_raw, data_outs =
-    Data.prepare_parametrization_data(; data_opts, _prep_kwargs(; cohorts_db_path, eco_field, tablename, filter_eco_field, filter_ecos,
-      filter_plots, exclude_plots, filter_species, filter_planted, skip_disturbances, spinup, by_subplot,
-      val_frac, split_seed, n_folds, fold_index, test_frac, min_trees, min_agb_frac, stratify_eco_mixed,
-      single_ecoregion, stratify_landuse, site_class_strata, siteclass_hi_max, siteclass_scheme, shade_tier_csv,
-      filter_extent, filter_states, siteclass_l3s, max_exact, max_group, train_cap, train_cap_k, train_cap_min, rng, drop_phantom)...)
+    Data.prepare_parametrization_data(data)
   _write_split_plots(output_dir, eco_list, splots, splots_val_raw, splots_test_raw, data_outs)
   n_species = length(species_list)
   # --- succession plugin selection (static type; everything downstream dispatches on succession_plugin_of(soa)) ---
@@ -4869,9 +4835,6 @@ function parametrize_SA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plugin
             @warn "val fit_params failed" exception = (e, catch_backtrace())
           end
         end
-  for c in ("sym", "shade_class")
-    c in names(df) || error("shade_tol_csv $csv_path: column '$c' not found (columns: $(join(names(df), ", ")))")
-  end
         record_best_losses!(losses_db, iter, total, run_result, eco_losses, search_state.best.x; eco_list, species_list, n_species, loss_params, print_breakdown=true)
       end
       if is_new_best || search_state.i % 50 == 0
@@ -4906,6 +4869,9 @@ end
 function _load_shade_tol_table(csv_path::String)
   isfile(csv_path) || error("shade_tol_from_data=true but $csv_path not found (set shade_tol_from_data: false to keep SHADE_TOL in the search)")   # used to warn and silently keep SHADE_TOL in the search
   df = CSV.read(csv_path, DataFrame)
+  for c in ("sym", "shade_class")
+    c in names(df) || error("shade_tol_csv $csv_path: column '$c' not found (columns: $(join(names(df), ", ")))")
+  end
   d = Dict{String,Int}(uppercase(strip(String(r.sym))) => Int(r.shade_class) for r in eachrow(df))
   @info "shade_tol_from_data: pinned SHADE_TOL for $(length(d)) species from $csv_path (out of search)"
   d
@@ -5068,51 +5034,6 @@ function _cfg_data_inputs(cfg0::AbstractDict)
   )
 end
 
-# parametrize-style data-prep inputs → keyword arguments of `Data.prepare_parametrization_data` (quirks live HERE only:
-# `output_dir=tablename`, split RNG seeded from `split_seed` alone so all folds share the shuffle).
-function _prep_kwargs(; cohorts_db_path::String, eco_field, tablename::String, filter_eco_field::String,
-  filter_ecos::Vector{String}, filter_plots::Vector{NTuple{4,Int}}, exclude_plots::Vector{NTuple{4,Int}},
-  filter_species::Vector{String}, filter_planted::Bool=false, skip_disturbances::Bool, spinup::Bool, by_subplot::Bool,
-  val_frac::Float64, split_seed::Int, n_folds::Int, fold_index::Int, test_frac::Float64,
-  min_trees::Int, min_agb_frac::Float64, stratify_eco_mixed::Bool, single_ecoregion::Bool, stratify_landuse::Bool,
-  site_class_strata::Bool, siteclass_hi_max::Int, siteclass_scheme::String, shade_tier_csv::Union{Nothing,String},
-  filter_extent::Union{Nothing,String}, filter_states::Vector{Int}, siteclass_l3s::Vector{String},
-  max_exact::Int, max_group::Int, train_cap::Union{Nothing,Int,String}, train_cap_k::Float64, train_cap_min::Int,
-  rng::Random.AbstractRNG, drop_phantom::Bool=false)
-  split_rng = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) ? RNGType(UInt64(split_seed)) : nothing   # seeded from split_seed only ⇒ all folds share the shuffle
-  return (cohorts_db_path=cohorts_db_path,
-    eco_field=eco_field,
-    tablename=tablename,
-    output_dir=tablename,
-    skip_disturbances=skip_disturbances,
-    spinup=spinup,
-    by_subplot=by_subplot,
-    val_frac=val_frac,
-    split_rng=split_rng,
-    n_folds=n_folds,
-    fold_index=fold_index,
-    test_frac=test_frac,
-    min_trees=min_trees,
-    min_agb_frac=min_agb_frac,
-    stratify_eco_mixed=stratify_eco_mixed,
-    single_ecoregion=single_ecoregion,
-    stratify_landuse=stratify_landuse,
-    site_class_strata=site_class_strata,
-    siteclass_hi_max=siteclass_hi_max,
-    siteclass_scheme=siteclass_scheme,
-    shade_tier_csv=shade_tier_csv,
-    filter_extent=filter_extent,
-    filter_states=filter_states, siteclass_l3s=siteclass_l3s, max_exact=max_exact, max_group=max_group,
-    train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min, drop_phantom=drop_phantom,
-    filter_eco_field=filter_eco_field,
-    filter_ecos=filter_ecos,
-    filter_plots=filter_plots,
-    exclude_plots=exclude_plots,
-    filter_species=filter_species,
-    filter_planted=filter_planted,
-    RNG=rng)
-end
-
 # yaml `dual_mode` → :off | :joint | :b. Accepts Bool (true = joint, the pre-June spelling) and strings in any case
 # ("off"/"false", "joint"/"true", "b"). The single parser for every reader (run_from_yaml, the disturbance-shock setup, tools).
 function _parse_dual_mode(v)::Symbol
@@ -5167,12 +5088,21 @@ function _disturbance_shock_path(cfg0::AbstractDict)
 end
 
 """
-    data_options(cfg) -> Data.DataOptions
+    data_config(cfg; split_seed=nothing) -> Data.DataConfig
 
-The data-preparation inputs of a run, read from a loaded config (the disturbance-shock parquet). Pure; pass the result as
-`parametrize(data_opts=...)` / `Data.prepare_parametrization_data(data_opts=...)` (`prepare_from_cfg` does it for you).
+The ONE place a loaded config becomes the data-preparation inputs of a run: the selection / split / strata / tiering keys (`_cfg_data_inputs`:
+`\${VAR}`/`~` expansion, the `FIADB` env override, `exclude_plots` + `exclude_plots_csv`), the disturbance-shock parquet and `data_on_missing`.
+`split_seed` replaces the config's `split_seed` (per-fold scripts share the shuffle of the run they re-derive). Pure.
+`run_from_yaml` passes the result to `parametrize(data=...)`; the analysis scripts get the same struct from `prepare_from_cfg`.
 """
-data_options(cfg0::AbstractDict)::Data.DataOptions = Data.DataOptions(disturbance_path=_disturbance_shock_path(cfg0))
+function data_config(cfg0::AbstractDict; split_seed=nothing)::Data.DataConfig
+  cfg = _as_config(cfg0)
+  din = _cfg_data_inputs(cfg)
+  return Data.DataConfig(; din...,
+    split_seed=split_seed === nothing ? din.split_seed : Int(split_seed),
+    disturbance_path=_disturbance_shock_path(cfg),
+    on_missing=Symbol(cfg["data_on_missing"]))
+end
 
 """
     scoring_options(cfg) -> ScoringOptions
@@ -5213,7 +5143,7 @@ end
 The ONE place the scoring and Sim B options are built. `run_from_yaml` and the analysis tools (tost, scatter, plots) all call it, so a tool
 scores exactly the way the run was trained; the options are then passed explicitly to `parametrize`, `fit_params` and the helpers.
 
-The data-preparation inputs live in `data_options`, the parameter-space switches in `param_space_options`.
+The data-preparation inputs live in `data_config`, the parameter-space switches in `param_space_options`.
 """
 function scoring_from_config(cfg0::AbstractDict)
   cfg = _as_config(cfg0)
@@ -5223,32 +5153,15 @@ function scoring_from_config(cfg0::AbstractDict)
 end
 
 """
-    prep_kwargs_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, rng=nothing) -> NamedTuple
-
-Keyword arguments for `Data.prepare_parametrization_data`, computed from a YAML-loaded config EXACTLY as the training
-path (`run_from_yaml` → `parametrize`) computes them: `\${VAR}`/`~` expansion of string values, the `FIADB` env override,
-`exclude_plots` + `exclude_plots_csv`, `filter_plots`/`filter_species`/`filter_extent`/`filter_ecos`, region keys
-(`filter_states`, `siteclass_l3s`, `max_exact`, `max_group`, `train_cap[_k|_min]`), site-class/shade-tier keys, and the
-split RNG (seeded from `split_seed` when val/test/folds are used). `split_rng_seed_override` replaces `split_seed`;
-`rng` is the (currently unused by prepare) `RNG` argument — default is derived from `seed` without touching global RNG state.
-Per-fold scripts can override with `prepare_from_cfg(cfg; fold_index=k)`.
-"""
-function prep_kwargs_from_cfg(cfg0::AbstractDict; split_rng_seed_override=nothing, rng::Union{Nothing,Random.AbstractRNG}=nothing)
-  cfg = _as_config(cfg0)
-  din = _cfg_data_inputs(cfg)
-  split_seed = split_rng_seed_override === nothing ? din.split_seed : Int(split_rng_seed_override)
-  rng_ = rng === nothing ? RNGType(rand(Random.Xoshiro(cfg["seed"]), UInt64)) : rng   # == run_from_yaml's RNGType(rand(UInt64)) after Random.seed!(seed)
-  return merge(_prep_kwargs(; din..., split_seed=split_seed, rng=rng_), (; data_opts=data_options(cfg)))
-end
-
-"""
     prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw...)
 
-`Data.prepare_parametrization_data(; prep_kwargs_from_cfg(cfg)..., kw...)` — returns
-`(splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs::Data.DataOutputs)`. Extra `kw` override individual arguments.
+`Data.prepare_parametrization_data(data_config(cfg; split_seed=split_rng_seed_override))` — EXACTLY the data the training path prepares (same struct) —
+returns `(splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs::Data.DataOutputs)`. Extra `kw` replace individual `DataConfig`
+fields (e.g. `fold_index=k`); an unknown field is an error.
 """
 function prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw...)
-  return Data.prepare_parametrization_data(; prep_kwargs_from_cfg(cfg; split_rng_seed_override=split_rng_seed_override)..., kw...)
+  dc = data_config(cfg; split_seed=split_rng_seed_override)
+  return Data.prepare_parametrization_data(isempty(kw) ? dc : Data.with_data(dc; kw...))
 end
 
 function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}(), exec::Union{Nothing,ExecOptions}=nothing, post_search_hook=nothing)
@@ -5266,7 +5179,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   rng = RNGType(rand(UInt64))
 
   # Data-prep inputs (filter_plots, exclude_plots[_csv], split/region/site-class keys, ...) are parsed by the SAME
-  # function the analysis scripts use (`prep_kwargs_from_cfg`), so training and re-derivations can never drift.
+  # function the analysis scripts use (`data_config`), so training and re-derivations can never drift.
   din = _cfg_data_inputs(cfg)
   filter_plots = din.filter_plots
   exclude_plots = din.exclude_plots
@@ -5286,36 +5199,11 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   _db_path = din.cohorts_db_path   # (yaml value, with the FIADB env override applied by load_config)
 
   # Fields shared by parametrize, plot_sample, and plot_sample_sobol
-  data_opts = data_options(cfg)   # data-preparation inputs (disturbance-shock parquet), passed to parametrize
+  data = data_config(cfg)   # every data-preparation input of the run (selection, split, strata, tiering, disturbance parquet, on_missing), passed to parametrize
   common_kw = (
-    data_opts=data_opts,
-    cohorts_db_path=_db_path,
-    filter_eco_field=din.filter_eco_field,
-    eco_field=din.eco_field,
-    tablename=din.tablename,
+    data=data,
     output_dir=_output_dir,
-    filter_ecos=din.filter_ecos,
-    filter_plots=filter_plots,
-    filter_species=din.filter_species,
-    skip_disturbances=din.skip_disturbances,
-    spinup=din.spinup,
-    by_subplot=din.by_subplot,
     no_establishment=cfg["no_establishment"],
-    min_trees=din.min_trees,
-    min_agb_frac=din.min_agb_frac,
-    stratify_eco_mixed=din.stratify_eco_mixed,
-    single_ecoregion=din.single_ecoregion,
-    stratify_landuse=din.stratify_landuse,
-    site_class_strata=din.site_class_strata,
-    siteclass_hi_max=din.siteclass_hi_max,
-    siteclass_scheme=din.siteclass_scheme,
-    shade_tier_csv=din.shade_tier_csv,
-    filter_extent=din.filter_extent,
-    filter_states=din.filter_states,
-    siteclass_l3s=din.siteclass_l3s,
-    max_exact=din.max_exact, max_group=din.max_group, drop_phantom=din.drop_phantom,
-    train_cap=din.train_cap,
-    train_cap_k=din.train_cap_k, train_cap_min=din.train_cap_min,
     split_only=cfg["split_only"],
     bins_idx=cfg["bins_idx"],
   )
@@ -5336,7 +5224,6 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
 
   _res = parametrize(;
     common_kw...,
-    exclude_plots=exclude_plots,
     search_mode=plot_mode ? "igelmo" : search_mode,
     context_only=plot_mode,
     tier=cfg["tier"],
@@ -5497,16 +5384,9 @@ function main()
   resume_from = "./outputs/search_state_latest.jld2" #nothing             # set to e.g. "./outputs/search_state_latest.jld2" to resume
   force_restart_from_random = false # set to true to restart from random params when resuming
   parametrize(;
-    cohorts_db_path="../data_eco_cohorts.duckdb",
-    filter_eco_field="epa_l3",
-    eco_field="epa_l3",
-    tablename="data_eco_cohorts",
+    data=Data.DataConfig(; cohorts_db_path="../data_eco_cohorts.duckdb", filter_eco_field="epa_l3", eco_field="epa_l3", tablename="data_eco_cohorts",
+      filter_ecos=filter_ecos, filter_plots=filter_plots, filter_species=filter_species, skip_disturbances=true, spinup=false),
     output_dir="./outputs",
-    filter_ecos=filter_ecos,
-    filter_plots=filter_plots,
-    filter_species=filter_species,
-    skip_disturbances=true,
-    spinup=false,
     search_mode="lbsa",
     tier=1,
     bins_idx=t1_bins_idx,
@@ -5878,7 +5758,7 @@ function simulate_spatial_treemap(;
   params = JLD2.load_object(joinpath(data_dir, biomass_params_path))
 
   println("Loading eco raster")
-  eco_raster_data = Data.load_eco_raster(joinpath(data_dir, eco_raster))
+  eco_raster_data = SpatialData.load_eco_raster(joinpath(data_dir, eco_raster))
 
   eco_mapping_path = joinpath(data_dir, eco_ecocode_mapping)
   eco_mapping_df = CSV.read(eco_mapping_path, DataFrame)
@@ -5887,34 +5767,34 @@ function simulate_spatial_treemap(;
 
   if !isnothing(treemap_raster)
     println("Loading treemap raster: $treemap_raster")
-    @time cn_raster, _ = Data.load_treemap_raster(
+    @time cn_raster, _ = SpatialData.load_treemap_raster(
       joinpath(data_dir, treemap_raster); treemap_version=treemap_version)
     @assert size(cn_raster) == size(eco_raster_data) "Raster size mismatch: treemap $(size(cn_raster)) ≠ eco $(size(eco_raster_data))"
 
     println("Extracting cohorts from DuckDB (treemap path)")
-    @time splots, eco_list, eff_eco_list, species_list = (simple_match ? Data.load_treemap_cohorts_simple : Data.load_treemap_cohorts)(
+    @time splots, eco_list, eff_eco_list, species_list = (simple_match ? SpatialData.load_treemap_cohorts_simple : SpatialData.load_treemap_cohorts)(
       cn_raster, eco_raster_data, treemap_db_path, eco_mapping_path, params; stratify_eco_mixed=stratify_eco_mixed)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
     println(species_list)
 
     println("Remapping params to data eco/species")
-    @time mod_params, mapped_splots, eco_species_ids = Data.map_params_to_data_treemap(
+    @time mod_params, mapped_splots, eco_species_ids = SpatialData.map_params_to_data_treemap(
       params, eco_list, eff_eco_list, species_list, splots)
 
     println("Expanding cohorts to raster pixels")
-    @time splots_pixels = Data.expand_to_pixels(
+    @time splots_pixels = SpatialData.expand_to_pixels(
       mapped_splots, cn_raster, eco_raster_data)
 
   elseif !isnothing(communities_csv)
     println("Loading initial communities from CSV: $communities_csv")
-    ic_df = Data.load_csv_communities(joinpath(data_dir, communities_csv))
-    splots_pixels, mod_params, eco_species_ids = Data.prepare_general_splots(
+    ic_df = SpatialData.load_csv_communities(joinpath(data_dir, communities_csv))
+    splots_pixels, mod_params, eco_species_ids = SpatialData.prepare_general_splots(
       ic_df, eco_raster_data, eco_mapping_df, params)
 
   elseif !isnothing(communities_db)
     println("Loading initial communities from DuckDB: $communities_db")
-    ic_df = Data.load_duckdb_communities(communities_db)
-    splots_pixels, mod_params, eco_species_ids = Data.prepare_general_splots(
+    ic_df = SpatialData.load_duckdb_communities(communities_db)
+    splots_pixels, mod_params, eco_species_ids = SpatialData.prepare_general_splots(
       ic_df, eco_raster_data, eco_mapping_df, params)
 
   else
@@ -5980,8 +5860,8 @@ function simulate_spatial_landis(;
   rng = RNGType(UInt64(rng_seed))
 
   println("Loading LANDIS rasters")
-  @time communities_raster = Data.load_landis_mapcode_raster(initial_communities_tif)
-  @time eco_raster = Data.load_eco_raster(ecoregion_tif)
+  @time communities_raster = SpatialData.load_landis_mapcode_raster(initial_communities_tif)
+  @time eco_raster = SpatialData.load_eco_raster(ecoregion_tif)
   @assert size(communities_raster) == size(eco_raster) "Raster size mismatch"
 
   println("Loading LANDIS tables")
@@ -5994,24 +5874,24 @@ function simulate_spatial_landis(;
   println("initial communities csv: done")
 
   println("Core species data")
-  core_sp_df = Data.load_landis_core_species(core_species_data)
+  core_sp_df = SpatialData.load_landis_core_species(core_species_data)
   println("Core species data done")
   println("Core biomass spp")
-  spp_eco_df = Data.load_landis_spp_ecoregion(spp_ecoregion_data; year=spp_eco_year)
+  spp_eco_df = SpatialData.load_landis_spp_ecoregion(spp_ecoregion_data; year=spp_eco_year)
   println("Core biomass spp done")
   println("species data")
   species_df = CSV.read(species_data, DataFrame)
   println("species data done")
 
   println("Building BiomassSuccessionParams from LANDIS files")
-  @time params = Data.make_landis_params(
+  @time params = SpatialData.make_landis_params(
     core_sp_df, species_df, spp_eco_df;
     min_rel_biomass=min_rel_biomass,
   )
   println("Ecos: $(length(params.ECO_LIST)), Species: $(length(params.SPECIES_LIST))")
 
   println("Expanding IC to pixels")
-  @time splots = Data.expand_landis_pixels(
+  @time splots = SpatialData.expand_landis_pixels(
     communities_raster, eco_raster, ic_df, eco_ecocode_df, params)
   println("Sites: $(length(unique(splots.mapcode))), Cohort rows: $(nrow(splots))")
 
@@ -6105,7 +5985,7 @@ function export_landis_scenario(;
 
   println("Loading eco raster")
   eco_raster_path = joinpath(data_dir, eco_raster)
-  eco_raster_data = Data.load_eco_raster(eco_raster_path)
+  eco_raster_data = SpatialData.load_eco_raster(eco_raster_path)
 
   eco_mapping_path = joinpath(data_dir, eco_ecocode_mapping)
   eco_mapping_df = CSV.read(eco_mapping_path, DataFrame)
@@ -6119,7 +5999,7 @@ function export_landis_scenario(;
 
   if !isnothing(treemap_raster)
     println("Loading treemap raster: $treemap_raster")
-    @time cn_raster, _ = Data.load_treemap_raster(
+    @time cn_raster, _ = SpatialData.load_treemap_raster(
       joinpath(data_dir, treemap_raster); treemap_version=treemap_version)
     @assert size(cn_raster) == size(eco_raster_data) "Raster size mismatch: treemap $(size(cn_raster)) ≠ eco $(size(eco_raster_data))"
 
@@ -6137,36 +6017,36 @@ function export_landis_scenario(;
     if downsample > 1
       println("Downsampling rasters $(downsample)x ($(cell_length_m)m → $(cell_length_m * downsample)m), eco by majority vote")
       if stratify_eco_mixed
-        cn_mixed = Data.load_plot_mixed(cn_raster, treemap_db_path)
-        strat_fine = Data.stratify_eco_raster(eco_raster_data, cn_raster, cn_mixed)
-        eco_export_mapping = Data.stratified_eco_mapping(eco_mapping_df)
-        eco_match_raster, coarse_eco_raster = Data.block_majority_eco(strat_fine, downsample, Set(Int.(eco_export_mapping.ecocode)))
+        cn_mixed = SpatialData.load_plot_mixed(cn_raster, treemap_db_path)
+        strat_fine = SpatialData.stratify_eco_raster(eco_raster_data, cn_raster, cn_mixed)
+        eco_export_mapping = SpatialData.stratified_eco_mapping(eco_mapping_df)
+        eco_match_raster, coarse_eco_raster = SpatialData.block_majority_eco(strat_fine, downsample, Set(Int.(eco_export_mapping.ecocode)))
         eco_loader_override = eco_export_mapping  # ecocodes already stratified → loader runs unstratified
         loader_stratify = false
       else
-        eco_match_raster, coarse_eco_raster = Data.block_majority_eco(eco_raster_data, downsample, Set(Int.(eco_mapping_df.ecocode)))
+        eco_match_raster, coarse_eco_raster = SpatialData.block_majority_eco(eco_raster_data, downsample, Set(Int.(eco_mapping_df.ecocode)))
       end
     end
 
     println("Extracting cohorts from DuckDB (treemap path)")
-    @time splots, eco_list, eff_eco_list, species_list = (simple_match ? Data.load_treemap_cohorts_simple : Data.load_treemap_cohorts)(
+    @time splots, eco_list, eff_eco_list, species_list = (simple_match ? SpatialData.load_treemap_cohorts_simple : SpatialData.load_treemap_cohorts)(
       cn_raster, eco_match_raster, treemap_db_path, eco_mapping_path, params;
       stratify_eco_mixed=loader_stratify, eco_ecocode_override=eco_loader_override)
     println("Plots: $(length(unique(splots.plt_cn))), Ecos: $(length(eco_list)), Species: $(length(species_list))")
     println(species_list)
 
     println("Remapping params to data eco/species")
-    @time mod_params, mapped_splots, eco_species_ids = Data.map_params_to_data_treemap(
+    @time mod_params, mapped_splots, eco_species_ids = SpatialData.map_params_to_data_treemap(
       params, eco_list, eff_eco_list, species_list, splots)
 
     if downsample > 1
       println("Aggregating cohorts into $(downsample)x coarse cells (combine species×age, biomass / $(downsample^2))")
-      @time communities_df, mapcode_raster = Data.aggregate_coarse_communities(
+      @time communities_df, mapcode_raster = SpatialData.aggregate_coarse_communities(
         mapped_splots, cn_raster, eco_match_raster, downsample)
       combo_to_mapcode = nothing
     else
       println("Deduplicating cohorts by (plt_cn, ecocode)")
-      @time communities_df, combo_to_mapcode = Data.deduplicate_for_export(
+      @time communities_df, combo_to_mapcode = SpatialData.deduplicate_for_export(
         mapped_splots, cn_raster, eco_raster_data)
     end
 
@@ -6174,22 +6054,22 @@ function export_landis_scenario(;
     # (The downsample+stratify case already produced coarse_eco_raster/eco_export_mapping above.)
     if stratify_eco_mixed && downsample == 1
       println("Building stratified ecoregion raster + mapping (base*10 + mixed?1:2)")
-      cn_mixed = Data.load_plot_mixed(cn_raster, treemap_db_path)
-      strat_eco_raster = Data.stratify_eco_raster(eco_raster_data, cn_raster, cn_mixed)
-      eco_export_mapping = Data.stratified_eco_mapping(eco_mapping_df)
+      cn_mixed = SpatialData.load_plot_mixed(cn_raster, treemap_db_path)
+      strat_eco_raster = SpatialData.stratify_eco_raster(eco_raster_data, cn_raster, cn_mixed)
+      eco_export_mapping = SpatialData.stratified_eco_mapping(eco_mapping_df)
     end
 
   elseif !isnothing(communities_csv) || !isnothing(communities_db)
     if !isnothing(communities_csv)
       println("Loading initial communities from CSV: $communities_csv")
-      ic_df = Data.load_csv_communities(joinpath(data_dir, communities_csv))
+      ic_df = SpatialData.load_csv_communities(joinpath(data_dir, communities_csv))
     else
       println("Loading initial communities from DuckDB: $communities_db")
-      ic_df = Data.load_duckdb_communities(communities_db)
+      ic_df = SpatialData.load_duckdb_communities(communities_db)
     end
     # prepare_general_splots maps to internal IDs; for export we use ic_df directly.
     # We still call it to get mod_params and eco_species_ids.
-    _, mod_params, eco_species_ids = Data.prepare_general_splots(
+    _, mod_params, eco_species_ids = SpatialData.prepare_general_splots(
       ic_df, eco_raster_data, eco_mapping_df, params)
     cn_raster = nothing
     combo_to_mapcode = nothing
@@ -6253,7 +6133,6 @@ function export_landis_scenario(;
     cp(realpath(eco_raster_path), joinpath(output_dir, "ecoregion.tif"); force=true)
     println("  ecoregion.tif")
   end
-  ORDER BY year, eco_id, species_id
 
   # 3. Climate config file + any data files it references
   climate_ref = nothing  # filename to embed in biomass_succession.txt
@@ -6358,10 +6237,10 @@ function plot_species_composition(;
   species_order::Vector{String}=String[],  # canonical symbol order for stable colors across plots
 )
   # 1. Reconstruct the sim's id scheme.
-  core_sp_df = Data.load_landis_core_species(joinpath(scenario_dir, "CoreSpeciesData.txt"))
+  core_sp_df = SpatialData.load_landis_core_species(joinpath(scenario_dir, "CoreSpeciesData.txt"))
   species_df = CSV.read(joinpath(scenario_dir, "SpeciesData.csv"), DataFrame)
-  spp_eco_df = Data.load_landis_spp_ecoregion(joinpath(scenario_dir, "SppEcoregionData.csv"); year=spp_eco_year)
-  params = Data.make_landis_params(core_sp_df, species_df, spp_eco_df)
+  spp_eco_df = SpatialData.load_landis_spp_ecoregion(joinpath(scenario_dir, "SppEcoregionData.csv"); year=spp_eco_year)
+  params = SpatialData.make_landis_params(core_sp_df, species_df, spp_eco_df)
   SPECIES_LIST = params.SPECIES_LIST
   ECO_LIST = params.ECO_LIST
   eco_species_ids = params.ECO_SPECIES_IDS
@@ -6375,6 +6254,7 @@ function plot_species_composition(;
   SELECT year, eco_id, species_id, SUM(biomass) AS biomass
   FROM cohorts WHERE year IN ($(join(years, ",")))
   GROUP BY year, eco_id, species_id
+  ORDER BY year, eco_id, species_id
 """
   ) |> DataFrame
   DuckDB.close(db)

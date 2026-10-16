@@ -1,6 +1,9 @@
 using ..PanCore
-export prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity, get_injection_cohorts, build_padded_sim_years, print_cycle_coverage, build_cycle_map
+export DataConfig, with_data, prepare_parametrization_data, get_site_sim_years, get_spinup_cohorts, make_spdf_dict, get_initial_cohorts, check_cohort_continuity, get_injection_cohorts, build_padded_sim_years, print_cycle_coverage, build_cycle_map
 import DuckDB
+import CSV
+import ArchGDAL
+const AG = ArchGDAL
 import Random
 import StatsBase
 using DataFrames
@@ -69,7 +72,8 @@ function assign_tiered_species!(df::DataFrame;
   max_exact::Int=12, max_group::Int=4,
   min_trees::Int=100, min_agb_frac::Float64=0.05,
   tree_stats::Union{Nothing,DataFrame}=nothing,
-  shade_tier::Union{Nothing,Dict{String,String}}=nothing)
+  shade_tier::Union{Nothing,Dict{String,String}}=nothing,
+  on_missing::Symbol=:warn)
   tierof(sp) = shade_tier === nothing ? "" : get(shade_tier, uppercase(strip(String(sp))), "NA")
   suffix(t) = isempty(t) ? "" : "_" * t
   if isnothing(tree_stats)
@@ -114,6 +118,10 @@ function assign_tiered_species!(df::DataFrame;
     end
   end
 
+  shade_tier === nothing || _note_missing(on_missing, "species absent from the shade-tier table (tier \"NA\")",
+    [sp for sp in sp_stats.species_symbol if !haskey(shade_tier, uppercase(strip(String(sp))))])
+  _note_missing(on_missing, "species without a softwood/hardwood class (treated as \"H\")",
+    [sp for (sp, sh, g) in zip(sp_stats.species_symbol, sp_stats.sftwd_hrdwd, sp_stats.spgrpcd) if ismissing(sh) && !(sp in exact_set)])
   sp_map = Dict{String,String}()
   for row in eachrow(sp_stats)
     sp = row.species_symbol; t = tierof(sp)
@@ -126,6 +134,8 @@ function assign_tiered_species!(df::DataFrame;
     end
   end
 
+  _note_missing(on_missing, "cohort species absent from the tree statistics (mapped to the \"_H\" catch-all)",
+    [s for s in unique(df.species_symbol) if !haskey(sp_map, s)])
   df.effective_species = [get(sp_map, s, "_H") for s in df.species_symbol]
 
   # Summary
@@ -171,23 +181,139 @@ Base.@kwdef struct CycleOptions
 end
 
 """
-    DataOptions(; disturbance_path="")
+    DataConfig(; cohorts_db_path, tablename, eco_field, ...)
 
-Inputs of data preparation that are not plain prep kwargs. `disturbance_path`: parquet of per-(subplot, species, visit, age) disturbance rows
-(tools/export_cohort_disturbance.py; partial AND full removals); empty = off. Built by `Pan.data_options` from a config.
+EVERYTHING data preparation reads, as one concretely typed immutable struct (built from a yaml by `Pan.data_config`, the one place; tools build
+it with keywords). `prepare_parametrization_data(dc)` is a function of this struct (+ the filesystem) only. Unknown keywords are an error.
+
+Selection: `cohorts_db_path`/`tablename` (the cohort table; `curated_trees`, `REF_SPECIES` and, for `site_class_strata`, `COND` must be in the same DB),
+`eco_field` (stratification column) / `filter_eco_field`+`filter_ecos`, `filter_plots`, `exclude_plots`, `filter_species` (effective species),
+`filter_planted`, `filter_extent` (shapefile), `filter_states`, `skip_disturbances`, `spinup`, `by_subplot`, `drop_phantom`.
+Split: `val_frac`, `test_frac`, `n_folds`, `fold_index`, `split_seed` (the split RNG is `SPLIT_RNG(split_seed)` whenever a split is active), `train_cap[_k|_min]`.
+Strata / tiering: `stratify_eco_mixed`, `single_ecoregion`, `stratify_landuse`, `site_class_strata` (+`siteclass_hi_max|scheme|l3s`), `shade_tier_csv`,
+`min_trees`, `min_agb_frac`, `max_exact`, `max_group`. `disturbance_path`: parquet of per-(subplot, species, visit, age) disturbance rows
+(tools/export_cohort_disturbance.py); empty = off.
+
+`on_missing` (:warn | :error) controls every place where preparation used to substitute a default for missing data: species absent from the shade-tier
+table (tier "NA"), cohort species absent from the tree statistics (the "_H" catch-all), species without softwood/hardwood class ("H"), plots without a
+site class ("NA"), NULL land_use ("NA"), listed filter values that match nothing. `:warn` (default, the behaviour so far) logs each case with its
+count; `:error` stops.
 """
-Base.@kwdef struct DataOptions
+Base.@kwdef struct DataConfig
+  cohorts_db_path::String
+  tablename::String = "data_eco_cohorts"
+  eco_field::String = "epa_l3"
+  filter_eco_field::String = "epa_l3"
+  filter_ecos::Vector{String} = String[]
+  filter_plots::Vector{NTuple{4,Int}} = NTuple{4,Int}[]
+  exclude_plots::Vector{NTuple{4,Int}} = NTuple{4,Int}[]
+  filter_species::Vector{String} = String[]
+  filter_planted::Bool = false
+  filter_extent::Union{Nothing,String} = nothing
+  filter_states::Vector{Int} = Int[]
+  skip_disturbances::Bool = true
+  spinup::Bool = false
+  by_subplot::Bool = false
+  drop_phantom::Bool = false
+  min_trees::Int = 100
+  min_agb_frac::Float64 = 0.05
+  val_frac::Float64 = 0.0
+  test_frac::Float64 = 0.0
+  n_folds::Int = 1
+  fold_index::Int = 1
+  split_seed::Int = 42
+  train_cap::Union{Nothing,Int,String} = nothing
+  train_cap_k::Float64 = 1.5
+  train_cap_min::Int = 20
+  stratify_eco_mixed::Bool = false
+  single_ecoregion::Bool = false
+  stratify_landuse::Bool = false
+  site_class_strata::Bool = false
+  siteclass_hi_max::Int = 4
+  siteclass_scheme::String = "2way"
+  siteclass_l3s::Vector{String} = String[]
+  shade_tier_csv::Union{Nothing,String} = nothing
+  max_exact::Int = 12
+  max_group::Int = 4
   disturbance_path::String = ""
+  on_missing::Symbol = :warn
+end
+
+"`dc` with some fields replaced (DataConfig is immutable)."
+with_data(dc::DataConfig; kw...) = DataConfig(; (k => getfield(dc, k) for k in fieldnames(DataConfig))..., kw...)
+
+# The split RNG type (== Pan.RNGType, checked in test/unit_data_layer.jl); seeded from `split_seed` alone so all folds share the shuffle.
+const SPLIT_RNG = Random.Xoshiro
+split_active(dc::DataConfig) = dc.val_frac > 0.0 || dc.n_folds > 1 || dc.test_frac > 0.0
+
+# The checks that used to be silent (or late, deep in the split code), done once up front.
+function validate_data_config(dc::DataConfig)
+  dc.on_missing in (:warn, :error) || error("DataConfig.on_missing must be :warn or :error, got :$(dc.on_missing)")
+  dc.siteclass_scheme in ("2way", "4cell") || error("siteclass_scheme must be \"2way\" or \"4cell\", got $(repr(dc.siteclass_scheme))")
+  0.0 <= dc.val_frac < 1.0 || error("val_frac must be in [0, 1), got $(dc.val_frac)")
+  0.0 <= dc.test_frac < 1.0 || error("test_frac must be in [0, 1), got $(dc.test_frac)")
+  dc.n_folds >= 1 || error("n_folds must be >= 1, got $(dc.n_folds)")
+  1 <= dc.fold_index <= dc.n_folds || error("fold_index $(dc.fold_index) is outside 1..n_folds ($(dc.n_folds))")
+  dc.test_frac > 0.0 && dc.n_folds > 1 && error("test_frac>0 (3-way train/val/test split) is incompatible with n_folds>1 (cross-validation) — pick one")
+  dc.train_cap !== nothing && dc.n_folds > 1 && error("train_cap (species-balanced training set) is not supported with n_folds>1 cross-validation")
+  dc.train_cap isa AbstractString && dc.train_cap != "auto" && error("train_cap must be an integer or \"auto\", got $(repr(dc.train_cap))")
+  dc.max_exact >= 0 && dc.max_group >= 0 || error("max_exact / max_group must be >= 0")
+  dc.min_trees >= 0 || error("min_trees must be >= 0")
+  isfile(dc.cohorts_db_path) || error("cohort database not found: $(dc.cohorts_db_path)")
+  dc.shade_tier_csv === nothing || isfile(dc.shade_tier_csv) || error("shade_tier_csv not found: $(dc.shade_tier_csv)")
+  isempty(dc.disturbance_path) || isfile(dc.disturbance_path) || error("disturbance parquet not found: $(dc.disturbance_path)")
+  dc.filter_extent === nothing || isfile(dc.filter_extent) || error("filter_extent shapefile not found: $(dc.filter_extent)")
+  dc
+end
+
+# ---- SQL helpers: values are always bound parameters; the few things that cannot be parameters (the attached file, table and
+# column names) are validated here ---------------------------------------------------------------------------------------
+const _IDENT_RE = r"^[A-Za-z_][A-Za-z0-9_]*$"
+function _ident(s::AbstractString, what::AbstractString)::String
+  occursin(_IDENT_RE, s) || error("$what: $(repr(s)) is not a valid SQL identifier (letters, digits, underscore; not starting with a digit)")
+  String(s)
+end
+# ATTACH takes a string literal, not a parameter: escape it (and refuse control characters).
+_sql_literal_path(p::AbstractString)::String = PanCore.sql_quote_path(p)
+_params_placeholders(n::Int) = join(fill("?", n), ",")
+# Names of the tables of the attached database `src` (lower-cased -> stored name).
+function _src_tables(con)::Dict{String,String}
+  df = DataFrame(DuckDB.execute(con, "SELECT table_name FROM information_schema.tables WHERE table_catalog = 'src' ORDER BY table_name"))
+  Dict(lowercase(String(t)) => String(t) for t in df.table_name)
+end
+function _require_table(con, name::AbstractString, what::AbstractString)::String
+  nm = _ident(name, what)
+  tabs = _src_tables(con)
+  haskey(tabs, lowercase(nm)) || error("$what: table '$nm' not found in the cohort database (tables: $(join(sort(collect(values(tabs)))[1:min(end, 25)], ", ")))")
+  tabs[lowercase(nm)]
+end
+function _table_columns(con, table::AbstractString)::Dict{String,String}
+  df = DataFrame(DuckDB.execute(con, "SELECT column_name FROM information_schema.columns WHERE table_catalog = 'src' AND table_name = ? ORDER BY ordinal_position", [table]))
+  Dict(lowercase(String(c)) => String(c) for c in df.column_name)
+end
+function _require_column(cols::Dict{String,String}, name::AbstractString, table::AbstractString, what::AbstractString)::String
+  nm = _ident(name, what)
+  haskey(cols, lowercase(nm)) || error("$what: column '$nm' not found in table '$table' (columns: $(join(sort(collect(values(cols))), ", ")))")
+  cols[lowercase(nm)]
+end
+
+# on_missing policy: log (or stop on) a substituted default. `what` names the substitution, `items` the affected keys.
+function _note_missing(dc_policy::Symbol, what::AbstractString, items)
+  isempty(items) && return
+  shown = join(first(sort!(string.(collect(items))), 8), ", ")
+  msg = "data preparation: $(length(items)) $(what) [$(shown)$(length(items) > 8 ? ", …" : "")]"
+  dc_policy === :error && error(msg * " (on_missing: error)")
+  @warn msg
 end
 
 # ---- disturbance shock data (tools/export_cohort_disturbance.py) ---------------------------------------------
 # Parquet of per-(subplot, species, visit T, age) disturbance rows (partial AND full removals). Empty path = off.
-# Path comes from `DataOptions.disturbance_path` (config `disturbance_full_removals`); only used with the new scoring order (loss_before_injection).
+# Path comes from `DataConfig.disturbance_path` (config `disturbance_full_removals`); only used with the new scoring order (loss_before_injection).
 const _K0_W_TO_AGB = 1.0 / 4046.86     # tree_trajectories w = drybio_g*tpa  →  curated cohort `agb` (g/m²): agb = w / 4046.86
 
 function _load_disturbance_rows(path::AbstractString)::DataFrame
   con = DuckDB.connect(DuckDB.DB())
-  DuckDB.execute(con, "SELECT statecd, unitcd, countycd, plot, subp, species_symbol, CAST(measdate AS DATE) AS measdate, age_calc, disturbance_drop_pct, would_be, full_removal FROM read_parquet('$(path)')") |> DataFrame
+  DuckDB.execute(con, "SELECT statecd, unitcd, countycd, plot, subp, species_symbol, CAST(measdate AS DATE) AS measdate, age_calc, disturbance_drop_pct, would_be, full_removal FROM read_parquet(?)", [String(path)]) |> DataFrame
 end
 
 # Plot-level full removals + plot-level partial-drop update, for ONE split's aggregated `sp` (same plot_id / sim_year /
@@ -348,32 +474,26 @@ function with_mixed_plot(df::DataFrame; threshold::Float64=0.7)
   return leftjoin(df, m, on=ks)
 end
 
-function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector{String}=String[],
-  by_subplot::Bool=false,
-  val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0,
-  min_trees::Int=100, min_agb_frac::Float64=0.05,
-  stratify_eco_mixed::Bool=false,
-  single_ecoregion::Bool=false, stratify_landuse::Bool=false,
-  tree_stats::Union{Nothing,DataFrame}=nothing, shade_tier::Union{Nothing,Dict{String,String}}=nothing,
-  max_exact::Int=12, max_group::Int=4,
-  train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20,
-  data_opts::DataOptions=DataOptions())
-  # eco_field can be any column of the loaded cohorts (epa_l4/epa_l3/ecosubcd, or a curated
-  # stratifier like land_use). Falls back to ecosubcd only for the legacy unspecified case.
-  eco_field = if eco in ("epa_l4", "epa_l3", "ecosubcd", "land_use")
-    Symbol(eco)
-  elseif hasproperty(df, Symbol(eco))
-    Symbol(eco)
-  else
-    :ecosubcd
-  end
-  hasproperty(df, eco_field) || error("make_splots: eco_field :$eco_field is not a column of the cohorts table")
+function make_splots(df::DataFrame, dc::DataConfig; split_rng::Union{Nothing,Random.AbstractRNG}=nothing,
+  tree_stats::Union{Nothing,DataFrame}=nothing, shade_tier::Union{Nothing,Dict{String,String}}=nothing)
+  eco = dc.eco_field; filter_species = dc.filter_species; by_subplot = dc.by_subplot
+  val_frac = dc.val_frac; n_folds = dc.n_folds; fold_index = dc.fold_index; test_frac = dc.test_frac
+  min_trees = dc.min_trees; min_agb_frac = dc.min_agb_frac
+  stratify_eco_mixed = dc.stratify_eco_mixed; single_ecoregion = dc.single_ecoregion; stratify_landuse = dc.stratify_landuse
+  max_exact = dc.max_exact; max_group = dc.max_group
+  train_cap = dc.train_cap; train_cap_k = dc.train_cap_k; train_cap_min = dc.train_cap_min
+  # eco_field can be any column of the loaded cohorts (epa_l4/epa_l3/ecosubcd, or a curated stratifier like land_use).
+  # (Step 6: it used to fall back silently to :ecosubcd when the column was absent; now an error.)
+  hasproperty(df, Symbol(eco)) || error("make_splots: eco_field '$eco' is not a column of the cohorts table (columns: $(join(names(df), ", ")))")
+  eco_field = Symbol(eco)
 
-  assign_tiered_species!(df; max_exact=max_exact, max_group=max_group, min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats, shade_tier=shade_tier)
+  assign_tiered_species!(df; max_exact=max_exact, max_group=max_group, min_trees=min_trees, min_agb_frac=min_agb_frac, tree_stats=tree_stats, shade_tier=shade_tier, on_missing=dc.on_missing)
   species_map = sort!(unique(select(df, [:species_symbol, :effective_species])), :species_symbol)
   if !isempty(filter_species)
     fs = Set(filter_species)
+    _note_missing(dc.on_missing, "filter_species entries matching no effective species", setdiff(fs, Set(df.effective_species)))
     filter!(row -> row.effective_species in fs, df)
+    nrow(df) > 0 || error("make_splots: filter_species $(sort(collect(fs))) selects no cohort rows (effective species present: $(join(sort(unique(species_map.effective_species)), ", ")))")
   end
 
   # Optionally stratify the ecoregion by stand mixedness: :eco is the base ecoregion,
@@ -385,6 +505,8 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   df.eco = single_ecoregion ? fill("ALL", nrow(df)) : string.(getproperty(df, eco_field))
   if stratify_landuse && eco_field != :land_use
     hasproperty(df, :land_use) || error("stratify_landuse=true but the cohorts table has no :land_use column")
+    n_lu_null = count(ismissing, df.land_use)
+    n_lu_null > 0 && _note_missing(dc.on_missing, "cohort rows with NULL land_use (stratum \"NA\")", ["$n_lu_null rows"])
     df.eco = df.eco .* "|lu=" .* string.(coalesce.(df.land_use, "NA"))
   end
   df.eco_mixed = stratify_eco_mixed ?
@@ -413,7 +535,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
   df.age_calc = df.age_calc .|> UIntType
   # Per-cohort partial-disturbance biomass-drop fraction (from curation; 0 where absent/un-attached).
   # The override-sync scales matched cohorts by (1-drop) at the disturbance year.
-  shock_rows = isempty(data_opts.disturbance_path) ? nothing : _load_disturbance_rows(data_opts.disturbance_path)
+  shock_rows = isempty(dc.disturbance_path) ? nothing : _load_disturbance_rows(dc.disturbance_path)
   if hasproperty(df, :disturbance_drop_pct)
     df.disturbance_drop_pct = Float32.(coalesce.(df.disturbance_drop_pct, 0.0))
   elseif shock_rows !== nothing
@@ -425,7 +547,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
     end
     df.disturbance_drop_pct = Float32[get(pd, (Int(a), Int(b), Int(c), Int(d), Int(e), String(f), Dates.Date(g), Int(h)), 0f0)
       for (a, b, c, d, e, f, g, h) in zip(df.statecd, df.unitcd, df.countycd, df.plot, df.subp, df.species_symbol, df.measdate, df.age_calc)]
-    println("disturbance_drop_pct attached from $(basename(data_opts.disturbance_path)): $(sum(df.disturbance_drop_pct .> 0)) / $(nrow(df)) cohort rows > 0")
+    println("disturbance_drop_pct attached from $(basename(dc.disturbance_path)): $(sum(df.disturbance_drop_pct .> 0)) / $(nrow(df)) cohort rows > 0")
   else
     df.disturbance_drop_pct = zeros(Float32, nrow(df))
   end
@@ -447,7 +569,8 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
 
   # Split right here — after mapping, before aggregation — so each half gets its
   # own contiguous plot_ids and is fully self-contained.
-  do_split = (val_frac > 0.0 || n_folds > 1 || test_frac > 0.0) && !isnothing(split_rng)
+  do_split = split_active(dc)
+  do_split && isnothing(split_rng) && error("make_splots: a split is requested (val_frac/test_frac/n_folds) but no split RNG was given")   # used to skip the split silently
   train_cap !== nothing && !do_split &&
     @warn "train_cap=$(train_cap) is IGNORED: no train/val/test split is active (set val_frac/test_frac)"
   df_train, df_val_raw, df_test_raw, split_dom = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
@@ -476,6 +599,7 @@ function make_splots(df::DataFrame; eco::String="epa_l4", filter_species::Vector
     sp
   end
 
+  nrow(df_train) > 0 || error("make_splots: the training split is empty ($(nrow(df)) cohort rows before the split; val_frac=$val_frac, test_frac=$test_frac, n_folds=$n_folds)")
   splots_train = _agg(df_train)
   splots_val = isnothing(df_val_raw) ? nothing : _agg(df_val_raw)
   splots_test = isnothing(df_test_raw) ? nothing : _agg(df_test_raw)
@@ -711,6 +835,7 @@ end
 # untouched — this only restricts WHICH plots are used for calibration.
 function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::String; plot_table::String="PLOT")
   isfile(shapefile_path) || error("filter_extent shapefile not found: $shapefile_path")
+  plot_table = _require_table(con, plot_table, "filter_extent")
   plot_keys = [:statecd, :unitcd, :countycd, :plot]
   plots = unique(select(cohorts_df, plot_keys))
   DuckDB.register_data_frame(con, plots, "extent_plots")
@@ -780,89 +905,119 @@ function filter_cohorts_by_extent(con, cohorts_df::DataFrame, shapefile_path::St
   return cohorts_df[keep, :]
 end
 
-function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_field::String, eco_field::String, tablename::String, output_dir::String, skip_disturbances=true, spinup=false, by_subplot::Bool=false, val_frac::Float64=0.0, split_rng::Union{Nothing,Random.AbstractRNG}=nothing, n_folds::Int=1, fold_index::Int=1, test_frac::Float64=0.0, min_trees::Int=100, min_agb_frac::Float64=0.05, stratify_eco_mixed::Bool=false, single_ecoregion::Bool=false, stratify_landuse::Bool=false, site_class_strata::Bool=false, siteclass_hi_max::Int=4, siteclass_scheme::String="2way", shade_tier_csv::Union{Nothing,String}=nothing, filter_extent::Union{Nothing,String}=nothing, filter_ecos::Vector{String}=String[], filter_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], exclude_plots::Vector{NTuple{4,Int}}=NTuple{4,Int}[], filter_species::Vector{String}=String[], filter_planted::Bool=false, filter_states::Vector{Int}=Int[], siteclass_l3s::Vector{String}=String[], max_exact::Int=12, max_group::Int=4, drop_phantom::Bool=false, train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20, RNG::Union{Nothing,Random.AbstractRNG}, data_opts::DataOptions=DataOptions())
-  println("Connecting to: $(cohorts_db_path) ")
+"""
+    prepare_parametrization_data(dc::DataConfig; split_rng=nothing) -> (splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs)
+
+Load the cohorts selected by `dc`, tier the species, split train / val / test and aggregate. `split_rng` defaults to `SPLIT_RNG(split_seed)` when a split is
+active (val_frac, test_frac or n_folds > 1), so all folds share the shuffle. Every SQL value is a bound parameter; the table and column names that come from
+the config are validated against the database. Selections that come out empty are errors.
+"""
+function prepare_parametrization_data(dc::DataConfig; split_rng::Union{Nothing,Random.AbstractRNG}=nothing)
+  validate_data_config(dc)
+  if split_active(dc) && split_rng === nothing
+    split_rng = SPLIT_RNG(UInt64(dc.split_seed))
+  end
+  println("Connecting to: $(dc.cohorts_db_path) ")
   # In-memory main DB + ATTACH the file READ-ONLY: a killed run can never corrupt the file (a mid-write
   # checkpoint was the corruption cause), yet df registrations (loaded_subplots) still land in the writable
   # in-memory catalog. DB tables are qualified `src.…`; registered views stay unqualified. No CREATE INDEX
   # on a read-only DB — DuckDB's columnar scans are fast enough for the one-shot load.
   con = DuckDB.connect(DuckDB.DB())
-  DuckDB.execute(con, "ATTACH '$(cohorts_db_path)' AS src (READ_ONLY);")
-  sql = "SELECT * FROM src.$(tablename) WHERE true"
-  if length(filter_ecos) > 0
-    sql *= " AND $(filter_eco_field) in ('$(join(filter_ecos,"','"))')"
+  DuckDB.execute(con, "ATTACH '$(_sql_literal_path(dc.cohorts_db_path))' AS src (READ_ONLY);")
+  tbl = _require_table(con, dc.tablename, "tablename")
+  cols = _table_columns(con, tbl)
+  conds = String[]; params = Any[]
+  if length(dc.filter_ecos) > 0
+    fcol = _require_column(cols, dc.filter_eco_field, tbl, "filter_eco_field")
+    push!(conds, "\"$(fcol)\" IN ($(_params_placeholders(length(dc.filter_ecos))))"); append!(params, dc.filter_ecos)
   end
-  if drop_phantom   # synthetic pre-debut cohorts (FIA_DATA_PREP phantom backfill) are not measurements
-    sql *= " AND coalesce(intro_type, '') <> 'phantom_backfill'"
+  if dc.drop_phantom   # synthetic pre-debut cohorts (FIA_DATA_PREP phantom backfill) are not measurements
+    _require_column(cols, "intro_type", tbl, "drop_phantom")
+    push!(conds, "coalesce(intro_type, '') <> 'phantom_backfill'")
   end
-  if length(filter_states) > 0   # region = state ∩ eco (e.g. EPA Region 4 FIPS); empty ⇒ no state filter
-    sql *= " AND statecd IN ($(join(filter_states, ",")))"
+  if length(dc.filter_states) > 0   # region = state ∩ eco (e.g. EPA Region 4 FIPS); empty ⇒ no state filter
+    push!(conds, "statecd IN ($(_params_placeholders(length(dc.filter_states))))"); append!(params, dc.filter_states)
   end
-  if skip_disturbances
-    sql *= " AND subp_has_dstrb= false"
+  if dc.skip_disturbances
+    _require_column(cols, "subp_has_dstrb", tbl, "skip_disturbances")
+    push!(conds, "subp_has_dstrb = false")
   end
-  if !spinup
-    if by_subplot
-      sql *= " AND subp_meas_num > 1 "
-    else
-      sql *= " AND plot_meas_num > 1 "
-    end
+  if !dc.spinup
+    mcol = dc.by_subplot ? "subp_meas_num" : "plot_meas_num"
+    _require_column(cols, mcol, tbl, "spinup: false")
+    push!(conds, "$(mcol) > 1")
   end
-  if length(filter_plots) > 0
-    tuples_str = join(["($(s),$(u),$(c),$(p))" for (s, u, c, p) in filter_plots], ",")
-    sql *= " AND (statecd, unitcd, countycd, plot) IN ($(tuples_str))"
+  plot_tuples(v) = DataFrame(statecd=[t[1] for t in v], unitcd=[t[2] for t in v], countycd=[t[3] for t in v], plot=[t[4] for t in v])
+  if length(dc.filter_plots) > 0
+    DuckDB.register_data_frame(con, plot_tuples(dc.filter_plots), "sel_plots")
+    push!(conds, "(statecd, unitcd, countycd, plot) IN (SELECT statecd, unitcd, countycd, plot FROM sel_plots)")
   end
-  if length(exclude_plots) > 0
-    tuples_str = join(["($(s),$(u),$(c),$(p))" for (s, u, c, p) in exclude_plots], ",")
-    sql *= " AND (statecd, unitcd, countycd, plot) NOT IN ($(tuples_str))"
+  if length(dc.exclude_plots) > 0
+    DuckDB.register_data_frame(con, plot_tuples(dc.exclude_plots), "excl_plots")
+    push!(conds, "(statecd, unitcd, countycd, plot) NOT IN (SELECT statecd, unitcd, countycd, plot FROM excl_plots)")
   end
-  if filter_planted
-    sql *= " AND (statecd, unitcd, countycd, plot, subp) IN (SELECT statecd, unitcd, countycd, plot, subp FROM src.$(tablename) WHERE intro_type = 'planted')"
+  if dc.filter_planted
+    _require_column(cols, "intro_type", tbl, "filter_planted")
+    push!(conds, "(statecd, unitcd, countycd, plot, subp) IN (SELECT statecd, unitcd, countycd, plot, subp FROM src.$(tbl) WHERE intro_type = 'planted')")
   end
-  sql *= " ORDER BY ALL"   # total, deterministic row order (all columns) — a parallel scan is otherwise unordered, making the downstream aggregation/split non-reproducible even with a fixed seed
-  println(sql)
-  cohorts_df = DuckDB.execute(con, sql) |> DataFrame
+  sql = "SELECT * FROM src.$(tbl) WHERE true" * join(" AND " .* conds) * " ORDER BY ALL"   # total, deterministic row order (all columns) — a parallel scan is otherwise unordered, making the downstream aggregation/split non-reproducible even with a fixed seed
+  println(sql, isempty(params) ? "" : "   -- params: $(length(params))")
+  cohorts_df = DataFrame(DuckDB.execute(con, sql, params))
   println("$(nrow(cohorts_df)) cohort rows loaded.")
+  nrow(cohorts_df) > 0 || error("prepare_parametrization_data: the cohort selection is empty (table $(tbl); filter_ecos=$(dc.filter_ecos) on $(dc.filter_eco_field), filter_states=$(dc.filter_states), " *
+    "$(length(dc.filter_plots)) filter_plots, $(length(dc.exclude_plots)) exclude_plots, skip_disturbances=$(dc.skip_disturbances), spinup=$(dc.spinup), drop_phantom=$(dc.drop_phantom), filter_planted=$(dc.filter_planted))")
+  if length(dc.filter_ecos) > 0
+    fcol = _require_column(cols, dc.filter_eco_field, tbl, "filter_eco_field")
+    _note_missing(dc.on_missing, "filter_ecos values matching no cohort row", setdiff(Set(dc.filter_ecos), Set(string.(skipmissing(cohorts_df[!, Symbol(fcol)])))))
+  end
+  if length(dc.filter_plots) > 0
+    have = Set(zip(cohorts_df.statecd, cohorts_df.unitcd, cohorts_df.countycd, cohorts_df.plot))
+    _note_missing(dc.on_missing, "filter_plots entries matching no cohort row", [t for t in dc.filter_plots if !(t in have)])
+  end
 
   # Site-productivity stratification: replace the `land_use` column with a per-plot site-tier derived from
   # COND.SITECLCD (dominant forested condition, max CONDPROP_UNADJ), binned hi = SITECLCD ≤ siteclass_hi_max,
   # lo = above. FIADB stays read-only (computed here, not stored). `stratify_landuse` then appends |lu=<tier>,
   # so the ecoregion becomes epa_l3 × {hi,lo}. Order-preserving Dict map ⇒ deterministic.
-  if site_class_strata
+  if dc.site_class_strata
+    cond_tbl = _require_table(con, "COND", "site_class_strata")
     # 2way: hi = SITECLCD ≤ siteclass_hi_max, lo = above.  4cell: A=1-3, B=4, C=5, D=6-7 (per-species tiering).
-    bin_expr = siteclass_scheme == "4cell" ?
-      "CASE WHEN sc<=3 THEN 'A' WHEN sc=4 THEN 'B' WHEN sc=5 THEN 'C' ELSE 'D' END" :
-      "CASE WHEN sc <= $(siteclass_hi_max) THEN 'hi' ELSE 'lo' END"
+    bin_expr, bin_params = dc.siteclass_scheme == "4cell" ?
+      ("CASE WHEN sc<=3 THEN 'A' WHEN sc=4 THEN 'B' WHEN sc=5 THEN 'C' ELSE 'D' END", Any[]) :
+      ("CASE WHEN sc <= ? THEN 'hi' ELSE 'lo' END", Any[dc.siteclass_hi_max])
     sc = DuckDB.execute(con, """
       WITH cr AS (SELECT co.STATECD s, co.UNITCD u, co.COUNTYCD c, co.PLOT p, co.SITECLCD sc, SUM(co.CONDPROP_UNADJ) w
-                  FROM src.COND co WHERE co.COND_STATUS_CD = 1 AND co.SITECLCD IS NOT NULL GROUP BY ALL),
+                  FROM src.$(cond_tbl) co WHERE co.COND_STATUS_CD = 1 AND co.SITECLCD IS NOT NULL GROUP BY ALL),
       rk AS (SELECT s, u, c, p, sc, ROW_NUMBER() OVER (PARTITION BY s, u, c, p ORDER BY w DESC, sc) rn FROM cr)
       SELECT s AS statecd, u AS unitcd, c AS countycd, p AS plot,
              $(bin_expr) AS site_class
       FROM rk WHERE rn = 1
-    """) |> DataFrame
+    """, bin_params) |> DataFrame
     scmap = Dict((r.statecd, r.unitcd, r.countycd, r.plot) => String(r.site_class) for r in eachrow(sc))
+    plot_keys = unique(zip(cohorts_df.statecd, cohorts_df.unitcd, cohorts_df.countycd, cohorts_df.plot))
+    _note_missing(dc.on_missing, "plots without a site class in COND (land_use \"NA\")", [t for t in plot_keys if !haskey(scmap, t)])
     cohorts_df.land_use = [get(scmap, (r.statecd, r.unitcd, r.countycd, r.plot), "NA") for r in eachrow(cohorts_df)]
-    if !isempty(siteclass_l3s)   # site cells only in the listed ecos; every other eco collapses to ONE cell "X"
-      keep_sc = Set(siteclass_l3s); ecol = Symbol(eco_field)
+    if !isempty(dc.siteclass_l3s)   # site cells only in the listed ecos; every other eco collapses to ONE cell "X"
+      keep_sc = Set(dc.siteclass_l3s); ecol = Symbol(dc.eco_field)
+      hasproperty(cohorts_df, ecol) || error("siteclass_l3s: eco_field '$(dc.eco_field)' is not a column of $(tbl)")
       cohorts_df.land_use = [string(e) in keep_sc ? lu : "X" for (e, lu) in zip(cohorts_df[!, ecol], cohorts_df.land_use)]
     end
     nplt(v) = length(unique(zip(cohorts_df.statecd[cohorts_df.land_use.==v], cohorts_df.unitcd[cohorts_df.land_use.==v], cohorts_df.countycd[cohorts_df.land_use.==v], cohorts_df.plot[cohorts_df.land_use.==v])))
-    scheme_desc = siteclass_scheme == "4cell" ? "4cell A=1-3,B=4,C=5,D=6-7" : "2way hi≤$(siteclass_hi_max),lo=above"
+    scheme_desc = dc.siteclass_scheme == "4cell" ? "4cell A=1-3,B=4,C=5,D=6-7" : "2way hi≤$(dc.siteclass_hi_max),lo=above"
     println("site_class_strata: land_use ← site-tier ($(scheme_desc)); plots: " *
             join(["$v=$(nplt(v))" for v in sort(unique(cohorts_df.land_use))], ", "))
   end
 
   # Restrict to plots whose location falls inside the supplied shapefile (eco_field still
   # decides each plot's ecoregion). Applied before any other per-plot processing.
-  if !isnothing(filter_extent)
-    cohorts_df = filter_cohorts_by_extent(con, cohorts_df, filter_extent)
-    println("After filter_extent ($(basename(filter_extent))): $(nrow(cohorts_df)) rows, $(length(unique(zip(cohorts_df.statecd,cohorts_df.unitcd,cohorts_df.countycd,cohorts_df.plot)))) plots")
-    isempty(cohorts_df) && error("filter_extent kept 0 plots — compare the 'plot coords' and 'polygon bbox' ranges printed above. If they don't overlap it's a CRS/axis issue: try pre-reprojecting the shapefile with `ogr2ogr -t_srs EPSG:4326 out.shp $(filter_extent)`.")
+  if !isnothing(dc.filter_extent)
+    cohorts_df = filter_cohorts_by_extent(con, cohorts_df, dc.filter_extent)
+    println("After filter_extent ($(basename(dc.filter_extent))): $(nrow(cohorts_df)) rows, $(length(unique(zip(cohorts_df.statecd,cohorts_df.unitcd,cohorts_df.countycd,cohorts_df.plot)))) plots")
+    isempty(cohorts_df) && error("filter_extent kept 0 plots — compare the 'plot coords' and 'polygon bbox' ranges printed above. If they don't overlap it's a CRS/axis issue: try pre-reprojecting the shapefile with `ogr2ogr -t_srs EPSG:4326 out.shp $(dc.filter_extent)`.")
   end
 
   # Tag each plot mixed/pure over its entire loaded history (used to stratify ecoregions).
-  if stratify_eco_mixed
+  if dc.stratify_eco_mixed
     cohorts_df = with_mixed_plot(cohorts_df)
     println("Plots tagged mixed_plot: $(sum(unique(select(cohorts_df, [:statecd,:unitcd,:countycd,:plot,:mixed_plot])).mixed_plot)) mixed of $(length(unique(zip(cohorts_df.statecd,cohorts_df.unitcd,cohorts_df.countycd,cohorts_df.plot))))")
   end
@@ -872,6 +1027,8 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   # take max(DRYBIO_AG) — a tree measured multiple times counts once, biomass is its max, not
   # a sum over visits — then per (species, spgrpcd, sftwd_hrdwd): COUNT distinct trees and SUM
   # the per-tree maxes. spgrpcd/sftwd_hrdwd are carried so assign_tiered_species! can group on them.
+  trees_tbl = _require_table(con, "curated_trees", "species tiering (tree statistics)")
+  ref_tbl = _require_table(con, "REF_SPECIES", "species tiering (tree statistics)")
   subplots_df = unique(select(cohorts_df, [:statecd, :unitcd, :countycd, :plot, :subp]))
   DuckDB.register_data_frame(con, subplots_df, "loaded_subplots")
   tree_stats = DuckDB.execute(con, """
@@ -880,7 +1037,7 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
              max(t.SPCD)      AS spcd,
              max(t.SPGRPCD)   AS spgrpcd,
              max(t.DRYBIO_AG) AS drybio_max
-      FROM src.curated_trees t
+      FROM src.$(trees_tbl) t
       JOIN loaded_subplots ls
         ON ls.statecd = t.STATECD AND ls.unitcd = t.UNITCD AND ls.countycd = t.COUNTYCD
        AND ls.plot = t.PLOT AND ls.subp = t.SUBP
@@ -893,26 +1050,26 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
            COUNT(*)::BIGINT  AS n_trees,
            SUM(tm.drybio_max)::DOUBLE AS sp_biomass
     FROM tree_max tm
-    JOIN src.REF_SPECIES r ON r.SPCD = tm.spcd
+    JOIN src.$(ref_tbl) r ON r.SPCD = tm.spcd
     GROUP BY r.SPECIES_SYMBOL, tm.spgrpcd, r.SFTWD_HRDWD
     ORDER BY ALL
   """) |> DataFrame
   println("Tree stats: $(nrow(tree_stats)) (species,spgrpcd,sftwd) rows from curated_trees over $(nrow(subplots_df)) subplots.")
+  nrow(tree_stats) > 0 || error("prepare_parametrization_data: no live trees in $(trees_tbl) for the $(nrow(subplots_df)) loaded subplots — the species tiering has no statistics")
 
   # optional shade-tolerance tier (species → LST[1-3]/HST[4-5]) to split the species grouping key
   shade_tier = nothing
-  if shade_tier_csv !== nothing
-    st = DuckDB.execute(con, "SELECT UPPER(TRIM(sym)) sym, shade_class FROM read_csv_auto('$(shade_tier_csv)')") |> DataFrame
-    shade_tier = Dict(String(r.sym) => (Int(r.shade_class) <= 3 ? "LST" : "HST") for r in eachrow(st))
-    println("shade_tier: $(length(shade_tier)) species → LST/HST from $(basename(shade_tier_csv))")
+  if dc.shade_tier_csv !== nothing
+    st = CSV.read(dc.shade_tier_csv, DataFrame)
+    for c in ("sym", "shade_class")
+      c in names(st) || error("shade_tier_csv $(dc.shade_tier_csv): column '$c' not found (columns: $(join(names(st), ", ")))")
+    end
+    shade_tier = Dict(uppercase(strip(String(r.sym))) => (Int(r.shade_class) <= 3 ? "LST" : "HST") for r in eachrow(st))
+    println("shade_tier: $(length(shade_tier)) species → LST/HST from $(basename(dc.shade_tier_csv))")
   end
 
   @time splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs =
-    make_splots(cohorts_df, eco=eco_field, filter_species=filter_species,
-      by_subplot=by_subplot, val_frac=val_frac, split_rng=split_rng, n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
-      min_trees=min_trees, min_agb_frac=min_agb_frac,
-      stratify_eco_mixed=stratify_eco_mixed, single_ecoregion=single_ecoregion, stratify_landuse=stratify_landuse, tree_stats=tree_stats, shade_tier=shade_tier,
-      max_exact=max_exact, max_group=max_group, train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min, data_opts=data_opts)
+    make_splots(cohorts_df, dc; split_rng=split_rng, tree_stats=tree_stats, shade_tier=shade_tier)
   mark_estab_year!(splots)
   isnothing(splots_val) || mark_estab_year!(splots_val)
   isnothing(splots_test) || mark_estab_year!(splots_test)
@@ -921,4 +1078,12 @@ function prepare_parametrization_data(; cohorts_db_path::String, filter_eco_fiel
   println("Cohort continuity violations: $n_viol")
 
   return splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs
+end
+
+# Keyword form (analysis tools): `prepare_parametrization_data(; cohorts_db_path=..., ...)` = `DataConfig(; ...)` + `split_rng`.
+# Unknown keywords are an error; a requested split without `split_rng` uses RNGType(split_seed).
+function prepare_parametrization_data(; split_rng::Union{Nothing,Random.AbstractRNG}=nothing, output_dir=nothing, RNG=nothing, eco_field=nothing, kw...)
+  # `output_dir` / `RNG` were accepted and ignored by the old signature; `eco_field` may be a Symbol there.
+  ef = eco_field === nothing ? () : (:eco_field => String(eco_field),)
+  prepare_parametrization_data(DataConfig(; ef..., kw...); split_rng=split_rng)
 end

@@ -329,7 +329,7 @@ end
 
 # ---------------------------------------------------------------------------
 # Export initial communities TIF using combo_to_mapcode lookup built by
-# Data.deduplicate_for_export: key = (plt_cn::String, ecocode::Int64).
+# SpatialData.deduplicate_for_export: key = (plt_cn::String, ecocode::Int64).
 # Every raster pixel sharing the same (plt_cn, ecocode) gets the same mapcode.
 # ---------------------------------------------------------------------------
 

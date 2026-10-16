@@ -131,7 +131,7 @@ training set lowered the binding PIEL AB B_MAX floor 28,830 → 23,175 and ANPP 
 
 Analysis scripts (`test/scatter_sim_obs*.jl`, `test/tost_sim_obs.jl`, `test/smape_agebin.jl`, `test/sweep_archive_tost.jl`,
 `tools/scatter_archive.jl`, `tools/check_rankw.jl`) now call `Pan.prepare_from_cfg(cfg)`, which derives the data-prep
-kwargs exactly as training does (`Pan.prep_kwargs_from_cfg`). Behaviour changes: their `filter_eco_field` default is now
+kwargs exactly as training does (`Pan.data_config`). Behaviour changes: their `filter_eco_field` default is now
 `epa_l3` (training default); `tools/scatter_archive.jl` follows the config's split (it used to force no split).
 
 Configs: `configs/region4/r4_smoke_2l3.yml` (plumbing), `configs/region4/r4_igelmo_full.yml` (production, 14 L3),
