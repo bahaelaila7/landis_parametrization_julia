@@ -86,4 +86,9 @@ end
   @test length(st.archive) == 3
   @test isconcretetype(typeof(on)) && all(isconcretetype, fieldtypes(typeof(on)))   # the maps are type parameters, not Ref{Any}
 end
+# Step 5a (B26): validation scoring is concurrent in candidate mode ⇒ val evaluations run their sites serially there, for every driver.
+@testset "val_sites_parallel (no nested threads in candidate mode)" begin
+  @test Pan.val_sites_parallel(Pan.ExecOptions(parallel_mode=:soa))
+  @test !Pan.val_sites_parallel(Pan.ExecOptions(parallel_mode=:candidate))
+end
 end # module

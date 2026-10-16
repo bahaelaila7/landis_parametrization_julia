@@ -202,14 +202,22 @@ function val_eval(env::MOEnv, x)
 end
 
 """
+    val_sites_parallel(exec) -> Bool
+
+Whether a validation evaluation may thread over sites. Validation scoring of archive members is concurrent in candidate mode (`mo_gen_finalize!`
+runs `val_fit` of several members at once), so there each evaluation runs its sites serially: `soa.parallel` must be false inside a
+candidate-parallel batch, else the site loops nest `@threads` regions inside the candidate-level ones.
+"""
+val_sites_parallel(exec::ExecOptions) = !candidate_parallel(exec)
+
+"""
     mo_val!(env; dual=true, tier=3, seeds=:fixed) -> env
 
 Build the validation side of `env` (scales, Sim B, work buffers, `val_fit`). Called at the point of the driver's choosing because building the
 val Sim B draws from the run rng (see `val_dual_early`). `dual`: the val objective includes Sim B in dual runs (as train does); `tier`: the tier the
-val split is scored at (a higher tier needs the val split's own tier-4 tables); `seeds`: `:fixed` (common random numbers) or the legacy `:rng`;
-`serial_val`: run the val sites serially when candidates are evaluated concurrently (val scoring of archive members is then concurrent).
+val split is scored at (a higher tier needs the val split's own tier-4 tables); `seeds`: `:fixed` (common random numbers) or the legacy `:rng`.
 """
-function mo_val!(env::MOEnv; dual::Bool=true, tier::Int=3, seeds::Symbol=:fixed, serial_val::Bool=true)
+function mo_val!(env::MOEnv; dual::Bool=true, tier::Int=3, seeds::Symbol=:fixed)
   env.have_val || return env
   env.val_tier = tier; env.val_seeds = seeds
   if tier == 4 || tier == 5   # tier 4/5 need per-cycle bins built from the validation split
@@ -224,7 +232,7 @@ function mo_val!(env::MOEnv; dual::Bool=true, tier::Int=3, seeds::Symbol=:fixed,
     env.val_dual_b = nothing
   end
   cand = candidate_parallel(env.exec)
-  env.val_sites_parallel = !(cand && serial_val)   # serial_val=false: legacy (val sites stay threaded even when val is scored concurrently)
+  env.val_sites_parallel = val_sites_parallel(env.exec)
   env.val_work = deepcopy(env.val_ref_soa)
   env.val_work_t = cand ? [deepcopy(env.val_ref_soa) for _ in 1:Threads.maxthreadid()] : nothing   # per-thread buffers: val_fit runs concurrently across archive members
   env.val_fit = x -> val_eval(env, x)

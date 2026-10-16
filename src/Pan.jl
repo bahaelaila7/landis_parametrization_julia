@@ -3631,7 +3631,7 @@ function parametrize_MOCMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::P
     load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
   end
   n_species = env.n_species; max_sim_year = env.max_sim_year
-  mo_val!(env; serial_val=false)
+  mo_val!(env)
 
   if exec.cv_reselect   # skip the search; just re-score the 10 reselection positions (5 per archive) on the (frozen-norm) val set
     env.have_val || (@warn "ExecOptions.cv_reselect set but no val split — nothing to do"; return)
@@ -4066,7 +4066,7 @@ function parametrize_CCIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     return search_state
   end
 
-  mo_val!(env; dual=false, serial_val=false)   # legacy: the val objective of this driver is Sim A only; val sites stay threaded
+  mo_val!(env; dual=false)   # legacy: the val objective of this driver is Sim A only
   loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
   gio = loop.gio
 
@@ -4230,7 +4230,7 @@ function parametrize_NSGA2(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
     return search_state
   end
 
-  mo_val!(env; dual=false, serial_val=false)   # legacy: the val objective of this driver is Sim A only; val sites stay threaded
+  mo_val!(env; dual=false)   # legacy: the val objective of this driver is Sim A only
   loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
   gio = loop.gio
 
@@ -4365,7 +4365,7 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
 
   # Validation mirrors the TRAINING tier so the held-out loss ranks candidates by the SAME objective (tier 5 ⇒ tier-5 val; tier 4/5 need
   # per-cycle bins built from the validation split) and, in dual modes, the same A⊕B objective. Legacy: a fresh seed per val evaluation.
-  mo_val!(env; dual=true, tier=search_tier, seeds=:rng, serial_val=false)
+  mo_val!(env; dual=true, tier=search_tier, seeds=:rng)
   loop = mo_loop_open(env, search_state; output_dir, resuming=false)
   gio = loop.gio
 
@@ -4699,7 +4699,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
       generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     end
 
-  mo_val!(env; seeds=:rng, serial_val=false)   # legacy: a fresh seed per val evaluation; val sites stay threaded
+  mo_val!(env; seeds=:rng)   # legacy: a fresh seed per val evaluation
   loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
   gio = loop.gio
 
