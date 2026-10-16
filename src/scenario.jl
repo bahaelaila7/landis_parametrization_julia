@@ -128,7 +128,7 @@ end
 """Initial state of FIA plots identified by PLOT.CN: one row per plot (meta) + per-plot cohort tables (symbol, age, agb)."""
 function load_scenario_plots(scen::ScenarioConfig, cns::Vector{String})
   db = DuckDB.DB(); con = DuckDB.DBInterface.connect(db)   # in-memory (temp views allowed) + FIA DB attached read-only
-  DuckDB.execute(con, "ATTACH '$(scen.fia_db)' AS src (READ_ONLY)")
+  DuckDB.execute(con, "ATTACH '$(PanCore.sql_quote_path(scen.fia_db))' AS src (READ_ONLY)")
   try
     DuckDB.register_data_frame(con, DataFrame(cn=unique(cns)), "req_cns")
     pl = DataFrame(DuckDB.DBInterface.execute(con, """
@@ -145,7 +145,7 @@ function load_scenario_plots(scen::ScenarioConfig, cns::Vector{String})
     DuckDB.register_data_frame(con, DataFrame(rkey=unique(pl.key)), "req_keys")
     co = DataFrame(DuckDB.DBInterface.execute(con, """
       SELECT plt_cn AS pkey, measdate, UPPER(TRIM(species_symbol)) sym, age_calc age, SUM(agb) agb, any_value(epa_l3) l3, any_value(epa_l4) l4
-      FROM src.$(scen.cohort_table) t JOIN req_keys k ON t.plt_cn = k.rkey
+      FROM src.$(Data._ident(scen.cohort_table, "cohort_table")) t JOIN req_keys k ON t.plt_cn = k.rkey
       WHERE coalesce(t.intro_type, '') <> 'phantom_backfill' AND t.age_calc > 0
       GROUP BY plt_cn, measdate, UPPER(TRIM(species_symbol)), age_calc
       ORDER BY plt_cn, measdate, sym, age"""))

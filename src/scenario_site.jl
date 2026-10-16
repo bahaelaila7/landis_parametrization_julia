@@ -85,9 +85,9 @@ end
 _site_table(scen::ScenarioConfig) = get_cached!(scen.cache, :site_table) do
   db = DuckDB.DB(); con = DuckDB.DBInterface.connect(db)
   try
-    DuckDB.execute(con, "ATTACH '$(scen.fia_db)' AS src (READ_ONLY)")
+    DuckDB.execute(con, "ATTACH '$(PanCore.sql_quote_path(scen.fia_db))' AS src (READ_ONLY)")
     df = DataFrame(DuckDB.DBInterface.execute(con, """
-      WITH k AS (SELECT plt_cn AS key, any_value(epa_l3) AS l3 FROM src.$(scen.cohort_table) GROUP BY plt_cn),
+      WITH k AS (SELECT plt_cn AS key, any_value(epa_l3) AS l3 FROM src.$(Data._ident(scen.cohort_table, "cohort_table")) GROUP BY plt_cn),
            p AS (SELECT CN, STATECD||'_'||UNITCD||'_'||COUNTYCD||'_'||PLOT AS key, LAT, LON FROM src.PLOT WHERE LAT IS NOT NULL),
            pk AS (SELECT p.* FROM p JOIN k USING (key)),
            c AS (SELECT pk.key, co.SITECLCD AS sc, SUM(co.CONDPROP_UNADJ) AS w FROM src.COND co JOIN pk ON co.PLT_CN = pk.CN

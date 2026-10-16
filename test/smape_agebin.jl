@@ -17,7 +17,7 @@ no_estab = Bool(g("no_establishment", false)); rng = P.RNGType(UInt64(Int(g("see
 val_frac = Float64(g("val_frac", 0.0))
 test_frac = Float64(g("test_frac", 0.0))               # 3-way split: reproduce the run's held-out TEST set too
 n_folds = Int(g("n_folds", 1)); fold_index = parse(Int, get(ENV, "PAN_FOLD", string(g("fold_index", 1))))  # PAN_FOLD picks the CV fold
-# Data prep via the SAME code path as training (Pan.prepare_from_cfg → prep_kwargs_from_cfg): identical split, region/site-class
+# Data prep via the SAME code path as training (Pan.prepare_from_cfg → data_config): identical split, region/site-class
 # filters, outlier exclusions, species tiering caps. (PAN_FOLD picks the CV fold.)
 splots, eco_list, species_list, eco_species_ids, splots_val, splots_test = P.prepare_from_cfg(cfg; fold_index=fold_index)
 n_species = length(species_list)

@@ -20,7 +20,7 @@ end
   @test !off.override && !off.sync && !off.replace && off.disturbance === :off
   @test Pan._disturbance_shock_path(Dict{String,Any}("loss_before_injection" => true)) == ""   # no sync in this config ⇒ no shock
   @test Pan._disturbance_shock_path(Dict{String,Any}("override_injection" => true, "override_injection_sync" => true)) != ""
-  @test Pan.data_options(Dict{String,Any}("loss_before_injection" => true)).disturbance_path == "" && Pan.scoring_options(Dict{String,Any}("fia_cycle" => true, "fia_cycle_merge" => 2)).cycle == Pan.Data.CycleOptions(use_fia_cycle=true, merge=2)
+  @test Pan.data_config(Dict{String,Any}("loss_before_injection" => true)).disturbance_path == "" && Pan.scoring_options(Dict{String,Any}("fia_cycle" => true, "fia_cycle_merge" => 2)).cycle == Pan.Data.CycleOptions(use_fia_cycle=true, merge=2)
   @test !isdefined(Pan, :OVERRIDE_INJECTION) && !isdefined(Pan, :OVERRIDE_INJECTION_SYNC)      # no module-level flag left to leak
 end
 

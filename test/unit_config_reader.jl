@@ -118,9 +118,9 @@ end
       @test L("cohorts_db_path" => "/yaml/x.duckdb")["cohorts_db_path"] == "/yaml/x.duckdb"
     end
   end
-  # prep_kwargs_from_cfg no longer mutates ENV
+  # data_config does not mutate ENV
   withenv("PAN_DATA" => nothing, "PAN_OUT" => nothing, "FIADB" => nothing) do
-    Pan.prep_kwargs_from_cfg(L("val_frac" => 0.0))
+    Pan.data_config(L("val_frac" => 0.0))
     @test !haskey(ENV, "PAN_DATA") && !haskey(ENV, "PAN_OUT")
   end
 end
