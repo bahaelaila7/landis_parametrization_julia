@@ -62,6 +62,45 @@ Cohort = (plot, species key, 10-yr birth class) of the tracked trees; species ke
 Each interval is an independent site initialised from the observed (N, D, H, A) and integrated dt years (whole years + one fractional step).
 Objective = joint NLL: binomial survival of tree counts (p = N2/N1) + Gaussian ln D2 and ln H2 of the survivors (weight = survivors, σ profiled out).
 
+## 4.1 Current model specification (v2f / v2g; `HBAD2_FORM=2 HBAD2_SIZE_SPLIT=5,12.7,25,40 HBAD2_SITE=subplot [HBAD2_VIGOUR=1]`)
+
+**Site** = one FIA subplot (7.3 m radius; densities expanded ×4 to per hectare). Competition (light, crowding) is computed within the
+site; the four subplots of a plot are simulated independently (E4: local competition explains growth and small-tree mortality better).
+
+**Cohort state** (SoA arrays, CSR over sites): species `sp`, trees/ha `N` (only decreases after a cohort's recruitment class closes),
+quadratic mean diameter `D` (cm), mean height `H` (m), age `A` (yr), vigour quantile `zq` (0 = mean-field cohort). No biomass.
+Initial cohorts from data: (species key × 10-yr birth class × initial D class 5/12.7/25/40 cm), N = Σ TPA_UNADJ·2.47105·4, D = QMD,
+H = TPA-weighted mean height, A = mean estimated age (ages of saplings are unreliable; growth does not depend on age).
+
+**Annual step per site** (Δ = 1, or the fractional remainder of a remeasurement interval):
+1. Snapshot: SDI_i = N_i (D_i/25.4)^1.605; SDImax_site = SDI-weighted mean of species SDIMAX; RD = ΣSDI / SDImax_site;
+   overtopping O_i = (Σ_{H_j > H_i} SDI_j + ½ Σ_{H_j = H_i, j≠i} SDI_j + ½ SDI_i) / SDImax_site.
+2. Growth (power-exponential potential in the current size; its integral is the species' free-growth age curve):
+   dD = rD (D/20)^cD e^{−D/Dmax} · e^{−gOD·O} · e^{gRD·RD} · e^{σv·zq} · (planted ? e^{pD} : 1)
+   dH = rH (H/15)^cH e^{−H/Hmax} · e^{−gOH·O + gRH·RD} · e^{σv·zq} · (planted ? e^{pH} : 1)
+3. Mortality hazard (N ← N e^{−hΔ}): h = fM [ e^{mbg + mD ln(D/20) + mD2 D/20} + msup (1 − min(1, e^{−gOD·O} e^{σv·zq})) (D/20)^{mSD} ]
+   + e^{mA (A/LONGEVITY − 1)},  fM = planted ? e^{pM} : 1, mA = 10 (Biomass Succession "d").
+   = background (U-shaped in size) + growth-suppression (light-limited, size-dependent, vigour-dependent) + age-related.
+4. Self-thinning safety cap: while RD > 1, SDI is removed in proportion to SDI_i (1 − v_i) (suppressed first). In the fitted
+   models the cap never binds: the Reineke boundary emerges from suppression mortality (stocking chart, 5.10).
+5. A ← A + Δ.
+6. Free runs only — recruitment into the 1-in tally per species: R = 185.2 · exp(ρ0 + ρS ln(1 + BA_sp(D ≥ 12.7)) + ρL · SDI/600)
+   trees/ha/yr; recruits enter at D 2.54 cm, H 3 m, A 5 and accumulate in one cohort per species and 5-yr class (×3 vigour sub-cohorts).
+
+**Parameters**: per species key (12 = 10 species with ≥ 3000 train trees + _S/_H): Hmax rH cH Dmax rD cD (growth curves), gOD gRD gOH gRH
+(competition responses), mbg mD msup (mortality), SDIMAX (cap), LONGEVITY (fixed, species_longevity_ref) = 14 fitted; global mD2, pH, pD,
+pM, mSD, σv; recruitment ρ0 ρS ρL per species (start = Poisson fit on natural sapling ingrowth).
+
+**Observation operators and likelihoods** (no biomass anywhere):
+* Sim A (tracked trees, each undisturbed remeasurement interval an independent site initialised from the observed stand): per cohort,
+  binomial survival of the tracked tree COUNTS (p = N2/N1) + Gaussian ln QMD and ln mean H of the survivors (σ profiled). This is the
+  calibration target (`fit_simA.jl`).
+* Sim B (free runs from the first visit of clean natural plots, recruitment on): expected TALLIED trees per size class through a
+  lognormal within-cohort D distribution (σ_obs = data-based 0.11) ÷ FIA expansion (microplot 185.2·4, subplot 14.87·4 per site), Poisson
+  NLL against the observed tally; `HBAD2_FB=stand` per (species × class × subplot), `size` per (plot × class, species pooled); + Gaussian
+  ln Lorey height. Second objective of the joint calibration (`fit_joint.jl`).
+* Evaluation: val selects among structures/fits, test is reported once (5.10).
+
 ## 5. Results log
 
 ### 5.1 v2a (fit_simA.jl v2a: 13 params/species + 1 global, CMA-ES λ 32, 20k evals from the data-based start)
