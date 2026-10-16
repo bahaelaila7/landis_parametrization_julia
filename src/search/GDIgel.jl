@@ -21,6 +21,7 @@
 module GDIgel
 import LinearAlgebra, Random, Sobol
 const LA = LinearAlgebra
+import ..Common: Common, AbstractSearch, cma11_psucc, cma11_sigma, cma11_path, cma11_cov
 
 mutable struct BlockState
   sigma::Float64
@@ -197,16 +198,15 @@ function assemble!(st::GDState, ys::Vector{Vector{Float64}}, fys::Vector{Vector{
       else
         _score(fy, b.resp) < _score(L.f, b.resp) ? 1.0 : 0.0
       end
-      B.p_succ = (1 - b.c_p) * B.p_succ + b.c_p * succ
+      B.p_succ = cma11_psucc(B.p_succ, b.c_p, succ)
       if succ == 1.0
         step = (y[b.idx] .- L.x[b.idx]) ./ B.sigma
         active = B.p_succ < b.p_thresh
-        B.p_c = active ? (1 - b.c_c) .* B.p_c .+ sqrt(b.c_c * (2 - b.c_c)) .* step : (1 - b.c_c) .* B.p_c
-        B.C = active ? (1 - b.c_cov) .* B.C .+ b.c_cov .* (B.p_c * B.p_c') :
-                       (1 - b.c_cov) .* B.C .+ b.c_cov .* (B.p_c * B.p_c' .+ b.c_c * (2 - b.c_c) .* B.C)
+        B.p_c = cma11_path(B.p_c, step, active, b.c_c)
+        B.C = cma11_cov(B.C, B.p_c, active, b.c_c, b.c_cov)
         xp[b.idx] .= y[b.idx]; nsucc += 1
       end
-      B.sigma = clamp(B.sigma * exp((1 / b.d) * (B.p_succ - b.p_target) / (1 - b.p_target)), st.sigma_min, 0.5)   # cap: u-space is [0,1]
+      B.sigma = clamp(cma11_sigma(B.sigma, B.p_succ, b.d, b.p_target), st.sigma_min, 0.5)   # cap: u-space is [0,1]
     end
     st.pending[k] = (y=y, fy=fy, xp=xp, mode=(nsucc == 0 ? :none : nsucc == nact ? :all : :mixed))
     out[k] = st.pending[k].mode === :mixed ? xp : nothing

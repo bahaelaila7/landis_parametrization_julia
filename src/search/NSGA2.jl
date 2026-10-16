@@ -8,6 +8,7 @@ module NSGA2
 # purely-evolutionary sibling to the existing setup.
 import Random
 import ..MOLBSA: MOFitness, MOCandidate, dominates
+import ..Common: crowding_distance, nd_fronts, pareto_insert!, evict_most_crowded
 
 export NSGA2State, ask, tell!, is_search_over
 
@@ -42,36 +43,8 @@ end
 
 is_search_over(st::NSGA2State)::Bool = st.i >= st.max_iter
 
-# NSGA-II crowding distance over objective vectors (boundary points → Inf).
-function _crowding(objs::AbstractVector{<:AbstractVector{<:Real}})::Vector{Float64}
-  m = length(objs); m <= 2 && return fill(Inf, m)
-  M = length(objs[1]); cd = zeros(Float64, m); vals = Vector{Float64}(undef, m)
-  for o in 1:M
-    @inbounds for i in 1:m; vals[i] = Float64(objs[i][o]); end
-    ord = sortperm(vals); span = vals[ord[end]] - vals[ord[1]]
-    cd[ord[1]] = Inf; cd[ord[end]] = Inf
-    span > 0 && for r in 2:m-1; cd[ord[r]] += (vals[ord[r+1]] - vals[ord[r-1]]) / span; end
-  end
-  return cd
-end
-
-# fast non-dominated sort → front rank (1 = best) over a set of objective vectors.
-function _fronts(objs::Vector{<:AbstractVector})::Vector{Int}
-  m = length(objs); S = [Int[] for _ in 1:m]; ndom = zeros(Int, m); rank = zeros(Int, m)
-  for p in 1:m, q in 1:m
-    p == q && continue
-    if dominates(objs[p], objs[q]); push!(S[p], q)
-    elseif dominates(objs[q], objs[p]); ndom[p] += 1; end
-  end
-  cur = [i for i in 1:m if ndom[i] == 0]; rr = 1
-  while !isempty(cur)
-    for i in cur; rank[i] = rr; end
-    nxt = Int[]
-    for p in cur, q in S[p]; ndom[q] -= 1; ndom[q] == 0 && push!(nxt, q); end
-    cur = nxt; rr += 1
-  end
-  return rank
-end
+const _crowding = crowding_distance   # NSGA-II crowding distance over objective vectors (boundary points → Inf)
+const _fronts = nd_fronts           # fast non-dominated sort → front rank (1 = best)
 
 # elitist (μ+λ) environmental selection: indices of the best μ of the combined set by (rank, −crowding).
 function _select(objs::Vector{<:AbstractVector}, μ::Int)::Vector{Int}
@@ -150,13 +123,7 @@ end
 
 # insert into the capped Pareto archive + track representative / return is-new-best (mirrors MOLBSA.update_archive!).
 function _archive!(st::NSGA2State, cand::MOCandidate)::Bool
-  objs = cand.fx.objectives
-  for m in st.archive; dominates(m.fx.objectives, objs) && return false; end
-  filter!(m -> !dominates(objs, m.fx.objectives), st.archive)
-  push!(st.archive, cand)
-  if length(st.archive) > st.archive_cap
-    deleteat!(st.archive, argmin(_crowding([m.fx.objectives for m in st.archive])))
-  end
+  pareto_insert!(st.archive, cand, st.archive_cap, m -> m.fx.objectives, a -> evict_most_crowded(a, m -> m.fx.objectives)) || return false
   improved = cand.fx.aggregate < st.representative.fx.aggregate
   if improved
     st.representative = cand; st.best_iteration = st.i

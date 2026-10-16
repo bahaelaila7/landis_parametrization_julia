@@ -13,6 +13,7 @@ import LinearAlgebra
 const LA = LinearAlgebra
 import ..CMAES
 import ..MOLBSA: MOFitness, MOCandidate, dominates
+import ..Common: crowding_distance, pareto_insert!, evict_most_crowded
 
 export MOCMAESState, tell!, update_archive!, restart!, is_search_over, mo_sortperm
 
@@ -137,7 +138,7 @@ function _nds_sortperm(fxs::Vector{MOFitness})::Vector{Int}
     if length(front) <= 2
       append!(order, sort(front; by = k -> fxs[k].aggregate))
     else
-      cd = _crowding_fx(fxs, front)
+      cd = crowding_distance([fxs[i].objectives for i in front])
       append!(order, front[sortperm(1:length(front); by = t -> (-cd[t], fxs[front[t]].aggregate))])
     end
     nxt = Int[]                                # peel next front
@@ -150,56 +151,12 @@ function _nds_sortperm(fxs::Vector{MOFitness})::Vector{Int}
   return order
 end
 
-# NSGA-II crowding distance over a subset `idxs` of `fxs` (higher = more isolated; per-objective
-# boundary points = Inf). Same formula as `_crowding`, but over offspring MOFitness rather than the archive.
-function _crowding_fx(fxs::Vector{MOFitness}, idxs::Vector{Int})::Vector{Float64}
-  N = length(idxs)
-  N <= 2 && return fill(Inf, N)
-  M = length(fxs[idxs[1]].objectives)
-  cd = zeros(Float64, N); vals = Vector{Float64}(undef, N)
-  for o in 1:M
-    @inbounds for i in 1:N; vals[i] = Float64(fxs[idxs[i]].objectives[o]); end
-    ord = sortperm(vals)
-    span = vals[ord[end]] - vals[ord[1]]
-    cd[ord[1]] = Inf; cd[ord[end]] = Inf
-    if span > 0
-      for r in 2:N-1
-        cd[ord[r]] += (vals[ord[r+1]] - vals[ord[r-1]]) / span
-      end
-    end
-  end
-  return cd
-end
-
 # One generation update, driven by the multi-objective ranking of the offspring.
 function tell!(state::MOCMAESState, fxs::Vector{MOFitness}, xs_u::Vector{Vector{Float64}}; nds::Bool=false)
   CMAES._update_distribution!(state, mo_sortperm(fxs; nds), xs_u)
 end
 
-# NSGA-II crowding distance per archive member (higher = more isolated). Boundary members — the
-# best on any single objective — get Inf so the extremes of the front are never evicted.
-function _crowding(archive::Vector{<:MOCandidate})::Vector{Float64}
-  N = length(archive)
-  N <= 2 && return fill(Inf, N)
-  M = length(archive[1].fx.objectives)
-  cd = zeros(Float64, N)
-  vals = Vector{Float64}(undef, N)
-  for o in 1:M
-    @inbounds for i in 1:N
-      vals[i] = Float64(archive[i].fx.objectives[o])
-    end
-    order = sortperm(vals)
-    span = vals[order[end]] - vals[order[1]]
-    cd[order[1]] = Inf
-    cd[order[end]] = Inf
-    if span > 0
-      for r in 2:N-1
-        cd[order[r]] += (vals[order[r+1]] - vals[order[r-1]]) / span
-      end
-    end
-  end
-  return cd
-end
+_crowding(archive::Vector{<:MOCandidate}) = crowding_distance([m.fx.objectives for m in archive])   # per archive member (higher = more isolated)
 
 # Insert `cand` into the Pareto archive (dominance logic as in MOLBSA.update_archive!): skip if
 # dominated; prune members it dominates; push. When over the cap, evict the MOST CROWDED member
@@ -211,15 +168,8 @@ end
 # new representative (aggregate dropped). improved ⟹ changed. Callers checkpoint the archive on any
 # `changed` (so params are pullable at every archive change, not just representative improvements).
 function update_archive!(state::MOCMAESState, cand::MOCandidate)
-  objs = cand.fx.objectives
-  for m in state.archive
-    dominates(m.fx.objectives, objs) && return (changed=false, improved=false)
-  end
-  filter!(m -> !dominates(objs, m.fx.objectives), state.archive)
-  push!(state.archive, cand)
-  if length(state.archive) > state.archive_cap
-    deleteat!(state.archive, argmin(_crowding(state.archive)))
-  end
+  pareto_insert!(state.archive, cand, state.archive_cap, m -> m.fx.objectives, a -> evict_most_crowded(a, m -> m.fx.objectives)) ||
+    return (changed=false, improved=false)
   improved = cand.fx.aggregate < state.representative.fx.aggregate
   if improved
     state.representative = cand

@@ -11,6 +11,8 @@ import LinearAlgebra
 import Sobol
 const LA = LinearAlgebra
 import ..MOLBSA: MOFitness, MOCandidate, dominates
+import ..Common: Common, AbstractSearch, crowding_distance, nd_fronts, pareto_prune!, evict_most_crowded,
+  cma11_psucc, cma11_sigma, cma11_path, cma11_cov
 
 export IgelState, IgelOptions, ask, tell!, is_search_over
 
@@ -200,39 +202,14 @@ function ask(st::IgelState, o::IgelOptions=IgelOptions())::Vector{Vector{Float64
   return offs
 end
 
-# NSGA-II crowding distance over a set of vectors (objectives OR decision points). Boundary → Inf.
-function _crowding(pts::Vector{<:AbstractVector{<:Real}})::Vector{Float64}
-  m = length(pts); m <= 2 && return fill(Inf, m)
-  M = length(pts[1]); cd = zeros(Float64, m); vals = Vector{Float64}(undef, m)
-  for o in 1:M
-    @inbounds for i in 1:m; vals[i] = Float64(pts[i][o]); end
-    ord = sortperm(vals); span = vals[ord[end]] - vals[ord[1]]
-    cd[ord[1]] = Inf; cd[ord[end]] = Inf
-    span > 0 && for r in 2:m-1; cd[ord[r]] += (vals[ord[r+1]] - vals[ord[r-1]]) / span; end
-  end
-  return cd
-end
+const _crowding = crowding_distance   # NSGA-II crowding distance over a set of vectors (objectives OR decision points). Boundary → Inf.
 
 # fast non-dominated sort → front rank (1 = best). With niche_radius>0, two individuals only COMPETE
 # (can dominate one another) when within `r` in decision space — so explorers descending toward a
 # different optimum aren't killed by an individual already converged at another basin.
 function _fronts(Q::Vector{Individual}, nv::Vector{<:AbstractVector}, r::Float64, quanta::AbstractVector)::Vector{Int}
-  m = length(Q); objs = [ind.fx.objectives for ind in Q]
-  S = [Int[] for _ in 1:m]; ndom = zeros(Int, m); rank = zeros(Int, m)
-  for p in 1:m, q in 1:m
-    p == q && continue
-    (!isempty(nv) && _ndist(nv[p], nv[q], quanta) >= r) && continue   # niching: only compete within the quantum-L∞ radius
-    if dominates(objs[p], objs[q]); push!(S[p], q)
-    elseif dominates(objs[q], objs[p]); ndom[p] += 1; end
-  end
-  cur = [i for i in 1:m if ndom[i] == 0]; rr = 1
-  while !isempty(cur)
-    for i in cur; rank[i] = rr; end
-    nxt = Int[]
-    for p in cur, q in S[p]; ndom[q] -= 1; ndom[q] == 0 && push!(nxt, q); end
-    cur = nxt; rr += 1
-  end
-  return rank
+  objs = [ind.fx.objectives for ind in Q]
+  isempty(nv) ? nd_fronts(objs) : nd_fronts(objs, (p, q) -> !(_ndist(nv[p], nv[q], quanta) >= r))   # niching: only compete within the quantum-L∞ radius
 end
 
 # total preorder key over the combined set: (front rank, −crowding-within-front). Crowding is taken
@@ -247,8 +224,8 @@ function _keys(Q::Vector{Individual}, nv::Vector{<:AbstractVector}, r::Float64, 
 end
 
 @inline function _update_stepsize!(ind::Individual, succ::Float64, st::IgelState)
-  ind.p_succ = (1 - st.c_p) * ind.p_succ + st.c_p * succ
-  ind.sigma *= exp((1 / st.d) * (ind.p_succ - st.p_target) / (1 - st.p_target))
+  ind.p_succ = cma11_psucc(ind.p_succ, st.c_p, succ)
+  ind.sigma = cma11_sigma(ind.sigma, ind.p_succ, st.d, st.p_target)
 end
 
 # BLOCK-DIAGONAL (1+1)-CMA covariance update: p_c evolves over the full vector, but the rank-1 C update
@@ -256,23 +233,16 @@ end
 # keeps its own small covariance. With one block this is the standard full-C update.
 @inline function _update_cov!(ind::Individual, step::Vector{Float64}, st::IgelState)
   active = ind.p_succ < st.p_thresh
-  ind.p_c = active ? (1 - st.c_c) .* ind.p_c .+ sqrt(st.c_c * (2 - st.c_c)) .* step : (1 - st.c_c) .* ind.p_c
+  ind.p_c = cma11_path(ind.p_c, step, active, st.c_c)
   for idx in st.blocks
-    pcb = @view ind.p_c[idx]
-    Cb = @view ind.C[idx, idx]
-    if active
-      ind.C[idx, idx] = (1 - st.c_cov) .* Cb .+ st.c_cov .* (pcb * pcb')
-    else
-      ind.C[idx, idx] = (1 - st.c_cov) .* Cb .+ st.c_cov .* (pcb * pcb' .+ st.c_c * (2 - st.c_c) .* Cb)
-    end
+    ind.C[idx, idx] = cma11_cov(@view(ind.C[idx, idx]), @view(ind.p_c[idx]), active, st.c_c, st.c_cov)
   end
 end
 
 # Insert into the Pareto archive (dominance + crowding-eviction), mirroring MOCMAES.update_archive!.
 function _archive!(st::IgelState, cand::MOCandidate, o::IgelOptions=IgelOptions())::Bool
-  objs = cand.fx.objectives
-  for m in st.archive; dominates(m.fx.objectives, objs) && return false; end
-  filter!(m -> !dominates(objs, m.fx.objectives), st.archive)
+  objs_of = m -> m.fx.objectives
+  pareto_prune!(st.archive, objs_of(cand), objs_of) || return false
   if _niching(st, o)
     q = o.niche_q; to_n = o.params_to_nvec
     cu = to_n(cand.x)
@@ -284,10 +254,7 @@ function _archive!(st::IgelState, cand::MOCandidate, o::IgelOptions=IgelOptions(
       deleteat!(st.archive, argmin(_niso([to_n(m.x) for m in st.archive], q)))     # cap: drop the most redundant
   else
     push!(st.archive, cand)
-    if length(st.archive) > st.archive_cap
-      cds = _crowding([m.fx.objectives for m in st.archive])
-      deleteat!(st.archive, argmin(cds))
-    end
+    length(st.archive) > st.archive_cap && deleteat!(st.archive, evict_most_crowded(st.archive, objs_of))
   end
   improved = cand.fx.aggregate < st.representative.fx.aggregate
   if improved

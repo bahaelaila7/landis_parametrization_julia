@@ -15,9 +15,13 @@ module MOLBSA
 # generic over a single signed `diff_fit`.
 import Random
 import Statistics
+import ..Common: dominates, pareto_insert!, evict_worst   # `dominates` lives in Common (re-exported here for the existing callers)
 
 export MOFitness, MOCandidate, MOLBSAState, mo_delta, dominates,
   search_cmp!, should_restart, is_search_over, restart, update_archive!
+
+_objs(m) = m.fx.objectives
+_agg(m) = m.fx.aggregate
 
 @enum SearchMethod SimulatedAnnealing ThresholdAccepting
 
@@ -57,17 +61,6 @@ end
   return Float64(losses - wins) + frac
 end
 
-# Pareto dominance for minimization: `a` dominates `b` iff a ≤ b on every
-# objective and a < b on at least one.
-@inline function dominates(a::Vector{Float32}, b::Vector{Float32})::Bool
-  strictly = false
-  @inbounds for k in eachindex(a)
-    a[k] > b[k] && return false
-    a[k] < b[k] && (strictly = true)
-  end
-  return strictly
-end
-
 @inline should_restart(state)::Bool = state._should_restart
 @inline is_search_over(state)::Bool = state.i >= state.max_iter
 
@@ -77,16 +70,7 @@ end
 # candidate is non-dominated AND improves the representative's aggregate — which
 # gates checkpoints/plots so they don't fire on every weakly-non-dominated point.
 @inline function update_archive!(state, cand::MOCandidate)::Bool
-  objs = cand.fx.objectives
-  for m in state.archive
-    dominates(m.fx.objectives, objs) && return false
-  end
-  filter!(m -> !dominates(objs, m.fx.objectives), state.archive)
-  push!(state.archive, cand)
-  if length(state.archive) > state.archive_cap
-    worst_i = argmax(i -> state.archive[i].fx.aggregate, eachindex(state.archive))
-    deleteat!(state.archive, worst_i)
-  end
+  pareto_insert!(state.archive, cand, state.archive_cap, _objs, a -> evict_worst(a, _agg)) || return false
   improved = cand.fx.aggregate < state.representative.fx.aggregate
   if improved
     state._frozen_no_best_reheats = 0

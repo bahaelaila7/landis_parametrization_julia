@@ -5,6 +5,7 @@ module MOSA
 # win/loss count, scale-invariant) and maintains a Pareto archive (mirroring MOLBSA.update_archive!).
 import Random
 import ..MOLBSA: MOFitness, MOCandidate, mo_delta, dominates
+import ..Common: pareto_insert!, evict_worst
 
 export MOSACandidate, MOSAState, search_cmp!, search_update_rule!, should_restart, update_archive!, restart
 
@@ -19,16 +20,7 @@ const MOSACandidate = MOCandidate                       # reuse the MO candidate
 # Insert `cand` into the Pareto archive if non-dominated (pruning members it dominates, capping by
 # worst aggregate); update the representative (min aggregate). Returns true on representative improvement.
 @inline function update_archive!(state, cand::MOCandidate)::Bool
-  objs = cand.fx.objectives
-  for m in state.archive
-    dominates(m.fx.objectives, objs) && return false
-  end
-  filter!(m -> !dominates(objs, m.fx.objectives), state.archive)
-  push!(state.archive, cand)
-  if length(state.archive) > state.archive_cap
-    worst_i = argmax(i -> state.archive[i].fx.aggregate, eachindex(state.archive))
-    deleteat!(state.archive, worst_i)
-  end
+  pareto_insert!(state.archive, cand, state.archive_cap, m -> m.fx.objectives, a -> evict_worst(a, m -> m.fx.aggregate)) || return false
   improved = cand.fx.aggregate < state.representative.fx.aggregate
   if improved
     state.representative = cand

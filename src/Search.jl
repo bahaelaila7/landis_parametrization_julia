@@ -1,4 +1,5 @@
 module Search
+    include("search/common.jl")
     include("search/SA.jl")
     include("search/LBSA.jl")
     include("search/MOLBSA.jl")
