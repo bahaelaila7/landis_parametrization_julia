@@ -4869,6 +4869,9 @@ function parametrize_SA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plugin
             @warn "val fit_params failed" exception = (e, catch_backtrace())
           end
         end
+  for c in ("sym", "shade_class")
+    c in names(df) || error("shade_tol_csv $csv_path: column '$c' not found (columns: $(join(names(df), ", ")))")
+  end
         record_best_losses!(losses_db, iter, total, run_result, eco_losses, search_state.best.x; eco_list, species_list, n_species, loss_params, print_breakdown=true)
       end
       if is_new_best || search_state.i % 50 == 0
@@ -4888,13 +4891,11 @@ function _load_longevity_table(db_path::String)
   # READ-ONLY attach (in-memory main + ATTACH … READ_ONLY) — never open the cohorts DB read-write just to
   # SELECT; a read-write open here risks corrupting the DB if the process is killed mid-load.
   con = DuckDB.connect(DuckDB.DB())
-  DuckDB.execute(con, "ATTACH '$(db_path)' AS src (READ_ONLY);")
-  has = (DuckDB.execute(con, "SELECT count(*) AS n FROM information_schema.tables WHERE table_name='species_longevity_ref'") |> DataFrame).n[1]
-  if has == 0
-    @warn "longevity_from_data=true but species_longevity_ref not found in $db_path — LONGEVITY stays in the search"
-    return nothing
-  end
-  df = DuckDB.execute(con, "SELECT species_symbol, longevity FROM src.species_longevity_ref WHERE longevity IS NOT NULL") |> DataFrame
+  isfile(db_path) || error("longevity_from_data: cohort database not found: $db_path")
+  DuckDB.execute(con, "ATTACH '$(PanCore.sql_quote_path(db_path))' AS src (READ_ONLY);")
+  has = (DuckDB.execute(con, "SELECT count(*) AS n FROM information_schema.tables WHERE table_catalog = 'src' AND table_name = 'species_longevity_ref'") |> DataFrame).n[1]
+  has == 0 && error("longevity_from_data=true but table species_longevity_ref is not in $db_path (set longevity_from_data: false to keep LONGEVITY in the search)")   # used to warn and silently keep LONGEVITY in the search
+  df = DuckDB.execute(con, "SELECT species_symbol, longevity FROM src.species_longevity_ref WHERE longevity IS NOT NULL ORDER BY species_symbol") |> DataFrame
   d = Dict{String,Float64}(String(r.species_symbol) => Float64(r.longevity) for r in eachrow(df))
   @info "longevity_from_data: pinned LONGEVITY for $(length(d)) species from species_longevity_ref (out of search)"
   d
@@ -4903,10 +4904,7 @@ end
 # Load per-species SHADE_TOL (shade class 1-5) from a CSV (cols: sym, shade_class), e.g.
 # runs/shadetol_all_species.csv. Pins SHADE_TOL out of the search. Missing/absent → SHADE_TOL_DEFAULT.
 function _load_shade_tol_table(csv_path::String)
-  if !isfile(csv_path)
-    @warn "shade_tol_from_data=true but $csv_path not found — SHADE_TOL stays in the search"
-    return nothing
-  end
+  isfile(csv_path) || error("shade_tol_from_data=true but $csv_path not found (set shade_tol_from_data: false to keep SHADE_TOL in the search)")   # used to warn and silently keep SHADE_TOL in the search
   df = CSV.read(csv_path, DataFrame)
   d = Dict{String,Int}(uppercase(strip(String(r.sym))) => Int(r.shade_class) for r in eachrow(df))
   @info "shade_tol_from_data: pinned SHADE_TOL for $(length(d)) species from $csv_path (out of search)"
@@ -4919,13 +4917,14 @@ end
 function _load_prob_estab_table(csv_nat::String, csv_art::String)
   d = Dict{Tuple{String,String,String},Float64}()
   for (path, lu) in ((csv_nat, "natural"), (csv_art, "artificial"))
-    (isempty(path) || !isfile(path)) && (path == csv_nat && @warn "prob_estab_from_data: $path not found"; continue)
+    isempty(path) && continue
+    isfile(path) || error("prob_estab_from_data=true but $path ($lu table) not found")   # used to warn (natural) or skip silently (artificial)
     df = CSV.read(path, DataFrame)
     for r in eachrow(df)
       d[(uppercase(strip(String(r.category))), String(r.l3), lu)] = Float64(r.prob_estab)
     end
   end
-  isempty(d) && (@warn "prob_estab_from_data: no rows loaded — PROB_ESTAB left as-is"; return nothing)
+  isempty(d) && error("prob_estab_from_data=true but no rows were loaded from $csv_nat / $csv_art")   # used to warn and leave PROB_ESTAB as-is
   @info "prob_estab_from_data: loaded $(length(d)) (category,l3,lu) PROB_ESTAB values"
   d
 end
@@ -5161,7 +5160,7 @@ function _disturbance_shock_path(cfg0::AbstractDict)
       path = ""
     else
       path = explicit
-      isfile(path) || (@warn "disturbance_full_removals: $(path) not found — disturbance shocks disabled"; path = "")
+      isfile(path) || error("disturbance_full_removals: $(path) not found (set `disturbance_full_removals: \"\"` to run without disturbance shocks)")   # used to warn and silently disable the shocks
     end
   end
   path
