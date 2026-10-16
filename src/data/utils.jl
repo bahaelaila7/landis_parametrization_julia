@@ -313,7 +313,7 @@ const _K0_W_TO_AGB = 1.0 / 4046.86     # tree_trajectories w = drybio_g*tpa  →
 
 function _load_disturbance_rows(path::AbstractString)::DataFrame
   con = DuckDB.connect(DuckDB.DB())
-  DuckDB.execute(con, "SELECT statecd, unitcd, countycd, plot, subp, species_symbol, CAST(measdate AS DATE) AS measdate, age_calc, disturbance_drop_pct, would_be, full_removal FROM read_parquet(?)", [String(path)]) |> DataFrame
+  DuckDB.execute(con, "SELECT statecd, unitcd, countycd, plot, subp, species_symbol, CAST(measdate AS DATE) AS measdate, age_calc, disturbance_drop_pct, would_be, full_removal FROM read_parquet(?) ORDER BY ALL", [String(path)]) |> DataFrame   # fixed order: rows feed float accumulations (B34)
 end
 
 # Plot-level full removals + plot-level partial-drop update, for ONE split's aggregated `sp` (same plot_id / sim_year /
