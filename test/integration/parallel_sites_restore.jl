@@ -26,4 +26,4 @@ r_par = ev();                     @test ws.parallel === true
 tot(r) = convert(Float64, Pan.PU.get_total_loss(r[1][1], d.loss_params))
 @test isfinite(tot(r_ser)) && isfinite(tot(r_par))          # serial and threaded evaluations of the same params/seed agree up to summation order
 @test isapprox(tot(r_ser), tot(r_par); rtol=1e-4)
-println("parallel_sites_restore: OK (", length(Test.get_testset().results), " checks)")
+println("parallel_sites_restore: OK")
