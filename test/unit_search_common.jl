@@ -97,4 +97,39 @@ mkcand(o, a) = MOLBSA.MOCandidate(x=0, fx=MOLBSA.MOFitness(o, a))
     end
   end
 end
+
+@testset "IgelSearch: tell! keeps the per-lineage bases on their survivors; save_state/load_state continue identically" begin
+  n = 4; mu = 5
+  mk(; seed=1) = (rng = Random.Xoshiro(seed); us = [rand(rng, n) for _ in 1:mu];
+    cands = [MOLBSA.MOCandidate(copy(u), MOLBSA.MOFitness([sum(u), sum(1 .- u)], sum(u .^ 2))) for u in us];
+    Igel.IgelState(us, cands, rng; sigma0=0.2, reseed_sigma=0.05, maturity_period=2))
+  fit(o) = MOLBSA.MOFitness([sum(o), sum(1 .- o) + 0.1sum(abs2, o .- 0.5)], sum(o .^ 2))
+  s = Igel.IgelSearch(mk(), Igel.IgelOptions(); bases=Any["lineage$k" for k in 1:mu])
+  @test Igel.state(s) === s.st
+  for g in 1:8
+    offs = Igel.ask(s)
+    pre = copy(s.st.pop); off = copy(s.st._off); tag = copy(s.bases)
+    Igel.tell!(s, [fit(o) for o in offs], offs)
+    for (j, ind) in enumerate(s.st.pop)             # a survivor is a parent or an offspring OBJECT of exactly one lineage; its base is that lineage's
+      k = findfirst(x -> x === ind, pre); k === nothing && (k = findfirst(x -> x === ind, off))
+      @test k !== nothing && s.bases[j] == tag[k]
+    end
+  end
+  # round trip: save the exit checkpoint, reload (state + sidecar), and both continue with identical offspring and selection
+  dir = mktempdir()
+  path = Igel.save_state(s, dir)
+  @test basename(path) == "search_state@$(s.st.i).jld2" && isfile(joinpath(dir, "igel_bases@$(s.st.i).jld2")) && islink(joinpath(dir, "search_state_latest.jld2"))
+  s2 = Igel.load_state(Igel.IgelSearch, path; bases=true)
+  @test s2.bases == s.bases && s2.st.i == s.st.i
+  for g in 1:3
+    o1 = Igel.ask(s); o2 = Igel.ask(s2); @test o1 == o2
+    @test Igel.tell!(s, [fit(o) for o in o1], o1) == Igel.tell!(s2, [fit(o) for o in o2], o2)
+  end
+  @test [ind.x for ind in s.st.pop] == [ind.x for ind in s2.st.pop] && s.bases == s2.bases && rand(copy(s.st.rng)) == rand(copy(s2.st.rng))
+  # freeze_seed_growth resume without its sidecar is refused (the lineage bases cannot be rebuilt from the engine state)
+  p3 = Igel.save_state(Igel.IgelSearch(mk(), Igel.IgelOptions()), mktempdir())
+  @test_throws ErrorException Igel.load_state(Igel.IgelSearch, p3; bases=true)
+  @test Igel.load_state(Igel.IgelSearch, p3; bases=false).bases === nothing
+end
+
 end # module
