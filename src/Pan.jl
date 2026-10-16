@@ -2528,6 +2528,9 @@ _init_scales(n::Int, opts::ScoringOptions) = (opts.init_perturb_frac <= 0 || n <
 # Per-rep RNG seeds. Perturb mode shares ONE seed across reps so the only thing that varies is the
 # initial-biomass scaling (sync path has no RNG influence anyway, but this makes it exact); legacy
 # draws an independent seed per rep.
+# B33: the rng of the diagnostic `simulate_and_test` (new-best stats) — derived from the fixed seeds, never the run rng,
+# so the search trajectory does not depend on whether diagnostics / val are enabled.
+_diag_rng(seeds::AbstractVector{UInt64}, tag::Symbol) = Random.MersenneTwister(hash((String(tag), Tuple(seeds))))
 _fixed_seeds(rng, n::Int, opts::ScoringOptions) = opts.init_perturb_frac > 0 ? fill(rand(rng, UInt64), n) : [rand(rng, UInt64) for _ in 1:n]
 
 # Aggregate per-rep results into (run_result, eco_losses, picked_idx). Legacy (frac=0): SUM across reps.
@@ -2937,7 +2940,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plug
           total = convert(Float64, search_state.best.fx)
           @info "New best @ $iter | loss=$total"
           try
-            test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
+            test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=_diag_rng(fixed_seeds, :train), plugin=plugin)
             println("Train stats:")
             show(test_df; allrows=true, allcols=true)
             println()
@@ -2953,7 +2956,7 @@ function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plug
               val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
               @info "Val loss @ $iter | loss=$val_total"
               try
-                val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
+                val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=_diag_rng(fixed_seeds, :val), plugin=plugin)
                 println("Val stats:")
                 show(val_test_df; allrows=true, allcols=true)
                 println()
@@ -3167,7 +3170,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
           total = convert(Float64, search_state.best.fx)
           @info "New best @ gen $iter | loss=$total | σ=$(search_state.sigma)"
           try
-            test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
+            test_df = simulate_and_test(; splots=splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=site_sim_years, M=n_reps, no_establishment=no_establishment, rng=_diag_rng(fixed_seeds, :train), plugin=plugin)
             println("Train stats:")
             show(test_df; allrows=true, allcols=true)
             println()
@@ -3183,7 +3186,7 @@ function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
               val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
               @info "Val loss @ gen $iter | loss=$val_total"
               try
-                val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=rng, plugin=plugin)
+                val_test_df = simulate_and_test(; splots=val_splots, bio_params=search_state.best.x, eco_list=eco_list, species_list=species_list, eco_species_ids=eco_species_ids, loss_params=loss_params, site_sim_years=val_site_sim_years, M=n_reps, no_establishment=no_establishment, rng=_diag_rng(fixed_seeds, :val), plugin=plugin)
                 println("Val stats:")
                 show(val_test_df; allrows=true, allcols=true)
                 println()
@@ -3559,7 +3562,7 @@ function mo_gen_finalize!(gio::MOGenIO, state, pop_size::Int, is_new_best::Bool,
       try
         test_df = simulate_and_test(; splots=gio.splots, bio_params=state.representative.x, eco_list=gio.eco_list,
           species_list=gio.species_list, eco_species_ids=gio.eco_species_ids, loss_params=gio.loss_params,
-          site_sim_years=gio.site_sim_years, M=gio.n_reps, no_establishment=gio.no_establishment, rng=gio.rng, plugin=gio.plugin)
+          site_sim_years=gio.site_sim_years, M=gio.n_reps, no_establishment=gio.no_establishment, rng=_diag_rng(UInt64[gio.n_reps], :train), plugin=gio.plugin)
         println("Train stats:"); show(test_df; allrows=true, allcols=true); println()
       catch e; @warn "simulate_and_test (train) failed" exception=(e, catch_backtrace()); end
     end
