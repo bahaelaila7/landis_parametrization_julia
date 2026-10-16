@@ -101,6 +101,15 @@ for p in 1:npl, (y, o) in obs[p]
     HL_o=o.HL, HL_m=m.HL, HL_0=p0.HL, Nc_o=o.Nc, Nc_m=m.Nc, Nc_0=p0.Nc, comp_m=0.5sum(abs.(m.comp .- o.comp)), comp_0=0.5sum(abs.(p0.comp .- o.comp))))
 end
 df = DataFrame(rows); CSV.write(joinpath(FD, "simB_$(SET)" * (JOINT ? "_" * split(tag, "/")[2] : "") * ".csv"), df)
+# per-species BA (m²/ha) of every plot-visit: observed / simulated / initial (long format) for composition analysis
+sprows = NamedTuple[]
+for p in 1:npl, (y, o) in obs[p]
+  xs = [snaps[s][y] for s in sites_of[p]]; m = plotstand(cat_(xs, 1), cat_(xs, 2), cat_(xs, 3), cat_(xs, 4)); p0 = st0[p]
+  for (k, key) in enumerate(keys_)
+    push!(sprows, (plot=p, yr=y, key=key, ba_o=o.comp[k] * o.BA, ba_m=m.comp[k] * m.BA, ba_0=p0.comp[k] * p0.BA))
+  end
+end
+CSV.write(joinpath(FD, "simB_species_$(SET)" * (JOINT ? "_" * split(tag, "/")[2] : "") * ".csv"), DataFrame(sprows))
 lr(a, b) = log.(max.(a, 1e-6) ./ max.(b, 1e-6))
 @printf("Sim B %s: %d plots (%d sites), %d plot-visits\n", SET, npl, ns, nrow(df))
 @printf("%-6s %6s | %-27s | %-27s | %-27s | %-27s | %-27s | %-13s\n", "gap", "n", "BA  model/persist (bias)", "N≥5in", "N all", "QMD", "Lorey H", "composition")

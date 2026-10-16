@@ -7,8 +7,8 @@
 #   HBAD2_FORM=2 HBAD2_SIZE_SPLIT=5,12.7,25,40 ./julia_gdal.sh --project=. --threads=8 tools/hbad2/fit_joint.jl <tag> <start θ.csv> <λ list e.g. 0,0.5,1> [evals]
 include(joinpath(@__DIR__, "common.jl")); include(joinpath(@__DIR__, "cmaes.jl")); include(joinpath(@__DIR__, "simB_lik.jl"))
 tag, θpath, lams = ARGS[1], ARGS[2], parse.(Float64, split(ARGS[3], ",")); EV = length(ARGS) >= 4 ? parse(Int, ARGS[4]) : 12000
-const FB_MODE = get(ENV, "HBAD2_FB", "stand")     # Sim B objective: stand (species × class + Lorey H) | size (plot size-class totals + Lorey H) | both
-OUTD = joinpath(R2DIR, "joint_" * tag); mkpath(OUTD); write_meta(OUTD); open(io -> println(io, "fb=", FB_MODE), joinpath(OUTD, "meta.txt"), "a")
+const FB_MODE = get(ENV, "HBAD2_FB", "stand")     # Sim B objective: stand (species × class + Lorey H) | size (plot size-class totals + Lorey H) | margins (size + plot species×{sapling,tree} totals + Lorey H) | both
+OUTD = joinpath(R2DIR, "joint_" * tag); mkpath(OUTD); write_meta(OUTD); open(io -> (println(io, "fb=", FB_MODE); println(io, "recr_fixed=", get(ENV, "HBAD2_RECR_FIXED", "0"))), joinpath(OUTD, "meta.txt"), "a")
 logio = open(joinpath(OUTD, "log.txt"), "a"); lg(s) = (println(s); println(logio, s); flush(logio); flush(stdout))
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
@@ -16,16 +16,20 @@ longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) fo
 rc = CSV.read(joinpath(R2DIR, SITE_SUB ? "recruitment_coefs_subplot.csv" : "recruitment_coefs.csv"), DataFrame); rcd = Dict(String(r.key) => r for r in eachrow(rc))
 θg = read_theta(θpath, nsp); ng = length(θg)
 rpath = replace(θpath, "theta" => "recr")       # a joint fit's θ comes with its recruitment vector; otherwise start from the Poisson fit
-θ0 = rpath != θpath && isfile(rpath) ? vcat(θg, vec(CSV.read(rpath, DataFrame).theta)) : vcat(θg, reduce(vcat, [[rcd[k].rho0, rcd[k].rhoS, rcd[k].rhoL] for k in keys_]))
+# HBAD2_RECR_FIXED=1: recruitment stays at its own data likelihood optimum (the Poisson fit on observed sapling ingrowth) and is NOT a
+# free parameter of the joint fit (otherwise it can compensate structural errors elsewhere — the j6 composition drift, docs §5.14)
+const RECR_FIXED = get(ENV, "HBAD2_RECR_FIXED", "0") == "1"
+recr_poisson = reduce(vcat, [[rcd[k].rho0, rcd[k].rhoS, rcd[k].rhoL] for k in keys_])
+θ0 = RECR_FIXED ? copy(θg) : rpath != θpath && isfile(rpath) ? vcat(θg, vec(CSV.read(rpath, DataFrame).theta)) : vcat(θg, recr_poisson)
 decR(z) = [RecP(clamp(z[3k-2], -12, 2), clamp(z[3k-1], -1, 4), clamp(z[3k], -10, 2), 2.54, 3.0, 5.0) for k in 1:nsp]
 TRA = build_cohorts(tr, "train", keys_); VAA = build_cohorts(tr, "val", keys_)
 TRB = build_simB("train", keys_); VAB = build_simB("val", keys_)
 lg(@sprintf("[fB=%s] joint %s: SimA train %d cohorts, SimB train %d sites / val %d sites; params %d (+%d recruitment); λ %s", FB_MODE, tag, length(TRA.S.sp), length(TRB.live0), length(VAB.live0), ng, 3nsp, ARGS[3]))
 function both(θ, A, B)
-  P, G = decode(view(θ, 1:ng), nsp, longev); R = decR(view(θ, ng+1:length(θ)))
+  P, G = decode(view(θ, 1:ng), nsp, longev); R = RECR_FIXED ? decR(recr_poisson) : decR(view(θ, ng+1:length(θ)))
   simulate!(A.S, P, G); a = nll_parts(cohort_view(A), A.obs).total
   r = simB_nll!(B, P, G, R)
-  a, (FB_MODE == "size" ? r.size + r.H : FB_MODE == "both" ? r.total + r.size : r.total)
+  a, (FB_MODE == "size" ? r.size + r.H : FB_MODE == "margins" ? r.size + r.species + r.H : FB_MODE == "plotstand" ? r.plotstand + r.H : FB_MODE == "both" ? r.total + r.size : r.total)
 end
 a0, b0 = both(θ0, TRA, TRB); va0, vb0 = both(θ0, VAA, VAB)
 lg(@sprintf("START train fA %.1f fB %.1f | val fA %.1f fB %.1f", a0, b0, va0, vb0))
@@ -53,6 +57,6 @@ for λ in lams
   a, b = both(r.x, TRA, TRB); va, vb = both(r.x, VAA, VAB)
   lg(@sprintf("λ=%.2f  train fA %.1f fB %.1f | VAL fA %.1f fB %.1f  (start val %.1f / %.1f)", λ, a, b, va, vb, va0, vb0))
   push!(res, (λ, a, b, va, vb))
-  CSV.write(joinpath(OUTD, @sprintf("theta_l%.2f.csv", λ)), DataFrame(theta=r.x[1:ng])); CSV.write(joinpath(OUTD, @sprintf("recr_l%.2f.csv", λ)), DataFrame(theta=r.x[ng+1:end]))
+  CSV.write(joinpath(OUTD, @sprintf("theta_l%.2f.csv", λ)), DataFrame(theta=r.x[1:ng])); CSV.write(joinpath(OUTD, @sprintf("recr_l%.2f.csv", λ)), DataFrame(theta=RECR_FIXED ? recr_poisson : r.x[ng+1:end]))
   CSV.write(joinpath(OUTD, "front.csv"), res)
 end

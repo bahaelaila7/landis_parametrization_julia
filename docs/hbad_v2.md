@@ -318,3 +318,20 @@ Sim-B-only point j4 (−1,249) → the λ = 0 end overfits TRAIN. Remaining Sim 
 1.8× at > 21 yr, composition drifts (0.174 vs persistence 0.134). Selection (user rule): VAL decides; TEST is reported once at the end.
 Vigour front (same ideal/nadir; VAL): λ 0.25 (j7): fA −260,213, fB −1,431 vs λ 0.5 (j6): −265,212 / −1,420 → moving weight to Sim B
 costs 5.0k Sim A NLL for no held-out Sim B gain (−1,431 vs −1,420): λ 0.5 is at/near the knee on VAL. λ 0.75 running.
+
+### 5.14 Composition drift — diagnosis
+Sim B per-species BA (tools/hbad2/simB.jl now also writes simB_species_<set>.csv; VAL, j6): PITA BA share initial / obs / sim at ≤ 7 yr
+0.118 / 0.127 / 0.177, at > 21 yr 0.164 / 0.209 / **0.321**; mean BA change per plot-visit PITA obs +1.61 vs sim +2.07 m²/ha, every
+other species gains less than observed (_H +0.97 vs +0.65, _S +0.48 vs +0.18). First-interval decomposition (composition_decomp.jl;
+survivor growth, mortality loss, recruit BA): in j6 the PITA RECRUITS hold 0.255 m²/ha after one interval vs 0.002–0.023 for every
+other species (v2f with the data-based recruitment: PITA 0.050). Cause: the joint fit had recruitment FREE and the species-pooled size
+objective carries no composition information → it cut ρ0 of nearly all species (−0.6 to −1.4; _H −1.42, LIST2 −1.16, PIEL −1.01) to
+remove the sapling/pole excess and RAISED PITA (ρ0 −2.60 → −2.32, ρL −5.12 → −4.70): recruitment was used to compensate structural
+error elsewhere (equifinality), handing the regeneration niche to pine.
+Count-based Sim B likelihoods do not see this: j6 beats v2f on every one of them (val: species-margin 22,310 vs 27,333; plot-scale
+species × class 29,117 vs 35,768; its ≥ 12.7 cm part 21,696 vs 27,565) — the drift is in BA share (few, large trees), the counts are
+dominated by small trees, where j6's gain is large.
+Recruitment is observed directly (sapling ingrowth; Poisson NLL maximised by the data fit), so it should stay tied to its own data:
+j8 = j6 with recruitment FIXED at the Poisson fit (HBAD2_RECR_FIXED=1), same ideal/nadir, λ 0.5.
+Sim A per species (v2f, VAL): PITA dD 0.596 vs obs 0.669 (−11 %), dH 0.586 vs 0.649; _H fine (0.246 vs 0.251); all species
+dD −5 %, dH −7 % (survivor selection, which the mean-field cohort cannot produce; vigour sub-cohorts can).

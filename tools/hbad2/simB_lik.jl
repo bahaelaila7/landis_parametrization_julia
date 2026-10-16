@@ -119,5 +119,27 @@ function simB_nll!(B::SimBData, P, G, R)
     o = To[ix]; λ = Tl[ix]; (o == 0 && λ == 0) && continue; λ = max(λ, 1e-6)
     nsz += λ - o * log(λ) + (o > 0 ? o * log(o) - o : 0.0)
   end
-  (total=nll + nH, counts=nll, H=nH, size=nsz, dropped=sum(F.dropped))
+  # species margin per PLOT and visit: tallied saplings (2.54–12.7 cm, microplot) and trees (≥ 12.7 cm, subplot) of each species, sizes pooled
+  nspp = size(B.obs, 3)
+  So = zeros(npl, nv, nspp, 2); Sl = zeros(npl, nv, nspp, 2)
+  @inbounds for s in axes(B.obs, 1), k in 1:nv, sp in 1:nspp, c in 1:SB_NC
+    p = B.plot_of[s]; q = c <= 2 ? 1 : 2; So[p, k, sp, q] += B.obs[s, k, sp, c]; Sl[p, k, sp, q] += B.lam[s, k, sp, c]
+  end
+  nspc = 0.0
+  @inbounds for ix in eachindex(So)
+    o = So[ix]; λ = Sl[ix]; (o == 0 && λ == 0) && continue; λ = max(λ, 1e-6)
+    nspc += λ - o * log(λ) + (o > 0 ? o * log(o) - o : 0.0)
+  end
+  # plot-scale stand table: species × size class per PLOT and visit (subplots aggregated → far fewer empty cells than per subplot)
+  Po = zeros(npl, nv, nspp, SB_NC); Pl = zeros(npl, nv, nspp, SB_NC)
+  @inbounds for s in axes(B.obs, 1), k in 1:nv, sp in 1:nspp, c in 1:SB_NC
+    p = B.plot_of[s]; Po[p, k, sp, c] += B.obs[s, k, sp, c]; Pl[p, k, sp, c] += B.lam[s, k, sp, c]
+  end
+  npst = 0.0; npst_t = 0.0
+  @inbounds for ix in CartesianIndices(Po)
+    o = Po[ix]; λ = Pl[ix]; (o == 0 && λ == 0) && continue; λ = max(λ, 1e-6)
+    d = λ - o * log(λ) + (o > 0 ? o * log(o) - o : 0.0)
+    npst += d; ix[4] >= 3 && (npst_t += d)           # classes ≥ 12.7 cm (subplot trees) only
+  end
+  (total=nll + nH, counts=nll, H=nH, size=nsz, species=nspc, plotstand=npst, plotstand_trees=npst_t, dropped=sum(F.dropped))
 end
