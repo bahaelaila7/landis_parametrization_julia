@@ -54,6 +54,8 @@ param_pooling:               # D3 Stage A: everything region-level except per-ce
     B_MAX_SPP:    {level: region, cell_split: [PITA, PIEL]}
     ANPP_MAX_SPP: {level: region, cell_split: [PITA, PIEL]}
     S:            {level: region, cell_split: [PITA, PIEL]}
+    PROB_ESTAB_SPP: {level: region, cell_split: [PITA, PIEL]}   # tandem: pooled like growth (was 508 unpooled dims)
+    PROB_MORT_SPP:  {level: region, cell_split: [PITA, PIEL]}   # tandem: pooled like growth (was 508 unpooled dims)
   cell_merge: {PIEL: {A: AB, B: AB}}
 rankw_mode: "cbal_pct"
 rankw_beta: 0.999
@@ -116,7 +118,8 @@ maturity_from_data: true
 maturity_csv: "${PAN_DATA}/prob_estab_all_species.csv"
 fix_maturity: true
 fix_min_rel: true
-pmort_upper: 0.2
+pmort_upper: 0.05            # tandem b_only box (empirical natural death ≈ 0.0145/yr; 0.2 made random starts kill ~10%/yr)
+pmort_upper_simA: 0.05       # tandem likelihood box (same)
 fix_pmort: false
 prob_estab_from_data: true
 prob_estab_csv: "${PAN_DATA}/prob_estab_all_species.csv"
