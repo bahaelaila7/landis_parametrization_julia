@@ -13,6 +13,7 @@ redirect_stdout(stderr)
 const PARAMS_DIR = get(ENV, "PAN_PARAMS_DIR", joinpath(dirname(@__DIR__), "results", "params_yaml"))
 # defaults: EPA Region 4 sets (cover all R4 ecoregions incl. GA+FL); GA+FL-specific, cross-validated sets ship as samples
 const DEFAULTS = Dict("biomass" => "r4_biomass_v1.yaml", "pnet" => "r4_pnet_v1.yaml", "hbad" => "r4_hbad_v1.yaml")
+const SCEN = P.ScenarioConfig()          # data sources of the scenario engine, read from the PAN_* env once at startup (owns the lazy tables)
 const CACHE = Dict{String,Any}()        # params_id => ParamSet
 
 send(x) = (println(OUT, JSON3.write(x)); flush(OUT))
@@ -25,7 +26,7 @@ function _describe(ps)
    region=m.region, provenance=m.provenance, species=String.(p.SPECIES_LIST), ecos=String.(p.ECO_LIST), warnings=m.warnings)
 end
 function _load(text::AbstractString)
-  ps = P.load_paramset(text); CACHE[ps.id] = ps; ps
+  ps = P.load_paramset(text, SCEN); CACHE[ps.id] = ps; ps
 end
 function _default(plugin::AbstractString)
   f = joinpath(PARAMS_DIR, get(DEFAULTS, lowercase(plugin), "")); isfile(f) || error("no default parameter set for plugin '$plugin' ($f)")
@@ -70,7 +71,7 @@ function handle(id, req)
   op == "simulate" && return op_simulate(id, req)
   if op == "climate_preview"
     plots = _plots(req)
-    return P.climate_preview(plots, get(req, "climate", nothing); start_year=Int(get(req, "start_year", 2025)), years=Int(get(req, "years", 100)))
+    return P.climate_preview(SCEN, plots, get(req, "climate", nothing); start_year=Int(get(req, "start_year", 2025)), years=Int(get(req, "years", 100)))
   end
   error("unknown op '$op'")
 end

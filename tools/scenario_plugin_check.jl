@@ -2,15 +2,16 @@
 #   ./julia_gdal.sh --project=. --threads=2 tools/scenario_plugin_check.jl
 using Pan, DuckDB, DataFrames, SHA
 const P = Pan
-db = DuckDB.DB(P.SCEN_FIA_DB[]; readonly=true); con = DuckDB.DBInterface.connect(db)
-cns = String.(DataFrame(DuckDB.DBInterface.execute(con, """SELECT p.CN cn FROM PLOT p JOIN (SELECT DISTINCT plt_cn k FROM $(P.SCEN_COHORT_TABLE[]) WHERE epa_l3 IN ('8.3.5','8.5.3')) c
+scen = P.ScenarioConfig()   # data sources from the PAN_* env at call time
+db = DuckDB.DB(scen.fia_db; readonly=true); con = DuckDB.DBInterface.connect(db)
+cns = String.(DataFrame(DuckDB.DBInterface.execute(con, """SELECT p.CN cn FROM PLOT p JOIN (SELECT DISTINCT plt_cn k FROM $(scen.cohort_table) WHERE epa_l3 IN ('8.3.5','8.5.3')) c
   ON c.k = p.STATECD || '_' || p.UNITCD || '_' || p.COUNTYCD || '_' || p.PLOT WHERE p.INVYR >= 2015 ORDER BY p.CN LIMIT 4""")).cn)
 plots = [(cn=c, acres=10.0 + i) for (i, c) in enumerate(cns)]
 plan = Dict("cycles" => 3, "period" => 5, "actions" => Any[
   Dict("kind" => "harvest", "cycle" => 1, "selection" => Dict("species" => "all"), "removal" => Dict("type" => "percent_biomass", "value" => 30.0), "stands" => Dict("rank" => "all", "area_pct" => 100)),
   Dict("kind" => "plant", "cycle" => 2, "species" => "PITA,QUAL", "tpa" => 200.0, "survival" => 80.0)])
 for f in ("r4_biomass_v1", "r4_hbad_v1", "r4_pnet_v1")
-  ps = P.load_paramset(read(joinpath("results", "params_yaml", f * ".yaml"), String))
+  ps = P.load_paramset(read(joinpath("results", "params_yaml", f * ".yaml"), String), scen)
   res, warns = P.run_scenario(ps, plots, plan; seed=3)
   io = IOBuffer()
   for cn in cns

@@ -9,11 +9,65 @@
 # before that cycle's management) and management actions fire at elapsed = cycle × period.
 import Dates
 
-const SCEN_FIA_DB = Ref(get(ENV, "PAN_FIA_DB", "/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb"))
-const SCEN_COHORT_TABLE = Ref(get(ENV, "PAN_COHORT_TABLE", "curated_cohorts_landis_stdorg"))
-const SCEN_SOIL_CSV = Ref(get(ENV, "PAN_SOIL_CSV", "/workspace/landis_region4/data_r4/plot_soil_r4.csv"))
-const SCEN_PNET_CLIMATE = Ref(get(ENV, "PAN_PNET_CLIMATE", "/workspace/landis_region4/data_r4/pnet_climate_r4_l4.jld2"))
-const SCEN_CO2_CSV = Ref(get(ENV, "PAN_CO2_CSV", "/workspace/landis_region4/data_r4/co2_annual.csv"))
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Configuration: data sources and lazy caches (Step 3f). Nothing is read from the environment at module load (so nothing is
+# baked into a sysimage); a `ScenarioConfig` is built at call time and passed through the scenario API (a `ParamSet` carries
+# the one it was loaded with).
+# ---------------------------------------------------------------------------------------------------------------------
+# one volume equation: v = cf · exp(b0) · ba^b1 · H^b2 (see scenario_volume.jl)
+struct VolEq
+  b0::Float64; b1::Float64; b2::Float64; cf::Float64
+  min_dbh::Float64; sq_a::Float64; sq_c::Float64
+end
+
+"""
+    ScenarioCache()
+
+The lazily loaded tables of ONE `ScenarioConfig`, guarded by a lock (the worker may serve requests from several tasks). The cache is
+owned by its config, so a different config (other paths) never sees this config's tables and a config's tables die with it - no cache
+key to get wrong. `get_cached!(f, cache, :slot)` builds a slot once under the lock.
+"""
+Base.@kwdef mutable struct ScenarioCache
+  lock::ReentrantLock = ReentrantLock()
+  species_codes::Union{Nothing,Dict{String,Int}} = nothing         # REF_SPECIES: symbol → SPCD
+  donors::Union{Nothing,Dict{String,String}} = nothing             # TreeMap plot CN → donor CN
+  pnet_base::Union{Nothing,PnETPlugin.PnETContext} = nothing       # PnET constants + 1980-2025 climate cache
+  site_table::Union{Nothing,Dict{String,NamedTuple}} = nothing     # per EPA L3: FIA plot coordinates + site classes
+  voleq::Union{Nothing,Dict{Tuple{String,String,String},VolEq}} = nothing   # volume-equation table
+  spgrp::Union{Nothing,Dict{Int,Int}} = nothing                    # SPCD → FIA species group
+  voleq_by_set::Dict{String,Vector{NTuple{2,VolEq}}} = Dict{String,Vector{NTuple{2,VolEq}}}()   # ParamSet.id → (tcuft, bdft) per global species
+end
+
+"The slot `slot` of the cache, built by `f()` under the cache lock the first time it is needed."
+function get_cached!(f, cache::ScenarioCache, slot::Symbol)
+  lock(cache.lock) do
+    v = getfield(cache, slot)
+    v === nothing || return v
+    setfield!(cache, slot, f())
+  end
+end
+
+"""
+    ScenarioConfig(; fia_db, cohort_table, soil_csv, pnet_climate, co2_csv, donors, climate_db, solus, volume_eqs)
+
+Where the scenario engine reads its data. Every default is resolved when the config is BUILT (env `PAN_FIA_DB`, `PAN_COHORT_TABLE`,
+`PAN_SOIL_CSV`, `PAN_PNET_CLIMATE`, `PAN_CO2_CSV`, `PAN_DONORS`, `PAN_CLIMATE_DB`, `PAN_SOLUS`, `PAN_VOLUME_EQS`), never at module load.
+`cache` holds the lazily loaded tables of this config. Build it once (tools/pan_worker.jl does) and pass it to `load_paramset`
+(`run_scenario` uses the set's) and `climate_preview`.
+"""
+Base.@kwdef struct ScenarioConfig
+  fia_db::String = get(ENV, "PAN_FIA_DB", "/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb")
+  cohort_table::String = get(ENV, "PAN_COHORT_TABLE", "curated_cohorts_landis_stdorg")
+  soil_csv::String = get(ENV, "PAN_SOIL_CSV", "/workspace/landis_region4/data_r4/plot_soil_r4.csv")
+  pnet_climate::String = get(ENV, "PAN_PNET_CLIMATE", "/workspace/landis_region4/data_r4/pnet_climate_r4_l4.jld2")
+  co2_csv::String = get(ENV, "PAN_CO2_CSV", "/workspace/landis_region4/data_r4/co2_annual.csv")
+  donors::String = get(ENV, "PAN_DONORS", normpath(joinpath(@__DIR__, "..", "data", "treemap_donors.csv")))
+  climate_db::String = get(ENV, "PAN_CLIMATE_DB", "/workspace/pan_climate/pan_climate.duckdb")
+  solus::String = get(ENV, "PAN_SOLUS", "/workspace/SOLUS/SOLUS100")
+  volume_eqs::String = get(ENV, "PAN_VOLUME_EQS", normpath(joinpath(@__DIR__, "..", "data", "volume_eqs_r4.csv")))
+  cache::ScenarioCache = ScenarioCache()
+end
 
 # unit conversions
 const SC_HA_PER_AC = 0.40468564224
@@ -34,10 +88,11 @@ struct ParamSet
   eco_index::Dict{String,Int}
   local_index::Vector{Dict{Int,Int}}   # per eco: global species → eco-local index
   spcd::Dict{String,Int}               # parameter species → FIA SPCD (groups: negative synthetic codes)
+  scen::ScenarioConfig                 # the data sources (and caches) this set was loaded against
   hb::HBADPlugin.HBADContext           # HBAD priors of THIS set's species list: cohort-structure translation (TPA/QMD/height) for every plugin; the HBAD run context
 end
 
-function load_paramset(text::AbstractString)
+function load_paramset(text::AbstractString, scen::ScenarioConfig=ScenarioConfig())
   p, meta = params_from_yaml(text)
   SP = succession_plugin_for(p)
   sp_index = Dict(String(s) => k for (k, s) in enumerate(p.SPECIES_LIST))
@@ -46,18 +101,16 @@ function load_paramset(text::AbstractString)
   # cohort-structure translation (TPA/QMD/height) for every plugin uses the HBAD priors of this species list (an immutable context owned by the set)
   hb = HBADPlugin.HBADContext(String.(p.SPECIES_LIST), [Int.(ids) for ids in p.ECO_SPECIES_IDS])
   spcd = Dict{String,Int}(); k = 0
-  codes = _species_codes()
+  codes = _species_codes(scen)
   for s in p.SPECIES_LIST
     c = get(codes, uppercase(String(s)), 0)
     spcd[String(s)] = c > 0 ? c : (k -= 1)
   end
-  ParamSet(string(hash(text); base=16, pad=16), p, meta, SP, sp_index, eco_index, local_index, spcd, hb)
+  ParamSet(string(hash(text); base=16, pad=16), p, meta, SP, sp_index, eco_index, local_index, spcd, scen, hb)
 end
 
-const _SPCODES = Ref{Union{Nothing,Dict{String,Int}}}(nothing)
-function _species_codes()
-  _SPCODES[] === nothing || return _SPCODES[]
-  db = DuckDB.DB(SCEN_FIA_DB[]; readonly=true); con = DuckDB.DBInterface.connect(db)
+_species_codes(scen::ScenarioConfig) = get_cached!(scen.cache, :species_codes) do
+  db = DuckDB.DB(scen.fia_db; readonly=true); con = DuckDB.DBInterface.connect(db)
   d = Dict{String,Int}()
   try
     for r in DuckDB.DBInterface.execute(con, "SELECT UPPER(TRIM(SPECIES_SYMBOL)) s, SPCD c FROM REF_SPECIES WHERE SPECIES_SYMBOL IS NOT NULL")
@@ -66,16 +119,16 @@ function _species_codes()
   finally
     DuckDB.DBInterface.close!(con); DuckDB.close(db)
   end
-  _SPCODES[] = d
+  d
 end
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------------------------------------------------
 """Initial state of FIA plots identified by PLOT.CN: one row per plot (meta) + per-plot cohort tables (symbol, age, agb)."""
-function load_scenario_plots(cns::Vector{String})
+function load_scenario_plots(scen::ScenarioConfig, cns::Vector{String})
   db = DuckDB.DB(); con = DuckDB.DBInterface.connect(db)   # in-memory (temp views allowed) + FIA DB attached read-only
-  DuckDB.execute(con, "ATTACH '$(SCEN_FIA_DB[])' AS src (READ_ONLY)")
+  DuckDB.execute(con, "ATTACH '$(scen.fia_db)' AS src (READ_ONLY)")
   try
     DuckDB.register_data_frame(con, DataFrame(cn=unique(cns)), "req_cns")
     pl = DataFrame(DuckDB.DBInterface.execute(con, """
@@ -91,7 +144,7 @@ function load_scenario_plots(cns::Vector{String})
     DuckDB.register_data_frame(con, DataFrame(rkey=unique(pl.key)), "req_keys")
     co = DataFrame(DuckDB.DBInterface.execute(con, """
       SELECT plt_cn AS pkey, measdate, UPPER(TRIM(species_symbol)) sym, age_calc age, SUM(agb) agb, any_value(epa_l3) l3, any_value(epa_l4) l4
-      FROM src.$(SCEN_COHORT_TABLE[]) t JOIN req_keys k ON t.plt_cn = k.rkey
+      FROM src.$(scen.cohort_table) t JOIN req_keys k ON t.plt_cn = k.rkey
       WHERE coalesce(t.intro_type, '') <> 'phantom_backfill' AND t.age_calc > 0
       GROUP BY plt_cn, measdate, UPPER(TRIM(species_symbol)), age_calc"""))
     byk = Dict{String,DataFrame}(String(k.pkey) => DataFrame(g) for (k, g) in pairs(groupby(co, :pkey)))
@@ -121,21 +174,18 @@ function load_scenario_plots(cns::Vector{String})
   end
 end
 
-const SCEN_DONORS = Ref(get(ENV, "PAN_DONORS", normpath(joinpath(@__DIR__, "..", "data", "treemap_donors.csv"))))
-const _DONORS = Ref{Union{Nothing,Dict{String,String}}}(nothing)
 "TreeMap plot CN → donor CN for plots without curated cohorts (data/treemap_donors.csv, docs/treemap_donors.md)."
-function _donor_map()
-  _DONORS[] === nothing || return _DONORS[]
+_donor_map(scen::ScenarioConfig) = get_cached!(scen.cache, :donors) do
   d = Dict{String,String}()
-  if isfile(SCEN_DONORS[])
-    df = CSV.read(SCEN_DONORS[], DataFrame; types=Dict(:cn => String, :donor_cn => String))
+  if isfile(scen.donors)
+    df = CSV.read(scen.donors, DataFrame; types=Dict(:cn => String, :donor_cn => String))
     for r in eachrow(df)
       ismissing(r.donor_cn) || isempty(r.donor_cn) || (d[r.cn] = r.donor_cn)
     end
   else
-    @warn "TreeMap donor table not found" SCEN_DONORS[]
+    @warn "TreeMap donor table not found" scen.donors
   end
-  _DONORS[] = d
+  d
 end
 
 """
@@ -146,11 +196,11 @@ the cohorts of its TreeMap donor (same forest type, nearest in BA/QMD/height/TPA
 (`l4`, `lon`, `lat` = majority EPA L4 and centroid of its pixels in the AOI), the ecoregion (eco cell, PnET climate), the
 site class and the PnET soils come from that location instead of from where the FIA plot was measured.
 """
-function load_scenario_units(plots, warnings)
-  info = load_scenario_plots(String[String(x.cn) for x in plots])
-  dm = _donor_map()
+function load_scenario_units(scen::ScenarioConfig, plots, warnings)
+  info = load_scenario_plots(scen, String[String(x.cn) for x in plots])
+  dm = _donor_map(scen)
   need = [r.cn for r in info if r.status == "no_data" && haskey(dm, r.cn)]
-  dinfo = isempty(need) ? Dict{String,Any}() : Dict{String,Any}(d.cn => d for d in load_scenario_plots(unique([dm[c] for c in need])))
+  dinfo = isempty(need) ? Dict{String,Any}() : Dict{String,Any}(d.cn => d for d in load_scenario_plots(scen, unique([dm[c] for c in need])))
   loc = Dict{String,Any}()
   for x in plots
     l4 = hasproperty(x, :l4) ? String(something(x.l4, "")) : ""
@@ -169,7 +219,7 @@ function load_scenario_units(plots, warnings)
     end
     lon = NaN
     if r.status == "ok" && haskey(loc, r.cn)
-      L = loc[r.cn]; sc = site_class_at(L.l3, L.lon, L.lat)
+      L = loc[r.cn]; sc = site_class_at(scen, L.l3, L.lon, L.lat)
       sc > 0 && (nsc += 1)
       r = merge(r, (l3=L.l3, l4=L.l4, lat=L.lat, siteclcd=(sc > 0 ? sc : r.siteclcd))); lon = L.lon; nloc += 1
     end
@@ -382,7 +432,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
   SP = ps.plugin; p = ps.params
   cycles = Int(get(plan, "cycles", 10)); period = Int(get(plan, "period", 10)); horizon = cycles * period
   warnings = String[]
-  info = load_scenario_units(plots, warnings)
+  info = load_scenario_units(ps.scen, plots, warnings)
   acres = Dict(String(x.cn) => Float64(x.acres) for x in plots)
   results = Dict{String,Any}()
   rows = NamedTuple[]; meta = NamedTuple[]
@@ -418,9 +468,9 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
   splots = DataFrame(rows)
   # the plugin context of this run: HBAD = the set's priors; PnET = the per-request climate (+ the cached base constants / species table); BS = no data
   attrs = nothing
-  pc = SP === PnETPlugin.PnET ? _pnet_context(climate, meta, horizon, warnings) :
+  pc = SP === PnETPlugin.PnET ? _pnet_context(ps.scen, climate, meta, horizon, warnings) :
        SP === HBADPlugin.HBAD ? ps.hb : BiomassSuccessionPlugin.BSTables()
-  SP === PnETPlugin.PnET && (attrs = _pnet_site_attrs(pc.climate, meta, warnings))
+  SP === PnETPlugin.PnET && (attrs = _pnet_site_attrs(ps.scen, pc.climate, meta, warnings))
   rng = RNGType(UInt64(seed))
   soa = make_sites(splots, [Int.(ids) for ids in p.ECO_SPECIES_IDS]; plugin=PluginConfig(pc), rng=rng, spinup=false,
                    no_establishment=!establishment, site_attrs=attrs)
@@ -518,10 +568,9 @@ function _select_stands(ps::ParamSet, soa, act, acr, seed)
 end
 
 # --- PnET climate + site attributes -----------------------------------------------------------------------------------
-const SCEN_CLIMATE_DB = Ref(get(ENV, "PAN_CLIMATE_DB", "/workspace/pan_climate/pan_climate.duckdb"))
 const DEFAULT_CLIMATE = Dict{String,Any}("baseline" => Dict{String,Any}("mode" => "forecast", "T" => 30, "K" => 3),
                                          "co2" => Dict{String,Any}("mode" => "constant"), "changes" => Any[])
-_co2_observed() = (df = CSV.read(SCEN_CO2_CSV[], DataFrame); Dict{Int,Float64}(Int(r[1]) => Float64(r[2]) for r in eachrow(df)))
+_co2_observed(scen::ScenarioConfig) = (df = CSV.read(scen.co2_csv, DataFrame); Dict{Int,Float64}(Int(r[1]) => Float64(r[2]) for r in eachrow(df)))
 
 """
     scenario_climate(l4s, y1, y2, climate) -> (years, Dict(l4 => Dict(var => 12×n matrix)), co2::Vector)
@@ -531,9 +580,9 @@ scenario baseline (forecast | repeat last T | average of the last K windows of T
 (ClimateScenario.build_climate) — changes act on every year from their start year, historical years included only if the
 user dates them there. CO₂: observed annual series, then the scenario pathway.
 """
-function scenario_climate(l4s::Vector{String}, y1::Int, y2::Int, climate)
+function scenario_climate(scen::ScenarioConfig, l4s::Vector{String}, y1::Int, y2::Int, climate)
   sc = climate === nothing ? DEFAULT_CLIMATE : climate
-  db = DuckDB.DB(SCEN_CLIMATE_DB[]; readonly=true); con = DuckDB.DBInterface.connect(db)
+  db = DuckDB.DB(scen.climate_db; readonly=true); con = DuckDB.DBInterface.connect(db)
   obs = Dict{String,Dict{String,Matrix{Float64}}}(); fc = Dict{String,Dict{String,Matrix{Float64}}}()
   oy = collect(1895:2024); fy = collect(2025:2150)
   try
@@ -552,32 +601,30 @@ function scenario_climate(l4s::Vector{String}, y1::Int, y2::Int, climate)
   end
   out = Dict{String,Dict{String,Matrix{Float64}}}(); years = collect(y1:y2)
   for l in l4s
-    haskey(obs, l) || error("no PRISM climate for L4 $l in $(SCEN_CLIMATE_DB[])")
+    haskey(obs, l) || error("no PRISM climate for L4 $l in $(scen.climate_db)")
     o = obs[l]; any(isnan, o["tmin"]) && error("incomplete PRISM record for L4 $l")
     _, d = ClimateScenario.build_climate(o, oy, get(fc, l, nothing), fy, sc; start_year=y1, end_year=y2)
     out[l] = d
   end
-  co2 = ClimateScenario.co2_series(years, ClimateScenario._get(sc, :co2, Dict{String,Any}("mode" => "constant")), _co2_observed())
+  co2 = ClimateScenario.co2_series(years, ClimateScenario._get(sc, :co2, Dict{String,Any}("mode" => "constant")), _co2_observed(scen))
   years, out, co2
 end
 
 # The PnET run context without a per-request climate: constants / species table + the 1980-2025 climate cache. Loaded on first use (lazy cache).
-const _PNET_BASE = Ref{Union{Nothing,PnETPlugin.PnETContext}}(nothing)
-function _pnet_base_context()
-  _PNET_BASE[] === nothing && (_PNET_BASE[] = PnETPlugin.PnETContext(SCEN_PNET_CLIMATE[], SCEN_CO2_CSV[]; generic=Dict{String,Any}(), db_path=SCEN_FIA_DB[]))
-  return _PNET_BASE[]
+_pnet_base_context(scen::ScenarioConfig) = get_cached!(scen.cache, :pnet_base) do
+  PnETPlugin.PnETContext(scen.pnet_climate, scen.co2_csv; generic=Dict{String,Any}(), db_path=scen.fia_db)
 end
 
 """The PnET context of a request: the base constants with a per-request climate covering every plot's L4 for its whole run (the cached 1980-2025 cache without a climate DB)."""
-function _pnet_context(climate, meta, horizon::Int, warnings)
-  base = _pnet_base_context()
-  if !isfile(SCEN_CLIMATE_DB[])
-    push!(warnings, "PnET climate: $(SCEN_CLIMATE_DB[]) not found — using the 1980–2025 cache (later years repeat 2025); climate scenarios unavailable")
+function _pnet_context(scen::ScenarioConfig, climate, meta, horizon::Int, warnings)
+  base = _pnet_base_context(scen)
+  if !isfile(scen.climate_db)
+    push!(warnings, "PnET climate: $(scen.climate_db) not found — using the 1980–2025 cache (later years repeat 2025); climate scenarios unavailable")
     return base
   end
   l4s = sort(unique(String(m.l4) for m in meta if !isempty(m.l4)))
   y1 = minimum(Dates.year(m.measdate) for m in meta); y2 = maximum(Dates.year(m.measdate) for m in meta) + horizon + 1
-  years, cl, co2 = scenario_climate(l4s, y1, y2, climate)
+  years, cl, co2 = scenario_climate(scen, l4s, y1, y2, climate)
   ny = length(years); nc = length(l4s)
   tmin = Array{Float64}(undef, 12, ny, nc); tmax = similar(tmin); ppt = similar(tmin)
   for (c, l) in enumerate(l4s)
@@ -586,11 +633,11 @@ function _pnet_context(climate, meta, horizon::Int, warnings)
   return PnETPlugin.with_climate(base, PnETPlugin.build_climate(l4s, years, tmin, tmax, ppt, co2))
 end
 
-function _pnet_site_attrs(cl, meta, warnings)
+function _pnet_site_attrs(scen::ScenarioConfig, cl, meta, warnings)
   idpos = Dict(id => i for (i, id) in enumerate(cl.ids))
-  soil = isfile(SCEN_SOIL_CSV[]) ? PnETPlugin.load_plot_soil(SCEN_SOIL_CSV[]) : Dict()
+  soil = isfile(scen.soil_csv) ? PnETPlugin.load_plot_soil(scen.soil_csv) : Dict()
   located = [m for m in meta if isfinite(m.lon)]
-  lsoil = Dict(zip((m.plot_id for m in located), soil_at(Float64[m.lon for m in located], Float64[m.lat for m in located])))
+  lsoil = Dict(zip((m.plot_id for m in located), soil_at(scen, Float64[m.lon for m in located], Float64[m.lat for m in located])))
   nls = count(!isnothing, values(lsoil))
   rows = NamedTuple[]; nfb = 0
   for m in meta
@@ -611,13 +658,13 @@ function _pnet_site_attrs(cl, meta, warnings)
 end
 
 """
-    climate_preview(plots, climate; start_year, years) -> NamedTuple for the UI
+    climate_preview(scen, plots, climate; start_year, years) -> NamedTuple for the UI
 
 AOI-weighted (acres) monthly series of tmin, tmax, tmean, ppt and annual CO₂ for start_year … start_year+years−1 over the
 plots' L4s: `baseline` = the scenario's baseline mode with no changes, `modified` = with its changes and CO₂ pathway.
 """
-function climate_preview(plots, climate; start_year::Integer, years::Integer)
-  info = load_scenario_units(plots, String[])
+function climate_preview(scen::ScenarioConfig, plots, climate; start_year::Integer, years::Integer)
+  info = load_scenario_units(scen, plots, String[])
   acres = Dict(String(x.cn) => Float64(x.acres) for x in plots)
   w = Dict{String,Float64}()
   for r in info
@@ -630,8 +677,8 @@ function climate_preview(plots, climate; start_year::Integer, years::Integer)
   base_sc = Dict{String,Any}("baseline" => ClimateScenario._get(sc, :baseline, DEFAULT_CLIMATE["baseline"]),
                              "co2" => Dict{String,Any}("mode" => "constant"), "changes" => Any[])
   y1 = Int(start_year); y2 = Int(start_year + years - 1)
-  yrs, cb, co2b = scenario_climate(l4s, y1, y2, base_sc)
-  _, cm, co2m = scenario_climate(l4s, y1, y2, sc)
+  yrs, cb, co2b = scenario_climate(scen, l4s, y1, y2, base_sc)
+  _, cm, co2m = scenario_climate(scen, l4s, y1, y2, sc)
   agg(cl, v) = sum(w[l] / tw .* cl[l][v] for l in l4s)
   vars = NamedTuple[]
   for (v, lab, un) in (("tmin", "Minimum temperature", "°C"), ("tmax", "Maximum temperature", "°C"), ("tmean", "Mean temperature", "°C"), ("ppt", "Precipitation", "mm/month"))

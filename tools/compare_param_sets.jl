@@ -6,7 +6,8 @@
 using Pan, DuckDB, DataFrames, CSV, Statistics, Printf
 const P = Pan
 out = ARGS[1]; cycles = parse(Int, ARGS[2]); period = parse(Int, ARGS[3]); nplots = parse(Int, ARGS[4]); files = ARGS[5:end]
-db = DuckDB.DB(P.SCEN_FIA_DB[]; readonly=true); con = DuckDB.DBInterface.connect(db)
+scen = P.ScenarioConfig()
+db = DuckDB.DB(scen.fia_db; readonly=true); con = DuckDB.DBInterface.connect(db)
 cns = DataFrame(DuckDB.DBInterface.execute(con, """
   SELECT p.CN cn FROM PLOT p WHERE p.STATECD IN (12, 13) AND p.INVYR BETWEEN 2018 AND 2020
     AND (p.STATECD || '_' || p.UNITCD || '_' || p.COUNTYCD || '_' || p.PLOT) IN
@@ -16,7 +17,7 @@ plots = [(cn=String(c), acres=1.0) for c in cns]
 plan = Dict{String,Any}("cycles" => cycles, "period" => period, "actions" => Any[])
 rows = DataFrame(set=String[], elapsed=Int[], agb=Float64[], ba=Float64[], tpa=Float64[], qmd=Float64[], carbon=Float64[], nplots=Int[])
 for f in files
-  ps = P.load_paramset(read(f, String))
+  ps = P.load_paramset(read(f, String), scen)
   res, w = P.run_scenario(ps, plots, plan)
   ok = [v for v in values(res) if v.status == "ok"]
   for c in 1:(cycles + 1)

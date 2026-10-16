@@ -41,7 +41,8 @@ function select_hook(d)
   if space == "projection"
     meta = P.params_from_yaml(read(ENV["ANCHOR_YAML"], String))[2]
     nplots = parse(Int, get(ENV, "PROJ_PLOTS", "60"))
-    db = P.DuckDB.DB(P.SCEN_FIA_DB[]; readonly=true); con = P.DuckDB.DBInterface.connect(db)
+    scen = P.ScenarioConfig()
+    db = P.DuckDB.DB(scen.fia_db; readonly=true); con = P.DuckDB.DBInterface.connect(db)
     cns = DataFrame(P.DuckDB.DBInterface.execute(con, """
       SELECT p.CN cn FROM PLOT p WHERE p.STATECD IN (12, 13) AND p.INVYR BETWEEN 2018 AND 2020
         AND (p.STATECD || '_' || p.UNITCD || '_' || p.COUNTYCD || '_' || p.PLOT) IN
@@ -51,7 +52,7 @@ function select_hook(d)
     plan = Dict{String,Any}("cycles" => 10, "period" => 10, "actions" => Any[])
     topsp = Ref{Vector{Int16}}(Int16[])
     function project(p)
-      ps = P.load_paramset(P.params_to_yaml(p; name="candidate", species_map=meta.species_map, eco_mapping=meta.eco_mapping))
+      ps = P.load_paramset(P.params_to_yaml(p; name="candidate", species_map=meta.species_map, eco_mapping=meta.eco_mapping), scen)
       res, _ = P.run_scenario(ps, plots, plan)
       ok = [v for v in values(res) if v.status == "ok"]
       agb(c) = mean(v.metrics[c].agb for v in ok); tpa(c) = mean(v.metrics[c].tpa for v in ok)
