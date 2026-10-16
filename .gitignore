@@ -31,3 +31,5 @@ JuliaLocalPreferences.toml
 runs/*.duckdb
 .julia_depot/
 .gdal_driver_path_cache
+results/hbad2/*.arrow
+results/hbad2/*.out
