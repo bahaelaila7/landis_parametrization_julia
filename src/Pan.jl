@@ -3250,8 +3250,8 @@ function _dump_cv_front(search_state, output_dir, eco_list, eco_species_ids, n_s
     Set((Int(r.plot_id), Int(r.sim_year)) for r in eachrow(val_injection_cohorts) if r.disturbance_drop_pct > 0) : Set{Tuple{Int,Int}}()
   mrows = NamedTuple[]; prows = NamedTuple[]
   for (kind, c) in reps
-    rr = fit_params(val_ref_soa, c.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years,
-      spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=true)
+    rr = val_fit_params(c.x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+      injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin, collect_cohorts=true)
     run_result, eco_losses, idx = _agg_reps(rr, loss_params, scoring)
     objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, val_scales, val_dual_b)
     push!(mrows, (rep_kind=kind, W=Float64(sum(objs[1:2:end])), AGB=Float64(sum(objs[2:2:end])), total=Float64(_mo_aggregate(objs, run_result, loss_params)), front_size=length(arch)))
@@ -3287,8 +3287,8 @@ function _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max
   wtot(c)=Float64(sum(@view c.fx.objectives[1:2:end])); atot(c)=Float64(sum(@view c.fx.objectives[2:2:end]))
   ckey(c)=Tuple(round.(Float64.(collect(c.fx.objectives)), digits=10))   # dedup id (non-dominated ⇒ distinct)
   val_obj(x) = begin
-    rr = fit_params(val_ref_soa, x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years,
-      spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin=plugin)
+    rr = val_fit_params(x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+      injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin)
     _, eco_losses, _ = _agg_reps(rr, loss_params, scoring); objs = _mo_objectives(eco_losses, eco_species_ids, loss_params, val_scales, val_dual_b)
     (Float64(sum(objs[1:2:end])), Float64(sum(objs[2:2:end])))
   end
@@ -3386,8 +3386,8 @@ function _cv_reselect_dump(output_dir, eco_list, eco_species_ids, n_species, max
       [:plot_id, :sim_year, :eco_species_id, :eco_id]), :agb_sum => sum => :obs_agb)
     prows = NamedTuple[]
     for (nm, c, _vp) in positions(p100_arch)
-      rr = fit_params(val_ref_soa, c.x, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years,
-        spinup, val_spinup_cohorts, loss_params; debug=false, search_tier=3, injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin=plugin, collect_cohorts=true)
+      rr = val_fit_params(c.x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+      injection=inj_val, dual_b=val_dual_b, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin, collect_cohorts=true)
       av = _agg_reps(rr, loss_params, scoring); cached = rr[av[3]][2]
       simdf = DataFrame(plot_id=Int[], sim_year=Int[], eco_species_id=Int[], sim_agb=Float64[])
       for (pid, sy, esp, _age, bio) in cached
