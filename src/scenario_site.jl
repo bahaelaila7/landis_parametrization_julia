@@ -94,7 +94,8 @@ _site_table(scen::ScenarioConfig) = get_cached!(scen.cache, :site_table) do
                  WHERE co.COND_STATUS_CD = 1 AND co.SITECLCD IS NOT NULL GROUP BY ALL),
            r AS (SELECT key, sc, ROW_NUMBER() OVER (PARTITION BY key ORDER BY w DESC, sc) AS rn FROM c),
            ll AS (SELECT key, avg(LAT) AS lat, avg(LON) AS lon FROM pk GROUP BY key)
-      SELECT k.l3, ll.lat, ll.lon, r.sc FROM k JOIN ll USING (key) JOIN r USING (key) WHERE r.rn = 1"""))
+      SELECT k.l3, ll.lat, ll.lon, r.sc FROM k JOIN ll USING (key) JOIN r USING (key) WHERE r.rn = 1
+      ORDER BY k.l3, ll.lat, ll.lon, r.sc, k.key"""))
     byl3 = Dict{String,NamedTuple}()
     for g in groupby(df, :l3)
       ismissing(g.l3[1]) && continue

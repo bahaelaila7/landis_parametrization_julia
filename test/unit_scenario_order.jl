@@ -1,0 +1,29 @@
+# load_scenario_plots must return plots (and each plot's cohorts) in a DETERMINISTIC order: it feeds the plot ids / site indices (hence the
+# per-site RNG seeds) and the order of equal-age cohorts of run_scenario. Unordered DuckDB result sets made run_scenario depend on scheduling.
+module UnitScenarioOrder
+using Test, Pan, DuckDB, DataFrames, Dates
+const P = Pan
+mktempdir() do d
+  f = joinpath(d, "mini.duckdb")
+  db = DuckDB.DB(f); con = DuckDB.DBInterface.connect(db)
+  DuckDB.execute(con, "CREATE TABLE PLOT(CN VARCHAR, STATECD INT, UNITCD INT, COUNTYCD INT, PLOT INT, INVYR INT, MEASYEAR INT, MEASMON INT, MEASDAY INT, LAT DOUBLE, LON DOUBLE)")
+  DuckDB.execute(con, "CREATE TABLE COND(PLT_CN VARCHAR, SITECLCD INT, CONDPROP_UNADJ DOUBLE, COND_STATUS_CD INT)")
+  DuckDB.execute(con, "CREATE TABLE coh(plt_cn VARCHAR, measdate DATE, species_symbol VARCHAR, age_calc INT, agb DOUBLE, epa_l3 VARCHAR, epa_l4 VARCHAR, intro_type VARCHAR)")
+  cns = ["c9", "c3", "c7", "c1", "c5"]          # deliberately not sorted
+  for (i, c) in enumerate(cns)
+    DuckDB.execute(con, "INSERT INTO PLOT VALUES ('$c', 12, 1, 1, $i, 2018, 2018, 6, 15, 30.0, -85.0)")
+    DuckDB.execute(con, "INSERT INTO COND VALUES ('$c', 3, 1.0, 1)")
+    for (sp, age) in (("QUAL", 40), ("PITA", 40), ("ACRU", 40), ("PITA", 10), ("LITU", 40))   # equal-age ties across species
+      DuckDB.execute(con, "INSERT INTO coh VALUES ('12_1_1_$i', DATE '2018-06-15', '$sp', $age, $(100.0 * i + age), '8.3.5', '8.3.5a', NULL)")
+    end
+  end
+  DuckDB.DBInterface.close!(con); DuckDB.close(db)
+  scen = P.ScenarioConfig(; fia_db=f, cohort_table="coh")
+  out = P.load_scenario_plots(scen, cns)
+  @test [r.cn for r in out] == sort(cns)
+  for r in out
+    @test r.status == "ok"
+    @test collect(zip(r.cohorts.sym, r.cohorts.age)) == [("ACRU", 40), ("LITU", 40), ("PITA", 10), ("PITA", 40), ("QUAL", 40)]
+  end
+end
+end

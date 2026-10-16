@@ -133,7 +133,8 @@ function load_scenario_plots(scen::ScenarioConfig, cns::Vector{String})
     DuckDB.register_data_frame(con, DataFrame(cn=unique(cns)), "req_cns")
     pl = DataFrame(DuckDB.DBInterface.execute(con, """
       SELECT p.CN cn, p.STATECD s, p.UNITCD u, p.COUNTYCD c, p.PLOT p, p.INVYR invyr, p.MEASYEAR my, p.MEASMON mm, p.MEASDAY md, p.LAT lat, p.LON lon
-      FROM src.PLOT p JOIN req_cns r ON p.CN = r.cn"""))
+      FROM src.PLOT p JOIN req_cns r ON p.CN = r.cn
+      ORDER BY p.CN"""))
     sc = DataFrame(DuckDB.DBInterface.execute(con, """
       WITH cr AS (SELECT co.PLT_CN cn, co.SITECLCD sc, SUM(co.CONDPROP_UNADJ) w FROM src.COND co JOIN req_cns r ON co.PLT_CN = r.cn
                   WHERE co.COND_STATUS_CD = 1 AND co.SITECLCD IS NOT NULL GROUP BY ALL),
@@ -146,7 +147,8 @@ function load_scenario_plots(scen::ScenarioConfig, cns::Vector{String})
       SELECT plt_cn AS pkey, measdate, UPPER(TRIM(species_symbol)) sym, age_calc age, SUM(agb) agb, any_value(epa_l3) l3, any_value(epa_l4) l4
       FROM src.$(scen.cohort_table) t JOIN req_keys k ON t.plt_cn = k.rkey
       WHERE coalesce(t.intro_type, '') <> 'phantom_backfill' AND t.age_calc > 0
-      GROUP BY plt_cn, measdate, UPPER(TRIM(species_symbol)), age_calc"""))
+      GROUP BY plt_cn, measdate, UPPER(TRIM(species_symbol)), age_calc
+      ORDER BY plt_cn, measdate, sym, age"""))
     byk = Dict{String,DataFrame}(String(k.pkey) => DataFrame(g) for (k, g) in pairs(groupby(co, :pkey)))
     out = NamedTuple[]
     for r in eachrow(pl)
