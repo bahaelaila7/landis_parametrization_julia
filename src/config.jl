@@ -75,7 +75,7 @@ const SCHEMA_LIST = KeySpec[
   KeySpec("train_cap_min", :int, 20, "lower bound of the \"auto\" cap"),
   KeySpec("split_only", :bool, false, "write split_plots.csv / species_map.csv (+ pool_map.csv) and stop"),
   # ---- run control ---------------------------------------------------------------------------------------------------
-  KeySpec("search_mode", :string, "lbsa", "lbsa | molbsa | cmaes | mocmaes | igelmo | cmame | ccigel | nsga2 | gdigel | sobol | plot_only | plot_only_sobol"),
+  KeySpec("search_mode", :string, "lbsa", "lbsa | sa | molbsa | cmaes | mocmaes | igelmo | cmame | ccigel | nsga2 | gdigel | sobol | plot_only | plot_only_sobol"),
   KeySpec("tier", :int, 1, "Sim A scoring tier (1-5)"),
   KeySpec("trials", :int, 1000000, "evaluation budget"),
   KeySpec("seed", :int, 404, "master RNG seed"),
@@ -203,6 +203,13 @@ const SCHEMA_LIST = KeySpec[
   KeySpec("lbsa_temp_list_len", :int, 150, "LBSA temperature-list length"),
   KeySpec("lbsa_replace_oldest", :bool, true, "false = overwrite the maximum each stretch (responsive temperature)"),
   KeySpec("lbsa_cooling_only", :bool, false, "true = monotone cooling so the search can freeze and reheat"),
+  # ---- SA (classic simulated annealing with a cooling schedule) -----------------------------------------------------
+  KeySpec("sa_initial_t", :float, 1000.0, "SA initial temperature"),
+  KeySpec("sa_alpha", :float, 0.9992, "SA geometric cooling factor per trial (t <- alpha t)"),
+  KeySpec("sa_min_t", :float, 0.01, "SA stops when the temperature falls below this"),
+  KeySpec("sa_acceptance", :string, "SA", "SA acceptance rule: SA (Metropolis) | TA (threshold accepting)"; choices=("SA", "TA")),
+  KeySpec("sa_reheat_prob", :float, 0.01, "SA reheats when the running acceptance probability stays below this"),
+  KeySpec("sa_reheat_after", :int, 100, "SA reheats after this many consecutive trials below sa_reheat_prob"),
   # ---- CMA-ES family -------------------------------------------------------------------------------------------------
   KeySpec("mocmaes_true_nds", :bool, false, "MO-CMA-ES ranks offspring by NSGA-II fronts instead of win count"),
   KeySpec("cmaes_lambda", :int, nothing, "CMA-ES offspring count (null = default)"; nullable=true),

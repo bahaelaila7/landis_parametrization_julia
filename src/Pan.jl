@@ -1355,11 +1355,10 @@ function _write_split_plots(output_dir::AbstractString, eco_list, splots, sv, st
 end
 
 # search drivers reachable from `parametrize` (sobol returns early; plot_only* are handled in run_from_yaml)
-const SEARCH_MODES = ("lbsa", "molbsa", "cmaes", "mocmaes", "igelmo", "cmame", "ccigel", "nsga2", "gdigel")
+const SEARCH_MODES = ("lbsa", "sa", "molbsa", "cmaes", "mocmaes", "igelmo", "cmame", "ccigel", "nsga2", "gdigel")
 function _check_search_mode(m::AbstractString)
   (m in SEARCH_MODES || m == "sobol") && return nothing
-  error("unknown search_mode $(repr(m)); valid: $(join(SEARCH_MODES, ", ")), sobol, plot_only, plot_only_sobol" *
-        (m == "sa" ? " (the SA driver predates injection/tiers and is being rebuilt on the shared annealing loop; use lbsa)" : ""))
+  error("unknown search_mode $(repr(m)); valid: $(join(SEARCH_MODES, ", ")), sobol, plot_only, plot_only_sobol")
 end
 
 function parametrize(; cohorts_db_path::String,
@@ -1698,7 +1697,8 @@ function parametrize(; cohorts_db_path::String,
     post_search_hook === nothing || post_search_hook(ctx)
     return ctx
   end
-  driver = search_mode == "molbsa" ? parametrize_MOLBSA :
+  driver = search_mode == "sa" ? parametrize_SA :
+           search_mode == "molbsa" ? parametrize_MOLBSA :
            search_mode == "cmaes" ? parametrize_CMAES :
            search_mode == "mocmaes" ? parametrize_MOCMAES :
            search_mode == "igelmo" ? parametrize_IgelMOCMAES :
@@ -4794,75 +4794,89 @@ function load_sobol_candidates(db_path::String; top_frac::Float64=0.5, run_id::U
   end
 end
 
-function parametrize_SA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, scale_seed::PU.LossScales=PU.LossScales())
-  n_species = length(species_list)
-  sa_scales = compute_loss_scales(loss_params, 3, spdf_plts, nothing, eco_species_ids, n_species; per_plot_mean=false, cbal=scale_seed.cbal, ncoh=scale_seed.ncoh, dom=scale_seed.dom)
-  SP = succession_plugin_of(ref_soa)   # succession plugin type (dispatch for params/ctx/step!)
-  bio_params = generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng)
-  best_result = nothing # PU.SiteLoss(FloatType[], FloatType[], FloatType(Inf), 1)
-  cur = SA.SACandidate(bio_params, best_result)
-  _best = cur
-  search_state = SA.SAState(_best, cur, rng; max_iter=TRIALS, initial_t=1e3, t=1e3)
-  if TRIALS < 1
-    return search_state #best_loss, best_result, best_params
+# Simulated-annealing driver (Step 5b rebuild; B22). Classic SA with a geometric cooling schedule on the scalar Sim-A loss, built on the shared
+# machinery like the other drivers: `mo_env` (injection plan, tier references, fixed seeds, scales, Sim B), `run_candidate` (= fit_params),
+# the one validation evaluation (`mo_val!` / `val_eval`, fixed common-random-number seeds), `scalar_loop_open` / `run_search_loop` (writer,
+# losses.duckdb, interrupt handling, exit checkpoint) and checkpoint/resume (`resume_from`: the state carries the temperature, the counters and
+# the run rng, so a resumed run continues exactly like an uninterrupted one). Proposals mutate the CURRENT point (the retired driver mutated its
+# last proposal, accepted or not, which made it a random walk). Score = the LBSA score (cell-normalised aggregate under CELL_NORM, else the raw
+# scalar). Knobs: yaml `sa_*` (SAOptions).
+function parametrize_SA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, TRIALS::Int, rng::Random.AbstractRNG, debug::Bool, search_tier::Int=3, resume_from::Union{Nothing,String}=nothing, start_from::Union{Nothing,String}=nothing, force_restart_from_random::Bool=false, n_reps::Int=1, sobol_candidates_db::Union{Nothing,String}=nothing, sobol_top_frac::Float64=0.5, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, val_splots=nothing, val_ref_soa=nothing, val_spdf_plts=nothing, val_site_sim_years=nothing, val_spinup_cohorts=nothing, val_injection_cohorts=nothing, cycle_years::Real=8, scale_seed::PU.LossScales=PU.LossScales(), exec::ExecOptions=ExecOptions(), search::SearchOptions=SearchOptions())
+  search_tier in (1, 2, 3, 4, 5) || error("parametrize_SA: unknown search_tier=$search_tier (expected 1, 2, 3, 4, or 5)")
+  env = mo_env(; ref_soa, plugin, splots, spdf_plts, spinup_cohorts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, spinup, rng, debug,
+    search_tier, n_reps, n_output_plots, no_establishment, injection_cohorts, cycle_years, scale_seed, exec,
+    val_splots, val_ref_soa, val_spdf_plts, val_site_sim_years, val_spinup_cohorts, val_injection_cohorts)
+  _sobol_cands = isnothing(sobol_candidates_db) ? [] : load_sobol_candidates(sobol_candidates_db; top_frac=sobol_top_frac)
+  n_species = env.n_species
+  # the SAME scalar as LBSA's: the cell-normalised aggregate under CELL_NORM, else the raw total
+  _score(rr, el) = loss_params.cell_norm ? Float64(sum(_mo_objectives(el, eco_species_ids, loss_params, env.scales, env.dual_b))) : convert(Float64, PU.get_total_loss(rr, loss_params))
+  function _eval(p)
+    rep_results = run_candidate(env, p)
+    run_result, eco_losses, _ = _agg_reps(rep_results, loss_params, scoring)
+    return _score(run_result, eco_losses), run_result, eco_losses, rep_results
   end
-  max_sim_year = site_sim_years.sim_years .|> maximum |> maximum
+  sa = search.sa
+  if isnothing(resume_from)
+    bio_params = if !isnothing(start_from)
+      @info "Seeding initial candidate from $start_from (fresh search_state)"
+      p = _load_params_from_path(start_from, plugin.ctx)
+      (p.SPECIES_LIST == species_list && p.ECO_LIST == eco_list) ||
+        error("start_from params are incompatible with this run: their SPECIES_LIST/ECO_LIST differ from the loaded data (e.g. different stratify_eco_mixed, species tiering, or eco/plot filters). Seeding requires matching ecoregions and species.")
+      p
+    elseif !isempty(_sobol_cands)
+      @info "Using Sobol candidate 1/$(length(_sobol_cands)) as initial point"
+      _sobol_cands[1]
+    else
+      generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
+    end
+    f0 = _eval(bio_params)[1]
+    cur = SA.SACandidate(bio_params, f0)
+    search_state = SA.SAState(cur, cur, rng; max_iter=TRIALS, initial_t=sa.initial_t, t=sa.initial_t, min_t=sa.min_t, alpha=sa.alpha, acceptance_rule=sa.acceptance,
+                              reheat_prob_threshold=sa.reheat_prob_threshold, reheat_after_iters=sa.reheat_after_iters)
+    push!(search_state.best_iterations, (0, f0, f0))
+  else
+    @info "Resuming from $resume_from"
+    search_state = JLD2.load_object(resume_from)
+    search_state.max_iter = TRIALS
+    rng = search_state.rng   # the checkpoint's rng IS the run's rng from here on (as in the uninterrupted run, where state.rng === rng)
+  end
+  if TRIALS < 1 || SA.is_search_over(search_state)
+    return search_state
+  end
 
-  writer_ch, writer_task = start_writer(typeof(search_state), output_dir)
-
-  try
-
-    TProgress.@track for trial in 1:TRIALS
-      search_state.i = trial
-      soa = deepcopy(ref_soa)
-
-      bio_params, _ = PU.mutate_params(bio_params, space; rng=rng)
-      eco_params = generate_eco_params(plugin.ctx, bio_params)
-      ctx = make_ctx(plugin.ctx, eco_params)
-      years_results = Vector{PU.SiteLoss}(undef, max_sim_year + 1)
-      if spinup
-        soa = spinup!(SP, soa, spinup_cohorts, eco_params)
-      end
-      for current_sim_year in 0:max_sim_year
-        #println("\ttimestep $(t)")
-        sites_results = Vector{PU.SiteLoss}(undef, soa.n)
-        step!(SP, soa, current_sim_year, ctx)
-        Threads.@threads :static for i in 1:soa.n
-          @inbounds begin
-            site = getsite(soa, i)
-            !site.active && continue
-            spdf_plt = spdf_plts[(site.ref_cn, site.eco_id)]
-            sim_years = site_sim_years.sim_years[site.mapcode]
-            if current_sim_year in sim_years
-              #cache_site_data()
-              sloss = PU.calculate_site_loss2(current_sim_year, site, n_species, eco_species_ids, spdf_plt[current_sim_year], loss_params, sa_scales; debug=debug)
-              sites_results[i] = sloss
-            end
+  mo_val!(env)
+  loop, losses_db = scalar_loop_open(search_state; output_dir)
+  writer_ch = loop.writer_ch
+  run_search_loop(loop; get_state=() -> search_state, unit="trial") do
+    TProgress.@track for trial in (search_state.i+1):TRIALS
+      bio_params, _ = PU.mutate_params(search_state.current.x, space; rng=rng)
+      next_loss, run_result, eco_losses, rep_results = _eval(bio_params)
+      is_new_best = SA.search_cmp!(SA.SACandidate(bio_params, next_loss), search_state)
+      val_sim_sample = nothing
+      if is_new_best
+        iter = search_state.best_iteration
+        total = convert(Float64, search_state.best.fx)
+        @info "New best @ $iter | loss=$total"
+        if env.have_val
+          try
+            val_result = env.val_fit(search_state.best.x)
+            @info "Val loss @ $iter | loss=$(convert(Float64, PU.get_total_loss(val_result[1], loss_params)))"
+            val_sim_sample = n_output_plots > 0 ? _filter_cached_to_df(val_result[2], env.sampled_ids_val) : nothing
+          catch e
+            @warn "val fit_params failed" exception = (e, catch_backtrace())
           end
         end
-        year_results_no_missing = collect(PU.skipundef(sites_results))
-        if length(year_results_no_missing) > 0
-          current_year_results = sum(year_results_no_missing)
-          years_results[current_sim_year+1] = current_year_results
-        end
+        record_best_losses!(losses_db, iter, total, run_result, eco_losses, search_state.best.x; eco_list, species_list, n_species, loss_params, print_breakdown=true)
       end
-      run_result = sum(PU.skipundef(years_results))
-      @assert !any(isnan.(run_result.sp_w_loss)) "run NaN"
-      next = SA.SACandidate(bio_params, Float64(PU.get_total_loss(run_result, loss_params)))   # SA compares scalar fitnesses
-
-      is_new_best = SA.search_cmp!(next, search_state)
       if is_new_best || search_state.i % 50 == 0
-        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state)))
+        cached_sites_state = _median_rep_cached(rep_results, loss_params, scoring)
+        sim_sample = (is_new_best && n_output_plots > 0) ? _filter_cached_to_df(cached_sites_state, env.sampled_ids) : nothing
+        put!(writer_ch, WriterJob(is_new_best, deepcopy(search_state), splots, _cohorts_df(cached_sites_state), env.emp_sample, sim_sample, is_new_best ? env.emp_sample_val : nothing, val_sim_sample))
       end
-      if SA.search_update_rule!(search_state)
-        break
-      end
-      #println(convert(Float64,run_result))
+      SA.search_update_rule!(search_state) && break
     end
-  finally
-    stop_writer(writer_ch, writer_task)
   end
-
+  return search_state
 end
 
 # Load the data-derived per-species LONGEVITY table (species_symbol -> years) from species_longevity_ref
@@ -5512,7 +5526,10 @@ end
 
 function _load_params_from_path(params_path::String, pc=nothing)
   raw = JLD2.load_object(params_path)
-  if raw isa LBSA.LBSAState
+  if raw isa SA.SAState
+    @info "Loaded SAState — using best params" loss = convert(Float64, raw.best.fx) iter = raw.best_iteration
+    return raw.best.x
+  elseif raw isa LBSA.LBSAState
     @info "Loaded LBSAState — using best params" loss = convert(Float64, raw.best.fx) iter = raw.best_iteration
     return raw.best.x
   elseif raw isa MOLBSA.MOLBSAState

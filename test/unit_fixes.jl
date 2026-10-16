@@ -42,7 +42,7 @@ end
   @test Pan._check_search_mode("igelmo") === nothing && Pan._check_search_mode("sobol") === nothing
   @test all(m -> Pan._check_search_mode(m) === nothing, Pan.SEARCH_MODES)
   @test_throws ErrorException Pan._check_search_mode("igel_mo")
-  @test_throws ErrorException Pan._check_search_mode("sa")
+  @test_throws ErrorException Pan._check_search_mode("annealing")
 end
 
 

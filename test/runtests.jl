@@ -15,6 +15,7 @@ using Test, Pan
   @testset "unit_fixes" begin include("unit_fixes.jl") end
   @testset "unit_search_common" begin include("unit_search_common.jl") end
   @testset "unit_scenario_order" begin include("unit_scenario_order.jl") end
+  @testset "unit_search_sa" begin include("unit_search_sa.jl") end
 
   # Pre-existing asserting scripts: run as subprocesses (they call exit(), define globals / @check macros, or print-and-exit-code).
   julia = Base.julia_cmd()

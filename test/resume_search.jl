@@ -85,4 +85,18 @@ end
     @test a.meta.kappa == b.meta.kappa == mid.meta.kappa
     @test isequal(sig_gd(a), sig_gd(b))
   end
+  @testset "sa: 6 + 6 trials == 12 trials (B22)" begin
+    base = Dict{String,Any}("search_mode" => "sa", "sa_initial_t" => 3.0, "sa_alpha" => 0.9)
+    full = joinpath(tmp, "sa_full"); part = joinpath(tmp, "sa_part")
+    run_cfg(merge(base, Dict{String,Any}("output_dir" => full, "trials" => 12)))
+    run_cfg(merge(base, Dict{String,Any}("output_dir" => part, "trials" => 6)))
+    ck = joinpath(fold_dir(part), "search_state_latest.jld2")
+    mid = Pan.JLD2.load_object(ck); @test mid.i == 6 && mid.t < 3.0
+    run_cfg(merge(base, Dict{String,Any}("output_dir" => part, "trials" => 12, "resume_from" => ck)))
+    a = Pan.JLD2.load_object(joinpath(fold_dir(full), "search_state_latest.jld2")); b = Pan.JLD2.load_object(joinpath(fold_dir(part), "search_state_latest.jld2"))
+    @test a.i == 12 && b.i == 12
+    bytes(x) = (io = IOBuffer(); Pan.Serialization.serialize(io, x); take!(io))   # the parameter struct holds arrays: compare content, not identity
+    sig(st) = (st.i, st.t, bytes(st.current.x), st.current.fx, bytes(st.best.x), st.best.fx, st.best_iteration, [(i, f) for (i, f, _) in st.best_iterations], st.prob_avg, st.diff_avg, st.reheat_iter_counter, rngsig(st.rng))
+    @test isequal(sig(a), sig(b))
+  end
 end

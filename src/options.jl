@@ -150,14 +150,32 @@ Base.@kwdef struct LBSAOptions
 end
 
 """
+    SAOptions
+
+The simulated-annealing knobs of `parametrize_SA` (yaml `sa_*`): the geometric cooling schedule `t ← alpha·t` from `initial_t` (the run ends when
+`t < min_t` or the trial budget is spent), the `acceptance` rule ("SA" Metropolis exp(-Δ/t) or "TA" threshold accepting Δ < t) and the reheat
+(back to `initial_t` when the running acceptance probability stays below `reheat_prob_threshold` for `reheat_after_iters` trials). The defaults
+are those of the original driver.
+"""
+Base.@kwdef struct SAOptions
+  initial_t::Float64 = 1000.0
+  alpha::Float64 = 0.9992
+  min_t::Float64 = 0.01
+  acceptance::String = "SA"
+  reheat_prob_threshold::Float64 = 0.01
+  reheat_after_iters::Int = 100
+end
+
+"""
     SearchOptions
 
-The config-derived knobs of the search engines, bundled and passed to the drivers as `search=`: `lbsa` (LBSA), `igel` (the Igel engine's
+The config-derived knobs of the search engines, bundled and passed to the drivers as `search=`: `lbsa` (LBSA), `sa` (simulated annealing), `igel` (the Igel engine's
 resume-retunable knobs, see `IgelMOCMAES.IgelOptions`; the Igel driver adds its niching maps and reseed fraction on top) and `mocmaes_nds`
 (MO-CMA-ES and CMA-ME rank offspring by TRUE NSGA-II non-dominated sorting instead of the net win count; yaml `mocmaes_true_nds`).
 """
 Base.@kwdef struct SearchOptions
   lbsa::LBSAOptions = LBSAOptions()
+  sa::SAOptions = SAOptions()
   igel::IgelMOCMAES.IgelOptions{typeof(identity),typeof(identity)} = IgelMOCMAES.IgelOptions()
   mocmaes_nds::Bool = false
 end
@@ -166,6 +184,8 @@ end
 search_options_from_config(cfg::AbstractDict) = SearchOptions(
   lbsa=LBSAOptions(stretch_len=cfg["lbsa_stretch_len"], stale_ratio=cfg["lbsa_stale_ratio"], temp_list_len=cfg["lbsa_temp_list_len"],
                    replace_oldest=cfg["lbsa_replace_oldest"], cooling_only=cfg["lbsa_cooling_only"]),
+  sa=SAOptions(initial_t=cfg["sa_initial_t"], alpha=cfg["sa_alpha"], min_t=cfg["sa_min_t"], acceptance=cfg["sa_acceptance"],
+               reheat_prob_threshold=cfg["sa_reheat_prob"], reheat_after_iters=cfg["sa_reheat_after"]),
   igel=IgelMOCMAES.IgelOptions(use_cholesky=cfg["igel_cholesky"], reseed_sigma_override=cfg["igel_reseed_sigma_override"],
                                maturity_override=cfg["igel_maturity_override"]),
   mocmaes_nds=cfg["mocmaes_true_nds"])
