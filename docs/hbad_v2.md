@@ -291,3 +291,16 @@ at λ = 0 or 1 the best scalarised value is then pinned at 0 and CMA's best-so-f
 improvement), and at other λ the objective drifts during the run. Now fixed reference points (start, ideal = start − 5 %). j2's λ = 0 / 0.5
 points were produced with the moving ideal → treat them as indicative only (rerun pending). Plot-level species-pooled size-class objective
 (`HBAD2_FB=size`): runs j3 (no vigour) and j4 (vigour) at λ 0 then 0.5.
+j3 λ = 0 (no vigour, Sim B size objective only, fixed normalisation; 8k evals from v2f): VAL size objective 1,754 → −1,119, but
+Sim A VAL −271,797 → **−226,188** (−45k NLL) and composition worse (0.192 vs 0.134). The size profile is then almost right (> 21 yr:
+< 5 cm 253 vs 264, 5–12.7 cm 123 vs 94, 12.7–25 cm 224 vs 244, ≥ 25 cm 144 vs 162). ⇒ with mean-field cohorts, matching the stand's size
+structure requires distorting the tracked-tree dynamics: a structural trade-off (model inadequacy), not a calibration problem. j4 (vigour
+sub-cohorts, same objective) tests whether within-cohort heterogeneity removes it. (j3's λ = 0.5 leg was stopped: it used the start − 5 %
+normalisation, which is arbitrary for a near-zero objective; fit_joint.jl now takes HBAD2_IDEAL from the end-point runs.)
+j4 λ = 0 (vigour, size objective only): VAL size objective −1,249 (j3 −1,119), Sim A VAL −218,010; size profile > 21 yr 240 / 137 / 219 / 149
+vs obs 264 / 94 / 244 / 162. As expected at λ = 0 the Sim A fit is sacrificed; the question is the compromise → j5 (no vigour) and j6
+(vigour) at λ = 0.5 with ideal points fA = v2f train −272,975, fB = the λ = 0 train optima (−2,919 / −2,944).
+Second scalarisation bug (found 11:55): with ideal fA = the start's own fA (v2f is the Sim A optimum) the normaliser (start − ideal) is
+0 (j5) or tiny (j6, 306 NLL units) → invalid runs, moved to results/hbad2/aborted/. fit_joint.jl now normalises by ideal → NADIR
+(env HBAD2_NADIR; nadir = the other end point) and refuses nadir ≤ ideal. j5 (no vigour) and j6 (vigour) relaunched at λ 0.5 with the
+SAME constants so their points are directly comparable: ideal (fA −272,975.3, fB −2,944.0), nadir (fA −237,456.7, fB 635.0).

@@ -31,12 +31,21 @@ a0, b0 = both(θ0, TRA, TRB); va0, vb0 = both(θ0, VAA, VAB)
 lg(@sprintf("START train fA %.1f fB %.1f | val fA %.1f fB %.1f", a0, b0, va0, vb0))
 # FIXED reference points for the whole run (a moving ideal makes the scalarisation non-stationary: CMA's best-so-far is then compared
 # across different objectives and, at λ = 0 or 1, pinned at 0 → the returned point would be the first improvement, not the best)
-idealA = Ref(a0 - 0.05abs(a0)); idealB = Ref(b0 - 0.05abs(b0)); ρ = 0.05
+# ideal = the single-objective optima when known (env HBAD2_IDEAL="fA,fB" on TRAIN, e.g. from the λ = 1 and λ = 0 runs), else start − 5 %|start|
+# (only meaningful for λ ∈ {0, 1}, where the scalarisation is monotone in the one objective; a near-zero start makes 5 % a bad scale)
+ide = get(ENV, "HBAD2_IDEAL", "")
+idealA = Ref(isempty(ide) ? a0 - 0.05abs(a0) : parse(Float64, split(ide, ",")[1])); idealB = Ref(isempty(ide) ? b0 - 0.05abs(b0) : parse(Float64, split(ide, ",")[2])); ρ = 0.05
+# nadir (worst value of each objective on the front, e.g. fA at the λ = 0 end, fB at the λ = 1 end; env HBAD2_NADIR="fA,fB"), else the start
+nad = get(ENV, "HBAD2_NADIR", "")
+nadA = isempty(nad) ? a0 : parse(Float64, split(nad, ",")[1]); nadB = isempty(nad) ? b0 : parse(Float64, split(nad, ",")[2])
+(nadA - idealA[] > 0 && nadB - idealB[] > 0) || error("scalarisation needs nadir > ideal for both objectives (fA $(idealA[])→$(nadA), fB $(idealB[])→$(nadB))")
+lg(@sprintf("scalarisation: ideal fA %.1f fB %.1f | nadir fA %.1f fB %.1f (start %.1f / %.1f)", idealA[], idealB[], nadA, nadB, a0, b0))
+any(l -> 0 < l < 1, lams) && isempty(ide) && @warn "λ strictly between 0 and 1 without HBAD2_IDEAL: the normalisation is arbitrary"
 res = DataFrame(lam=Float64[], fA=Float64[], fB=Float64[], vA=Float64[], vB=Float64[])
 for λ in lams
   f = function (θ)
     a, b = both(θ, TRA, TRB)
-    x = (a - idealA[]) / (a0 - idealA[]); y = (b - idealB[]) / (b0 - idealB[])
+    x = (a - idealA[]) / (nadA - idealA[]); y = (b - idealB[]) / (nadB - idealB[])
     max(λ * x, (1 - λ) * y) + ρ * (λ * x + (1 - λ) * y)
   end
   r = cmaes(f, θ0, parse(Float64, get(ENV, "HBAD2_SIGMA", "0.03")); λ=parse(Int, get(ENV, "HBAD2_LAMBDA", "24")), maxevals=EV, logf=lg, log_every=25)
