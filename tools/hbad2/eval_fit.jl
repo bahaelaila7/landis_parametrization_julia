@@ -11,19 +11,20 @@ sets = get(ENV, "HBAD2_TEST", "0") == "1" ? ("train", "val", "test") : ("train",
 for set in sets
   C = build_cohorts(tr, set, keys_)
   # O and RD at the START (one snapshot) for residual classes: run the kernel 0 years
-  S0 = Sites(C.S.off, C.S.sp, C.S.N0, C.S.D0, C.S.H0, C.S.A0, zeros(Int, length(C.S.nyr)), fill(1e-9, length(C.S.nyr)))
+  S0 = Sites(C.S.off, C.S.sp, C.S.N0, C.S.D0, C.S.H0, C.S.A0, zeros(Int, length(C.S.nyr)), fill(1e-9, length(C.S.nyr)), C.S.planted, C.S.zq)
   simulate!(S0, P, G); O0 = copy(S0.O); RD0 = zeros(length(O0))
   for s in 1:length(C.S.off)-1
     lo, hi = C.S.off[s], C.S.off[s+1] - 1; tot = sum(S0.S[lo:hi]); sm = sum(S0.S[i] * P[C.S.sp[i]].sdimax for i in lo:hi) / tot
     RD0[lo:hi] .= tot / sm
   end
-  simulate!(C.S, P, G); p = nll_parts(C.S, C.obs)
+  simulate!(C.S, P, G); p = nll_parts(cohort_view(C), C.obs)
   @printf("EVAL %-5s total %.1f (mort %.1f D %.1f H %.1f σD %.4f σH %.4f)\n", set, p.total, p.mort, p.D, p.H, p.sigD, p.sigH)
   set == "train" && continue
-  diagnostics(C.S, C.obs, keys_)
+  diagnostics(cohort_view(C), C.obs, keys_)
   o = C.obs; ok = o.n1 .> 0
-  df = DataFrame(O=O0, RD=RD0, D=C.S.D0, A=C.S.A0, pl=C.coh.planted, l3=C.coh.l3, n1=o.n1, s=o.s,
-                 ps=C.S.N ./ C.S.N0, eD=log.(C.S.D ./ o.D2o), eH=log.(max.(C.S.H, 0.1) ./ o.H2o))[ok, :]
+  V = cohort_view(C); first_of = [searchsortedfirst(C.parent, p) for p in 1:length(o.n1)]      # sub-cohort → cohort (vigour)
+  df = DataFrame(O=O0[first_of], RD=RD0[first_of], D=V.D0, A=C.S.A0[first_of], pl=C.coh.planted, l3=C.coh.l3, n1=o.n1, s=o.s,
+                 ps=V.N ./ V.N0, eD=log.(V.D ./ o.D2o), eH=log.(max.(V.H, 0.1) ./ o.H2o))[ok, :]
   cls(x, br) = [string("≤", br[findfirst(>=(v), br)]) for v in x]
   for (nm, col, br) in (("overtop O", :O, [0.1, 0.2, 0.35, 0.5, 0.75, 1e9]), ("stand RD", :RD, [0.2, 0.4, 0.6, 0.8, 1.0, 1e9]),
                          ("D cm", :D, [5.0, 12.7, 20, 30, 45, 1e9]), ("age", :A, [10.0, 20, 35, 50, 80, 1e9]))

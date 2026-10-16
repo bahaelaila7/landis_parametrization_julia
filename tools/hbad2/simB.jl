@@ -51,25 +51,25 @@ for r in eachrow(pl)
   v === nothing ? (length(init) > length(obs) && pop!(init)) : push!(obs, v)
 end
 # initial cohorts (species key × 10-yr birth class) at visit 1, capacity for recruits
-CAP_EXTRA = 120
-off = [1]; spv = Int[]; N0 = Float64[]; D0 = Float64[]; H0 = Float64[]; A0 = Float64[]; live = Int[]; site_plot = Int[]
+CAP_EXTRA = VIGOUR ? 330 : 120; QZ = VIGOUR ? collect(VIG_Z) : [0.0]; QW = VIGOUR ? collect(VIG_W) : [1.0]
+off = [1]; spv = Int[]; N0 = Float64[]; D0 = Float64[]; H0 = Float64[]; A0 = Float64[]; live = Int[]; site_plot = Int[]; zq = Float64[]
 for (pi_, t) in enumerate(init)
   t.bc = floor.(Int, -t.age ./ BIRTH_W) .* 100 .+ dclass.(t.dia_cm)
   for tt in (SITE_SUB ? [t[t.sb .== b, :] for b in 1:4] : [t])        # subplot sites: each subplot (empty ones too) is a site, N per ha ×4
     if nrow(tt) > 0
       g = combine(groupby(tt, [:key, :bc]), :w_ha => (w -> sum(w) * SITE_MULT) => :N, [:w_ha, :dia_cm] => ((w, x) -> sqrt(sum(w .* x .^ 2) / sum(w))) => :D,
                   [:w_ha, :ht_m] => ((w, x) -> sum(w .* x) / sum(w)) => :H, [:w_ha, :age] => ((w, x) -> sum(w .* x) / sum(w)) => :A)
-      for r in eachrow(g); push!(spv, kix[r.key]); push!(N0, r.N); push!(D0, r.D); push!(H0, r.H); push!(A0, max(r.A, 1.0)); end
-      push!(live, nrow(g))
+      for r in eachrow(g), (z, w) in zip(QZ, QW); push!(spv, kix[r.key]); push!(N0, r.N * w); push!(D0, r.D); push!(H0, r.H); push!(A0, max(r.A, 1.0)); push!(zq, z); end
+      push!(live, nrow(g) * length(QZ))
     else
       push!(live, 0)
     end
-    for _ in 1:CAP_EXTRA; push!(spv, 1); push!(N0, 0.0); push!(D0, 2.54); push!(H0, 3.0); push!(A0, 5.0); end
+    for _ in 1:CAP_EXTRA; push!(spv, 1); push!(N0, 0.0); push!(D0, 2.54); push!(H0, 3.0); push!(A0, 5.0); push!(zq, 0.0); end
     push!(off, length(spv) + 1); push!(site_plot, pi_)
   end
 end
 ns = length(live); npl = length(obs)
-S = Sites(off, spv, copy(N0), copy(D0), copy(H0), copy(A0), zeros(Int, ns), zeros(ns), fill(false, ns)); F = FreeSites(S, copy(live), nsp)
+S = Sites(off, spv, copy(N0), copy(D0), copy(H0), copy(A0), zeros(Int, ns), zeros(ns), fill(false, ns), copy(zq)); F = FreeSites(S, copy(live), nsp; vigour=VIGOUR)
 years = [maximum(first.(obs[site_plot[s]])) for s in 1:ns]
 snaps = [Dict{Int,Any}() for _ in 1:ns]
 want = [Set(first.(obs[site_plot[s]])) for s in 1:ns]

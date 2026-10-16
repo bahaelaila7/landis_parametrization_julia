@@ -35,7 +35,7 @@ function init_theta()
 end
 θ0 = length(ARGS) >= 2 ? read_theta(ARGS[2], nsp) : init_theta()
 function obj(θ, D)
-  P, G = decode(θ, nsp, longev); simulate!(D.S, P, G); nll_parts(D.S, D.obs)
+  P, G = decode(θ, nsp, longev); simulate!(D.S, P, G); nll_parts(cohort_view(D), D.obs)
 end
 for _ in 1:2; obj(θ0, TR); end
 t0 = time(); for _ in 1:10; obj(θ0, TR); end; lg(@sprintf("eval time train %.1f ms", (time() - t0) * 100))

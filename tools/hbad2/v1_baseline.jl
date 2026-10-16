@@ -40,7 +40,7 @@ function v1_sim!(S::Sites)
   S
 end
 for set in ("train", "val", "test")
-  C = build_cohorts(tr, set, keys_); v1_sim!(C.S); p = nll_parts(C.S, C.obs)
+  C = build_cohorts(tr, set, keys_); v1_sim!(C.S); p = nll_parts(cohort_view(C), C.obs)
   @printf("V1 %-5s total %.1f (mort %.1f D %.1f H %.1f σD %.4f σH %.4f) cohorts %d\n", set, p.total, p.mort, p.D, p.H, p.sigD, p.sigH, p.ncoh)
-  set == "val" && diagnostics(C.S, C.obs, keys_)
+  set == "val" && diagnostics(cohort_view(C), C.obs, keys_)
 end

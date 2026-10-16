@@ -12,7 +12,9 @@ dclass(D) = searchsortedfirst(SIZE_BREAKS, D)
 # simulation site: "plot" (all 4 subplots pooled) or "subplot" (each FIA subplot is a site; densities ×4 → per ha; competition is local, E4)
 const SITE_SUB = get(ENV, "HBAD2_SITE", "plot") == "subplot"
 const SITE_MULT = SITE_SUB ? 4.0 : 1.0
-const FORM = parse(Int, get(ENV, "HBAD2_FORM", "1"))          # potential-growth form (HBAD2.GlobP.form)
+const FORM = parse(Int, get(ENV, "HBAD2_FORM", "1"))
+# persistent growth vigour (E5): every cohort is simulated as 3 vigour sub-cohorts (HBAD2.VIG_Z / VIG_W); scoring aggregates them back
+const VIGOUR = get(ENV, "HBAD2_VIGOUR", "0") == "1"          # potential-growth form (HBAD2.GlobP.form)
 if FORM == 2   # power-exponential: rX = increment at the reference size [cm/yr | m/yr], cX = size exponent, Xmax = decay scale
   merge!(BOUNDS_OVERRIDE, Dict(:rD => (0.01, 3.0), :cD => (-1.5, 3.0), :Dmax => (5.0, 300.0), :rH => (0.005, 3.0), :cH => (-1.5, 3.0), :Hmax => (2.0, 200.0)))
 end
@@ -54,13 +56,34 @@ function build_cohorts(tr::DataFrame, set::AbstractString, keys_::Vector{String}
     off[s+1] = ix
   end
   dts = [g.dt[off[s]] for s in eachindex(sites)]; pls = [Bool(g.planted[off[s]]) for s in eachindex(sites)]
-  S = Sites(off, g.spi, Float64.(g.N1), Float64.(g.D1), Float64.(g.H1), Float64.(g.A1), floor.(Int, dts), dts .- floor.(dts), pls)
   obs = (n1=Int.(g.n1), s=Int.(g.s), D2o=Float64.(g.D2o), H2o=Float64.(g.H2o), dt=Float64.(g.dt))
-  (S=S, coh=g, obs=obs)
+  nc = nrow(g)
+  if !VIGOUR
+    S = Sites(off, g.spi, Float64.(g.N1), Float64.(g.D1), Float64.(g.H1), Float64.(g.A1), floor.(Int, dts), dts .- floor.(dts), pls)
+    return (S=S, coh=g, obs=obs, parent=collect(1:nc), agg=nothing)
+  end
+  q = length(VIG_Z); rep(x) = repeat(x; inner=q)
+  S = Sites((off .- 1) .* q .+ 1, rep(g.spi), rep(Float64.(g.N1)) .* repeat(collect(VIG_W), nc), rep(Float64.(g.D1)), rep(Float64.(g.H1)), rep(Float64.(g.A1)),
+            floor.(Int, dts), dts .- floor.(dts), pls, repeat(collect(VIG_Z), nc))
+  agg = (N0=Float64.(g.N1), N=zeros(nc), D=zeros(nc), H=zeros(nc), D0=Float64.(g.D1), H0=Float64.(g.H1), sp=Int32.(g.spi))
+  (S=S, coh=g, obs=obs, parent=rep(collect(1:nc)), agg=agg)
+end
+
+"Cohort-level state after a run: the Sites themselves, or (vigour) the sub-cohorts aggregated per observed cohort (ΣN, quadratic-mean D, N-weighted H)."
+function cohort_view(C)
+  C.agg === nothing && return C.S
+  a = C.agg; S = C.S; fill!(a.N, 0.0); fill!(a.D, 0.0); fill!(a.H, 0.0)
+  @inbounds for i in eachindex(S.N)
+    p = C.parent[i]; n = S.N[i]; a.N[p] += n; a.D[p] += n * S.D[i]^2; a.H[p] += n * S.H[i]
+  end
+  @inbounds for p in eachindex(a.N)
+    n = a.N[p]; a.D[p] = n > 0 ? sqrt(a.D[p] / n) : a.D0[p]; a.H[p] = n > 0 ? a.H[p] / n : a.H0[p]
+  end
+  a
 end
 
 "Joint negative log-likelihood (per tree-observation units): binomial survival + Gaussian ln D2, ln H2 of survivors (σ profiled)."
-function nll_parts(S::Sites, coh::NamedTuple)
+function nll_parts(S, coh::NamedTuple)
   nm = 0.0; sD = 0.0; sH = 0.0; cD = 0; nobs_m = 0
   @inbounds for i in eachindex(S.N)
     n1 = coh.n1[i]; n1 == 0 && continue
@@ -78,7 +101,7 @@ end
 # ---------------- parameter vector ⇄ species parameters
 # per species (14 free, log-space where positive): Hmax rH cH Dmax rD cD gOD gRD gOH gRH mbg mD msup sdimax ; global: mD2 pH pD pM
 const FREE = (:Hmax, :rH, :cH, :Dmax, :rD, :cD, :gOD, :gRD, :gOH, :gRH, :mbg, :mD, :msup, :sdimax)
-const NGLOB = 5
+const NGLOB = 6
 const LOGP = Set([:Hmax, :rH, :cH, :Dmax, :rD, :cD, :msup, :sdimax])
 const BOUNDS = Dict(:Hmax => (8.0, 70.0), :rH => (1e-3, 0.5), :cH => (0.3, 4.0), :Dmax => (15.0, 250.0), :rD => (1e-3, 0.5), :cD => (0.3, 4.0),
                     :gOD => (-1.0, 8.0), :gRD => (-3.0, 3.0), :gOH => (-1.0, 8.0), :gRH => (-3.0, 3.0), :mbg => (-9.0, -1.0), :mD => (-4.0, 4.0),
@@ -97,11 +120,11 @@ function decode(θ::AbstractVector, nsp::Int, longevity::Vector{Float64})
     P[s] = SpP(v..., longevity[s])
   end
   g = θ[nsp*NF+1:end]
-  P, HBAD2.GlobP(clamp(g[1], -3, 3), 10.0, clamp(g[2], -1, 1), clamp(g[3], -1, 1), clamp(g[4], -2, 2), FORM, clamp(g[5], -4, 2))
+  P, HBAD2.GlobP(clamp(g[1], -3, 3), 10.0, clamp(g[2], -1, 1), clamp(g[3], -1, 1), clamp(g[4], -2, 2), FORM, clamp(g[5], -4, 2), VIGOUR ? min(abs(g[6]), 2.0) : 0.0)
 end
 
 "Per-species diagnostics: observed vs predicted deaths (tree counts), mean annual ΔD and ΔH of survivors (obs vs sim), RD at start."
-function diagnostics(S::Sites, obs::NamedTuple, keys_::Vector{String}; io=stdout)
+function diagnostics(S, obs::NamedTuple, keys_::Vector{String}; io=stdout)
   nsp = length(keys_)
   od = zeros(nsp); pd = zeros(nsp); n = zeros(nsp); dDo = zeros(nsp); dDs = zeros(nsp); dHo = zeros(nsp); dHs = zeros(nsp); ns = zeros(nsp)
   for i in eachindex(S.N)
@@ -123,7 +146,8 @@ end
 function read_theta(path, nsp)
   θi = vec(CSV.read(path, DataFrame).theta)
   length(θi) == nsp * NF + NGLOB && return θi
-  length(θi) == nsp * NF + 4 && return vcat(θi, 0.0)           # before mSD (v2b/v2c)
+  length(θi) == nsp * NF + 4 && return vcat(θi, 0.0, 0.3)      # before mSD (v2b/v2c); σv start 0.3
+  length(θi) == nsp * NF + 5 && return vcat(θi, 0.3)           # before σv (v2d–v2f, joint j1–j3)
   length(θi) == nsp * 13 + 1 || error("θ length $(length(θi)) not recognised")
   θ = zeros(nsp * NF + NGLOB)
   for s in 1:nsp
@@ -134,11 +158,12 @@ function read_theta(path, nsp)
 end
 
 "Each fit directory records the structural switches it was fitted with; every tool checks them against the current env (HBAD2_FORM, HBAD2_SIZE_SPLIT)."
-function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); end; end
+function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); println(io, "vigour=", VIGOUR ? 1 : 0); end; end
 function check_meta(dir)
   f = joinpath(dir, "meta.txt"); isfile(f) || error("$f missing: cannot verify growth form / size split of this fit")
   m = Dict(split(l, "=")[1] => (length(split(l, "=")) > 1 ? split(l, "=")[2] : "") for l in readlines(f))
   parse(Int, m["form"]) == FORM || error("fit $(dir) has form=$(m["form"]) but HBAD2_FORM=$(FORM)")
+  parse(Int, get(m, "vigour", "0")) == (VIGOUR ? 1 : 0) || error("fit $(dir) has vigour=$(get(m, "vigour", "0")) but HBAD2_VIGOUR=$(VIGOUR ? 1 : 0)")
   get(m, "site", "plot") == (SITE_SUB ? "subplot" : "plot") || error("fit $(dir) has site=$(get(m, "site", "plot")) but HBAD2_SITE=$(SITE_SUB ? "subplot" : "plot")")
   m["size_split"] == join(SIZE_BREAKS, ",") || @warn "fit $(dir) was fitted with size_split=$(m["size_split"]); evaluating with $(join(SIZE_BREAKS, ","))"
 end

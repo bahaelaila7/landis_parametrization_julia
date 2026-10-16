@@ -10,16 +10,17 @@ const SB_NC = length(SB_BREAKS)
 
 struct SimBData
   F::FreeSites
-  N0::Vector{Float64}; D0::Vector{Float64}; H0::Vector{Float64}; A0::Vector{Float64}; sp0::Vector{Int32}; live0::Vector{Int}
+  N0::Vector{Float64}; D0::Vector{Float64}; H0::Vector{Float64}; A0::Vector{Float64}; sp0::Vector{Int32}; live0::Vector{Int}; zq0::Vector{Float64}
   years::Vector{Int}
   vis_year::Vector{Vector{Int}}           # per site: run years of the scored visits
   obs::Array{Float64,4}                   # site × visit × species × class: observed tallied tree counts
   lam::Array{Float64,4}                   # same shape: expected counts (filled by the run)
   hl_obs::Matrix{Float64}; hl_sim::Matrix{Float64}   # Lorey height per site × visit (NaN = none)
   σ::Float64
+  plot_of::Vector{Int}                    # site → plot index (subplot sites of one plot share it)
 end
 
-function build_simB(set::AbstractString, keys_::Vector{String}; σ=0.16, cap_extra=120, natural_only=true)
+function build_simB(set::AbstractString, keys_::Vector{String}; σ=0.16, cap_extra=(VIGOUR ? 330 : 120), natural_only=true)
   iv = DataFrame(Arrow.Table(joinpath(R2DIR, "intervals.arrow"))); raw = DataFrame(Arrow.Table(joinpath(R2DIR, "interval_trees.arrow")))
   ig = DataFrame(Arrow.Table(joinpath(R2DIR, "interval_ingrowth.arrow")))
   kix = Dict(k => i for (i, k) in enumerate(keys_)); big = Set(k for k in keys_ if k[1] != '_'); keyof(s, g) = s in big ? s : "_" * g
@@ -44,20 +45,21 @@ function build_simB(set::AbstractString, keys_::Vector{String}; σ=0.16, cap_ext
           push!(vis, (round(Int, Dates.value(ivr.d2 - y0) / 365.25), vcat(a.key, g.key), vcat(a.dia2_cm, g.dia_cm), vcat(a.ht2_m, g.ht_m), vcat(a.w2_ha, g.w_ha)))
         end
       end
-      push!(sites, (init=f(DataFrame(rbyi[(ivs.iid[1],)])), vis=vis))
+      push!(sites, (init=f(DataFrame(rbyi[(ivs.iid[1],)])), vis=vis, plot=rownumber(r)))
     end
   end
   ns = length(sites); nv = maximum(length(s.vis) for s in sites); nsp = length(keys_)
-  off = [1]; spv = Int[]; N0 = Float64[]; D0 = Float64[]; H0 = Float64[]; A0 = Float64[]; live = Int[]
+  off = [1]; spv = Int[]; N0 = Float64[]; D0 = Float64[]; H0 = Float64[]; A0 = Float64[]; live = Int[]; zq = Float64[]
+  QZ = VIGOUR ? collect(VIG_Z) : [0.0]; QW = VIGOUR ? collect(VIG_W) : [1.0]
   obs = zeros(ns, nv, nsp, SB_NC); hlo = fill(NaN, ns, nv); vy = Vector{Vector{Int}}()
   for (s, st) in enumerate(sites)
     t = st.init; t.bc = floor.(Int, -t.age ./ BIRTH_W) .* 100 .+ dclass.(t.dia_cm)
     g = nrow(t) == 0 ? DataFrame(key=String[], N=Float64[], D=Float64[], H=Float64[], A=Float64[]) :
       combine(groupby(t, [:key, :bc]), :w_ha => (w -> sum(w) * SITE_MULT) => :N, [:w_ha, :dia_cm] => ((w, x) -> sqrt(sum(w .* x .^ 2) / sum(w))) => :D,
                 [:w_ha, :ht_m] => ((w, x) -> sum(w .* x) / sum(w)) => :H, [:w_ha, :age] => ((w, x) -> sum(w .* x) / sum(w)) => :A)
-    for r in eachrow(g); push!(spv, kix[r.key]); push!(N0, r.N); push!(D0, r.D); push!(H0, r.H); push!(A0, max(r.A, 1.0)); end
-    push!(live, nrow(g))
-    for _ in 1:cap_extra; push!(spv, 1); push!(N0, 0.0); push!(D0, 2.54); push!(H0, 3.0); push!(A0, 5.0); end
+    for r in eachrow(g), (z, w) in zip(QZ, QW); push!(spv, kix[r.key]); push!(N0, r.N * w); push!(D0, r.D); push!(H0, r.H); push!(A0, max(r.A, 1.0)); push!(zq, z); end
+    push!(live, nrow(g) * length(QZ))
+    for _ in 1:cap_extra; push!(spv, 1); push!(N0, 0.0); push!(D0, 2.54); push!(H0, 3.0); push!(A0, 5.0); push!(zq, 0.0); end
     push!(off, length(spv) + 1)
     push!(vy, [v[1] for v in st.vis])
     for (k, (y, key, D, H, w)) in enumerate(st.vis)
@@ -65,14 +67,15 @@ function build_simB(set::AbstractString, keys_::Vector{String}; σ=0.16, cap_ext
       ba = (pi / 4) .* (D ./ 100) .^ 2 .* w; sum(ba) > 0 && (hlo[s, k] = sum(ba .* H) / sum(ba))
     end
   end
-  S = Sites(off, spv, copy(N0), copy(D0), copy(H0), copy(A0), zeros(Int, ns), zeros(ns), fill(false, ns))
-  F = FreeSites(S, copy(live), nsp)
-  SimBData(F, N0, D0, H0, A0, Int32.(spv), live, [maximum(v) for v in vy], vy, obs, similar(obs), hlo, fill(NaN, ns, nv), σ)
+  S = Sites(off, spv, copy(N0), copy(D0), copy(H0), copy(A0), zeros(Int, ns), zeros(ns), fill(false, ns), copy(zq))
+  F = FreeSites(S, copy(live), nsp; vigour=VIGOUR)
+  pl_of = [st.plot for st in sites]; pl_of = [findfirst(==(x), unique(pl_of)) for x in pl_of]
+  SimBData(F, N0, D0, H0, A0, Int32.(spv), live, zq, [maximum(v) for v in vy], vy, obs, similar(obs), hlo, fill(NaN, ns, nv), σ, pl_of)
 end
 
 function _reset!(B::SimBData)
   S = B.F.S
-  copyto!(S.N, B.N0); copyto!(S.D, B.D0); copyto!(S.H, B.H0); copyto!(S.A, B.A0); copyto!(S.sp, B.sp0); copyto!(S.N0, B.N0)
+  copyto!(S.N, B.N0); copyto!(S.D, B.D0); copyto!(S.H, B.H0); copyto!(S.A, B.A0); copyto!(S.sp, B.sp0); copyto!(S.N0, B.N0); copyto!(S.zq, B.zq0)
   copyto!(B.F.live, B.live0); fill!(B.F.open_slot, 0); fill!(B.F.open_year, 0); fill!(B.F.dropped, 0); fill!(B.lam, 0.0); fill!(B.hl_sim, NaN)
 end
 
@@ -105,5 +108,16 @@ function simB_nll!(B::SimBData, P, G, R)
   end
   e = [log(B.hl_sim[i] / B.hl_obs[i]) for i in eachindex(B.hl_obs) if isfinite(B.hl_obs[i]) && isfinite(B.hl_sim[i])]
   nH = 0.5 * length(e) * log(sum(abs2, e) / length(e))
-  (total=nll + nH, counts=nll, H=nH, dropped=sum(F.dropped))
+  # species-pooled size-class totals per PLOT and visit (the stand's size profile; Poisson on tallied trees)
+  npl = maximum(B.plot_of); nv = size(B.obs, 2)
+  To = zeros(npl, nv, SB_NC); Tl = zeros(npl, nv, SB_NC)
+  @inbounds for s in axes(B.obs, 1), k in 1:nv, sp in axes(B.obs, 3), c in 1:SB_NC
+    p = B.plot_of[s]; To[p, k, c] += B.obs[s, k, sp, c]; Tl[p, k, c] += B.lam[s, k, sp, c]
+  end
+  nsz = 0.0
+  @inbounds for ix in eachindex(To)
+    o = To[ix]; λ = Tl[ix]; (o == 0 && λ == 0) && continue; λ = max(λ, 1e-6)
+    nsz += λ - o * log(λ) + (o > 0 ? o * log(o) - o : 0.0)
+  end
+  (total=nll + nH, counts=nll, H=nH, size=nsz, dropped=sum(F.dropped))
 end

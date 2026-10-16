@@ -14,7 +14,7 @@
 # Δ = 1 for full years; a fractional last step (Δ < 1) scales every rate, so an interval of 5.4 yr is integrated exactly.
 module HBAD2
 
-export SpP, Sites, simulate!, N_SP_PARAMS, SP_PARAM_NAMES, RecP, FreeSites, run_free!
+export SpP, Sites, simulate!, N_SP_PARAMS, SP_PARAM_NAMES, RecP, FreeSites, run_free!, VIG_Z, VIG_W
 
 const SP_PARAM_NAMES = (:Hmax, :rH, :cH, :Dmax, :rD, :cD, :gOD, :gRD, :gOH, :gRH, :mbg, :mD, :msup, :sdimax, :longevity)
 const N_SP_PARAMS = length(SP_PARAM_NAMES)
@@ -31,10 +31,15 @@ struct GlobP
   pM::Float64      # planted cohorts: ln multiplier of the background + suppression hazard
   form::Int        # potential-growth form: 1 = Chapman–Richards state form; 2 = power-exponential r (X/X0)^c e^{−X/Xmax}
   mSD::Float64     # size exponent of the suppression hazard: msup (1 − v) (D/20)^mSD (small suppressed trees die more if < 0)
+  σv::Float64      # persistent growth vigour: a sub-cohort at quantile zq grows ×e^{σv·zq}; its suppression hazard uses v·e^{σv·zq} (slow trees die)
 end
-GlobP(mD2, mA) = GlobP(mD2, mA, 0.0, 0.0, 0.0, 1, 0.0)
-GlobP(mD2, mA, pH, pD, pM) = GlobP(mD2, mA, pH, pD, pM, 1, 0.0)
-GlobP(mD2, mA, pH, pD, pM, form) = GlobP(mD2, mA, pH, pD, pM, form, 0.0)
+GlobP(mD2, mA) = GlobP(mD2, mA, 0.0, 0.0, 0.0, 1, 0.0, 0.0)
+GlobP(mD2, mA, pH, pD, pM) = GlobP(mD2, mA, pH, pD, pM, 1, 0.0, 0.0)
+GlobP(mD2, mA, pH, pD, pM, form) = GlobP(mD2, mA, pH, pD, pM, form, 0.0, 0.0)
+GlobP(mD2, mA, pH, pD, pM, form, mSD) = GlobP(mD2, mA, pH, pD, pM, form, mSD, 0.0)
+"Gauss–Hermite (3-point) vigour sub-cohorts: quantiles z and population shares."
+const VIG_Z = (-sqrt(3.0), 0.0, sqrt(3.0))
+const VIG_W = (1 / 6, 2 / 3, 1 / 6)
 
 "SoA store: CSR over sites; initial state (N0,D0,H0,A0) and working state (N,D,H,A); per-site years (whole) + fractional remainder."
 struct Sites
@@ -45,10 +50,11 @@ struct Sites
   O::Vector{Float64}; S::Vector{Float64}; V::Vector{Float64}          # scratch: overtopping, SDI, vigour
   nyr::Vector{Int}; frac::Vector{Float64}
   planted::Vector{Bool}                  # per SITE: planted stand (stand origin) → GlobP planted multipliers
+  zq::Vector{Float64}                    # per cohort: vigour quantile (0 = mean-field cohort)
 end
-function Sites(off, sp, N0, D0, H0, A0, nyr, frac, planted=fill(false, length(off) - 1))
+function Sites(off, sp, N0, D0, H0, A0, nyr, frac, planted=fill(false, length(off) - 1), zq=zeros(length(sp)))
   n = length(sp)
-  Sites(off, Int32.(sp), N0, D0, H0, A0, copy(N0), copy(D0), copy(H0), copy(A0), zeros(n), zeros(n), zeros(n), nyr, frac, planted)
+  Sites(off, Int32.(sp), N0, D0, H0, A0, copy(N0), copy(D0), copy(H0), copy(A0), zeros(n), zeros(n), zeros(n), nyr, frac, planted, zq)
 end
 nsites(S::Sites) = length(S.off) - 1
 
@@ -83,11 +89,12 @@ end
   fH = pl ? exp(G.pH) : 1.0; fD = pl ? exp(G.pD) : 1.0; fM = pl ? exp(G.pM) : 1.0
   @inbounds for i in lo:hi
     p = P[sp[i]]; o = O[i]
-    v = exp(-p.gOD * o); V[i] = v
-    dD = potD(G, D[i], p, fD) * v * exp(p.gRD * RD)
-    dH = potH(G, H[i], p, fH) * exp(-p.gOH * o + p.gRH * RD)
+    vg = exp(G.σv * S.zq[i])                 # persistent vigour of this sub-cohort (1 for a mean-field cohort)
+    v = exp(-p.gOD * o); ve = min(v * vg, 1.0); V[i] = ve
+    dD = potD(G, D[i], p, fD) * v * vg * exp(p.gRD * RD)
+    dH = potH(G, H[i], p, fH) * vg * exp(-p.gOH * o + p.gRH * RD)
     lD = log(D[i] / 20)
-    h = fM * (exp(p.mbg + p.mD * lD + G.mD2 * D[i] / 20) + p.msup * (1 - v) * exp(G.mSD * lD)) + exp(G.mA * (A[i] / p.longevity - 1))
+    h = fM * (exp(p.mbg + p.mD * lD + G.mD2 * D[i] / 20) + p.msup * (1 - ve) * exp(G.mSD * lD)) + exp(G.mA * (A[i] / p.longevity - 1))
     N[i] *= exp(-h * Δ)
     D[i] += dD * Δ; H[i] += dH * Δ
   end
@@ -138,8 +145,9 @@ struct FreeSites
   open_slot::Matrix{Int}       # nsp × nsites, 0 = none
   open_year::Matrix{Int}
   dropped::Vector{Int}         # recruits not placed for lack of a free slot (diagnostic; should stay 0)
+  vigour::Bool                 # recruits enter as 3 vigour sub-cohorts (VIG_Z / VIG_W)
 end
-FreeSites(S::Sites, live::Vector{Int}, nsp::Int) = FreeSites(S, live, zeros(Int, nsp, length(live)), zeros(Int, nsp, length(live)), zeros(Int, length(live)))
+FreeSites(S::Sites, live::Vector{Int}, nsp::Int; vigour::Bool=false) = FreeSites(S, live, zeros(Int, nsp, length(live)), zeros(Int, nsp, length(live)), zeros(Int, length(live)), vigour)
 
 @inline function recruit_site!(F::FreeSites, R::AbstractVector{RecP}, P::AbstractVector{SpP}, s::Int, yr::Int, Δ::Float64, nsp::Int)
   S = F.S; lo = S.off[s]; cap = S.off[s+1] - S.off[s]; n = F.live[s]; hi = lo + n - 1
@@ -150,17 +158,22 @@ FreeSites(S::Sites, live::Vector{Int}, nsp::Int) = FreeSites(S, live, zeros(Int,
     r = R[k]; ba = 0.0
     for i in lo:hi; (S.sp[i] == k && S.D[i] >= DSEED) && (ba += 7.853981633974483e-5 * S.D[i]^2 * S.N[i]); end
     rate = RSCALE * exp(r.rho0 + r.rhoS * log1p(ba) + r.rhoL * RD) * Δ
-    j = F.open_slot[k, s]
+    j = F.open_slot[k, s]; nq = F.vigour ? 3 : 1
     if j == 0 || yr - F.open_year[k, s] >= RCLASS
-      if n < cap
-        n += 1; j = lo + n - 1; F.open_slot[k, s] = j; F.open_year[k, s] = yr
-        S.sp[j] = k; S.N[j] = rate; S.D[j] = r.D0; S.H[j] = r.H0; S.A[j] = r.A0; S.N0[j] = rate
+      if n + nq <= cap
+        j = lo + n; n += nq; F.open_slot[k, s] = j; F.open_year[k, s] = yr
+        for q in 1:nq
+          jj = j + q - 1; w = nq == 1 ? 1.0 : VIG_W[q]
+          S.sp[jj] = k; S.N[jj] = rate * w; S.D[jj] = r.D0; S.H[jj] = r.H0; S.A[jj] = r.A0; S.N0[jj] = rate * w; S.zq[jj] = nq == 1 ? 0.0 : VIG_Z[q]
+        end
       else
         F.dropped[s] += 1; F.open_slot[k, s] = 0
       end
     else
-      n0 = S.N[j]; m = n0 + rate
-      S.D[j] = sqrt((n0 * S.D[j]^2 + rate * r.D0^2) / m); S.H[j] = (n0 * S.H[j] + rate * r.H0) / m; S.N[j] = m; S.N0[j] += rate
+      for q in 1:nq
+        jj = j + q - 1; add = rate * (nq == 1 ? 1.0 : VIG_W[q]); n0 = S.N[jj]; m = n0 + add
+        S.D[jj] = sqrt((n0 * S.D[jj]^2 + add * r.D0^2) / m); S.H[jj] = (n0 * S.H[jj] + add * r.H0) / m; S.N[jj] = m; S.N0[jj] += add
+      end
     end
   end
   F.live[s] = n

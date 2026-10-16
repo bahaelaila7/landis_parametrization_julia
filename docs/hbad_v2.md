@@ -218,3 +218,37 @@ Lorey H 6.9 % — but more saplings/poles with gaps and plot-scale-fitted small-
 
   Mortality: tie at plot sites, v2 better at subplot sites; diameter: v2 better; height: v2 much better (v1's H follows its H–D curve).
   v1's regressions were fitted on 600 k remeasured TRAIN trees, so this is a strong empirical baseline; v2 is the process model.
+
+### 5.11 j2 front, pole diagnostics, size-profile objective
+j2 (subplot; VAL): λ 1 = v2f (fA −271,797, fB 63,454; v2f is already a local optimum of fA: the λ = 1 run found nothing better);
+λ 0.5: −271,772 / 61,853; λ 0: −270,969 / 59,833 → a real trade-off appears beyond λ 0.5. But even the Sim-B-only point (λ 0) does not
+fix the size profile (> 21 yr poles 387 vs 94) — the stand-table likelihood (species × class per SUBPLOT, mostly zero cells) is dominated
+by species presence/absence and gives little weight to the size profile.
+Pole/sapling demography (tools/hbad2/pole_demography.jl, VAL clean natural plots; model cohort-years in free runs vs tracked trees, by
+subplot overtopping SDI class <100 / 100–250 / 250–450 / ≥450 per ha):
+* poles 5–12.7 cm, mortality %/yr model (recruit-origin) 1.8 / 2.3 / 2.7 / 3.2 vs data 1.5 / 1.8 / 2.7 / 3.3; dD cm/yr 0.62 / 0.37 / 0.28 / 0.21
+  vs 0.57 / 0.33 / 0.21 / 0.13;
+* saplings 2.54–5 cm, mortality 3.1 / 3.5 / 4.1 / 4.8 vs 2.7 / 3.1 / 4.6 / 5.4; dD 0.33 / 0.24 / 0.18 / 0.11 vs 0.42 / 0.26 / 0.16 / 0.11;
+* recruit inflow model 51.2 trees/ha/yr (gross) vs observed sapling ingrowth 43.5 (net of in-interval deaths) — consistent;
+  sapling stock model 469 /ha (run mean) vs 291 at v1.
+Per-capita rates match within ~10–20 % in every light class; the pole excess is systematic (median plot-visit excess +14 / +108 / +207 /
++258 trees/ha at ≤7 / 8–14 / 15–21 / > 21 yr, not driven by outliers) → many small biases (shade mortality of saplings a bit low,
+open-grown sapling growth a bit slow) compounding over decades.
+j3: Sim B objective = species-pooled size-class totals per PLOT and visit (Poisson) + Lorey H (`HBAD2_FB=size`), λ 0 then 0.5 from v2f.
+
+### 5.12 Persistent growth vigour (E5) → vigour sub-cohorts (v2g); scalarisation bug in fit_joint.jl
+E5 (tools/hbad2/vigour_persistence.jl): 151,042 trees with two consecutive undisturbed growth intervals; residuals of ln annual dD
+(species + size + subplot overtopping + subplot SDI) correlate **0.49** between interval k and k+1 (residual sd 0.975) → about half of the
+unexplained growth variation is a persistent tree trait (≈ 2× growth between trees ±1 sd apart). A mean-field cohort cannot have fast
+trees that graduate and slow trees that stall and die.
+Kernel (σv, `HBAD2_VIGOUR=1`): every cohort (initial and each recruit class) is simulated as 3 Gauss–Hermite sub-cohorts, quantiles
+z = −√3, 0, √3 with shares 1/6, 2/3, 1/6; growth (D and H) × e^{σv z}; the suppression hazard uses the vigour-adjusted relative growth
+min(1, v e^{σv z}) (slow trees die — growth-dependent mortality, which also produces the within-cohort selection seen in 5.5). Sim A scores
+the sub-cohorts aggregated back to the observed cohort (ΣN, quadratic-mean D, N-weighted H). With σv = 0 / vigour off every output is
+bit-identical to before (unit tests 13/13; v2f val −271,797.3 reproduced). v2f parameters with σv = 0.3 and no refit: Sim A val −271,735
+(slightly worse), Sim B size-profile objective val 614 vs 1,754 without vigour (lower = better) — vigour alone moves the size profile.
+Bug found and fixed in tools/hbad2/fit_joint.jl: the Chebyshev ideal point was re-based whenever a candidate improved an objective;
+at λ = 0 or 1 the best scalarised value is then pinned at 0 and CMA's best-so-far never updates (the returned point is the FIRST
+improvement), and at other λ the objective drifts during the run. Now fixed reference points (start, ideal = start − 5 %). j2's λ = 0 / 0.5
+points were produced with the moving ideal → treat them as indicative only (rerun pending). Plot-level species-pooled size-class objective
+(`HBAD2_FB=size`): runs j3 (no vigour) and j4 (vigour) at λ 0 then 0.5.
