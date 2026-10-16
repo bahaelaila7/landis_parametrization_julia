@@ -97,4 +97,10 @@ end
   @test_throws ErrorException Pan._check_plan_options(p1, Pan.with_options(sync; exclude_recruits_at_entry=false))
 end
 
+@testset "B31 death term: the score-only PROB_MORT is zeroed on the parameters, not on the call's environment" begin
+  bp = (PROB_MORT_SPP=[[0.1, 0.2], [0.3]], B_MAX=[1.0, 2.0])
+  z = Pan._without_mortality(bp)
+  @test z.PROB_MORT_SPP == [[0.0, 0.0], [0.0]] && z.B_MAX == bp.B_MAX && bp.PROB_MORT_SPP[1][1] == 0.1   # inputs untouched
+end
+
 end

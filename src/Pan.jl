@@ -2241,6 +2241,9 @@ function _run_rep!(acc::TierAcc, pre_log, post_log, SP, soa, ctx, pc, sc::YearSc
   (run_result, _cohorts(pre_log, post_log), eco_losses)
 end
 
+"The parameters with the fitted, score-only PROB_MORT zeroed: the (deterministic) simulation of a Sim A run with a death term applies no stochastic mortality."
+_without_mortality(bp) = PU.Setfield.@set(bp.PROB_MORT_SPP = [zero.(v) for v in bp.PROB_MORT_SPP])
+
 # One rep: its SoA (copy / reset of the reference, optional initial-biomass perturbation), the plugin context, the spinup, then `_rep_sim`.
 # `ec` bundles the call's invariants (a NamedTuple, so every field is concretely typed in the specialised callee).
 function _fit_rep(ec::NamedTuple, seed, init_scale::FloatType)
@@ -2253,8 +2256,7 @@ function _fit_rep(ec::NamedTuple, seed, init_scale::FloatType)
   init_scale != one(FloatType) && _perturb_init!(pc, soa0, init_scale, ec.scoring.init_perturb_cap)   # not scored, only propagated
   SP = succession_plugin_of(ec.ref_soa)
   # death_acc !== nothing => Sim A with a death term: PROB_MORT is a fitted score-only parameter, NOT applied in the (deterministic) simulation
-  eco_params = generate_eco_params(pc, ec.death_acc === nothing || !hasproperty(ec.bio_params, :PROB_MORT_SPP) ? ec.bio_params :
-    PU.Setfield.@set(ec.bio_params.PROB_MORT_SPP = [zero.(v) for v in ec.bio_params.PROB_MORT_SPP]))
+  eco_params = generate_eco_params(pc, ec.death_acc === nothing || !hasproperty(ec.bio_params, :PROB_MORT_SPP) ? ec.bio_params : _without_mortality(ec.bio_params))
   ctx = make_ctx(pc, eco_params)
   soa = ec.spinup ? spinup!(SP, soa0, ec.spinup_cohorts, eco_params) : soa0
   _rep_sim(ec, SP, soa, ctx, eco_params)
