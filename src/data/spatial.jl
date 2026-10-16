@@ -252,7 +252,7 @@ function load_treemap_cohorts(
         FROM (
             SELECT *, ROW_NUMBER() OVER (
                 PARTITION BY raster_ecocode, effective_species_symbol_map
-                ORDER BY group_count DESC
+                ORDER BY group_count DESC, effective_eco
             ) AS rn
             FROM group_totals
         ) WHERE rn = 1
@@ -311,7 +311,7 @@ function _make_effective_splots(df::DataFrame)
   plots_md = innerjoin(plots, start_measdates,
     on=[:statecd, :unitcd, :countycd, :plot])
   splots = sort!(plots_md,
-    [:measdate, :statecd, :unitcd, :countycd, :plot,
+    [:measdate, :statecd, :unitcd, :countycd, :plot, :raster_ecocode,
       :age_calc, :species_id])
   splots.plot_id .= groupindices(
     groupby(splots, [:statecd, :unitcd, :countycd, :plot, :raster_ecocode])
