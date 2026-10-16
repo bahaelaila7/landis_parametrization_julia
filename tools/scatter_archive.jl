@@ -51,7 +51,7 @@ tbl = DF.DataFrame(candidate=Int[], species=String[], stratum=String[], n=Int[],
 for (ci, cf) in enumerate(cand_files)
   cand = JLD2.load_object(cf)
   res = P.fit_params(rs, cand, msy, n_species, eco_species_ids, spdf_plts, ssy, false, spc, loss_params;
-    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], scoring, simb, plugin=P.bs_plugin())
+    debug=false, search_tier=3, injection=injection, seeds=[rand(rng, UInt64)], scoring, simb, plugin=P.bs_plugin(), collect_cohorts=true)
   cached = res[1][2]
   simdf = DF.DataFrame(plot_id=Int[], sim_year=Int[], esp=Int[], agb=Float64[])
   for (pid, sy, esp, _a, bio) in cached; sy > 0 && push!(simdf, (Int(pid), Int(sy), Int(esp), Float64(bio))); end
