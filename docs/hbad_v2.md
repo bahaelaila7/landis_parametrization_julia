@@ -193,3 +193,28 @@ tree-count likelihood, comparable across site units); σ ln D 0.116 / σ ln H 0.
 homogeneous cohorts). Globals: mSD −0.80, planted ×1.43 / ×1.28 / ×0.78. Sim B with v2f: BA 12.7 % (+5.5), N ≥ 5 in 22.3 % (−0.4 bias),
 Lorey H 6.9 % — but more saplings/poles with gaps and plot-scale-fitted small-tree dynamics (> 21 yr: < 5 cm 396 vs 264, 5–12.7 cm 365 vs 94)
 → joint fit j2 on subplot sites (recruitment free).
+
+### 5.10 Joint j2 (subplot), stocking chart, FIA design check, fair v1 comparison (val selects; test reported once)
+* j2 λ = 0.5 (8k evals from v2f + subplot recruitment): VAL fA −271,772 (start −271,797) fB 61,853 (start 63,454): Sim B −2.5 % at no Sim A
+  cost; stand metrics nearly unchanged (BA 12.8 %, N ≥ 5 in 22.4 %, Lorey H 6.9 %); the size profile still over-produces saplings/poles
+  (> 21 yr 356/364 vs 264/94) and under-produces 12.7–25 cm (181 vs 244). CMA-ES in 209 dimensions moves slowly here.
+* Stocking chart (`results/hbad2/figures/v2f_stocking.png`; tools/hbad2/{obs_stocking.jl,plot_stocking.py}): from bare ground the v2f
+  stand recruits to ~1,600 trees/ha by 30 yr (QMD 10 cm), then self-thins PARALLEL to the Reineke −1.605 line (60–150 yr), max SDI 737 at
+  95 yr — observed SDI p95 730 (plot) / 909 (subplot). The SDImax cap never binds (RD ≤ 0.46): the boundary of the QMD–TPA chart emerges
+  from height-based suppression mortality.
+* FIA design check (tools/hbad2/ingrowth_design_check.jl, 17,476 undisturbed intervals): first-tallied macro trees (≥ 12.7 cm) = 85.1
+  trees/ha per interval, tracked microplot saplings crossing 12.7 cm × 185.2 = 60.4 → observed 5-in ingrowth is 1.41× what the microplot
+  sample implies, and 5.3 % of "ingrowth" trees are already ≥ 20 cm (missed / procedural trees). ≈ 30 % of the observed ingrowth into the
+  ≥ 5 in tally is not reproducible from the sapling sample by any model; part of the Sim B N ≥ 5 in deficit is this, the rest is
+  mean-field threshold crossing.
+* Fair head-to-head with v1 (same size-split cohorts, same site unit, v1 WITHOUT its self-thinning = its best variant; `v1_baseline.jl`):
+
+| site | model | VAL total | VAL mort | TEST total | TEST mort | TEST σ ln D / σ ln H |
+|---|---|---|---|---|---|---|
+| plot | v1 (FIA regressions) | −153,794 | 33,003 | −152,684 | 32,512 | 0.146 / 0.216 |
+| plot | **v2e** | **−170,903** | 33,022 | **−169,004** | 32,489 | 0.137 / 0.170 |
+| subplot | v1 | −248,805 | 32,998 | −246,242 | 32,533 | 0.128 / 0.191 |
+| subplot | **v2f** | **−271,797** | **32,872** | **−267,776** | **32,350** | 0.119 / 0.155 |
+
+  Mortality: tie at plot sites, v2 better at subplot sites; diameter: v2 better; height: v2 much better (v1's H follows its H–D curve).
+  v1's regressions were fitted on 600 k remeasured TRAIN trees, so this is a strong empirical baseline; v2 is the process model.
