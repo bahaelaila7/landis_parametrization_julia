@@ -6,7 +6,7 @@ tag = ARGS[1]; D_ = joinpath(R2DIR, "fit_" * tag)
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
-θ = read_theta(joinpath(R2DIR, "fit_" * tag, "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
+check_meta(joinpath(R2DIR, "fit_" * tag)); θ = read_theta(joinpath(R2DIR, "fit_" * tag, "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
 sets = get(ENV, "HBAD2_TEST", "0") == "1" ? ("train", "val", "test") : ("train", "val")
 for set in sets
   C = build_cohorts(tr, set, keys_)

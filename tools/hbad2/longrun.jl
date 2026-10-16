@@ -8,7 +8,7 @@ tag = ARGS[1]; YEARS = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 150
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
-θ = read_theta(joinpath(R2DIR, "fit_" * tag, "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
+check_meta(joinpath(R2DIR, "fit_" * tag)); θ = read_theta(joinpath(R2DIR, "fit_" * tag, "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
 rc = CSV.read(joinpath(R2DIR, "recruitment_coefs.csv"), DataFrame); rcd = Dict(String(r.key) => r for r in eachrow(rc))
 subset = length(ARGS) >= 3 ? split(ARGS[3], ",") : keys_
 act = [k in subset for k in keys_]

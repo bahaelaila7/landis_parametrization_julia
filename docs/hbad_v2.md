@@ -125,3 +125,47 @@ RD 0.4): corr with observed dH 0.94, dD 0.77; the dH:dD allocation decline is re
 pines, MAVI2, NYBI, ACRU. Failure at large sizes for LIST2 / LITU / TAAS / PIEL: the Chapman–Richards diameter asymptote is low
 (LIST2 Dmax 38 cm) so diameter growth stalls at old ages; several Chapman–Richards shape parameters sit at their bound (cD = 4,
 SDIMAX = 2000, ACRU Hmax = 70) → v2c tests a power-exponential potential r (X/X0)^c e^{−X/Xmax} (its free-growth age curve follows by integration).
+
+### 5.6 v2c (power-exponential potential growth, cold start) and v2d (+ size exponent of the suppression hazard)
+Fits record their structural switches in `fit_<tag>/meta.txt` (form, size split); every tool refuses a fit evaluated with a different
+growth form (a silent mismatch would decode the parameters with the wrong equations).
+
+| fit | form | VAL total | mort | ln D | ln H | note |
+|---|---|---|---|---|---|---|
+| v2b | Chapman–Richards state form | −122,232 | 33,477 | −81,914 | −73,795 | |
+| v2c | power-exponential r (X/X0)^c e^{−X/Xmax} | −122,365 | 33,530 | −82,054 | −73,841 | cold start, 30k evals |
+| v2d | v2c + msup (1−v)(D/20)^mSD | **−122,600** | **33,431** | −82,097 | −73,934 | mSD = −0.39 |
+
+Species timing (timing_curves.jl): v2c corr with the observed free-growing increments dD 0.86 (v2b 0.77), dH 0.955, dH:dD ratio 0.82;
+no diameter stall at large sizes any more (figures `results/hbad2/figures/v2c_{species_curves,allocation_vs_obs}.png`). The
+E3 trees are train+val plots, so this is a consistency check of the curves, not a held-out test. Planted multipliers are stable
+across fits (v2d: height rate ×1.42, diameter ×1.30, hazard ×0.79).
+
+Sim B (v2c, v2d): unchanged from v2b (BA 12.9 % / bias +1 %, N≥5 in 21.9 %, Lorey H 6.4 %, composition 0.140 vs persistence 0.134).
+Diagnosis of the remaining stand-structure error:
+* tree-level annual mortality declines smoothly with D (2.5 cm 3.8 %, 5 cm 2.6 %, 10 cm 1.5 %, 12.7 cm 1.4 %, 20 cm 1.0 %, 25–35 cm 0.9 %):
+  no step at the 5-in sampling threshold; but by cohort-QMD class the model under-predicts deaths at 5–12.7 cm (−18 %) and over-
+  predicts at 12.7–20 cm (+17 %) → aggregation: cohorts that mix microplot saplings (185/ha each) and subplot trees (14.9/ha) get one
+  QMD and the convex size hazard at the mean is wrong for both parts.
+* recruitment scaling (diagnostic only, ×0.5 / ×0.25) cannot fix the size profile: poles match only at ×0.25 when saplings collapse
+  (87 vs 264), and 12.7–25 cm stays low (144 vs 244) → the error is the flow through the mid sizes (graduation from poles, mortality
+  of 12.7–20 cm), not the recruitment level.
+* v2d evaluated on size-split cohorts (5/12.7/25/40 cm): mortality NLL 33,094 (vs 33,431 lumped) — splitting alone helps.
+→ v2e: fit on size-split Sim A cohorts (warm start v2d).
+
+### 5.7 v2e — fitted on size-split Sim A cohorts (5/12.7/25/40 cm; warm start v2d)
+VAL total −170,903 on the split cohorts (v2d on the same cohorts −170,604); mortality NLL 33,022 (v2d lumped-fit 33,094 on split,
+33,431 on lumped). Globals: mSD −0.68 (stronger size dependence of suppression mortality once cohorts are not size-mixed),
+planted ×1.43 height / ×1.33 diameter / ×0.79 hazard. Size-class residuals (VAL deaths obs/sim): < 5 cm 1,757/1,536, 5–12.7 1,185/1,096,
+12.7–20 4,063/4,315 (+6 %, was +17 %), 20–30 1,554/1,508, 30–45 757/800, > 45 254/207.
+Sim B (σ_obs 0.11 = the within-cohort spread of split cohorts): unchanged at the stand level (BA 12.9 %, bias +0.1 %; N ≥ 5 in 22.0 %;
+Lorey H 6.4 %) and the pole stall persists (> 21 yr: 5–12.7 cm 246 vs obs 94; 12.7–25 cm 160 vs 244).
+⇒ the tracked-tree likelihood does not identify the recruit → pole → mid-size pathway (Sim A has no recruits and no ingrowth).
+
+### 5.8 Joint calibration (tools/hbad2/simB_lik.jl, fit_joint.jl)
+Sim B stand-table likelihood: free runs (train: 532 clean natural plots) scored at every later visit by a Poisson NLL of the TALLIED
+tree counts per (species key × size class [2.54,5) [5,12.7) [12.7,25) [25,40) [40,∞)) — expected count = model N in the class through
+the lognormal within-cohort operator ÷ FIA expansion (185.2 microplot, 14.87 subplot) — plus a Gaussian ln Lorey-height term.
+0.2 s per evaluation; no recruitment doubles it (val 33.6k → 67.1k). Two objectives (fA = Sim A NLL, fB = Sim B NLL) because the
+two share plots (summing would double count); augmented Chebyshev per λ, one CMA-ES run per λ; recruitment (3 per species) free.
+Run j1: λ 0.5, 0, 1 from v2e + Poisson recruitment (start train fA −180,553 fB 36,561; val fA −170,903 fB 34,012).

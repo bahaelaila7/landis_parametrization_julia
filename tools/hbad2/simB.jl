@@ -12,9 +12,10 @@ tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_); kix = Dict
 big = Set(k for k in keys_ if k[1] != '_'); keyof(s, g) = s in big ? s : "_" * g
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
-θ = read_theta(joinpath(R2DIR, "fit_" * tag, "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
+check_meta(joinpath(R2DIR, "fit_" * tag)); θ = read_theta(joinpath(R2DIR, "fit_" * tag, "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
 rc = CSV.read(joinpath(R2DIR, "recruitment_coefs.csv"), DataFrame); rcd = Dict(String(r.key) => r for r in eachrow(rc))
-R = [RecP(rcd[k].rho0, rcd[k].rhoS, rcd[k].rhoL, 2.54, 3.0, 5.0) for k in keys_]
+RMULT = parse(Float64, get(ENV, "HBAD2_RECR_MULT", "1"))   # diagnostic only
+R = [RecP(rcd[k].rho0 + log(RMULT), rcd[k].rhoS, rcd[k].rhoL, 2.54, 3.0, 5.0) for k in keys_]
 # plots: in SET, ≥ 2 intervals, every interval clean and natural
 iv.pk = [(a, b, c, d) for (a, b, c, d) in zip(iv.st, iv.u, iv.c, iv.p)]
 pl = combine(groupby(iv, :pk), :set => first => :set, [:trt, :dst, :harv, :planted] => ((a, b, c, d) -> !any(a .| b .| c .| d)) => :clean, nrow => :nint)

@@ -1,7 +1,7 @@
 # Fit HBAD v2 on Sim A tracked cohorts (TRAIN) by CMA-ES on the joint NLL; report TRAIN and VAL (selection) parts and diagnostics.
 #   HBAD2_EVALS=40000 ./julia_gdal.sh --project=. --threads=8 tools/hbad2/fit_simA.jl <tag> [init.csv]
 include(joinpath(@__DIR__, "common.jl")); include(joinpath(@__DIR__, "cmaes.jl"))
-tag = length(ARGS) >= 1 ? ARGS[1] : "v2a"; OUTD = joinpath(R2DIR, "fit_" * tag); mkpath(OUTD)
+tag = length(ARGS) >= 1 ? ARGS[1] : "v2a"; OUTD = joinpath(R2DIR, "fit_" * tag); mkpath(OUTD); write_meta(OUTD)
 logio = open(joinpath(OUTD, "log.txt"), "w"); lg(s) = (println(s); println(logio, s); flush(logio); flush(stdout))
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))

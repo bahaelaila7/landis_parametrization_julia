@@ -7,7 +7,7 @@ tag = ARGS[1]; OUTD = joinpath(R2DIR, "fit_" * tag)
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
-θ = read_theta(joinpath(OUTD, "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
+check_meta(joinpath(R2DIR, "fit_" * tag)); θ = read_theta(joinpath(OUTD, "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
 rows = NamedTuple[]
 for k in 1:nsp
   S = Sites([1, 2], [k], [1.0], [2.54], [3.0], [5.0], [0], [0.0], [false])
