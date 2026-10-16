@@ -304,3 +304,15 @@ Second scalarisation bug (found 11:55): with ideal fA = the start's own fA (v2f 
 0 (j5) or tiny (j6, 306 NLL units) → invalid runs, moved to results/hbad2/aborted/. fit_joint.jl now normalises by ideal → NADIR
 (env HBAD2_NADIR; nadir = the other end point) and refuses nadir ≤ ideal. j5 (no vigour) and j6 (vigour) relaunched at λ 0.5 with the
 SAME constants so their points are directly comparable: ideal (fA −272,975.3, fB −2,944.0), nadir (fA −237,456.7, fB 635.0).
+
+### 5.13 Balanced joint fits (λ 0.5, same ideal/nadir): vigour vs no vigour
+| VAL | Sim A NLL | Sim B size obj. | BA err (bias) | N≥5in err (bias) | QMD err | Lorey H err | composition | > 21 yr classes (<5 / 5–12.7 / 12.7–25 / ≥25; obs 264 / 94 / 244 / 162) |
+|---|---|---|---|---|---|---|---|---|
+| v2f (Sim A optimum) | −271,797 | 1,754 | 12.7 % (+5.5) | 22.3 % (−0.4) | 23.6 % | 6.9 % | 0.157 | 396 / 365 / 181 / 147 |
+| j5 no vigour | −262,905 | −1,213 | 13.1 % (+8.5) | 19.9 % (+15.1) | 17.6 % | 6.6 % | 0.172 | 247 / 163 / 203 / 159 |
+| **j6 vigour** | **−265,212** | **−1,420** | 13.0 % (+9.3) | 19.2 % (+16.8) | 17.3 % | 6.8 % | 0.174 | 234 / 166 / 203 / 154 |
+
+The vigour model dominates the mean-field model at the balanced point on VAL (better on BOTH objectives) → keep the vigour sub-cohorts.
+j6 costs 2.4 % of the Sim A NLL vs v2f (6.6k) for most of the stand-structure gain; its VAL Sim B value (−1,420) is better than the
+Sim-B-only point j4 (−1,249) → the λ = 0 end overfits TRAIN. Remaining Sim B errors: N ≥ 5 in over-predicted (+17 %), poles still
+1.8× at > 21 yr, composition drifts (0.174 vs persistence 0.134). Selection (user rule): VAL decides; TEST is reported once at the end.

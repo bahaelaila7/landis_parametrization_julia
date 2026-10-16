@@ -1,0 +1,17 @@
+[fB=size] joint j5: SimA train 81680 cohorts, SimB train 2128 sites / val 1860 sites; params 174 (+36 recruitment); λ 0.5
+START train fA -272975.3 fB 635.0 | val fA -271797.3 fB 1753.9
+scalarisation: ideal fA -272975.3 fB -2944.0 | nadir fA -237456.7 fB 635.0 (start -272975.3 / 635.0)
+CMA gen 25 evals 601 fbest 0.2198 fgen 0.2198 σ 0.0288 cond 1.1
+CMA gen 50 evals 1201 fbest 0.1455 fgen 0.1462 σ 0.0431 cond 1.3
+CMA gen 75 evals 1801 fbest 0.1206 fgen 0.1206 σ 0.059 cond 1.3
+CMA gen 100 evals 2401 fbest 0.1154 fgen 0.1184 σ 0.0659 cond 1.4
+CMA gen 125 evals 3001 fbest 0.1130 fgen 0.1150 σ 0.068 cond 1.5
+CMA gen 150 evals 3601 fbest 0.1087 fgen 0.1168 σ 0.0702 cond 1.6
+CMA gen 175 evals 4201 fbest 0.1087 fgen 0.1153 σ 0.0673 cond 1.7
+CMA gen 200 evals 4801 fbest 0.1057 fgen 0.1112 σ 0.0627 cond 1.7
+CMA gen 225 evals 5401 fbest 0.1041 fgen 0.1063 σ 0.0605 cond 1.7
+CMA gen 250 evals 6001 fbest 0.1010 fgen 0.1030 σ 0.0575 cond 1.8
+CMA gen 275 evals 6601 fbest 0.0978 fgen 0.0999 σ 0.0535 cond 1.8
+CMA gen 300 evals 7201 fbest 0.0952 fgen 0.0956 σ 0.0484 cond 1.8
+CMA gen 325 evals 7801 fbest 0.0938 fgen 0.0954 σ 0.0471 cond 1.8
+λ=0.50  train fA -266941.8 fB -2338.4 | VAL fA -262905.0 fB -1213.4  (start val -271797.3 / 1753.9)

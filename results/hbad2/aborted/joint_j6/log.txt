@@ -1,0 +1,4 @@
+[fB=size] joint j6: SimA train 245040 cohorts, SimB train 2128 sites / val 1860 sites; params 174 (+36 recruitment); λ 0.5
+START train fA -272668.8 fB -392.6 | val fA -271734.7 fB 614.2
+scalarisation: ideal fA -272975.3 fB -2944.0 (start -272668.8 / -392.6)
+CMA gen 25 evals 601 fbest 0.4039 fgen 0.4115 σ 0.0241 cond 1.1
