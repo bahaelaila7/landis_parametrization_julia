@@ -6136,6 +6136,7 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   _db_path = din.cohorts_db_path   # (yaml value, with the FIADB env override applied by load_config)
 
   # Fields shared by parametrize, plot_sample, and plot_sample_sobol
+  data_opts = data_options(cfg)   # data-preparation inputs (disturbance-shock parquet), passed to parametrize
   common_kw = (
     data_opts=data_opts,
     cohorts_db_path=_db_path,
@@ -6172,7 +6173,6 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
   search_mode = cfg["search_mode"]
 
   scoring, simb = scoring_from_config(cfg)   # scoring rule + Sim B options (shared with the analysis tools), passed explicitly below
-  data_opts = data_options(cfg)   # data-preparation inputs (disturbance-shock parquet), passed to parametrize
   search = search_options_from_config(cfg)   # LBSA / Igel / MO-CMA-ES-ranking knobs of the run, passed to the drivers explicitly
   search.mocmaes_nds && @info "MO-CMA-ES offspring ranking: TRUE NSGA-II non-dominated sorting (Pareto fronts + crowding)"
   tables = bs_tables_from_cfg(cfg, _db_path)   # the Biomass Succession data tables of the run, passed explicitly (parametrize(tables=...))
