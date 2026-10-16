@@ -47,8 +47,8 @@ best = haskey(ENV, "PAN_PARAMS") ? JLD2.load_object(ENV["PAN_PARAMS"]) :
 _dm = (let d = g("dual_mode", "off"); d === true ? "joint" : lowercase(string(d)); end)   # "off"/"joint"/"b"
 function paired_agebin(sp, label)
   (isnothing(sp) || DF.nrow(sp) == 0) && return nothing
-  max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-  spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
+  spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
+  ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   if _dm == "b"   # Sim-B free-regen: age-bin paired via the shared helper (coarse bins from THIS script's loss_params)
     paired, _, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng; scoring=scoring, plugin=P.bs_plugin())
     paired.cbin = paired.bin

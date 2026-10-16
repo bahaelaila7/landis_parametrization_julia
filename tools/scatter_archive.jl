@@ -23,9 +23,8 @@ n_species = length(species_list)
 bins = cfg["bins_idx"]
 loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(cfg["loss_lambda"]))
 sp = splots
-max_age = Int(maximum(sp.age_calc))
-spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
+spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
+ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
 inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
 rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
 injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)

@@ -185,6 +185,57 @@ Initial SoA of a run for the succession plugin of `plugin` (a `PluginConfig`). `
 make_sites(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; plugin::PluginConfig=bs_plugin(), kw...) =
   _make_sites(plugin, splots, eco_species_ids; kw...)
 
+"""
+    Reference
+
+The scoring reference of one split (train, val, or a tool's plot set), built by `build_reference`:
+
+  - `splots`: the split's cohort table.
+  - `spdf`: the smoothed, binned observed age distributions (`PU.smoothen_ref_years`).
+  - `spdf_plts`: `(plot_id, eco_id) → sim_year → SPDFGroundTruth`, the loss reference.
+  - `site_sim_years`: the measurement years of every site.
+  - `spinup_cohorts`: the year-deficit cohorts of the Sim B spinup.
+  - `injection_cohorts`: the observed cohorts of the injection (and the disturbance data), or `nothing` when the run does not inject.
+  - `ref_soa`: the initial `SiteSoA` (`nothing` for `make_soa=false`).
+"""
+struct Reference{SY,SC,I,R}
+  splots::DataFrame
+  spdf::DataFrame
+  spdf_plts::Dict{Tuple{UIntType,UIntType},Dict{Int,PU.SPDFGroundTruth}}
+  site_sim_years::SY
+  spinup_cohorts::SC
+  injection_cohorts::I
+  ref_soa::R
+end
+
+"The smoothed observed distributions of `rows` and their `(plot_id, eco_id) → sim_year → SPDFGroundTruth` index (the smoothing / binning step of a reference)."
+function reference_tables(rows::DataFrame, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams; debug::Bool=false)
+  spdf = PU.smoothen_ref_years(rows, loss_params, Int(maximum(rows.age_calc)); debug=debug)
+  (spdf, Data.make_spdf_dict(spdf, eco_species_ids))
+end
+
+"""
+    build_reference(splots, eco_species_ids, loss_params; scoring=nothing, simb=nothing, no_establishment=false, plugin=nothing,
+                    rng=nothing, spinup=true, debug=false) -> Reference
+
+The one place that builds the scoring reference of a split: smoothing and binning, the `(plot, eco) → year` loss index, the site years, the
+spinup cohorts, the injection cohorts (only when the run injects: `no_establishment`, `scoring.override` or `simb.simb_disturb_only`) and, when a
+`plugin` is given, the initial `SiteSoA` (`make_sites`; consumes `rng`).
+"""
+function build_reference(splots::DataFrame, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams;
+                         scoring::Union{Nothing,ScoringOptions}=nothing, simb::Union{Nothing,SimBOptions}=nothing, no_establishment::Bool=false,
+                         plugin::Union{Nothing,PluginConfig}=nothing, rng::Union{Nothing,Random.AbstractRNG}=nothing, spinup::Bool=true, debug::Bool=false)
+  spdf, spdf_plts = reference_tables(splots, eco_species_ids, loss_params; debug=debug)
+  ssy = Data.get_site_sim_years(spdf)
+  spc = Data.get_spinup_cohorts(splots)
+  # simb_disturb_only builds the injection cohorts purely as the disturbance-data source (all_cohorts=true so the drops cover the whole stand);
+  # it never injects.
+  all_coh = (scoring !== nothing && scoring.override) || (simb !== nothing && simb.simb_disturb_only)
+  inj = (no_establishment || all_coh) ? Data.get_injection_cohorts(splots; all_cohorts=all_coh) : nothing
+  soa = plugin === nothing ? nothing : make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment, plugin=plugin)
+  Reference(splots, spdf, spdf_plts, ssy, spc, inj, soa)
+end
+
 function _make_sites(plugin::PluginConfig{P}, splots::DataFrame, eco_species_ids::Vector{Vector{Int}}; rng::Random.AbstractRNG, spinup::Bool=true, no_establishment::Bool=false,
                      site_attrs=nothing) where {P}
   pc = plugin.ctx
@@ -381,9 +432,7 @@ function _build_excl_plan(injection_dict, ref_soa, eco_species_ids, loss_params,
   ref = Dict{Int,Dict{Int,PU.SPDFGroundTruth}}()
   alt = Dict{Tuple{Int,Int},PU.SPDFGroundTruth}()
   if nrow(rows) > 0
-    max_age = maximum(rows.age_calc)
-    sp = PU.smoothen_ref_years(rows, loss_params, max_age)
-    for ((pid, eco), byyr) in Data.make_spdf_dict(sp, eco_species_ids), (yr, gt) in byyr
+    for ((pid, eco), byyr) in reference_tables(rows, eco_species_ids, loss_params)[2], (yr, gt) in byyr
       alt[(Int(pid), yr)] = gt
     end
   end
@@ -567,215 +616,204 @@ end
   nothing
 end
 
-function _apply_disturbance_shock!(pc, soa, shock_year::Union{Nothing,_SiteShockYear}, site_cohorts::Union{Nothing,_SiteInjectionYear}, opts::ScoringOptions)
-  if shock_year !== nothing
-    for (site_idx, lst) in shock_year
-      site = getsite(soa, site_idx)
-      site.active || continue
-      csp = site.c_species; cage = site.c_age
-      removed = false
-      for (sp, age) in lst
-        Threads.atomic_add!(SHOCK_STATS[1], 1)
-        @inbounds for j in 1:Int(site.live)
-          if csp[j] == sp && cage[j] == age
-            _shock_remove_cohort!(site, j)
-            Threads.atomic_add!(SHOCK_STATS[2], 1)
-            removed = true
-            break
-          end
+# Shock step (a): remove the sim cohorts matching (eco_species, age) of a cohort FULLY removed by disturbance since the previous visit.
+function _shock_full_removals!(soa, shock_year::_SiteShockYear)
+  for (site_idx, lst) in shock_year
+    site = getsite(soa, site_idx)
+    site.active || continue
+    csp = site.c_species; cage = site.c_age
+    removed = false
+    for (sp, age) in lst
+      Threads.atomic_add!(SHOCK_STATS[1], 1)
+      @inbounds for j in 1:Int(site.live)
+        if csp[j] == sp && cage[j] == age
+          _shock_remove_cohort!(site, j)
+          Threads.atomic_add!(SHOCK_STATS[2], 1)
+          removed = true
+          break
         end
-      end
-      if removed
-        o = zero(UIntType)
-        for j in 1:Int(site.live)
-          cage[j] > one(FloatType) && (o += one(UIntType))
-        end
-        site.old = o
-        site._new_cohort_counts = Int(site.live)
       end
     end
+    if removed
+      o = zero(UIntType)
+      for j in 1:Int(site.live)
+        cage[j] > one(FloatType) && (o += one(UIntType))
+      end
+      site.old = o
+      site._new_cohort_counts = Int(site.live)
+    end
   end
-  if site_cohorts !== nothing && opts.disturbance === :scale
-    for (site_idx, cohorts) in site_cohorts
-      site = getsite(soa, site_idx)
-      site.active || continue
-      csp = site.c_species; cage = site.c_age; cbio = site.c_bio
-      for (sp, age, _bio, drop) in cohorts
-        drop > zero(FloatType) || continue
-        Threads.atomic_add!(SHOCK_STATS[3], 1)
-        @inbounds for j in 1:Int(site.live)
-          if csp[j] == sp && cage[j] == age
-            Threads.atomic_add!(SHOCK_STATS[4], 1)
-            newb = cbio[j] * (one(FloatType) - drop)
-            site.B += newb - cbio[j]
-            set_cohort_bio!(pc, site, j, newb)
-            break
-          end
+  nothing
+end
+# Shock step (b), mode :scale: scale the matched, partially disturbed survivors (observed drop > 0) by (1-drop).
+function _shock_scale_partial!(pc, soa, site_cohorts::_SiteInjectionYear)
+  for (site_idx, cohorts) in site_cohorts
+    site = getsite(soa, site_idx)
+    site.active || continue
+    csp = site.c_species; cage = site.c_age; cbio = site.c_bio
+    for (sp, age, _bio, drop) in cohorts
+      drop > zero(FloatType) || continue
+      Threads.atomic_add!(SHOCK_STATS[3], 1)
+      @inbounds for j in 1:Int(site.live)
+        if csp[j] == sp && cage[j] == age
+          Threads.atomic_add!(SHOCK_STATS[4], 1)
+          newb = cbio[j] * (one(FloatType) - drop)
+          site.B += newb - cbio[j]
+          set_cohort_bio!(pc, site, j, newb)
+          break
         end
       end
     end
   end
   nothing
 end
+# The shock step of the scoring rule: (a) then (b), on the simulated state, before scoring.
+function _apply_disturbance_shock!(pc, soa, shock_year::Union{Nothing,_SiteShockYear}, site_cohorts::Union{Nothing,_SiteInjectionYear}, opts::ScoringOptions)
+  shock_year === nothing || _shock_full_removals!(soa, shock_year)
+  (site_cohorts !== nothing && opts.disturbance === :scale) && _shock_scale_partial!(pc, soa, site_cohorts)
+  nothing
+end
 
+# ---- Observed-cohort injection, one function per mode -----------------------------------------------------------------------------
 # Only touches the sites that actually have injections (typically << n_sites).
 # _new_cohort_counts is already == site.live for all other sites after process_plugin!.
-# override=false (default): append every listed cohort as a new cohort — unchanged.
-# override=true: for each observed cohort, overwrite the biomass of the matching
-#   (species, age) cohort in place; add it only if no match exists. Sim cohorts with
-#   no observed counterpart are left untouched; capacity grows only by the unmatched count.
-function _inject_observed_cohorts!(pc, soa, site_cohorts::_SiteInjectionYear, opts::ScoringOptions; override::Bool=opts.override, replace::Bool=opts.replace, sync::Bool=opts.sync, skip_scale::Bool=false)
-  if !override
-    for (site_idx, cohorts) in site_cohorts
-      site = getsite(soa, site_idx)
-      site.active || continue
-      site._new_cohort_counts = Int(site.live) + length(cohorts)
-    end
-    PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
-    for (site_idx, cohorts) in site_cohorts
-      site = getsite(soa, site_idx)
-      site.active || continue
-      for (sp, age, bio, _drop) in cohorts
-        add_cohort!(pc, site, sp, age, bio)
-        site.B += bio
-      end
-    end
-    return
-  end
+# The mode is a singleton type chosen once per call by `_inject_mode(override, replace, sync)` (replace beats sync):
+#   InjAppend   (override=false): append every listed cohort as a new cohort.
+#   InjReplace  (override, replace): wipe each measured site and rebuild it from exactly the observed cohorts.
+#   InjSync     (override, sync): the cohort SET tracks the data, matched survivors keep their sim biomass (steps below).
+#   InjOverride (override only): overwrite the biomass of the matching (species, age) cohort in place; add it only if no match exists.
+abstract type InjectMode end
+struct InjAppend   <: InjectMode end
+struct InjReplace  <: InjectMode end
+struct InjSync     <: InjectMode end
+struct InjOverride <: InjectMode end
+@inline _inject_mode(override::Bool, replace::Bool, sync::Bool)::Union{InjAppend,InjReplace,InjSync,InjOverride} =
+  !override ? InjAppend() : replace ? InjReplace() : sync ? InjSync() : InjOverride()
 
-  if replace
-    # Full replace: wipe each measured site and rebuild it from exactly the observed
-    # cohorts (raw biomass, no trunc; optional noise). Drops sim-only cohorts so the
-    # site state equals the data even when some sim cohorts should have died but didn't.
-    for (site_idx, cohorts) in site_cohorts
-      site = getsite(soa, site_idx)
-      site.active || continue
-      site._new_cohort_counts = length(cohorts)
-    end
-    PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
-    noise = FloatType(opts.noise)
-    for (site_idx, cohorts) in site_cohorts
-      site = getsite(soa, site_idx)
-      site.active || continue
-      site.live = zero(UIntType)
-      site.old = zero(UIntType)
-      site.B = zero(FloatType)
-      cbio = site.c_bio
-      for (sp, age, bio, _drop) in cohorts
-        b = noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
-        add_cohort!(pc, site, sp, age, b)
-        set_cohort_bio!(pc, site, Int(site.live), b)   # overwrite add_cohort!'s trunc with the raw value
-        site.B += b
-      end
-    end
-    return
+# Sim cohort (species, age) lookup over the first `n` cohorts of the site.
+@inline function _has_cohort(csp, cage, n::Int, sp, age)::Bool
+  for j in 1:n
+    (csp[j] == sp && cage[j] == age) && return true
   end
-
-  if sync
-    # Set-sync (choice B): cohort SET tracks the data; matched survivors keep their sim biomass.
-    # Pass A: remove sim cohorts whose (species,age) isn't in the observed set ("died"), in place.
-    for (site_idx, cohorts) in site_cohorts
-      site = getsite(soa, site_idx)
-      site.active || continue
-      keep = Set{Tuple{UIntType,FloatType}}((sp, age) for (sp, age, _, _) in cohorts)
-      csp = site.c_species
-      cage = site.c_age
-      cbio = site.c_bio
-      i = 1
-      while i <= Int(site.live)
-        if (csp[i], cage[i]) in keep
-          i += 1
-        else
-          site.B -= cbio[i]
-          lastidx = Int(site.live)
-          if i != lastidx
-            PanCore.swap_cohort!(site, i, lastidx)   # moves every per-cohort CSR field
-          end
-          site.live -= one(UIntType)
-        end
-      end
-    end
-    # Disturbance handling for matched (survivor) cohorts at the disturbance year. Only survivors
-    # (present after Pass A) are touched; recruits added in Pass C keep their observed biomass.
-    #   :scale            — biomass *= (1-drop): a known shock; cohort STAYS in the loss (growth fits it).
-    #   :exclude_overwrite— biomass := observed survivor biomass; cohort EXCLUDED from loss (loss side).
-    #   :exclude_noscale  — biomass unchanged; cohort EXCLUDED from loss (loss side).
-    let dmode = opts.disturbance
-      if (dmode === :scale && !skip_scale) || dmode === :exclude_overwrite   # skip_scale: the (1-drop) shock was already applied before scoring
-        for (site_idx, cohorts) in site_cohorts
-          site = getsite(soa, site_idx)
-          site.active || continue
-          csp = site.c_species; cage = site.c_age; cbio = site.c_bio
-          for (sp, age, bio, drop) in cohorts
-            drop > zero(FloatType) || continue
-            @inbounds for j in 1:Int(site.live)
-              if csp[j] == sp && cage[j] == age
-                newb = dmode === :scale ? cbio[j] * (one(FloatType) - drop) : bio
-                site.B += newb - cbio[j]
-                set_cohort_bio!(pc, site, j, newb)
-                break
-              end
-            end
-          end
-        end
-      end
-    end
-    # Pass B: size each site to survivors + (# observed (species,age) absent from the sim).
-    for (site_idx, cohorts) in site_cohorts
-      site = getsite(soa, site_idx)
-      site.active || continue
-      csp = site.c_species
-      cage = site.c_age
-      live = Int(site.live)
-      n_new = 0
-      for (sp, age, _, _) in cohorts
-        matched = false
-        for j in 1:live
-          if csp[j] == sp && cage[j] == age
-            matched = true
-            break
-          end
-        end
-        matched || (n_new += 1)
-      end
-      site._new_cohort_counts = live + n_new
-    end
-    PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
-    # Pass C: append the unmatched observed cohorts (recruits) with observed biomass; recompute old.
-    noise = FloatType(opts.noise)
-    for (site_idx, cohorts) in site_cohorts
-      site = getsite(soa, site_idx)
-      site.active || continue
-      csp = site.c_species
-      cage = site.c_age
-      cbio = site.c_bio
-      orig_live = Int(site.live)
-      for (sp, age, bio, _drop) in cohorts
-        matched = false
-        for j in 1:orig_live
-          if csp[j] == sp && cage[j] == age
-            matched = true
-            break
-          end
-        end
-        if !matched
-          b = noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
-          add_cohort!(pc, site, sp, age, b)
-          set_cohort_bio!(pc, site, Int(site.live), b)
-          site.B += b
-        end
-      end
-      # Pass A removals + Pass C adds left site.old stale — recompute (# cohorts with age > 1).
-      o = zero(UIntType)
-      for j in 1:Int(site.live)
-        cage[j] > one(FloatType) && (o += one(UIntType))
-      end
-      site.old = o
-    end
-    return
+  false
+end
+# Biomass of an injected cohort: the observed value, with the multiplicative noise of the sensitivity test when noise > 0.
+@inline _noisy_bio(site, bio::FloatType, noise::FloatType)::FloatType =
+  noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
+# Append (species, age) with RAW biomass b (overwrites add_cohort!'s integer truncation, which only the model proper uses; C# parity).
+@inline function _add_cohort_raw!(pc, site, sp, age, b::FloatType)
+  add_cohort!(pc, site, sp, age, b)
+  set_cohort_bio!(pc, site, Int(site.live), b)
+  site.B += b
+  nothing
+end
+# Recompute site.old (# cohorts with age > 1) after cohorts were removed / added.
+@inline function _recompute_old!(site)
+  cage = site.c_age
+  o = zero(UIntType)
+  for j in 1:Int(site.live)
+    cage[j] > one(FloatType) && (o += one(UIntType))
   end
+  site.old = o
+  nothing
+end
 
-  # Pass 1: size each site to live + (# observed cohorts with no (species,age) match).
+function _inject!(::InjAppend, pc, soa, site_cohorts::_SiteInjectionYear, opts::ScoringOptions, skip_scale::Bool)
+  for (site_idx, cohorts) in site_cohorts
+    site = getsite(soa, site_idx)
+    site.active || continue
+    site._new_cohort_counts = Int(site.live) + length(cohorts)
+  end
+  PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+  for (site_idx, cohorts) in site_cohorts
+    site = getsite(soa, site_idx)
+    site.active || continue
+    for (sp, age, bio, _drop) in cohorts
+      add_cohort!(pc, site, sp, age, bio)
+      site.B += bio
+    end
+  end
+  nothing
+end
+
+# Full replace: wipe each measured site and rebuild it from exactly the observed
+# cohorts (raw biomass, no trunc; optional noise). Drops sim-only cohorts so the
+# site state equals the data even when some sim cohorts should have died but didn't.
+function _inject!(::InjReplace, pc, soa, site_cohorts::_SiteInjectionYear, opts::ScoringOptions, skip_scale::Bool)
+  for (site_idx, cohorts) in site_cohorts
+    site = getsite(soa, site_idx)
+    site.active || continue
+    site._new_cohort_counts = length(cohorts)
+  end
+  PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+  noise = FloatType(opts.noise)
+  for (site_idx, cohorts) in site_cohorts
+    site = getsite(soa, site_idx)
+    site.active || continue
+    site.live = zero(UIntType)
+    site.old = zero(UIntType)
+    site.B = zero(FloatType)
+    for (sp, age, bio, _drop) in cohorts
+      _add_cohort_raw!(pc, site, sp, age, _noisy_bio(site, bio, noise))
+    end
+  end
+  nothing
+end
+
+# Set-sync (choice B): cohort SET tracks the data; matched survivors keep their sim biomass. Four steps, in this order.
+# Step A: remove sim cohorts whose (species,age) isn't in the observed set ("died"), in place.
+function _sync_remove_unobserved!(soa, site_cohorts::_SiteInjectionYear)
+  for (site_idx, cohorts) in site_cohorts
+    site = getsite(soa, site_idx)
+    site.active || continue
+    keep = Set{Tuple{UIntType,FloatType}}((sp, age) for (sp, age, _, _) in cohorts)
+    csp = site.c_species
+    cage = site.c_age
+    cbio = site.c_bio
+    i = 1
+    while i <= Int(site.live)
+      if (csp[i], cage[i]) in keep
+        i += 1
+      else
+        site.B -= cbio[i]
+        lastidx = Int(site.live)
+        if i != lastidx
+          PanCore.swap_cohort!(site, i, lastidx)   # moves every per-cohort CSR field
+        end
+        site.live -= one(UIntType)
+      end
+    end
+  end
+  nothing
+end
+# Disturbance handling for matched (survivor) cohorts at the disturbance year. Only survivors
+# (present after step A) are touched; recruits added in step C keep their observed biomass.
+#   :scale            — biomass *= (1-drop): a known shock; cohort STAYS in the loss (growth fits it).
+#   :exclude_overwrite— biomass := observed survivor biomass; cohort EXCLUDED from loss (loss side).
+#   :exclude_noscale  — biomass unchanged; cohort EXCLUDED from loss (loss side).
+# `skip_scale`: the (1-drop) shock was already applied before scoring.
+function _sync_disturbed_survivors!(pc, soa, site_cohorts::_SiteInjectionYear, dmode::Symbol, skip_scale::Bool)
+  ((dmode === :scale && !skip_scale) || dmode === :exclude_overwrite) || return nothing
+  for (site_idx, cohorts) in site_cohorts
+    site = getsite(soa, site_idx)
+    site.active || continue
+    csp = site.c_species; cage = site.c_age; cbio = site.c_bio
+    for (sp, age, bio, drop) in cohorts
+      drop > zero(FloatType) || continue
+      @inbounds for j in 1:Int(site.live)
+        if csp[j] == sp && cage[j] == age
+          newb = dmode === :scale ? cbio[j] * (one(FloatType) - drop) : bio
+          site.B += newb - cbio[j]
+          set_cohort_bio!(pc, site, j, newb)
+          break
+        end
+      end
+    end
+  end
+  nothing
+end
+# Step B: size each site to survivors + (# observed (species,age) absent from the sim).
+function _sync_size_sites!(soa, site_cohorts::_SiteInjectionYear)
   for (site_idx, cohorts) in site_cohorts
     site = getsite(soa, site_idx)
     site.active || continue
@@ -783,24 +821,46 @@ function _inject_observed_cohorts!(pc, soa, site_cohorts::_SiteInjectionYear, op
     cage = site.c_age
     live = Int(site.live)
     n_new = 0
-    for (sp, age, _) in cohorts
-      matched = false
-      for j in 1:live
-        if csp[j] == sp && cage[j] == age
-          matched = true
-          break
-        end
-      end
-      matched || (n_new += 1)
+    for (sp, age, _, _) in cohorts
+      _has_cohort(csp, cage, live, sp, age) || (n_new += 1)
     end
     site._new_cohort_counts = live + n_new
   end
   PanCore.readjust_soa!(soa, (cohort=soa.scalar._new_cohort_counts,))
+  nothing
+end
+# Step C: append the unmatched observed cohorts (recruits) with observed biomass; recompute old.
+function _sync_append_recruits!(pc, soa, site_cohorts::_SiteInjectionYear, noise::FloatType)
+  for (site_idx, cohorts) in site_cohorts
+    site = getsite(soa, site_idx)
+    site.active || continue
+    csp = site.c_species
+    cage = site.c_age
+    orig_live = Int(site.live)
+    for (sp, age, bio, _drop) in cohorts
+      _has_cohort(csp, cage, orig_live, sp, age) && continue
+      _add_cohort_raw!(pc, site, sp, age, _noisy_bio(site, bio, noise))
+    end
+    # step A removals + step C adds left site.old stale
+    _recompute_old!(site)
+  end
+  nothing
+end
+function _inject!(::InjSync, pc, soa, site_cohorts::_SiteInjectionYear, opts::ScoringOptions, skip_scale::Bool)
+  _sync_remove_unobserved!(soa, site_cohorts)
+  _sync_disturbed_survivors!(pc, soa, site_cohorts, opts.disturbance, skip_scale)
+  _sync_size_sites!(soa, site_cohorts)
+  _sync_append_recruits!(pc, soa, site_cohorts, FloatType(opts.noise))
+  nothing
+end
 
-  # Pass 2: overwrite matches in place (searching only the original live range),
-  # append the unmatched. Biomass is written RAW (no trunc) so the injected state
-  # equals the reference exactly — only this diagnostic path skips the integer-valued
-  # truncation that add_cohort!/succession use everywhere else (C# parity).
+# Override in place (no sync): overwrite matches in place (searching only the original live range), append the unmatched.
+# Biomass is written RAW (no trunc) so the injected state equals the reference exactly — only this diagnostic path skips the
+# integer-valued truncation that add_cohort!/succession use everywhere else (C# parity).
+function _inject!(::InjOverride, pc, soa, site_cohorts::_SiteInjectionYear, opts::ScoringOptions, skip_scale::Bool)
+  # Pass 1: size each site to live + (# observed cohorts with no (species,age) match).
+  _sync_size_sites!(soa, site_cohorts)
+  # Pass 2
   noise = FloatType(opts.noise)
   for (site_idx, cohorts) in site_cohorts
     site = getsite(soa, site_idx)
@@ -809,8 +869,8 @@ function _inject_observed_cohorts!(pc, soa, site_cohorts::_SiteInjectionYear, op
     cage = site.c_age
     cbio = site.c_bio
     orig_live = Int(site.live)
-    for (sp, age, bio) in cohorts
-      b = noise > zero(FloatType) ? abs(bio * (one(FloatType) + noise * randn(site.rng, FloatType))) : bio
+    for (sp, age, bio, _drop) in cohorts
+      b = _noisy_bio(site, bio, noise)
       matched = false
       for j in 1:orig_live
         if csp[j] == sp && cage[j] == age
@@ -820,13 +880,16 @@ function _inject_observed_cohorts!(pc, soa, site_cohorts::_SiteInjectionYear, op
           break
         end
       end
-      if !matched
-        add_cohort!(pc, site, sp, age, b)
-        set_cohort_bio!(pc, site, Int(site.live), b)   # overwrite add_cohort!'s trunc with the raw value
-        site.B += b
-      end
+      matched || _add_cohort_raw!(pc, site, sp, age, b)
     end
   end
+  nothing
+end
+
+# Entry point of the injection step of the scoring rule (after the shock and the exclusion plan have been applied / consulted).
+function _inject_observed_cohorts!(pc, soa, site_cohorts::_SiteInjectionYear, opts::ScoringOptions; override::Bool=opts.override, replace::Bool=opts.replace, sync::Bool=opts.sync, skip_scale::Bool=false)
+  _inject!(_inject_mode(override, replace, sync), pc, soa, site_cohorts, opts, skip_scale)
+  nothing
 end
 
 # Pre-index by sim_year → [(site_idx, cohorts)] using the ref_soa's plot→site mapping.
@@ -1527,7 +1590,7 @@ function parametrize(; cohorts_db_path::String,
   n_ecoregions = length(eco_list)
   n_plots = maximum(splots.plot_id)
   # count-balance reweight: build per-agebin W1 weights ONCE from the TRAIN reference (frozen), on the COARSE
-  # age_idx bins; Sim A (per-year) looks them up via CBAL_COARSE. Applied in calculate_species_loss!.
+  # age_idx bins; Sim A (per-year) looks them up via CBAL_COARSE. Applied in calculate_species_loss_acc!.
   # RANKW mode: :rank (default, 1/√ln(rank) by AGB) or :cbal_pct (percentile-floored class-balanced by cohort
   # count — species play the role of age-bins in build_cbal_tables; 10% floor caps rare/empty cells).
   # The run-wide TRAIN tables the reference scales are built from: per-cell cohort counts (rankw_mode = :cbal_pct) and the count-balance
@@ -1571,13 +1634,12 @@ function parametrize(; cohorts_db_path::String,
   val_spinup_cohorts = nothing
   val_injection_cohorts = nothing
   if !isnothing(splots_val_raw)
-    val_max_age = Int(maximum(splots_val_raw.age_calc))
-    val_spdf = PU.smoothen_ref_years(splots_val_raw, loss_params, val_max_age; debug=false)
-    val_spdf_plts = Data.make_spdf_dict(val_spdf, eco_species_ids)
-    val_site_sim_years = Data.get_site_sim_years(val_spdf)
-    val_spinup_cohorts = Data.get_spinup_cohorts(splots_val_raw)   # needed for the val Sim-B spinup (dual val)
-    val_injection_cohorts = (no_establishment || scoring.override || simb.simb_disturb_only) ? Data.get_injection_cohorts(splots_val_raw; all_cohorts=(scoring.override || simb.simb_disturb_only)) : nothing
-    val_ref_soa = make_sites(splots_val_raw, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment, plugin=plugin)
+    vref = build_reference(splots_val_raw, eco_species_ids, loss_params; scoring=scoring, simb=simb, no_establishment=no_establishment, plugin=plugin, rng=rng, spinup=spinup)
+    val_spdf_plts = vref.spdf_plts
+    val_site_sim_years = vref.site_sim_years
+    val_spinup_cohorts = vref.spinup_cohorts   # needed for the val Sim-B spinup (dual val)
+    val_injection_cohorts = vref.injection_cohorts
+    val_ref_soa = vref.ref_soa
     val_splots = splots_val_raw
     println("Val: $(length(unique(splots_val_raw.plot_id))) plots, $(nrow(splots_val_raw)) rows")
   end
@@ -1592,41 +1654,17 @@ function parametrize(; cohorts_db_path::String,
   #greet()
   #println(splots)
   #println(splots)
-  max_age = Int(maximum(splots.age_calc))
-  #precomupte loss for missing entries
   println("Preprocessing plot results (smoothing and binning)")
   debug = (get(ENV, "JULIA_DEBUG", "") ∈ ["Pan", "all"])
-  @time spdf = PU.smoothen_ref_years(splots, loss_params, max_age; debug=debug)
-  @assert minimum(spdf.sim_year) == 0 "$(spdf.sim_year)"
-  #show(spdf)
-  println("Creating comparison years")
-  @time spdf_plts = Data.make_spdf_dict(spdf, eco_species_ids)
-  @time total_err = test_spdf(spdf_plts, n_species, eco_species_ids, loss_params)
+  ref = build_reference(splots, eco_species_ids, loss_params; scoring=scoring, simb=simb, no_establishment=no_establishment, plugin=plugin, rng=rng, spinup=spinup, debug=debug)
+  @assert minimum(ref.spdf.sim_year) == 0 "$(ref.spdf.sim_year)"
+  spdf_plts = ref.spdf_plts; site_sim_years = ref.site_sim_years; spinup_cohorts = ref.spinup_cohorts
+  injection_cohorts = ref.injection_cohorts; ref_soa = ref.ref_soa
+  total_err = test_spdf(spdf_plts, n_species, eco_species_ids, loss_params)
   println(total_err)
   println(PU.get_total_loss(total_err, loss_params))
   println(sum(length(xs) for xs in eco_species_ids))
-  println("Marking sim years")
-  @time site_sim_years = Data.get_site_sim_years(spdf)
-  #println(site_sim_years)
-  #return
-  #show(site_sim_years)
-
-  println("Marking spinup cohorts")
-  @time spinup_cohorts = Data.get_spinup_cohorts(splots)
-  #initial_cohorts = get_initial_cohorts(splots)
   println("beginning trials")
-  #SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
-  #Profile.clear()
-  #Profile.init(n=10^7, delay=0.001)
-  #SITES_PER_RUN = Int(round(nrow(site_sim_years) * 0.33))
-
-
-
-  # simb_disturb_only builds injection_cohorts purely as the disturbance-data source (all_cohorts=true so the
-  # drops cover the whole stand), even with no_establishment=false + override_injection=false — it never injects.
-  injection_cohorts = (no_establishment || scoring.override || simb.simb_disturb_only) ?
-    Data.get_injection_cohorts(splots; all_cohorts=(scoring.override || simb.simb_disturb_only)) : nothing
-  ref_soa = make_sites(splots, eco_species_ids; rng=rng, spinup=spinup, no_establishment=no_establishment, plugin=plugin)
   if search_mode == "sobol"
     return parametrize_sobol(; ref_soa=ref_soa, space=space, plugin=plugin,
       output_dir=output_dir,
@@ -4946,7 +4984,9 @@ end
 @noinline _cell_error(M, gsp, e) = error("loss scale/weight matrix of size $(size(M)) does not cover (species=$gsp, eco=$e): " *
                                          "the cell scales / RANKW were not set for this reference (call _set_loss_scales! first)")   # (wording kept: the golden status.txt of the tier-5 scenario records it)
 
-function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}}, lp::PU.LossParams, scales::PU.LossScales, dual_b=nothing)::Vector{FloatType}
+# The one accumulation of the MO objective vector. `target_gsp == 0` sums every dominance species; `target_gsp > 0` restricts the inner loop to that
+# global species (CC-Igel specialization: still summed over ecoregions / dual groups).
+function _mo_accumulate(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}}, lp::PU.LossParams, scales::PU.LossScales, dual_b, target_gsp::Int)::Vector{FloatType}
   # 4 GROUPED objectives for the dual: [ΣA_W, ΣA_AGB, ΣB_W, ΣB_AGB] — sum each over its eco-blocks and
   # dominance species. eco_losses = [A's n_eco blocks ; B's n_eco blocks] (2·n_eco ⇒ ngroups=2 ⇒ 4 obj);
   # a single sim (n_eco blocks) ⇒ ngroups=1 ⇒ 2 obj [ΣW, ΣAGB]. Keeping the MO vector low-dimensional
@@ -4966,11 +5006,12 @@ function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector
     if cell
       # Per-cell: divide each (eco,lu,sp) cell by its OWN reference scale, rescale by the AGB-rank weight,
       # then sum into the group. A and B keep separate scales; RANKW is shared. NOTE: the AGB exponent is
-      # applied ONCE, per-cohort in calculate_species_loss! (_agb_pow on each hinged excess) — do NOT
+      # applied ONCE, per-cohort in the species loss (_agb_pow on each hinged excess) — do NOT
       # re-apply it here or it double-powers for p≠1 (W's power stays here since W is not pre-powered).
       sc = g == 0 ? sc0 : sc1
       Ws = sc.w_cell; As = sc.agb_cell; Rw = sc.rankw
       @inbounds for gsp in eco_species_ids[e]
+        (target_gsp == 0 || gsp == target_gsp) || continue
         _dom_included(dom, gsp) || continue
         rw = _cell(Rw, gsp, e); ws = _cell(Ws, gsp, e); as = _cell(As, gsp, e)
         objs[2 * g + 1] += rw * PU._w_pow(lp, ws > 0 ? el.sp_w_loss[gsp] / ws : el.sp_w_loss[gsp])
@@ -4978,6 +5019,7 @@ function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector
       end
     else
       @inbounds for gsp in eco_species_ids[e]
+        (target_gsp == 0 || gsp == target_gsp) || continue
         _dom_included(dom, gsp) || continue         # restrict to the selected dominance species
         objs[2 * g + 1] += el.sp_w_loss[gsp]   # ΣW   for this group
         objs[2 * g + 2] += el.sp_agb_loss[gsp] # ΣAGB for this group
@@ -4986,42 +5028,11 @@ function _mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector
   end
   return objs
 end
-
-# Per-species variant of _mo_objectives for CC-Igel specialization: IDENTICAL to _mo_objectives but the
-# inner per-species loop is restricted to `target_gsp` (still summed over ecoregions / dual groups). Returns
-# the 2-element [ΣW_g, ΣA_g] (single-sim) or 2·ngroups if dual — but for CC specialization only sim A is
-# used so it is the 2-vector. Same cell / non-cell branches, scales, rank and w-power as the aggregate.
-function _mo_objectives_species(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}}, lp::PU.LossParams, scales::PU.LossScales, dual_b, target_gsp::Int)::Vector{FloatType}
-  ne = length(eco_species_ids)
-  ngroups = max(1, length(eco_losses) ÷ ne)
-  objs = zeros(FloatType, 2 * ngroups)
-  cell = lp.cell_norm
-  sc0, sc1 = _group_scales(scales, dual_b)
-  dom = scales.dom                          # dominance species mask (empty = all), a field of the reference scales: allocation-free
-  for (idx, el) in enumerate(eco_losses)
-    g = (idx - 1) ÷ ne
-    e = (idx - 1) % ne + 1
-    if cell
-      sc = g == 0 ? sc0 : sc1
-      Ws = sc.w_cell; As = sc.agb_cell; Rw = sc.rankw
-      @inbounds for gsp in eco_species_ids[e]
-        gsp == target_gsp || continue
-        _dom_included(dom, gsp) || continue
-        rw = _cell(Rw, gsp, e); ws = _cell(Ws, gsp, e); as = _cell(As, gsp, e)
-        objs[2 * g + 1] += rw * PU._w_pow(lp, ws > 0 ? el.sp_w_loss[gsp] / ws : el.sp_w_loss[gsp])
-        objs[2 * g + 2] += rw * (as > 0 ? el.sp_agb_loss[gsp] / as : el.sp_agb_loss[gsp])
-      end
-    else
-      @inbounds for gsp in eco_species_ids[e]
-        gsp == target_gsp || continue
-        _dom_included(dom, gsp) || continue
-        objs[2 * g + 1] += el.sp_w_loss[gsp]
-        objs[2 * g + 2] += el.sp_agb_loss[gsp]
-      end
-    end
-  end
-  return objs
-end
+_mo_objectives(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}}, lp::PU.LossParams, scales::PU.LossScales, dual_b=nothing)::Vector{FloatType} =
+  _mo_accumulate(eco_losses, eco_species_ids, lp, scales, dual_b, 0)
+# Per-species variant for CC-Igel specialization: the same accumulation restricted to `target_gsp`.
+_mo_objectives_species(eco_losses::Vector{PU.SiteLoss}, eco_species_ids::Vector{Vector{Int}}, lp::PU.LossParams, scales::PU.LossScales, dual_b, target_gsp::Int)::Vector{FloatType} =
+  _mo_accumulate(eco_losses, eco_species_ids, lp, scales, dual_b, target_gsp)
 
 # Scalar aggregate paired with the MO objective vector (for the representative / archive eviction). With
 # cell_norm the per-cell scales/rank live only in _mo_objectives, so the aggregate = Σ of the objectives;

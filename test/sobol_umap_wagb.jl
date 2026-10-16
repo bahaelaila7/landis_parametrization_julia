@@ -44,8 +44,7 @@ loss_params = unbinned_w ?
   PU.LossParams(; age_bins=PU.AgeBins(bins_idx=collect(1:400), last_bin_open=true), smoothing_weights=P.FloatType[one(P.FloatType)], lambda=P.FloatType(g("loss_lambda", 1.0)), lopts...) :
   PU.LossParams(; age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=smooth, lambda=P.FloatType(g("loss_lambda", 1.0)), lopts...)
 
-spdf = PU.smoothen_ref_years(splots, loss_params, Int(maximum(splots.age_calc)); debug=false)
-spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(splots)
+spdf, spdf_plts = P.reference_tables(splots, eco_species_ids, loss_params); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(splots)
 inj = (no_estab || scoring.override) ? D.get_injection_cohorts(splots; all_cohorts=scoring.override) : nothing
 ref = P.make_sites(splots, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
 injection = P.build_injection_plan(inj, ref, eco_species_ids, loss_params, scoring)

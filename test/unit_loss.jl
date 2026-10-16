@@ -1,5 +1,5 @@
-# Loss functions in src/parametrize/utils.jl: the allocating reference implementations (calculate_site_loss2, calculate_species_loss!, bin_ages)
-# against their allocation-free twins (calculate_site_loss2_acc!, calculate_species_loss_acc!, bin_ages!) on random synthetic sites.
+# Loss functions in src/parametrize/utils.jl: the one loss implementation (calculate_site_loss2_acc! / calculate_species_loss_acc!, scratch-buffer
+# based) and its allocating SiteLoss wrapper calculate_site_loss2, plus the allocating bin_ages / smoothen_bin_cdf_forgive against their in-place twins.
 module UnitLoss
 using Test, Random, Pan
 const PU = Pan.PU
@@ -177,29 +177,22 @@ end
   end
 end
 
-@testset "calculate_species_loss! == calculate_species_loss_acc! (direct)" begin
+@testset "calculate_species_loss_acc! accumulates (+=) into the per-species slots" begin
   rng = Random.Xoshiro(77)
   for sw in (1, 3), whinge in (false, true), ahinge in (false, true), trial in 1:4
     lp = lossparams(; sw=sw, w_hinge=whinge, agb_hinge=ahinge, agb_hinge_p=FT(2)); sc = PU.LossScales()
-    begin
-      soa = make_site(rng; ncoh=12); site = PC.getsite(soa, 1); gt = make_ref(rng, lp; keys=[true, false, true])
-      p = sortperm(site.c_species); sp = site.c_species[p[1]]
-      hi = findlast(==(sp), site.c_species[p])
-      maxage = Int(ceil(maximum(site.c_age))) + (length(lp.smoothing_weights) >> 1)
-      w1 = zeros(FT, 3); a1 = zeros(FT, 3)
-      sag1 = PU.calculate_species_loss!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
-        sp_w_loss=w1, sp_agb_loss=a1, site_agb_loss=FT(0))
-      w2 = zeros(FT, 3); a2 = zeros(FT, 3)
-      sag2 = PU.calculate_species_loss_acc!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
-        w_acc=w2, agb_acc=a2, site_agb_loss=FT(0), cdf=FT[], agb_bins=FT[])
-      @test w1 == w2 && a1 == a2 && sag1 == sag2
-      # DOCUMENTED DIFFERENCE: the reference ASSIGNS into the per-species slot, the _acc! variant ACCUMULATES (+=) — calling twice differs.
-      PU.calculate_species_loss_acc!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
-        w_acc=w2, agb_acc=a2, site_agb_loss=FT(0), cdf=FT[], agb_bins=FT[])
-      PU.calculate_species_loss!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
-        sp_w_loss=w1, sp_agb_loss=a1, site_agb_loss=FT(0))
-      @test a2 == 2 .* a1 && w2 == 2 .* w1
-    end
+    soa = make_site(rng; ncoh=12); site = PC.getsite(soa, 1); gt = make_ref(rng, lp; keys=[true, false, true])
+    p = sortperm(site.c_species); sp = site.c_species[p[1]]
+    hi = findlast(==(sp), site.c_species[p])
+    maxage = Int(ceil(maximum(site.c_age))) + (length(lp.smoothing_weights) >> 1)
+    w = zeros(FT, 3); a = zeros(FT, 3)
+    call!() = PU.calculate_species_loss_acc!(; sp=sp, gsp=Int(sp), site=site, ages=zeros(FT, maxage), p=p, sp_start_idx=1, sp_end_idx=hi, spdf_plt=gt, loss_params=lp, scales=sc,
+      w_acc=w, agb_acc=a, site_agb_loss=FT(0), cdf=FT[], agb_bins=FT[])
+    sag = call!(); w1 = copy(w); a1 = copy(a)
+    call!()
+    @test a == 2 .* a1 && w == 2 .* w1              # a second call adds the same amount again
+    @test w1[Int(sp)] >= 0 && a1[Int(sp)] >= 0 && all(==(0), w1[setdiff(1:3, Int(sp))])
+    @test sag == call!() && sag isa FT
   end
 end
 

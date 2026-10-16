@@ -64,8 +64,7 @@ end
 function make_scatter(sp, label)
   (isnothing(sp) || DF.nrow(sp) == 0) && (println("($label: no data)"); return)
   max_age = Int(maximum(sp.age_calc))
-  spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-  spdf_plts = D.make_spdf_dict(spdf, eco_species_ids)
+  spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
   ssy = D.get_site_sim_years(spdf)
   spc = D.get_spinup_cohorts(sp)
   inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
@@ -212,9 +211,8 @@ end
 # per (plot, year, species, bin) and pair the bins. Natural plots regenerate; artificial plots planted.
 function make_scatter_B(sp, label)
   (isnothing(sp) || DF.nrow(sp) == 0) && return
-  max_age = Int(maximum(sp.age_calc))
-  spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-  spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
+  spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
+  ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   # Re-simulate the FREE Sim-B path EXACTLY as the run (disturb-only / year-0-vs-spinup / establishment ON;
   # frozen growth is baked into `best`), then pair sim vs obs by tier-4 age-bins. Shared with sMAPE/TOST.
   paired, _cyc_map, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng; scoring=scoring, plugin=P.bs_plugin())

@@ -56,8 +56,8 @@ end
 
 _dm = (let d = g("dual_mode", "off"); d === true ? "joint" : lowercase(string(d)); end)   # "off"/"joint"/"b"
 function paired_for(sp, label)
-  max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-  spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
+  spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
+  ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   if _dm == "b"   # Sim-B free-regen: age-bin-aggregated sim vs obs via the shared helper (per-cell log-diff test)
     paired, _, _ = P.resim_simB_paired(cfg, best, sp, spdf_plts, ssy, spc, loss_params, eco_list, species_list, eco_species_ids, rng; scoring=scoring, plugin=P.bs_plugin())
     return DF.subset(paired, :sp => DF.ByRow(>(0)))

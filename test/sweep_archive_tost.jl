@@ -30,8 +30,8 @@ st = JLD2.load_object(joinpath(outdir, "search_state_latest.jld2"))
 function val_equiv_count(params)
   sp = splots_val
   (isnothing(sp) || DF.nrow(sp) == 0) && return (0, 0)
-  max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-  spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
+  spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
+  ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
   rs = P.make_sites(sp, eco_species_ids; rng=rng, spinup=false, no_establishment=no_estab)
   injection = P.build_injection_plan(inj, rs, eco_species_ids, loss_params, scoring)

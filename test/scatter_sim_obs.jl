@@ -49,8 +49,7 @@ end
 function make_scatter(sp, label)
   (isnothing(sp) || DF.nrow(sp) == 0) && (println("($label: no data)"); return)
   max_age = Int(maximum(sp.age_calc))
-  spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-  spdf_plts = D.make_spdf_dict(spdf, eco_species_ids)
+  spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
   ssy = D.get_site_sim_years(spdf)
   spc = D.get_spinup_cohorts(sp)
   inj = (no_estab || scoring.override) ? D.get_injection_cohorts(sp; all_cohorts=scoring.override) : nothing
@@ -197,9 +196,8 @@ end
 # per (plot, year, species, bin) and pair the bins. Natural plots regenerate; artificial plots planted.
 function make_scatter_B(sp, label)
   (isnothing(sp) || DF.nrow(sp) == 0) && return
-  max_age = Int(maximum(sp.age_calc))
-  spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-  spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
+  spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
+  ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   art = Set(e for e in eachindex(eco_list) if occursin("artificial", lowercase(eco_list[e])))
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DF.select(sp, [:plot_id, :eco_id]))))
   art_plots = Set(p for (p, e) in plot2eco if e in art)

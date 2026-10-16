@@ -701,68 +701,6 @@ function build_cbal_tables(splots, coarse_bins::AgeBins, per_year_bins::AgeBins,
   return CbalTables(W, coarse)
 end
 
-@inline function calculate_species_loss!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, scales, sp_w_loss, sp_agb_loss, site_agb_loss, lp::FloatType=one(FloatType), debug::Bool=false)
-  sim_agb_sum = sum(@view site.c_bio[p[sp_start_idx:sp_end_idx]])
-  #log_diff = log10(1 + sim_agb_sum) #+ loss_params.EPS)
-  sp_agb_loss[gsp] = sim_agb_sum
-  site_agb_loss += sim_agb_sum
-  if spdf_plt.keys[sp]
-    rec = @inbounds spdf_plt.records[sp]
-    ages .= zero(FloatType)
-    for a in @view p[sp_start_idx:sp_end_idx]
-      ages[UIntType(site.c_age[a])] += site.c_bio[a]
-    end
-    sim_age_cdf = loss_params.w_hinge ?   # ±band "benefit of the doubt": forgive sim toward obs before the CDF (Sim A)
-      smoothen_bin_cdf_forgive(ages, rec.sp_age_agb, loss_params; age_bins=loss_params.age_bins) :
-      smoothen_bin_cdf(ages; w=loss_params.smoothing_weights, age_bins=loss_params.age_bins)
-    #@assert !any(isnan.(sim_age_cdf)) "cdf NaN"
-    #@assert length(sim_age_cdf) == length(rec.sp_age_cdf) "cdf bins are not the same size"
-    let bw = loss_params.age_bins.bin_widths
-      # W1 (L1) on the NORMALIZED age CDF → distribution SHAPE only (÷ global W_SCALE), optionally
-      # count-balance-reweighted per coarse age bin (CBAL) to counteract survivorship under-representation.
-      sp_w_loss[gsp] = _w_finish(loss_params, scales, _w1_sum(loss_params, scales, rec.sp_age_cdf, sim_age_cdf, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))
-    end
-    #@assert !any(isnan.(sp_w_loss[gsp])) "NaN"
-    # PER-COHORT AGB term (weighted by lambda): for each age bin i, softplus_β(|sim_i − obs_i| − thresh_i)^p,
-    # obs_i = rec.sp_age_agb[i], thresh_i = _agb_hinge_thresh(obs_i); SUMMED over bins so age errors no longer
-    # cancel. Stored raw — the per-species ÷scale, cell-norm rank and exponent apply downstream (for the L1 run
-    # ^p is identity, so the per-bin _agb_pow and the downstream one are both no-ops). Fallback = Σ_i sqrt-diff².
-    sim_agb_bins = bin_ages(ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
-    agb_acc = zero(FloatType)
-    if loss_params.agb_hinge
-      @inbounds for i in eachindex(rec.sp_age_agb)
-        agb_acc += _agb_pow(loss_params, _hinge_relu(loss_params, abs(sim_agb_bins[i] - rec.sp_age_agb[i]) - _agb_hinge_thresh(loss_params, rec.sp_age_agb[i])))
-      end
-      sp_agb_loss[gsp] = loss_params.lambda * _agb_finish(loss_params, scales, agb_acc)
-    else
-      @inbounds for i in eachindex(rec.sp_age_agb)
-        agb_acc += (sqrt(max(sim_agb_bins[i], zero(FloatType))) - sqrt(max(rec.sp_age_agb[i], zero(FloatType))))^2
-      end
-      sp_agb_loss[gsp] = loss_params.lambda * agb_acc
-    end
-    site_agb_loss -= rec.sp_agb_sum
-    if debug
-      println("smoothing_weights $(loss_params.smoothing_weights)")
-      smoothed_ages = smooth_ages(; ages=ages, smoothing_window=loss_params.smoothing_weights)
-      binned_ages = bin_ages(smoothed_ages; age_bins=loss_params.age_bins.bins_idx, last_bin_open=loss_params.age_bins.last_bin_open)
-      println("sim_sp: $(sp)")
-      println("sim_agb: $(sim_agb_sum)")
-      println("ref_agb: $(rec.sp_agb_sum)")
-      println("sim_cdf: $(sim_age_cdf)")
-      println("ref_cdf: $(rec.sp_age_cdf)")
-      println("sim__ages: $(ages)")
-      println("sim_sages: $(smoothed_ages)")
-      println("sim_bages: $(binned_ages)")
-      println("sp_w_loss: $(sp_w_loss)")
-
-
-    end
-
-  end
-  #sp_w_loss[gsp] = sp_w_loss[gsp] #(1.0f0 + sp_w_loss[gsp]) * (abs(log_diff)^2)
-  return site_agb_loss
-end
-
 # Sort `perm` (a permutation of cohort indices) by species, ties by index — the unique stable order, so it equals `sortperm(species)` and a stable
 # sort of an ascending index list. In-place QuickSort on the (species, index) key: no scratch buffer, so the site accumulator allocates nothing.
 @inline function _sort_perm_by_species!(perm::AbstractVector{Int}, csp)
@@ -790,106 +728,20 @@ function _excl_perm!(perm::Vector{Int}, site, excl_c)::Int
   n
 end
 
+"""
+    calculate_site_loss2(year, site, n_species, eco_species_ids, spdf_plt, loss_params, scales; excluded, excl_c) -> SiteLoss
+
+The per-site loss as a freshly allocated `SiteLoss` (tier 5 / diagnostics): the allocation-free accumulator `calculate_site_loss2_acc!` run on
+zeroed per-species accumulators and private scratch. There is ONE implementation of the loss arithmetic.
+`excluded` (eco-species to skip) and `excl_c` (cohort-level exclusions) as in `calculate_site_loss2_acc!`. `debug` logs the per-species losses.
+"""
 function calculate_site_loss2(current_year::Int, site::SiteView, n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams, scales::LossScales; lp::FloatType=one(FloatType), debug::Bool=false, excluded::Union{Nothing,Set{UIntType}}=nothing, excl_c::Union{Nothing,Vector{Tuple{UIntType,FloatType}}}=nothing)::SiteLoss
-  # `excluded`: eco-species (local sp index) to SKIP from this site's loss at this year — used by the
-  # disturbance exclude-modes (a partially-disturbed cohort the growth model can't fairly reproduce).
-  _excl(sp) = excluded !== nothing && UIntType(sp) in excluded
-  #Sort by species
-  #println("-----------current_year $(current_year) -------------")
-  #println("-----------current_site $(site.ref_cn) -------------")
-  eco_n_species = length(site.sp_mature)
-  species_id_map = eco_species_ids[site.eco_id]
-  #@assert eco_n_species == length(spdf_plt.keys) "eco species numbers do not match"
-  #@assert length(species_id_map) == eco_n_species "eco species numbers do not match"
-
-  insite = falses(eco_n_species)
-
-  #global loss
   sp_w_loss = zeros(FloatType, n_species)
   sp_agb_loss = zeros(FloatType, n_species)
-  site_agb_loss = zero(FloatType)
-
-  p0 = excl_c === nothing ? nothing : (pp = Int[]; _excl_perm!(pp, site, excl_c); pp)
-  if site.live > 0 && (p0 === nothing || !isempty(p0))
-
-    c_species = @view site.c_species[1:site.live]
-    max_age = UIntType(ceil(maximum(@view site.c_age[1:site.live])))
-    max_age += UIntType(length(loss_params.smoothing_weights) >> 1)
-    #get indices of species sorted
-    # traversing c_species[p[1..end]] is equivalent to traversing sorted_c_species[1..end]
-    # but now useful so that I don't need to sort c_age, c_bio
-    p = p0 === nothing ? sortperm(c_species) : p0
-    @debug c_species
-    @debug p
-
-    ages = Vector{FloatType}(undef, max_age)
-    sp_start_idx = 1
-    prev_sp = site.c_species[p[sp_start_idx]]
-
-
-    #initialize losses
-    # process sp's in site, sorted by species
-    for i in eachindex(p)
-
-      # get the
-      sp = @inbounds c_species[p[i]]
-      insite[sp] = true
-      # keep looping until you find the end of sp segment
-      # then use p[sp_start_index:sp_end_index] to gather from c_bio, c_age
-      # conclude sp
-      if sp != prev_sp
-        @debug "concluding_species: $(prev_sp)"
-        sp_end_idx = i - 1
-        #println("here1: $(sp_start_idx):$(sp_end_idx), $(@view p[sp_start_idx:sp_end_idx])")
-        # The segment [sp_start_idx:i-1] just finished belongs to prev_sp, NOT the new sp.
-        if !_excl(prev_sp)
-          site_agb_loss = calculate_species_loss!(; sp=prev_sp, gsp=species_id_map[prev_sp],
-            site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-            spdf_plt=spdf_plt, loss_params=loss_params, scales=scales, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
-        end
-        prev_sp = sp
-        sp_start_idx = i
-      end
-      @debug ("processing_species: $(sp)")
-      if i == length(p)
-        @debug ("concluding_species: $(sp)")
-        sp_end_idx = i
-        #println("here2: $(sp_start_idx):$(sp_end_idx), $(@view p[sp_start_idx:sp_end_idx])")
-        if !_excl(sp)
-          site_agb_loss = calculate_species_loss!(; sp=sp, gsp=species_id_map[sp],
-            site=site, ages=ages, p=p, sp_start_idx=sp_start_idx, sp_end_idx=sp_end_idx,
-            spdf_plt=spdf_plt, loss_params=loss_params, scales=scales, sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, lp=lp, debug=debug)
-        end
-      end
-    end
-  end
-
-  for sp in (1:length(spdf_plt.keys))[spdf_plt.keys.&(.!insite)]
-    _excl(sp) && continue   # disturbance-excluded species: don't penalize as "missing" either
-    @inbounds rec = spdf_plt.records[UIntType(sp)]
-    @inbounds gsp = species_id_map[sp]
-    # Species present in REF but absent in SIM: sim CDF = 0, sim AGB = 0.
-    # Shape penalty = full ref CDF²; level penalty = (sqrt(ref AGB))² = ref AGB (sim sqrt = 0).
-    let bw = loss_params.age_bins.bin_widths
-      sp_w_loss[gsp] = _w_finish(loss_params, scales, _w1_sum(loss_params, scales, rec.sp_age_cdf, nothing, bw, Int(gsp), Int(site.eco_id)), Int(gsp), Int(site.eco_id))  # sim absent → |0−ref|=ref
-    end
-    if loss_params.agb_hinge   # per-cohort, sim_i = 0 ⇒ |sim_i − obs_i| = obs_i = rec.sp_age_agb[i]
-      agb_acc0 = zero(FloatType)
-      @inbounds for i in eachindex(rec.sp_age_agb)
-        agb_acc0 += _agb_pow(loss_params, _hinge_relu(loss_params, rec.sp_age_agb[i] - _agb_hinge_thresh(loss_params, rec.sp_age_agb[i])))
-      end
-      sp_agb_loss[gsp] = loss_params.lambda * _agb_finish(loss_params, scales, agb_acc0)
-    else
-      sp_agb_loss[gsp] = loss_params.lambda * rec.sp_agb_sum   # Σ_i (√obs_i)² = Σ_i obs_i = ref total
-    end
-    site_agb_loss -= rec.sp_agb_sum
-  end
-
-
-  return SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=abs(site_agb_loss), num_sites=1)
-  #return SiteLoss(sp_w_loss=zeros(FloatType, length(sp_w_loss)), sp_agb_loss=zeros(FloatType, length(sp_w_loss)), site_agb_loss=zero(FloatType))
-  #return SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=zeros(FloatType, length(sp_w_loss)), site_agb_loss=zero(FloatType))
-
+  site_agb_loss = calculate_site_loss2_acc!(sp_w_loss, sp_agb_loss, current_year, site, n_species, eco_species_ids, spdf_plt, loss_params, scales,
+    Int[], FloatType[], Bool[], FloatType[], FloatType[]; lp=lp, excluded=excluded, excl_c=excl_c)
+  debug && @info "site loss" ref_cn=site.ref_cn year=current_year sp_w_loss sp_agb_loss site_agb_loss
+  return SiteLoss(sp_w_loss=sp_w_loss, sp_agb_loss=sp_agb_loss, site_agb_loss=site_agb_loss, num_sites=1)
 end
 
 @inline function find_age_bin(age::Int, age_bins::AgeBins)::Int
@@ -927,7 +779,7 @@ function wasserstein1d(a::AbstractVector, b::AbstractVector)::FloatType
 end
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────────────
-# Allocation-free tier-3 loss path. Same arithmetic as calculate_site_loss2 / calculate_species_loss! /
+# Allocation-free loss path: THE loss implementation (calculate_site_loss2 wraps it). Arithmetic of /
 # bin_ages / smoothen_bin_cdf_forgive, but every per-site/per-species temporary is a caller-owned per-thread
 # scratch buffer, and the per-species (W, AGB) losses are accumulated straight into per-eco accumulator arrays
 # (w_acc/agb_acc) instead of a freshly-allocated per-site SiteLoss. Eliminates the hot-path GC pressure that
@@ -971,7 +823,7 @@ end
 
 # Accumulating per-species loss: adds this species' (W, AGB) loss into w_acc[gsp]/agb_acc[gsp] and returns the
 # updated running site_agb_loss. `ages` (site-level, length max_age) is zeroed and refilled here; `cdf`/`agb_bins`
-# are per-thread bin-sized scratch. Mirrors calculate_species_loss! exactly.
+# are per-thread bin-sized scratch. 
 @inline function calculate_species_loss_acc!(; sp, gsp, site, ages, p, sp_start_idx, sp_end_idx, spdf_plt, loss_params, scales,
     w_acc, agb_acc, site_agb_loss, cdf, agb_bins, lp::FloatType=one(FloatType))
   sim_agb_sum = zero(FloatType)   # left fold over the species' cohorts (== sum of the indexed view, without materialising the index vector)
@@ -1015,7 +867,7 @@ end
 
 # Accumulating per-site loss: adds every species' (W, AGB) loss for this site into the per-eco accumulators
 # w_acc/agb_acc, and returns this site's |site_agb_loss| (the caller adds it to eco3_site_agb and bumps obs).
-# `perm`/`ages`/`insite`/`cdf`/`agb_bins` are per-thread scratch (resized in place). Mirrors calculate_site_loss2.
+# `perm`/`ages`/`insite`/`cdf`/`agb_bins` are per-thread scratch (resized in place). 
 function calculate_site_loss2_acc!(w_acc::Vector{FloatType}, agb_acc::Vector{FloatType}, current_year::Int, site::SiteView,
     n_species::Int, eco_species_ids::Vector{Vector{Int}}, spdf_plt::SPDFGroundTruth, loss_params::LossParams, scales::LossScales,
     perm::Vector{Int}, ages::Vector{FloatType}, insite::Vector{Bool}, cdf::Vector{FloatType}, agb_bins::Vector{FloatType};

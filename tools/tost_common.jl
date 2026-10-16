@@ -35,8 +35,8 @@ label(s, gp) = is_tiered(s) ? "$(species_list[s])·$(gp)" : species_list[s]
 bins = cfg["bins_idx"]
 loss_params = PU.LossParams(age_bins=PU.AgeBins(bins_idx=bins, last_bin_open=true), smoothing_weights=P.FloatType[1.0], lambda=P.FloatType(cfg["loss_lambda"]))
 function _split_ctx(sp)
-  max_age = Int(maximum(sp.age_calc)); spdf = PU.smoothen_ref_years(sp, loss_params, max_age; debug=false)
-  spdf_plts = D.make_spdf_dict(spdf, eco_species_ids); ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
+  spdf, spdf_plts = P.reference_tables(sp, eco_species_ids, loss_params)
+  ssy = D.get_site_sim_years(spdf); spc = D.get_spinup_cohorts(sp)
   inj = D.get_injection_cohorts(sp; all_cohorts=scoring.override)
   msy = maximum(maximum.(filter(!isempty, ssy.sim_years)))
   plot2eco = Dict(Int(r.plot_id) => Int(r.eco_id) for r in eachrow(unique(DF.select(sp, [:plot_id, :eco_id]))))
