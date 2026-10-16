@@ -568,6 +568,7 @@ function _query_cns(db_path::AbstractString, cns::Vector{Int64};
              t.site_slope, t.site_aspect, t.site_elev
       FROM $tablename t JOIN want_cns w ON t.plt_cn = w.plt_cn
       WHERE t.statuscd = 1 AND t.dia IS NOT NULL AND t.tpa_unadj > 0
+      ORDER BY t.plt_cn, t.measdate, t.spcd, t.dia, t.ht, t.cr, t.tpa_unadj
     """))
   finally
     close(con)

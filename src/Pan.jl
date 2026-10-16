@@ -4738,10 +4738,9 @@ end
 function load_best_params(db_path::String; iteration::Union{Nothing,Int}=nothing)
   db = DuckDB.DB(db_path)
   con = DuckDB.connect(db)
-  sql = isnothing(iteration) ?
-        "SELECT params_blob FROM total_loss ORDER BY total_loss ASC LIMIT 1" :
-        "SELECT params_blob FROM total_loss WHERE iteration = $iteration LIMIT 1"
-  result = DuckDB.execute(con, sql) |> DataFrame
+  result = isnothing(iteration) ?
+           DuckDB.execute(con, "SELECT params_blob FROM total_loss ORDER BY total_loss ASC, iteration ASC LIMIT 1") |> DataFrame :   # (iteration breaks ties of equal losses)
+           DuckDB.execute(con, "SELECT params_blob FROM total_loss WHERE iteration = ? ORDER BY iteration LIMIT 1", [iteration]) |> DataFrame
   close(db)
   isempty(result) && return nothing
   return Serialization.deserialize(IOBuffer(result.params_blob[1]))
@@ -4770,8 +4769,9 @@ function load_sobol_candidates(db_path::String; top_frac::Float64=0.5, run_id::U
     cols = Set(string(r.name) for r in (DuckDB.execute(con, "PRAGMA table_info('sobol_results')") |> DataFrame |> eachrow))
     hasWA = ("sumW" in cols) && ("sumAGB" in cols)
     sel = hasWA ? "mean_loss, sumW, sumAGB, params_blob" : "mean_loss, params_blob"
-    where = isnothing(run_id) ? "" : " WHERE run_id = '$(run_id)'"
-    result = DuckDB.execute(con, "SELECT $sel FROM sobol_results$where ORDER BY mean_loss ASC") |> DataFrame
+    where = isnothing(run_id) ? "" : " WHERE run_id = ?"
+    tie = ("sobol_idx" in cols) ? ", sobol_idx ASC" : ""   # equal losses keep a defined order (the candidates are used by position)
+    result = DuckDB.execute(con, "SELECT $sel FROM sobol_results$where ORDER BY mean_loss ASC$tie", isnothing(run_id) ? [] : [String(run_id)]) |> DataFrame
     isempty(result) && return []
     G = Float64.(result.mean_loss)
     order = if rank != :aggregate && hasWA
@@ -5603,7 +5603,7 @@ function plot_sample_sobol(ctx; sobol_candidates_db::String, n_output_plots::Int
 
   db = DuckDB.DB(sobol_candidates_db)
   con = DuckDB.connect(db)
-  raw = DuckDB.execute(con, "SELECT mean_loss, params_blob FROM sobol_results ORDER BY mean_loss ASC") |> DataFrame
+  raw = DuckDB.execute(con, "SELECT mean_loss, params_blob FROM sobol_results ORDER BY mean_loss ASC, sobol_idx ASC") |> DataFrame
   close(db)
   isempty(raw) && (@warn "No sobol results found in $sobol_candidates_db"; return)
   results = [(params=Serialization.deserialize(IOBuffer(row.params_blob)), mean_loss=row.mean_loss)
@@ -6375,6 +6375,7 @@ function plot_species_composition(;
   SELECT year, eco_id, species_id, SUM(biomass) AS biomass
   FROM cohorts WHERE year IN ($(join(years, ",")))
   GROUP BY year, eco_id, species_id
+  ORDER BY year, eco_id, species_id
 """
   ) |> DataFrame
   DuckDB.close(db)
@@ -6386,10 +6387,10 @@ function plot_species_composition(;
   # 3. Common-name labels + softwood/hardwood class (REF_SPECIES_GROUP.CLASS).
   fdb = DuckDB.DB(fia_db)
   fcon = DuckDB.connect(fdb)
-  ref_sp = DuckDB.execute(fcon, "SELECT r.SPECIES_SYMBOL AS sym, r.COMMON_NAME AS cn, r.SFTWD_HRDWD AS sh FROM REF_SPECIES r") |> DataFrame
+  ref_sp = DuckDB.execute(fcon, "SELECT r.SPECIES_SYMBOL AS sym, r.COMMON_NAME AS cn, r.SFTWD_HRDWD AS sh FROM REF_SPECIES r ORDER BY r.SPCD") |> DataFrame
   grp = DataFrame(spgrpcd=Int[], name=String[], class=String[])
   try
-    grp = DuckDB.execute(fcon, "SELECT g.SPGRPCD AS spgrpcd, g.NAME AS name, g.CLASS AS class FROM REF_SPECIES_GROUP g") |> DataFrame
+    grp = DuckDB.execute(fcon, "SELECT g.SPGRPCD AS spgrpcd, g.NAME AS name, g.CLASS AS class FROM REF_SPECIES_GROUP g ORDER BY g.SPGRPCD") |> DataFrame
   catch e
     @warn "REF_SPECIES_GROUP unavailable; _GRP_ labels stay raw and their soft/hard defaults to hardwood" exception = e
   end
