@@ -281,7 +281,7 @@ function _make_sites(plugin::PluginConfig{P}, splots::DataFrame, eco_species_ids
   else
     splots_dict = Dict(
       (plt_key.plot_id, plt_key.eco_id) => begin
-        plt_df = sort!(DataFrame(plt_df), :age_calc, rev=true)
+        plt_df = sort!(DataFrame(plt_df), [:age_calc, :eco_species_id, :agb_sum], rev=[true, false, false])   # B32 follow-up: full deterministic tie-break (equal-age cohorts no longer keep the input order)
         plt_df.sim_year .= Dates.value.(Dates.Day.(plt_df.measdate - plt_df.start_measdate)) ./ 365.25 .|> round .|> Int
         Data.get_initial_cohorts(plt_df)
       end

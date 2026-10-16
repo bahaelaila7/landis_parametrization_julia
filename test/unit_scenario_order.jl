@@ -27,3 +27,25 @@ mktempdir() do d
   end
 end
 end
+
+# make_sites (non-spinup) must not depend on the input row order of equal-age cohorts (full tie-break key: age desc, species, biomass).
+module UnitMakeSitesTies
+using Test, Pan, DataFrames, Dates, Random
+const P = Pan
+let
+  d0 = Date(2018, 6, 15)
+  rows = DataFrame(plot_id=fill(1, 6), eco_id=fill(1, 6), eco_species_id=[3, 1, 2, 2, 1, 3], age_calc=[40, 40, 40, 40, 10, 40],
+                   agb_sum=[5.0, 7.0, 9.0, 4.0, 3.0, 6.0], measdate=fill(d0, 6), start_measdate=fill(d0, 6))
+  esids = [[1, 2, 3]]
+  function cohorts(df)
+    soa = P.make_sites(df, esids; rng=Random.Xoshiro(1), spinup=false, no_establishment=false)
+    s = P.getsite(soa, 1)
+    [(s.c_species[j], s.c_bio[j]) for j in 1:Int(s.live)]
+  end
+  base = try cohorts(rows) catch e; e end
+  @test !(base isa Exception)
+  for seed in 1:5
+    @test cohorts(rows[Random.shuffle(Random.Xoshiro(seed), 1:6), :]) == base
+  end
+end
+end
