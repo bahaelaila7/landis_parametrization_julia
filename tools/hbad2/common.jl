@@ -9,6 +9,9 @@ const MIN_SP_TREES = parse(Int, get(ENV, "HBAD2_MIN_SP_TREES", "3000"))
 const BOUNDS_OVERRIDE = Dict{Symbol,Tuple{Float64,Float64}}()
 const SIZE_BREAKS = (b = get(ENV, "HBAD2_SIZE_SPLIT", ""); isempty(b) ? Float64[] : parse.(Float64, split(b, ",")))
 dclass(D) = searchsortedfirst(SIZE_BREAKS, D)
+# simulation site: "plot" (all 4 subplots pooled) or "subplot" (each FIA subplot is a site; densities ×4 → per ha; competition is local, E4)
+const SITE_SUB = get(ENV, "HBAD2_SITE", "plot") == "subplot"
+const SITE_MULT = SITE_SUB ? 4.0 : 1.0
 const FORM = parse(Int, get(ENV, "HBAD2_FORM", "1"))          # potential-growth form (HBAD2.GlobP.form)
 if FORM == 2   # power-exponential: rX = increment at the reference size [cm/yr | m/yr], cX = size exponent, Xmax = decay scale
   merge!(BOUNDS_OVERRIDE, Dict(:rD => (0.01, 3.0), :cD => (-1.5, 3.0), :Dmax => (5.0, 300.0), :rH => (0.005, 3.0), :cH => (-1.5, 3.0), :Hmax => (2.0, 200.0)))
@@ -24,6 +27,8 @@ function load_trees()
   tr.l3 = [coalesce(ivd[i].l3, "") for i in tr.iid]; tr.planted = [ivd[i].planted for i in tr.iid]
   cnt = combine(groupby(filter(r -> r.set == "train", tr), :sym), nrow => :n); big = Set(cnt.sym[cnt.n .>= MIN_SP_TREES])
   tr.key = [s in big ? s : "_" * g for (s, g) in zip(tr.sym, tr.grp)]
+  tr.site = SITE_SUB ? tr.iid .* 10 .+ tr.sb : copy(tr.iid)
+  tr.w_ha = tr.w_ha .* SITE_MULT; tr.w2_ha = tr.w2_ha .* SITE_MULT
   tr
 end
 
@@ -33,7 +38,7 @@ function build_cohorts(tr::DataFrame, set::AbstractString, keys_::Vector{String}
   d = filter(r -> r.set == set, tr)
   d.bc = floor.(Int, (d.y1 .- d.age) ./ BIRTH_W) .* 100 .+ dclass.(d.dia_cm)
   d.alive = d.out .== "alive"; d.counted = d.out .!= "missing"
-  g = combine(groupby(d, [:iid, :key, :bc]),
+  g = combine(groupby(d, [:site, :key, :bc]),
     :w_ha => sum => :N1, [:w_ha, :dia_cm] => ((w, x) -> sqrt(sum(w .* x .^ 2) / sum(w))) => :D1,
     [:w_ha, :ht_m] => ((w, x) -> sum(w .* x) / sum(w)) => :H1, [:w_ha, :age] => ((w, x) -> sum(w .* x) / sum(w)) => :A1,
     :counted => sum => :n1, :alive => sum => :s,
@@ -41,11 +46,11 @@ function build_cohorts(tr::DataFrame, set::AbstractString, keys_::Vector{String}
     [:w_ha, :dia2_cm, :alive] => ((w, x, a) -> any(a) ? sqrt(sum(w[a] .* x[a] .^ 2) / sum(w[a])) : NaN) => :D2o,
     [:w_ha, :ht2_m, :alive] => ((w, x, a) -> any(a) ? sum(w[a] .* x[a]) / sum(w[a]) : NaN) => :H2o,
     :dt => first => :dt, :l3 => first => :l3, :planted => first => :planted)
-  sort!(g, [:iid, :key, :bc]); g.spi = [kix[k] for k in g.key]
-  sites = unique(g.iid); off = Vector{Int}(undef, length(sites) + 1); off[1] = 1
+  sort!(g, [:site, :key, :bc]); g.spi = [kix[k] for k in g.key]
+  sites = unique(g.site); off = Vector{Int}(undef, length(sites) + 1); off[1] = 1
   ix = 1
   for (s, i) in enumerate(sites)
-    while ix <= nrow(g) && g.iid[ix] == i; ix += 1; end
+    while ix <= nrow(g) && g.site[ix] == i; ix += 1; end
     off[s+1] = ix
   end
   dts = [g.dt[off[s]] for s in eachindex(sites)]; pls = [Bool(g.planted[off[s]]) for s in eachindex(sites)]
@@ -129,10 +134,11 @@ function read_theta(path, nsp)
 end
 
 "Each fit directory records the structural switches it was fitted with; every tool checks them against the current env (HBAD2_FORM, HBAD2_SIZE_SPLIT)."
-function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); end; end
+function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); end; end
 function check_meta(dir)
   f = joinpath(dir, "meta.txt"); isfile(f) || error("$f missing: cannot verify growth form / size split of this fit")
   m = Dict(split(l, "=")[1] => (length(split(l, "=")) > 1 ? split(l, "=")[2] : "") for l in readlines(f))
   parse(Int, m["form"]) == FORM || error("fit $(dir) has form=$(m["form"]) but HBAD2_FORM=$(FORM)")
+  get(m, "site", "plot") == (SITE_SUB ? "subplot" : "plot") || error("fit $(dir) has site=$(get(m, "site", "plot")) but HBAD2_SITE=$(SITE_SUB ? "subplot" : "plot")")
   m["size_split"] == join(SIZE_BREAKS, ",") || @warn "fit $(dir) was fitted with size_split=$(m["size_split"]); evaluating with $(join(SIZE_BREAKS, ","))"
 end

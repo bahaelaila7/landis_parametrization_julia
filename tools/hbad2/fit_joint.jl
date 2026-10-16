@@ -12,7 +12,7 @@ logio = open(joinpath(OUTD, "log.txt"), "a"); lg(s) = (println(s); println(logio
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
-rc = CSV.read(joinpath(R2DIR, "recruitment_coefs.csv"), DataFrame); rcd = Dict(String(r.key) => r for r in eachrow(rc))
+rc = CSV.read(joinpath(R2DIR, SITE_SUB ? "recruitment_coefs_subplot.csv" : "recruitment_coefs.csv"), DataFrame); rcd = Dict(String(r.key) => r for r in eachrow(rc))
 θg = read_theta(θpath, nsp); ng = length(θg)
 rpath = replace(θpath, "theta" => "recr")       # a joint fit's θ comes with its recruitment vector; otherwise start from the Poisson fit
 θ0 = rpath != θpath && isfile(rpath) ? vcat(θg, vec(CSV.read(rpath, DataFrame).theta)) : vcat(θg, reduce(vcat, [[rcd[k].rho0, rcd[k].rhoS, rcd[k].rhoL] for k in keys_]))

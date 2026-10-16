@@ -32,23 +32,28 @@ function build_simB(set::AbstractString, keys_::Vector{String}; σ=0.16, cap_ext
   sites = []
   for r in eachrow(pl)
     ivs = sort(DataFrame(ivbypk[(r.pk,)]), :k); all(i -> haskey(rbyi, (i,)), ivs.iid) || continue
-    y0 = ivs.d1[1]; vis = Tuple{Int,Vector{String},Vector{Float64},Vector{Float64},Vector{Float64}}[]
-    for (j, ivr) in enumerate(eachrow(ivs))
-      t = DataFrame(rbyi[(ivr.iid,)])
-      j > 1 && push!(vis, (round(Int, Dates.value(ivr.d1 - y0) / 365.25), t.key, t.dia_cm, t.ht_m, t.w_ha))
-      if j == nrow(ivs)
-        a = t[t.out .== "alive", :]; g = haskey(igbyi, (ivr.iid,)) ? DataFrame(igbyi[(ivr.iid,)]) : DataFrame(key=String[], dia_cm=Float64[], ht_m=Float64[], w_ha=Float64[])
-        push!(vis, (round(Int, Dates.value(ivr.d2 - y0) / 365.25), vcat(a.key, g.key), vcat(a.dia2_cm, g.dia_cm), vcat(a.ht2_m, g.ht_m), vcat(a.w2_ha, g.w_ha)))
+    y0 = ivs.d1[1]
+    for sbsel in (SITE_SUB ? (1:4) : (0:0))                     # subplot sites (empty ones included), or the whole plot (0)
+      f(t) = sbsel == 0 ? t : t[t.sb .== sbsel, :]
+      vis = Tuple{Int,Vector{String},Vector{Float64},Vector{Float64},Vector{Float64}}[]
+      for (j, ivr) in enumerate(eachrow(ivs))
+        t = f(DataFrame(rbyi[(ivr.iid,)]))
+        j > 1 && push!(vis, (round(Int, Dates.value(ivr.d1 - y0) / 365.25), t.key, t.dia_cm, t.ht_m, t.w_ha))
+        if j == nrow(ivs)
+          a = t[t.out .== "alive", :]; g = haskey(igbyi, (ivr.iid,)) ? f(DataFrame(igbyi[(ivr.iid,)])) : DataFrame(key=String[], dia_cm=Float64[], ht_m=Float64[], w_ha=Float64[])
+          push!(vis, (round(Int, Dates.value(ivr.d2 - y0) / 365.25), vcat(a.key, g.key), vcat(a.dia2_cm, g.dia_cm), vcat(a.ht2_m, g.ht_m), vcat(a.w2_ha, g.w_ha)))
+        end
       end
+      push!(sites, (init=f(DataFrame(rbyi[(ivs.iid[1],)])), vis=vis))
     end
-    push!(sites, (init=DataFrame(rbyi[(ivs.iid[1],)]), vis=vis))
   end
   ns = length(sites); nv = maximum(length(s.vis) for s in sites); nsp = length(keys_)
   off = [1]; spv = Int[]; N0 = Float64[]; D0 = Float64[]; H0 = Float64[]; A0 = Float64[]; live = Int[]
   obs = zeros(ns, nv, nsp, SB_NC); hlo = fill(NaN, ns, nv); vy = Vector{Vector{Int}}()
   for (s, st) in enumerate(sites)
     t = st.init; t.bc = floor.(Int, -t.age ./ BIRTH_W) .* 100 .+ dclass.(t.dia_cm)
-    g = combine(groupby(t, [:key, :bc]), :w_ha => sum => :N, [:w_ha, :dia_cm] => ((w, x) -> sqrt(sum(w .* x .^ 2) / sum(w))) => :D,
+    g = nrow(t) == 0 ? DataFrame(key=String[], N=Float64[], D=Float64[], H=Float64[], A=Float64[]) :
+      combine(groupby(t, [:key, :bc]), :w_ha => (w -> sum(w) * SITE_MULT) => :N, [:w_ha, :dia_cm] => ((w, x) -> sqrt(sum(w .* x .^ 2) / sum(w))) => :D,
                 [:w_ha, :ht_m] => ((w, x) -> sum(w .* x) / sum(w)) => :H, [:w_ha, :age] => ((w, x) -> sum(w .* x) / sum(w)) => :A)
     for r in eachrow(g); push!(spv, kix[r.key]); push!(N0, r.N); push!(D0, r.D); push!(H0, r.H); push!(A0, max(r.A, 1.0)); end
     push!(live, nrow(g))
@@ -85,7 +90,7 @@ function simB_nll!(B::SimBData, P, G, R)
       μ = log(S.D[i]) - σ^2; sp = S.sp[i]; prev = Φ((lb[1] - μ) / σ)
       for c in 1:SB_NC
         nxt = c < SB_NC ? Φ((lb[c+1] - μ) / σ) : 1.0
-        B.lam[s, k, sp, c] += N * (nxt - prev) / SB_EXPAND[c]; prev = nxt
+        B.lam[s, k, sp, c] += N * (nxt - prev) / (SB_EXPAND[c] * SITE_MULT); prev = nxt
       end
       ba = N * S.D[i]^2; bas += ba; bah += ba * S.H[i]
     end

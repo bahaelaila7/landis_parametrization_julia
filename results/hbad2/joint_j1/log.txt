@@ -1,0 +1,21 @@
+joint j1: SimA train 59399 cohorts, SimB train 532 plots / val 465 plots; params 173 (+36 recruitment); λ 0.5,0,1
+START train fA -180553.1 fB 36561.2 | val fA -170902.6 fB 34012.2
+CMA gen 25 evals 601 fbest 0.5500 fgen 0.5582 σ 0.0223 cond 1.1
+CMA gen 50 evals 1201 fbest 0.5500 fgen 0.5544 σ 0.0198 cond 1.2
+CMA gen 75 evals 1801 fbest 0.5494 fgen 0.5512 σ 0.0182 cond 1.2
+CMA gen 100 evals 2401 fbest 0.5494 fgen 0.5508 σ 0.0163 cond 1.3
+CMA gen 125 evals 3001 fbest 0.5455 fgen 0.5470 σ 0.0142 cond 1.4
+CMA gen 150 evals 3601 fbest 0.5434 fgen 0.5442 σ 0.0122 cond 1.4
+CMA gen 175 evals 4201 fbest 0.5434 fgen 0.5442 σ 0.0117 cond 1.4
+CMA gen 200 evals 4801 fbest 0.5430 fgen 0.5431 σ 0.011 cond 1.5
+CMA gen 225 evals 5401 fbest 0.5421 fgen 0.5426 σ 0.0106 cond 1.6
+CMA gen 250 evals 6001 fbest 0.5413 fgen 0.5417 σ 0.00971 cond 1.6
+CMA gen 275 evals 6601 fbest 0.5403 fgen 0.5407 σ 0.00934 cond 1.7
+CMA gen 300 evals 7201 fbest 0.5392 fgen 0.5396 σ 0.00854 cond 1.7
+CMA gen 325 evals 7801 fbest 0.5386 fgen 0.5390 σ 0.00818 cond 1.8
+CMA gen 350 evals 8401 fbest 0.5380 fgen 0.5384 σ 0.00805 cond 1.8
+CMA gen 375 evals 9001 fbest 0.5376 fgen 0.5378 σ 0.00763 cond 1.8
+CMA gen 400 evals 9601 fbest 0.5370 fgen 0.5378 σ 0.00748 cond 1.8
+λ=0.50  train fA -180512.8 fB 35505.7 | VAL fA -170912.9 fB 33341.2  (start val -170902.6 / 34012.2)
+CMA gen 25 evals 601 fbest 0.0000 fgen 0.0000 σ 0.0287 cond 1.1
+CMA gen 50 evals 1201 fbest 0.0000 fgen 0.0000 σ 0.0462 cond 1.3

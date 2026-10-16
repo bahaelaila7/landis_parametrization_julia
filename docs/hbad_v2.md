@@ -169,3 +169,27 @@ the lognormal within-cohort operator ÷ FIA expansion (185.2 microplot, 14.87 su
 0.2 s per evaluation; no recruitment doubles it (val 33.6k → 67.1k). Two objectives (fA = Sim A NLL, fB = Sim B NLL) because the
 two share plots (summing would double count); augmented Chebyshev per λ, one CMA-ES run per λ; recruitment (3 per species) free.
 Run j1: λ 0.5, 0, 1 from v2e + Poisson recruitment (start train fA −180,553 fB 36,561; val fA −170,903 fB 34,012).
+j1 (plot sites) λ = 0.5 after 10k evals: train fA −180,513 fB 35,506; VAL fA −170,913 (start −170,903) fB 33,341 (start 34,012) — Sim B
+improved without any loss in Sim A (no trade-off at this point). Sim B metrics: saplings fixed (< 5 cm at > 21 yr 291 vs obs 264) but
+poles (237 vs 94) and mid trees (158 vs 244) unchanged → structural, not a parameter problem. j1 stopped after λ = 0.5 (superseded by 5.9).
+
+### 5.9 Competition is local: subplot sites (E4, v2f)
+E4 (tools/hbad2/empirical_checks3.jl; Ĥ-ranked overtopping + stand SDI, computed over the tree's SUBPLOT (×4 → per ha) vs the PLOT):
+
+| indices | R² ln dD | R² dH | mort NLL | mort AUC |
+|---|---|---|---|---|
+| plot | 0.269 | 0.204 | 0.2335 | 0.687 |
+| subplot | **0.281** | 0.206 | 0.2334 | 0.688 |
+| plot + subplot | 0.288 | 0.209 | 0.2331 | 0.689 |
+| small trees (< 12.7 cm), plot | 0.317 | | 0.4192 | 0.648 |
+| small trees, subplot | **0.338** | | **0.4162** | **0.658** |
+
+An FIA plot is 4 subplots of 7.3 m radius spread over ~0.4 ha: a sapling on subplot 2 is not shaded by a large tree on subplot 4, and
+a plot-level mean-field canopy suppresses every recruit equally (no gaps). ⇒ `HBAD2_SITE=subplot`: every subplot (empty ones too in
+Sim B) is a site, densities ×4 → per ha, recruitment refitted at subplot scale (recruitment_coefs_subplot.csv; light coefficients
+PIEL −10.1, PITA −5.1, LITU −3.1, LIST2 −2.6, QULA3 −2.4, QUNI −2.3, _S −2.0, ACRU −1.6, NYBI −1.3, _H −1.2, MAVI2 −0.4).
+v2f (Sim A on subplot sites, warm start v2e, 20k evals): VAL mortality NLL **32,872** (v2e 33,022 plot sites; v1 33,493; null 34,321 —
+tree-count likelihood, comparable across site units); σ ln D 0.116 / σ ln H 0.155 (plot sites 0.132 / 0.170 — partly smaller, more
+homogeneous cohorts). Globals: mSD −0.80, planted ×1.43 / ×1.28 / ×0.78. Sim B with v2f: BA 12.7 % (+5.5), N ≥ 5 in 22.3 % (−0.4 bias),
+Lorey H 6.9 % — but more saplings/poles with gaps and plot-scale-fitted small-tree dynamics (> 21 yr: < 5 cm 396 vs 264, 5–12.7 cm 365 vs 94)
+→ joint fit j2 on subplot sites (recruitment free).

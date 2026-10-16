@@ -56,7 +56,7 @@ for (i, r) in enumerate(eachrow(t))
                  dia2_cm=(out == "alive" ? t.dia[j] * 2.54 : NaN), ht2_m=(out == "alive" ? t.ht[j] * 0.3048 : NaN), w2_ha=(out == "alive" ? t.tpa[j] * 2.47105 : NaN)))
   end
   if r.s == 1 && k > 1 && !haskey(byid, (r.pk, r.sb, r.tr, vs[k-1]))   # first tallied at a later visit: ingrowth
-    push!(ing, (iid=ivkey[(r.pk..., vs[k-1])], sym=r.sym, grp=r.grp, age=Float64(r.age), dia_cm=r.dia * 2.54, ht_m=r.ht * 0.3048, w_ha=r.tpa * 2.47105))
+    push!(ing, (iid=ivkey[(r.pk..., vs[k-1])], sb=r.sb, sym=r.sym, grp=r.grp, age=Float64(r.age), dia_cm=r.dia * 2.54, ht_m=r.ht * 0.3048, w_ha=r.tpa * 2.47105))
   end
 end
 tr = DataFrame(rows); ig = DataFrame(ing)
