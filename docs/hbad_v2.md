@@ -354,3 +354,7 @@ Both show the same pine drift (PITA BA share > 21 yr 0.314 / 0.321 vs obs 0.209)
   crossers; the 1.41 excess stays unexplained by tracking artefacts.
 ⇒ Next: (i) j9 (recruitment fixed, λ 0.75) — does less weight on Sim B keep PITA small-tree growth plausible? (ii) a species-aware
   observation term for the macro ingrowth, or a constraint that keeps growth tied to Sim A (growth is observed directly on tracked trees).
+* j9 (recruitment fixed, λ 0.75): VAL −267,266 / −1,061 — dominated by j7 (free recruitment, λ 0.75: −268,525 / −1,230); PITA BA share
+  > 21 yr 0.281 (j7 0.314, obs 0.209). PITA small-tree growth (D 3 cm, O 0.3) j7 0.89, j9 0.93 cm/yr vs v2f 0.36 (others 0.08–0.15):
+  the inflation is present at every λ with the species-pooled size objective, with or without free recruitment. Fixing recruitment is
+  NOT the remedy; the objective is (→ j10: species-aware `margins` objective, λ 0 first for its ideal point).
