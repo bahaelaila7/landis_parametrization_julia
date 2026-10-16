@@ -316,3 +316,5 @@ The vigour model dominates the mean-field model at the balanced point on VAL (be
 j6 costs 2.4 % of the Sim A NLL vs v2f (6.6k) for most of the stand-structure gain; its VAL Sim B value (−1,420) is better than the
 Sim-B-only point j4 (−1,249) → the λ = 0 end overfits TRAIN. Remaining Sim B errors: N ≥ 5 in over-predicted (+17 %), poles still
 1.8× at > 21 yr, composition drifts (0.174 vs persistence 0.134). Selection (user rule): VAL decides; TEST is reported once at the end.
+Vigour front (same ideal/nadir; VAL): λ 0.25 (j7): fA −260,213, fB −1,431 vs λ 0.5 (j6): −265,212 / −1,420 → moving weight to Sim B
+costs 5.0k Sim A NLL for no held-out Sim B gain (−1,431 vs −1,420): λ 0.5 is at/near the knee on VAL. λ 0.75 running.
