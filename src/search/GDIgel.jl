@@ -274,7 +274,7 @@ non-dominated archive of every evaluated point) and `meta` = the run constants a
     (`evalx(xs)` → one objective vector per point; `between(xps, need)` runs after they are evaluated and before the parents are installed),
     parent installation and restarts of converged lineages;
   - `state(s)` → the `GDState`; `save_state(s, path)` / `load_state(GDSearch, path)` → the `gd_state@gen.jld2` checkpoint
-    `(st, archive, labels, slots, template, nd)`.
+    `(st, archive, labels, slots, template, nd, kappa)` (`kappa` = the death_fold weight κ, fixed for the run; absent in older checkpoints).
 """
 mutable struct GDSearch <: AbstractSearch
   st::GDState
@@ -301,13 +301,14 @@ function tell!(s::GDSearch, ys::Vector{Vector{Float64}}, fys::Vector{Vector{Floa
 end
 
 function save_state(s::GDSearch, path::AbstractString)
-  JLD2.save_object(path, (st=s.st, archive=s.archive, labels=s.meta.labels, slots=s.meta.slots, template=s.meta.template, nd=s.nd))
+  JLD2.save_object(path, (st=s.st, archive=s.archive, labels=s.meta.labels, slots=s.meta.slots, template=s.meta.template, nd=s.nd,
+                          kappa=get(s.meta, :kappa, nothing)))
   return path
 end
 
 function load_state(::Type{GDSearch}, path::AbstractString)
   saved = JLD2.load_object(path)
   return GDSearch(saved.st; archive=saved.archive, nd=hasproperty(saved, :nd) ? saved.nd : NamedTuple[],
-                  meta=(labels=saved.labels, slots=saved.slots, template=saved.template))
+                  meta=(labels=saved.labels, slots=saved.slots, template=saved.template, kappa=hasproperty(saved, :kappa) ? saved.kappa : nothing))
 end
 end

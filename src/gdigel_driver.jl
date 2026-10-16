@@ -381,6 +381,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   if resume_from !== nothing
     saved = GDIgel.load_state(GDIgel.GDSearch, resume_from); st = saved.st; append!(archive, saved.archive)
     MO && append!(ndarc, saved.nd)
+    saved.meta.kappa === nothing || (kappa[] = saved.meta.kappa)   # death_fold: κ is fixed after the start points and belongs to the run state
     st_ref[] = st
     @info "gdigel: resumed $(basename(resume_from)) at gen $(st.gen), $(st.n_evals) evals, $(length(st.solutions)) solutions"
   else
@@ -429,7 +430,7 @@ function parametrize_GDIgel(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
     for k in 1:mu; GDIgel.add_lineage!(st, starts[k], fvec(r0[k])); offer!(starts[k], r0[k], 0, k); MO && offer_nd!(starts[k], r0[k], 0, k, st.lineages[k].lam); end
     st.n_evals = mu
   end
-  gds = GDIgel.GDSearch(st; archive=archive, nd=ndarc, meta=(labels=labels, slots=slots, template=template))   # the resumable search (shares `archive`/`ndarc`)
+  gds = GDIgel.GDSearch(st; archive=archive, nd=ndarc, meta=(labels=labels, slots=slots, template=template, kappa=DEATH_FOLD ? kappa[] : nothing))   # the resumable search (shares `archive`/`ndarc`)
   logf = joinpath(output_dir, "gd_log.csv")
   isfile(logf) || open(io -> println(io, "gen,n_evals,lineage,born,total,n05,n10,n20,median_abs_bias_pct,mean_sigma,min_sigma,max_sigma" * (MO ? ",lambda,sumA,sumW" * (M3 ? ",sumD" : "") : "")), logf, "w")
   last_r = Dict{Int,Any}()

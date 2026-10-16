@@ -71,4 +71,18 @@ end
     its = [parse(Int, split(l, ',')[1]) for l in leg2[2:end]]
     @test length(leg2) > length(leg1) && issorted(its) && allunique(its)
   end
+  @testset "gdigel mo death_fold: κ survives a resume (B30)" begin
+    full = joinpath(tmp, "gdf_full"); part = joinpath(tmp, "gdf_part")
+    cfg = merge(gd(objective="mo", death_fold=true), Dict{String,Any}("w_scope" => "survivors", "death_term" => "likelihood"))
+    run_cfg(merge(cfg, Dict{String,Any}("output_dir" => full, "trials" => 30)))
+    run_cfg(merge(cfg, Dict{String,Any}("output_dir" => part, "trials" => 14)))
+    ck = latest(fold_dir(part), r"^gd_state@\d+\.jld2$")
+    mid = Pan.Search.GDIgel.load_state(Pan.Search.GDIgel.GDSearch, ck)
+    @test mid.meta.kappa isa Float64 && mid.meta.kappa > 0
+    run_cfg(merge(cfg, Dict{String,Any}("output_dir" => part, "trials" => 30, "resume_from" => ck)))
+    a = Pan.Search.GDIgel.load_state(Pan.Search.GDIgel.GDSearch, latest(fold_dir(full), r"^gd_state@\d+\.jld2$"))
+    b = Pan.Search.GDIgel.load_state(Pan.Search.GDIgel.GDSearch, latest(fold_dir(part), r"^gd_state@\d+\.jld2$"))
+    @test a.meta.kappa == b.meta.kappa == mid.meta.kappa
+    @test isequal(sig_gd(a), sig_gd(b))
+  end
 end
