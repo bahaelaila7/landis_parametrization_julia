@@ -53,4 +53,19 @@ end
   Sy = Sites([1, 2], [1], [300.0], [15.0], [12.0], [30.0], [5], [0.0], [false])
   simulate!(Sx, P, G); simulate!(Sy, P, G)
   @test Sx.D[2] - 15 < Sy.D[1] - 15 && Sx.N[2] < Sy.N[1]
+  # vigour sub-cohorts: fast grows more, slow dies more under suppression; σv = 0 → identical to the mean-field cohort
+  Gv = HBAD2.GlobP(0.2, 10.0, 0.0, 0.0, 0.0, 1, 0.0, 0.5)
+  Sv = Sites([1, 5], [1, 1, 1, 1], [300.0, 50.0, 200.0, 50.0], [40.0, 10.0, 10.0, 10.0], [30.0, 8.0, 8.0, 8.0], [60.0, 20.0, 20.0, 20.0], [5], [0.0], [false],
+             [0.0, VIG_Z[1], VIG_Z[2], VIG_Z[3]])
+  simulate!(Sv, P, Gv)
+  @test Sv.D[2] < Sv.D[3] < Sv.D[4]                                            # slow < mean < fast
+  @test Sv.N[2] / 50 < Sv.N[3] / 200 < Sv.N[4] / 50 + 1e-12                    # slow suppressed trees die more
+  S0v = Sites([1, 5], [1, 1, 1, 1], [300.0, 50.0, 200.0, 50.0], [40.0, 10.0, 10.0, 10.0], [30.0, 8.0, 8.0, 8.0], [60.0, 20.0, 20.0, 20.0], [5], [0.0], [false],
+              [0.0, VIG_Z[1], VIG_Z[2], VIG_Z[3]])
+  simulate!(S0v, P, HBAD2.GlobP(0.2, 10.0, 0.0, 0.0, 0.0, 1, 0.0, 0.0)); @test S0v.D[2] == S0v.D[3] == S0v.D[4]
+  # recruitment with vigour: 3 slots per recruit class, shares 1/6, 2/3, 1/6
+  Sr = Sites([1, 31], fill(1, 30), zeros(30), fill(2.54, 30), fill(3.0, 30), fill(5.0, 30), [0], [0.0], [false]); Fr = FreeSites(Sr, [0], 3; vigour=true)
+  Rr = [RecP(-2.0, 0.0, 0.0, 2.54, 3.0, 5.0) for _ in 1:3]
+  HBAD2.recruit_site!(Fr, Rr, P, 1, 1, 1.0, 3)
+  @test Fr.live[1] == 9 && Sr.zq[1:3] == collect(VIG_Z) && isapprox(Sr.N[1] / Sr.N[2], 0.25) && isapprox(Sr.N[3] / Sr.N[2], 0.25)
 end
