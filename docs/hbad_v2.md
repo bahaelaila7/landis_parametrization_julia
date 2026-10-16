@@ -335,3 +335,7 @@ Recruitment is observed directly (sapling ingrowth; Poisson NLL maximised by the
 j8 = j6 with recruitment FIXED at the Poisson fit (HBAD2_RECR_FIXED=1), same ideal/nadir, λ 0.5.
 Sim A per species (v2f, VAL): PITA dD 0.596 vs obs 0.669 (−11 %), dH 0.586 vs 0.649; _H fine (0.246 vs 0.251); all species
 dD −5 %, dH −7 % (survivor selection, which the mean-field cohort cannot produce; vigour sub-cohorts can).
+Vigour front complete (VAL; same ideal/nadir; recruitment free): start (v2f + σv 0.3) −271,735 / 614; λ 0.75 −268,525 / −1,230;
+λ 0.5 −265,212 / −1,420; λ 0.25 −260,213 / −1,431. λ 0.75 gets ~90 % of the held-out Sim B gain for < half the Sim A cost of λ 0.5;
+its stand metrics equal λ 0.5 (BA 12.8 %, N≥5in 19.4 %, QMD 17.1 %, Lorey H 6.6 %, > 21 yr poles 176 vs obs 94) → knee near λ 0.75.
+Both show the same pine drift (PITA BA share > 21 yr 0.314 / 0.321 vs obs 0.209): the free-recruitment problem of 5.14, not the weight.

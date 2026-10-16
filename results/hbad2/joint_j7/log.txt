@@ -21,3 +21,11 @@ CMA gen 75 evals 1801 fbest 0.0670 fgen 0.0677 σ 0.0404 cond 1.7
 CMA gen 100 evals 2401 fbest 0.0626 fgen 0.0630 σ 0.0409 cond 1.8
 CMA gen 125 evals 3001 fbest 0.0590 fgen 0.0594 σ 0.0393 cond 1.9
 CMA gen 150 evals 3601 fbest 0.0571 fgen 0.0579 σ 0.0386 cond 2
+CMA gen 175 evals 4201 fbest 0.0555 fgen 0.0555 σ 0.0374 cond 2.1
+CMA gen 200 evals 4801 fbest 0.0521 fgen 0.0540 σ 0.036 cond 2.2
+CMA gen 225 evals 5401 fbest 0.0511 fgen 0.0517 σ 0.0346 cond 2.2
+CMA gen 250 evals 6001 fbest 0.0499 fgen 0.0509 σ 0.0338 cond 2.3
+CMA gen 275 evals 6601 fbest 0.0499 fgen 0.0511 σ 0.0321 cond 2.3
+CMA gen 300 evals 7201 fbest 0.0491 fgen 0.0495 σ 0.0302 cond 2.4
+CMA gen 325 evals 7801 fbest 0.0478 fgen 0.0484 σ 0.0289 cond 2.4
+λ=0.75  train fA -270943.2 fB -2334.4 | VAL fA -268525.2 fB -1230.3  (start val -271734.7 / 614.2)
