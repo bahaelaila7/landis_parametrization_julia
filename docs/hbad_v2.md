@@ -339,3 +339,18 @@ Vigour front complete (VAL; same ideal/nadir; recruitment free): start (v2f + σ
 λ 0.5 −265,212 / −1,420; λ 0.25 −260,213 / −1,431. λ 0.75 gets ~90 % of the held-out Sim B gain for < half the Sim A cost of λ 0.5;
 its stand metrics equal λ 0.5 (BA 12.8 %, N≥5in 19.4 %, QMD 17.1 %, Lorey H 6.6 %, > 21 yr poles 176 vs obs 94) → knee near λ 0.75.
 Both show the same pine drift (PITA BA share > 21 yr 0.314 / 0.321 vs obs 0.209): the free-recruitment problem of 5.14, not the weight.
+
+### 5.15 Composition drift — refined diagnosis (j8, small-tree growth, ingrowth data)
+* j8 (j6 with recruitment FIXED at the Poisson fit, λ 0.5): VAL fA −261,362 / fB −1,217 — dominated by j6 (−265,212 / −1,420);
+  PITA BA share > 21 yr 0.291 (j6 0.321, obs 0.209), composition dissimilarity 0.226 (j6 0.228). Fixing recruitment does NOT remove
+  the drift; in j8 the PITA recruits still hold 0.232 m²/ha after one interval (v2f 0.050) with the same recruit numbers as v2f.
+* Cause = small-tree GROWTH of PITA: diameter increment at D 3 cm, O 0.3, RD 0.4 (mean-field cohort) — v2f PITA 0.36 cm/yr (others
+  0.11–0.19), j6 1.19, j8 **1.77** (others 0.06–0.13); with σv 0.58 the fast sub-cohort grows ×2.7 more (≈ 3–5 cm/yr; observed open-grown
+  saplings ≈ 0.4 cm/yr, free-growing young PITA 0.86). The species-pooled Sim B size objective asks for more ingrowth into ≥ 12.7 cm,
+  and the cheapest way is to accelerate the most abundant recruiter: equifinality across species, which hands BA to pine.
+* Why the data ask for more ingrowth: first-tallied macro trees vs tracked microplot saplings crossing 12.7 cm = 1.41 (5.3).
+  RECONCILECD does not separate it (141,814 first-tallied macro trees coded 1 = ingrowth, 299 = 2, 1,548 missing code with mean D 24 cm).
+  "Missing" tracked saplings (1,731) are mostly the SMALLEST (2.5–5 cm 4.1 % missing vs 10–12.7 cm 1.4 %), so they are not re-tallied
+  crossers; the 1.41 excess stays unexplained by tracking artefacts.
+⇒ Next: (i) j9 (recruitment fixed, λ 0.75) — does less weight on Sim B keep PITA small-tree growth plausible? (ii) a species-aware
+  observation term for the macro ingrowth, or a constraint that keeps growth tied to Sim A (growth is observed directly on tracked trees).
