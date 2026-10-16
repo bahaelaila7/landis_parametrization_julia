@@ -2910,8 +2910,10 @@ function parametrize_LBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plug
           end
           if have_val
             try
-              val_result = only(val_fit_params(search_state.best.x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
-                injection=inj_val, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin, collect_cohorts=n_output_plots > 0))
+              val_reps_ = val_fit_params(search_state.best.x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+                injection=inj_val, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin, collect_cohorts=n_output_plots > 0)   # B29: the fixed common-random-number seeds, like every other driver
+              val_agg_ = _agg_reps(val_reps_, loss_params, scoring)
+              val_result = (val_agg_[1], val_reps_[val_agg_[3]][2], val_agg_[2])
               val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
               @info "Val loss @ $iter | loss=$val_total"
               try
@@ -3164,8 +3166,10 @@ function parametrize_CMAES(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plu
           end
           if have_val
             try
-              val_result = only(val_fit_params(search_state.best.x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
-              injection=inj_val, seeds=[rand(rng, UInt64)], scales=val_scales, scoring, simb, plugin, collect_cohorts=n_output_plots > 0))
+              val_reps_ = val_fit_params(search_state.best.x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spdf_plts, val_site_sim_years, spinup, val_spinup_cohorts, loss_params,
+              injection=inj_val, seeds=fixed_seeds, scales=val_scales, scoring, simb, plugin, collect_cohorts=n_output_plots > 0)   # B29: the fixed common-random-number seeds, like every other driver
+              val_agg_ = _agg_reps(val_reps_, loss_params, scoring)
+              val_result = (val_agg_[1], val_reps_[val_agg_[3]][2], val_agg_[2])
               val_total = convert(Float64, PU.get_total_loss(val_result[1], loss_params))
               @info "Val loss @ gen $iter | loss=$val_total"
               try
@@ -4366,8 +4370,8 @@ function parametrize_CMAMAE(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
   end
 
   # Validation mirrors the TRAINING tier so the held-out loss ranks candidates by the SAME objective (tier 5 ⇒ tier-5 val; tier 4/5 need
-  # per-cycle bins built from the validation split) and, in dual modes, the same A⊕B objective. Legacy: a fresh seed per val evaluation.
-  mo_val!(env; dual=true, tier=search_tier, seeds=:rng)
+  # per-cycle bins built from the validation split) and, in dual modes, the same A⊕B objective.
+  mo_val!(env; dual=true, tier=search_tier)
   loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
   gio = loop.gio
 
@@ -4701,7 +4705,7 @@ function parametrize_MOLBSA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Pl
       generate_params(plugin.ctx, species_list, eco_list, eco_species_ids; rng=rng, no_establishment=no_establishment)
     end
 
-  mo_val!(env; seeds=:rng)   # legacy: a fresh seed per val evaluation
+  mo_val!(env)
   loop = mo_loop_open(env, search_state; output_dir, resuming=!isnothing(resume_from))
   gio = loop.gio
 

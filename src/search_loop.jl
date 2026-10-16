@@ -99,7 +99,7 @@ Base.@kwdef mutable struct MOEnv
   inj_val::Any = nothing; sampled_ids_val::Any = Set{UIntType}(); emp_sample_val::Any = nothing
   val_dual_b0::Any = nothing; val_dual_b0_built::Bool = false   # Sim B of the val split, when built before mo_val! (val_dual_early)
   val_scales::Any = nothing; val_dual_b::Any = nothing
-  val_tier::Int = 3; val_seeds::Symbol = :fixed
+  val_tier::Int = 3
   val_t4_ref::Any = nothing; val_cycle_map::Any = nothing; val_n_cycles::Int = 0
   val_work::Any = nothing; val_work_t::Any = nothing; val_sites_parallel::Bool = true
   val_fit::Any = nothing
@@ -180,23 +180,21 @@ val_fit_params(x; val_ref_soa, max_sim_year, n_species, eco_species_ids, val_spd
     val_reps(env, x) -> per-rep fit_params results of parameter set `x` on the validation split
 
 THE validation evaluation of the multi-objective drivers. Same reference, injection plan, scales and (when the run is dual) Sim B as the train
-split's objective; fixed common-random-number seeds (`env.val_seeds == :fixed`; the legacy `:rng` draws one fresh seed per call from the run rng);
+split's objective; the fixed common-random-number seeds of the train split (B29: the val evaluation never draws from the run rng);
 the per-thread work SoA; and sites serial whenever candidates are evaluated concurrently (`env.val_sites_parallel`) so concurrent val scoring never
 nests threads.
 """
 function val_reps(env::MOEnv, x)
   ws = env.val_work_t === nothing ? env.val_work : env.val_work_t[Threads.threadid()]
-  seeds = env.val_seeds === :fixed ? env.fixed_seeds : [rand(env.rng, UInt64)]
   val_fit_params(x; val_ref_soa=env.val_ref_soa, max_sim_year=env.max_sim_year, n_species=env.n_species, eco_species_ids=env.eco_species_ids, val_spdf_plts=env.val_spdf_plts,
     val_site_sim_years=env.val_site_sim_years, spinup=env.spinup, val_spinup_cohorts=env.val_spinup_cohorts, loss_params=env.loss_params, tier=env.val_tier,
-    t4_ref=env.val_t4_ref, cycle_map=env.val_cycle_map, n_cycles=env.val_n_cycles, injection=env.inj_val, dual_b=env.val_dual_b, seeds=seeds, work_soa=ws,
+    t4_ref=env.val_t4_ref, cycle_map=env.val_cycle_map, n_cycles=env.val_n_cycles, injection=env.inj_val, dual_b=env.val_dual_b, seeds=env.fixed_seeds, work_soa=ws,
     scales=env.val_scales, scoring=env.scoring, simb=env.simb, plugin=env.plugin, collect_cohorts=env.n_output_plots > 0, parallel_sites=env.val_sites_parallel)
 end
 
-"`(run_result, cached_sites, eco_losses)` of `x` on the validation split, aggregated over the reps like train (`:rng` seeds: the single rep)."
+"`(run_result, cached_sites, eco_losses)` of `x` on the validation split, aggregated over the reps like train."
 function val_eval(env::MOEnv, x)
   vreps = val_reps(env, x)
-  env.val_seeds === :fixed || return only(vreps)
   v = _agg_reps(vreps, env.loss_params, env.scoring)
   return (v[1], vreps[v[3]][2], v[2])
 end
@@ -211,15 +209,15 @@ candidate-parallel batch, else the site loops nest `@threads` regions inside the
 val_sites_parallel(exec::ExecOptions) = !candidate_parallel(exec)
 
 """
-    mo_val!(env; dual=true, tier=3, seeds=:fixed) -> env
+    mo_val!(env; dual=true, tier=3) -> env
 
 Build the validation side of `env` (scales, Sim B, work buffers, `val_fit`). Called at the point of the driver's choosing because building the
 val Sim B draws from the run rng (see `val_dual_early`). `dual`: the val objective includes Sim B in dual runs (as train does); `tier`: the tier the
-val split is scored at (a higher tier needs the val split's own tier-4 tables); `seeds`: `:fixed` (common random numbers) or the legacy `:rng`.
+val split is scored at (a higher tier needs the val split's own tier-4 tables).
 """
 function mo_val!(env::MOEnv; dual::Bool=true, tier::Int=3, seeds::Symbol=:fixed)
   env.have_val || return env
-  env.val_tier = tier; env.val_seeds = seeds
+  env.val_tier = tier
   if tier == 4 || tier == 5   # tier 4/5 need per-cycle bins built from the validation split
     env.val_t4_ref, env.val_cycle_map, env.val_n_cycles = t4_reference(env.val_splots, env.val_spdf_plts, env.loss_params, env.eco_species_ids, env.eco_list; cycle_years=env.cycle_years, scoring=env.scoring)
   end
