@@ -4,7 +4,7 @@ using DuckDB, DataFrames, CSV, Statistics, Arrow, LinearAlgebra, Random, Dates
 
 const HBAD_DB    = "/workspace/landis_region4/data_r4/slim_r4.duckdb"
 const HBAD_SPLIT = "/workspace/landis_region4/runs_local/gaflst_split/split_plots.csv"
-const HBAD_OUT   = joinpath(@__DIR__, "..", "results", "hbad")
+const HBAD_OUT   = get(ENV, "PAN_HBAD_OUT", joinpath(@__DIR__, "..", "results", "hbad"))   # PAN_HBAD_OUT=<dir>: write the outputs elsewhere (the tracked results/hbad is what the HBAD plugin reads)
 const LB   = 453.592 / 4046.86         # lb/acre -> g/m2 (Pan's unit factor)
 const ACRE2HA = 2.47105                # trees/acre -> trees/ha
 const FT2M = 0.3048
