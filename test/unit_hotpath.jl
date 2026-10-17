@@ -257,7 +257,7 @@ end
   end
 end
 # ------------------------------------------------------------------------------------------------------------------------------------------------
-# fit_params (Step 4a): ONE site loop per simulated year with a statically dispatched tier accumulator (Tier1Acc .. Tier5Acc, src/tier_acc.jl).
+# fit_params (Step 4a): ONE site loop per simulated year with a statically dispatched tier accumulator (Tier1Acc .. Tier5Acc, src/sim/tier_acc.jl).
 #   * the per-year loop (`_run_rep!`, `_score_sites!`, the accumulators' `site_visit!`, the cohort log) is specialised on the accumulator: no `Core.Box`
 #     (the pre-4a fit_params boxed variables it reassigned while closures captured them) and no `Any`-typed used locals;
 #   * the simulated cohorts (`sites_data`, a push per cohort per measurement and evaluation) are built only on request (`collect_cohorts` /
