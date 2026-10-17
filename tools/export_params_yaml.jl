@@ -1,4 +1,4 @@
-# Export a calibrated parameter set (JLD2) as a self-contained YAML roster (src/params_yaml.jl), with the mapping metadata
+# Export a calibrated parameter set (JLD2) as a self-contained YAML roster (src/config/params_yaml.jl), with the mapping metadata
 # a scenario needs to place NEW plots into the parameter space.
 #   ./julia_gdal.sh --project=. tools/export_params_yaml.jl <training_config.yml> <params.jld2> <out.yaml> "<name>" ["<description>"] ['<provenance json>']
 # species_map: every FIA tree species symbol in REF_SPECIES → its parameter species, by the SAME rule the training data

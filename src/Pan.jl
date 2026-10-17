@@ -45,84 +45,11 @@ const RNGType = Random.Xoshiro #Random.MersenneTwister
 const ActivePlugins = (BaseSitePlugin.BaseSite, BiomassSuccessionPlugin.BiomassSuccession)
 const ActiveSoA = SiteSoA{Tuple{(ActivePlugins)...}}
 include("succession_api.jl")
-include("params_yaml.jl")
-include("config.jl")
-include("options.jl")
-include("param_space.jl")
-
-succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "biomasssuccession", "bs") ? _BS :
-                                                lowercase(name) in ("pnet", "pnet-succession") ? _PN :
-                                                lowercase(name) in ("hbad", "hbad-succession") ? _HB :
-                                                error("unknown succession_plugin '$name' (biomass | pnet | hbad)")
-
-"""
-    bs_tables_from_cfg(cfg, db_path) -> BSTables
-
-The Biomass Succession data tables of a run (pinned LONGEVITY / SHADE_TOL, seeds for PROB_ESTAB / MATURITY, B_MAX / ANPP / PROB_ESTAB floors), loaded from the
-config's csv paths and the cohort database. Pure function of its inputs: nothing is stored in module state, the caller passes the result on explicitly.
-"""
-function bs_tables_from_cfg(cfg0::AbstractDict, db_path::AbstractString)
-  cfg = _as_config(cfg0)
-  longevity = cfg["longevity_from_data"] ? _load_longevity_table(db_path) : nothing
-  # Per-species LONGEVITY overrides from yaml (`longevity_overrides: {PIEL: 275}`) - applied on top of the
-  # data table so hand corrections don't require rewriting the read-only species_longevity_ref DB table.
-  let ov = cfg["longevity_overrides"]
-    if !isnothing(ov) && !isempty(ov)
-      tbl = longevity === nothing ? Dict{String,Float64}() : longevity
-      for (k, v) in ov; tbl[String(k)] = Float64(v); end
-      longevity = tbl
-      @info "longevity_overrides applied: $(Dict(String(k)=>Float64(v) for (k,v) in ov))"
-    end
-  end
-  return BiomassSuccessionPlugin.BSTables(;
-    fixed_longevity=(let v = cfg["fix_longevity"]; isnothing(v) ? nothing : Float64(v) end),
-    longevity=longevity,
-    shade_tol=cfg["shade_tol_from_data"] ? _load_shade_tol_table(cfg["shade_tol_csv"]) : nothing,
-    prob_estab=cfg["prob_estab_from_data"] ? _load_prob_estab_table(cfg["prob_estab_csv"], cfg["prob_estab_csv_artificial"]) : nothing,
-    maturity=cfg["maturity_from_data"] ? _load_maturity_table(cfg["maturity_csv"]) : nothing,
-    bmax_floor=cfg["bmax_floor_from_data"] ? _load_bmax_floor_table(cfg["bmax_floor_csv"]) : nothing,
-    anpp_floor=cfg["anpp_floor_from_data"] ? _load_anpp_floor_table(cfg["anpp_floor_csv"]) : nothing)
-end
-
-"""
-    plugin_config(succession_plugin, species_list, eco_species_ids, eco_list; tables, cohorts_db_path, tablename, pnet_*, hbad_*) -> PluginConfig
-
-Build the immutable plugin context of a run (`BSTables` | `PnETContext` | `HBADContext`) and the site-attribute builder (PnET: per-plot climate id / latitude / soil
-from the cohort database). The ONE place `parametrize` and `setup_plugin_from_cfg` construct a plugin; nothing is written to module state.
-"""
-function plugin_config(succession_plugin::AbstractString, species_list, eco_species_ids, eco_list::Vector{String};
-    tables::BiomassSuccessionPlugin.BSTables=BiomassSuccessionPlugin.BSTables(), cohorts_db_path::AbstractString="", tablename::AbstractString="",
-    pnet_climate_cache::AbstractString="", pnet_co2_csv::AbstractString="", pnet_generic::AbstractDict=Dict{String,Any}(),
-    pnet_soil_texture::AbstractDict=Dict{String,String}(), pnet_soil_csv::AbstractString="",
-    hbad_priors_csv::AbstractString="", hbad_coefs_csv::AbstractString="", hbad_init::AbstractString="jitter", hbad_seed_rain::Bool=false,
-    hbad_prob_estab_csv::AbstractString="", hbad_cycle_years::Real=8)
-  SUCC = succession_plugin_type(succession_plugin)
-  if SUCC === PnETPlugin.PnET
-    (isempty(pnet_climate_cache) || isempty(pnet_co2_csv)) && error("succession_plugin=pnet requires pnet_climate_cache and pnet_co2_csv")
-    ctx = PnETPlugin.PnETContext(pnet_climate_cache, pnet_co2_csv; generic=pnet_generic, db_path=cohorts_db_path, tables=tables)
-    @info "PnET succession: climate cache $(basename(pnet_climate_cache)) ($(length(ctx.climate.ids)) L4s, $(ctx.climate.y1)-$(ctx.climate.y2)); fixed constants" ctx.fixed
-    soil_map = Dict{String,String}(String(k) => String(v) for (k, v) in pnet_soil_texture)
-    return PluginConfig(ctx; site_attrs=sp -> PnETPlugin.build_site_attrs(ctx.climate, cohorts_db_path, tablename, sp, eco_list; soil_map=soil_map, soil_csv=pnet_soil_csv))
-  elseif SUCC === HBADPlugin.HBAD
-    (species_list === nothing || eco_species_ids === nothing) && error("the hbad plugin needs species_list and eco_species_ids")
-    return PluginConfig(HBADPlugin.HBADContext(species_list, eco_species_ids; priors_csv=hbad_priors_csv, coefs_csv=hbad_coefs_csv,
-      init_mode=Symbol(lowercase(hbad_init)), estab_prob_csv=hbad_prob_estab_csv, cycle_years=hbad_cycle_years, seed_rain=hbad_seed_rain, tables=tables))
-  end
-  return PluginConfig(tables)
-end
-
-# Tools/diagnostics (tools/tost_common.jl, calib_coord.jl): select and configure the succession plugin from a yaml cfg
-# exactly as `parametrize` does. Returns the `PluginConfig` (pass it to `make_sites`, `fit_params`, `generate_params`, ...).
-function setup_plugin_from_cfg(cfg0::AbstractDict, eco_list::Vector{String}; species_list=nothing, eco_species_ids=nothing,
-                               tables::BiomassSuccessionPlugin.BSTables=BiomassSuccessionPlugin.BSTables())
-  cfg = _as_config(cfg0)
-  return plugin_config(cfg["succession_plugin"], species_list, eco_species_ids, eco_list; tables=tables,
-    cohorts_db_path=cfg["cohorts_db_path"], tablename=cfg["tablename"],
-    pnet_climate_cache=cfg["pnet_climate_cache"], pnet_co2_csv=cfg["pnet_co2_csv"], pnet_generic=Dict{String,Any}(cfg["pnet_generic"]),
-    pnet_soil_texture=cfg["pnet_soil_texture"], pnet_soil_csv=cfg["pnet_soil_csv"],
-    hbad_priors_csv=cfg["hbad_priors_csv"], hbad_coefs_csv=cfg["hbad_coefs_csv"], hbad_init=cfg["hbad_init"], hbad_seed_rain=cfg["hbad_seed_rain"],
-    hbad_prob_estab_csv=cfg["hbad_prob_estab_csv"], hbad_cycle_years=cfg["cycle_years"])
-end
+include("config/params_yaml.jl")
+include("config/schema.jl")
+include("config/options.jl")
+include("config/param_space.jl")
+include("config/plugin_config.jl")
 
 # SoA type for a given succession plugin P (BaseSite + P). For BiomassSuccession this is exactly `ActiveSoA`.
 soa_type(::Type{P}) where {P} = SiteSoA{Tuple{BaseSitePlugin.BaseSite,P}}
@@ -321,7 +248,6 @@ function _make_sites(plugin::PluginConfig{P}, splots::DataFrame, eco_species_ids
     return soa
   end
 end
-
 
 # Each cohort tuple = (eco_species_id, age, observed_biomass, disturbance_drop_pct).
 const _SiteInjectionYear = Vector{Tuple{Int,Vector{Tuple{UIntType,FloatType,FloatType,FloatType}}}}
@@ -1206,6 +1132,7 @@ function stop_writer(ch::Channel, task::Task)
   close(ch)
   wait(task)
 end
+
 function test_spdf(df, n_species, eco_species_ids, loss_params::PU.LossParams)
   site_losses = []
   for (plt_key, plt_dict) in pairs(df)
@@ -1722,6 +1649,7 @@ function parametrize(; data::Data.DataConfig,
   post_search_hook === nothing || post_search_hook((; space, plugin, ref_soa, splots, spdf_plts, site_sim_years, species_list, eco_list, eco_species_ids, loss_params, scoring, simb, scale_seed, injection_cohorts, spinup_cohorts, output_dir, n_species, tier, spinup, no_establishment))
   return _driver_result
 end
+
 function accumulate_site_bins!(t1_sim_eco::Matrix{FloatType}, site, loss_params::PU.LossParams, scratch_perm::Vector{Int}, scratch_ages::Vector{FloatType})
   site.live == 0 && return
   nlive = site.live
@@ -2323,6 +2251,7 @@ function fit_params(ref_soa, bio_params, max_sim_year, n_species, eco_species_id
   bi = argmin(abs.(b_losses .- Statistics.median(b_losses)))   # B's median rep (robust to a lucky/unlucky draw)
   return RepResult[(a_run + resB[bi][1], resA[a_idx][2], vcat(a_eco, resB[bi][3]))]
 end
+
 function parametrize_sobol(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::PluginConfig, output_dir::AbstractString, splots, spdf_plts, spinup_cohorts::DataFrame, site_sim_years, species_list::Vector{String}, eco_list::Vector{String}, eco_species_ids::Vector{Vector{Int}}, loss_params::PU.LossParams, scoring::ScoringOptions, simb::SimBOptions, spinup::Bool, rng::Random.AbstractRNG, debug::Bool, N::Int=100, M::Int=5, eval_tier::Int=3, n_output_plots::Int=0, no_establishment::Bool=false, injection_cohorts=nothing, cycle_years::Real=8, saltelli::Bool=false, scale_seed::PU.LossScales=PU.LossScales())
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
@@ -4848,321 +4777,9 @@ function parametrize_SA(; ref_soa::SiteSoA, space::PU.ParamSpace, plugin::Plugin
   return search_state
 end
 
-# Load the data-derived per-species LONGEVITY table (species_symbol -> years) from species_longevity_ref
-# in the cohorts DB. Returns nothing (with a warning) if the table is absent. See species_longevity_ref_README.md.
-function _load_longevity_table(db_path::String)
-  # READ-ONLY attach (in-memory main + ATTACH … READ_ONLY) — never open the cohorts DB read-write just to
-  # SELECT; a read-write open here risks corrupting the DB if the process is killed mid-load.
-  con = DuckDB.connect(DuckDB.DB())
-  isfile(db_path) || error("longevity_from_data: cohort database not found: $db_path")
-  DuckDB.execute(con, "ATTACH '$(PanCore.sql_quote_path(db_path))' AS src (READ_ONLY);")
-  has = (DuckDB.execute(con, "SELECT count(*) AS n FROM information_schema.tables WHERE table_catalog = 'src' AND table_name = 'species_longevity_ref'") |> DataFrame).n[1]
-  has == 0 && error("longevity_from_data=true but table species_longevity_ref is not in $db_path (set longevity_from_data: false to keep LONGEVITY in the search)")   # used to warn and silently keep LONGEVITY in the search
-  df = DuckDB.execute(con, "SELECT species_symbol, longevity FROM src.species_longevity_ref WHERE longevity IS NOT NULL ORDER BY species_symbol") |> DataFrame
-  d = Dict{String,Float64}(String(r.species_symbol) => Float64(r.longevity) for r in eachrow(df))
-  @info "longevity_from_data: pinned LONGEVITY for $(length(d)) species from species_longevity_ref (out of search)"
-  d
-end
+include("config/tables.jl")
 
-# Load per-species SHADE_TOL (shade class 1-5) from a CSV (cols: sym, shade_class), e.g.
-# runs/shadetol_all_species.csv. Pins SHADE_TOL out of the search. Missing/absent → SHADE_TOL_DEFAULT.
-function _load_shade_tol_table(csv_path::String)
-  isfile(csv_path) || error("shade_tol_from_data=true but $csv_path not found (set shade_tol_from_data: false to keep SHADE_TOL in the search)")   # used to warn and silently keep SHADE_TOL in the search
-  df = CSV.read(csv_path, DataFrame)
-  for c in ("sym", "shade_class")
-    c in names(df) || error("shade_tol_csv $csv_path: column '$c' not found (columns: $(join(names(df), ", ")))")
-  end
-  d = Dict{String,Int}(uppercase(strip(String(r.sym))) => Int(r.shade_class) for r in eachrow(df))
-  @info "shade_tol_from_data: pinned SHADE_TOL for $(length(d)) species from $csv_path (out of search)"
-  d
-end
-
-# Load per-(category, L3, land_use) PROB_ESTAB from the natural + artificial rollup CSVs (cols: category,
-# l3, prob_estab). natural CSV → natural strata, artificial CSV → artificial strata. Seeds (not pins) the
-# initial PROB_ESTAB_SPP → the run becomes a calibration around the data-derived rates.
-function _load_prob_estab_table(csv_nat::String, csv_art::String)
-  d = Dict{Tuple{String,String,String},Float64}()
-  for (path, lu) in ((csv_nat, "natural"), (csv_art, "artificial"))
-    isempty(path) && continue
-    isfile(path) || error("prob_estab_from_data=true but $path ($lu table) not found")   # used to warn (natural) or skip silently (artificial)
-    df = CSV.read(path, DataFrame)
-    for r in eachrow(df)
-      d[(uppercase(strip(String(r.category))), String(r.l3), lu)] = Float64(r.prob_estab)
-    end
-  end
-  isempty(d) && error("prob_estab_from_data=true but no rows were loaded from $csv_nat / $csv_art")   # used to warn and leave PROB_ESTAB as-is
-  @info "prob_estab_from_data: loaded $(length(d)) (category,l3,lu) PROB_ESTAB values"
-  d
-end
-
-_parse_eco_lu(s) = (p = split(String(s), "|lu="); length(p) == 2 ? (String(p[1]), String(p[2])) : (String(s), ""))
-
-# Seed the initial candidate's PROB_ESTAB_SPP[eco][sp] from the data table (in place; stays in the search).
-function _seed_prob_estab!(tables::BiomassSuccessionPlugin.BSTables, params, eco_list, species_list, eco_species_ids)
-  tbl = tables.prob_estab
-  isnothing(tbl) && return params
-  n = 0
-  for (eco_id, sp_ids) in enumerate(eco_species_ids)
-    l3, lu = _parse_eco_lu(eco_list[eco_id])
-    lu in ("natural", "artificial") || (lu = "natural")   # site_class_strata puts a site-tier (A/B/C/D) in |lu=; establishment prob is site-tier-independent → use the natural model input
-    for (j, gsp) in enumerate(sp_ids)
-      v = get(tbl, (uppercase(species_list[gsp]), l3, lu), nothing)
-      v === nothing && continue
-      params.PROB_ESTAB_SPP[eco_id][j] = FloatType(v); n += 1
-    end
-  end
-  @info "prob_estab_from_data: seeded PROB_ESTAB for $n eco×species cells (calibration start)"
-  params
-end
-
-# Per-(category, L3, land_use) B_MAX floor (g/m²) from runs/bmax_floor.csv (cols: category,l3,lu,bmax_floor).
-function _load_bmax_floor_table(csv_path::String)
-  if !isfile(csv_path)
-    @warn "bmax_floor_from_data=true but $csv_path not found — B_MAX floor left flat [12000,35000]"; return nothing
-  end
-  df = CSV.read(csv_path, DataFrame)
-  d = Dict{Tuple{String,String,String},Float64}()
-  for r in eachrow(df)
-    d[(uppercase(strip(String(r.category))), String(r.l3), String(r.lu))] = Float64(r.bmax_floor)
-  end
-  isempty(d) && (@warn "bmax_floor: no rows in $csv_path"; return nothing)
-  @info "bmax_floor_from_data: loaded $(length(d)) (category,l3,lu) B_MAX floors from $csv_path"
-  d
-end
-
-# ANPP_MAX data floor — parallel to _load_bmax_floor_table. CSV cols: category,l3,lu,anpp_floor (+ extras
-# ignored). anpp_floor = p99 of per-cohort agb/age (a valid lower bound on ANPP_MAX; see plugin growth eq).
-function _load_anpp_floor_table(csv_path::String)
-  if !isfile(csv_path)
-    @warn "anpp_floor_from_data=true but $csv_path not found — ANPP floor off"; return nothing
-  end
-  df = CSV.read(csv_path, DataFrame)
-  col = "anpp_floor" in names(df) ? :anpp_floor : (:anpp_floor_pai in propertynames(df) ? :anpp_floor_pai : nothing)
-  isnothing(col) && (@warn "anpp_floor: no anpp_floor column in $csv_path"; return nothing)
-  d = Dict{Tuple{String,String,String},Float64}()
-  for r in eachrow(df)
-    v = getproperty(r, col)
-    ismissing(v) && continue
-    d[(uppercase(strip(String(r.category))), String(r.l3), String(r.lu))] = Float64(v)
-  end
-  isempty(d) && (@warn "anpp_floor: no rows in $csv_path"; return nothing)
-  @info "anpp_floor_from_data: loaded $(length(d)) (category,l3,lu) ANPP floors from $csv_path (col=$col)"
-  d
-end
-
-# Per-category MATURITY (SONA age) from prob_estab_all_species.csv (cols: category, maturity). One value per
-# category (constant across L3); median if a category has several. Seeds (not pins) MATURITY.
-function _load_maturity_table(csv_path::String)
-  if !isfile(csv_path)
-    @warn "maturity_from_data=true but $csv_path not found — MATURITY left as-is"; return nothing
-  end
-  df = CSV.read(csv_path, DataFrame)
-  d = Dict{String,Int}()
-  for g in groupby(df, :category)
-    d[uppercase(strip(String(g.category[1])))] = round(Int, Statistics.median(Float64.(g.maturity)))
-  end
-  @info "maturity_from_data: loaded MATURITY for $(length(d)) categories from $csv_path"
-  d
-end
-
-# Seed the initial candidate's per-species MATURITY from the table (in place; stays in the search).
-function _seed_maturity!(tables::BiomassSuccessionPlugin.BSTables, params, species_list)
-  tbl = tables.maturity
-  isnothing(tbl) && return params
-  n = 0
-  for gsp in eachindex(species_list)
-    v = get(tbl, uppercase(species_list[gsp]), nothing)
-    v === nothing && continue
-    params.MATURITY[gsp] = FloatType(v); n += 1
-  end
-  @info "maturity_from_data: seeded MATURITY for $n species (calibration start)"
-  params
-end
-
-# Data-derived MIN_REL_BIOMASS default (base 0.10 + fixed 0.175 spacing; see FIA_DATA_PREP shade analysis).
-const MIN_REL_PINNED = FloatType[0.10, 0.275, 0.45, 0.625, 0.80]
-# ---------------------------------------------------------------------------------------------------------------
-# Single source of truth for the DATA-PREP keyword arguments (train/val/test split, region filters, site-class
-# tiers, species tiering, outlier exclusions, ...). Used by `run_from_yaml` (training) AND by the analysis scripts
-# (`prepare_from_cfg`), so a script re-derives EXACTLY the plots/split the run trained on.
-# ---------------------------------------------------------------------------------------------------------------
-
-# Parse the data-prep inputs from a loaded config (`load_config`) into a NamedTuple whose names match `parametrize`'s kwargs.
-function _cfg_data_inputs(cfg0::AbstractDict)
-  cfg = _as_config(cfg0)
-  # Plots to DROP from the loaded set (outlier exclusion): the inline `exclude_plots:` list and/or the rows of an
-  # `exclude_plots_csv:` file with the four plot columns; merged (inline first).
-  exclude_plots = copy(cfg["exclude_plots"])
-  if cfg["exclude_plots_csv"] !== nothing
-    for r in eachrow(CSV.read(cfg["exclude_plots_csv"], DataFrame))
-      push!(exclude_plots, (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)))
-    end
-  end
-  return (
-    cohorts_db_path=cfg["cohorts_db_path"],   # (the FIADB env override is applied by load_config)
-    filter_eco_field=cfg["filter_eco_field"],
-    eco_field=cfg["eco_field"],
-    tablename=cfg["tablename"],
-    filter_ecos=cfg["filter_ecos"],
-    filter_plots=cfg["filter_plots"],
-    exclude_plots=exclude_plots,
-    filter_species=cfg["filter_species"],
-    skip_disturbances=cfg["skip_disturbances"],
-    spinup=cfg["spinup"],
-    by_subplot=cfg["by_subplot"],
-    val_frac=cfg["val_frac"],
-    split_seed=cfg["split_seed"],
-    n_folds=cfg["n_folds"],
-    fold_index=cfg["fold_index"],
-    test_frac=cfg["test_frac"],
-    min_trees=cfg["min_trees"],
-    min_agb_frac=cfg["min_agb_frac"],
-    stratify_eco_mixed=cfg["stratify_eco_mixed"],
-    single_ecoregion=cfg["single_ecoregion"],
-    stratify_landuse=cfg["stratify_landuse"],
-    site_class_strata=cfg["site_class_strata"],
-    siteclass_hi_max=cfg["siteclass_hi_max"],
-    siteclass_scheme=cfg["siteclass_scheme"],
-    shade_tier_csv=cfg["shade_tier_csv"],
-    filter_extent=cfg["filter_extent"],
-    filter_states=cfg["filter_states"],
-    siteclass_l3s=cfg["siteclass_l3s"],
-    max_exact=cfg["max_exact"], max_group=cfg["max_group"],
-    drop_phantom=cfg["drop_phantom"],
-    train_cap=cfg["train_cap"],
-    train_cap_k=cfg["train_cap_k"], train_cap_min=cfg["train_cap_min"],
-  )
-end
-
-# yaml `dual_mode` → :off | :joint | :b. Accepts Bool (true = joint, the pre-June spelling) and strings in any case
-# ("off"/"false", "joint"/"true", "b"). The single parser for every reader (run_from_yaml, the disturbance-shock setup, tools).
-function _parse_dual_mode(v)::Symbol
-  v === true && return :joint
-  (v === false || v === nothing) && return :off
-  s = lowercase(strip(String(v)))
-  s in ("off", "false") && return :off
-  s in ("joint", "true") && return :joint
-  s == "b" && return :b
-  error("dual_mode must be off | joint | b (or true/false), got $(repr(v))")
-end
-
-# yaml `loss_before_injection` (B14). The 2026-10-15 scoring rule (shock → score → sync injection) is defined for sync
-# injection only (override_injection + override_injection_sync, not replace). There the default is true; for the other
-# injection modes (append, replace) the default is the legacy order (false) and an explicit `true` is an error: those modes
-# used to score pre-injection silently, with the species-level exclusion and no recruit exclusion. Without injection the
-# flag has no effect. `g(key, default)` reads the already-coerced config values (called by `load_config`).
-function _resolve_loss_before_injection(g)::Bool
-  v = g("loss_before_injection", nothing)
-  inj = Bool(g("override_injection", false))
-  rule = inj && Bool(g("override_injection_sync", false)) && !Bool(g("override_injection_replace", false))
-  v === nothing && return !inj || rule
-  b = Bool(v)
-  b && inj && !rule && error("loss_before_injection: true needs override_injection_sync (and not override_injection_replace); " *
-                             "the other injection modes score in the legacy order — set loss_before_injection: false or omit it")
-  return b
-end
-
-# Disturbance-shock data source (yaml `disturbance_full_removals: <parquet>`, default data/cohort_disturbance_full.parquet in the
-# repo if present). Active only with the new scoring order + sync injection; otherwise "" (legacy behaviour byte-identical: no
-# partial-drop attach, no shock rows). Pure: returns the path, sets nothing.
-function _disturbance_shock_path(cfg0::AbstractDict)
-  cfg = _as_config(cfg0)
-  lbi = cfg["loss_before_injection"]   # resolved by load_config (_resolve_loss_before_injection)
-  dual = cfg["dual_mode"] !== :off
-  # Sim A needs sync injection; Sim B (dual mode / simB_disturb_only) uses the full removals + partial drops on its own
-  on = lbi && ((cfg["override_injection"] && cfg["override_injection_sync"]) || dual || cfg["simB_disturb_only"])
-  explicit = cfg["disturbance_full_removals"]   # nothing = default parquet | "" = disabled | path
-  default = joinpath(dirname(@__DIR__), "data", "cohort_disturbance_full.parquet")
-  path = ""
-  if on
-    if explicit === nothing
-      isfile(default) ? (path = default) : @warn "override_injection_sync with loss_before_injection: no disturbance data (set `disturbance_full_removals:` or build data/cohort_disturbance_full.parquet with tools/export_cohort_disturbance.py) — fully-removed cohorts are NOT shocked before scoring"
-    elseif explicit == ""
-      path = ""
-    else
-      path = explicit
-      isfile(path) || error("disturbance_full_removals: $(path) not found (set `disturbance_full_removals: \"\"` to run without disturbance shocks)")   # used to warn and silently disable the shocks
-    end
-  end
-  path
-end
-
-"""
-    data_config(cfg; split_seed=nothing) -> Data.DataConfig
-
-The ONE place a loaded config becomes the data-preparation inputs of a run: the selection / split / strata / tiering keys (`_cfg_data_inputs`:
-`\${VAR}`/`~` expansion, the `FIADB` env override, `exclude_plots` + `exclude_plots_csv`), the disturbance-shock parquet and `data_on_missing`.
-`split_seed` replaces the config's `split_seed` (per-fold scripts share the shuffle of the run they re-derive). Pure.
-`run_from_yaml` passes the result to `parametrize(data=...)`; the analysis scripts get the same struct from `prepare_from_cfg`.
-"""
-function data_config(cfg0::AbstractDict; split_seed=nothing)::Data.DataConfig
-  cfg = _as_config(cfg0)
-  din = _cfg_data_inputs(cfg)
-  return Data.DataConfig(; din...,
-    split_seed=split_seed === nothing ? din.split_seed : Int(split_seed),
-    disturbance_path=_disturbance_shock_path(cfg),
-    on_missing=Symbol(cfg["data_on_missing"]))
-end
-
-"""
-    scoring_options(cfg) -> ScoringOptions
-
-The scoring rule of a run, read from a loaded config: the injection mode (`override_injection[_replace|_sync|_noise|_disturbance]`),
-`loss_before_injection`, `exclude_recruits_at_entry`, `w_scope`, `death_term` and the initial-biomass perturbation (`init_perturb_frac/_cap`).
-Pure: it touches no module state.
-"""
-function scoring_options(cfg0::AbstractDict)::ScoringOptions
-  cfg = _as_config(cfg0)
-  w_scope = cfg["w_scope"]; w_scope in (:all, :survivors) || error("w_scope must be all | survivors")
-  death_term = cfg["death_term"]; death_term in (:none, :likelihood) || error("death_term must be none | likelihood")
-  return ScoringOptions(; override=cfg["override_injection"], replace=cfg["override_injection_replace"], sync=cfg["override_injection_sync"],
-    noise=cfg["override_injection_noise"], disturbance=cfg["override_injection_disturbance"],
-    loss_before_injection=cfg["loss_before_injection"], exclude_recruits_at_entry=cfg["exclude_recruits_at_entry"],
-    w_scope=w_scope, death_term=death_term,
-    init_perturb_frac=cfg["init_perturb_frac"], init_perturb_cap=FloatType(cfg["init_perturb_cap"]),
-    cycle=Data.CycleOptions(use_fia_cycle=cfg["fia_cycle"], merge=cfg["fia_cycle_merge"]))
-end
-
-"""
-    simb_options(cfg) -> SimBOptions
-
-Sim B / dual-mode options of a run, read from a loaded config. `t4_primary` is true for a dual_mode `b` run and for a tier-4 run without a dual.
-Pure: it touches no module state.
-"""
-function simb_options(cfg0::AbstractDict)::SimBOptions
-  cfg = _as_config(cfg0)
-  dual = cfg["dual_mode"]
-  return SimBOptions(; dual_mode=dual, tier_b=cfg["tier_b"], t4_primary=(dual === :b || (dual === :off && cfg["tier"] == 4)),
-    simb_spinup=cfg["simB_spinup"], simb_disturb_only=cfg["simB_disturb_only"],
-    t4_per_plot_mean=cfg["simB_per_plot_mean"], t4_mean_over_reps=cfg["simB_rep_mean"])
-end
-
-"""
-    scoring_from_config(cfg) -> (scoring::ScoringOptions, simb::SimBOptions)
-
-The ONE place the scoring and Sim B options are built. `run_from_yaml` and the analysis tools (tost, scatter, plots) all call it, so a tool
-scores exactly the way the run was trained; the options are then passed explicitly to `parametrize`, `fit_params` and the helpers.
-
-The data-preparation inputs live in `data_config`, the parameter-space switches in `param_space_options`.
-"""
-function scoring_from_config(cfg0::AbstractDict)
-  cfg = _as_config(cfg0)
-  scoring = scoring_options(cfg)
-  simb = simb_options(cfg)
-  return scoring, simb
-end
-
-"""
-    prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw...)
-
-`Data.prepare_parametrization_data(data_config(cfg; split_seed=split_rng_seed_override))` — EXACTLY the data the training path prepares (same struct) —
-returns `(splots, eco_list, species_list, eco_species_ids, splots_val, splots_test, outs::Data.DataOutputs)`. Extra `kw` replace individual `DataConfig`
-fields (e.g. `fold_index=k`); an unknown field is an error.
-"""
-function prepare_from_cfg(cfg::AbstractDict; split_rng_seed_override=nothing, kw...)
-  dc = data_config(cfg; split_seed=split_rng_seed_override)
-  return Data.prepare_parametrization_data(isempty(kw) ? dc : Data.with_data(dc; kw...))
-end
+include("config/from_yaml.jl")
 
 function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,Any}(), exec::Union{Nothing,ExecOptions}=nothing, post_search_hook=nothing)
   exec = exec === nothing ? exec_options_from_env() : exec   # env PAN_TIMING / PAN_SKIP_VAL / PAN_PARALLEL / PAN_NEWBEST_STATS, read once for the whole run

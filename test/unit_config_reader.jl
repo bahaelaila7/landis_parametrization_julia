@@ -207,7 +207,7 @@ end
   end
   @test occursin("`tier`", Pan.config_docs())
   # every top-level key read in src (cfg["..."]) is in the schema
-  src = read(joinpath(pkgdir(Pan), "src", "Pan.jl"), String)
+  src = join((read(joinpath(r, f), String) for (r, _, fs) in walkdir(joinpath(pkgdir(Pan), "src")) for f in fs if endswith(f, ".jl")), "\n")
   used = Set(m.captures[1] for m in eachmatch(r"\bcfg\[\"(\w+)\"\]", src))
   @test !isempty(used) && issubset(used, keys(Pan.SCHEMA))
 end
