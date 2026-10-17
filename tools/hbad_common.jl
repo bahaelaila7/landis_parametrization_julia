@@ -41,6 +41,7 @@ function hbad_load_trees(; alive_only=true)
       JOIN sp ON sp.statecd=t.STATECD AND sp.unitcd=t.UNITCD AND sp.countycd=t.COUNTYCD AND sp.plot=t.PLOT
       LEFT JOIN s.REF_SPECIES r ON r.SPCD = t.spcd_resolved
       WHERE t.STATECD IN (12,13) AND $st AND t.DIA > 0 AND t.HT > 0 AND t.estimated_age > 0
+      ORDER BY t.STATECD, t.UNITCD, t.COUNTYCD, t.PLOT, t.SUBP, t.TREE, t.INVYR   -- B37: fixed row order (fits sum in input order)
     """))
     DBInterface.close!(con)
     df.measdate = Date.(df.measdate)

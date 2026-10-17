@@ -36,7 +36,7 @@ function main()
     mkpath(HBAD_OUT)
     # species -> group map (all species seen)
     sg = unique(select(trees, :sym => :species, :grp))
-    sg = combine(groupby(sg, :species), :grp => first => :grp)
+    sg = sort!(combine(groupby(sg, :species), :grp => first => :grp), :species)   # B37: deterministic row order
     CSV.write(joinpath(HBAD_OUT, "species_group.csv"), sg)
     ## cohort features
     coh.lnagb = log.(coh.agb_g_m2); coh.lnage = log.(Float64.(coh.age))
@@ -46,7 +46,7 @@ function main()
     coh.planted = Float64.(coh.planted)
     # keys: top-30 species by train cohort count + pooled S/H
     tr = coh[coh.set .== "train", :]
-    cnt = combine(groupby(tr, :species), nrow => :n); sort!(cnt, :n, rev=true)
+    cnt = combine(groupby(tr, :species), nrow => :n); sort!(cnt, [order(:n, rev=true), :species])   # B37: ties by name
     top = cnt.species[1:30]; topset = Set(top)
     coh.key = [s in topset ? s : "_" * g for (s, g) in zip(coh.species, coh.grp)]
     trees.lndia = log.(trees.dia); trees.lnbio = log.(trees.bio); trees.lnage = log.(trees.age)
