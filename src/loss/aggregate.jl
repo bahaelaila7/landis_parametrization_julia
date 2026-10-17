@@ -98,7 +98,7 @@ end
 # CDF is computed per (eco, cycle, species); cycles are summed into one SiteLoss per eco
 # (num_obs = total measurements in the eco, so get_total_loss is per-measurement-averaged W1).
 # Diagnostics: fit_params(...; capture_t4=T4Capture()) → every calculate_t4_loss of that call stashes `(sim, ref, n_cycles, site_counts)` into `.data`
-# (the last one wins: Sim B's when a dual_b follows Sim A). tools/simB_regen_diff.jl.
+# (the last one wins: Sim B's when a dual_b follows Sim A). tools/legacy/simB_regen_diff.jl.
 mutable struct T4Capture
   data::Union{Nothing,NamedTuple}
 end
