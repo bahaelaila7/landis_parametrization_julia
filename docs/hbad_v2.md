@@ -367,3 +367,23 @@ take-over is gone (j6 0.321, j9 0.281). Size profile > 21 yr 253 / 171 / 217 / 1
 ×7.2), far above the measured persistent vigour (E5: sd of ln dD ≈ 0.68), and Sim A collapses (λ 0: VAL −223,904).
 → j11 (λ 0.75) and j12 (λ 0.5) on `margins`, recruitment fixed, σv ≤ 0.7 (HBAD2_SIGV_MAX, data-based bound; recorded in meta.txt and
 checked), ideal fA −272,975 (v2f train) / fB 14,619 (j10 train), nadir fA −236,467 (j10 train) / fB 24,102 (start).
+
+### 5.17 Compromise on the species-aware objective; candidate selection (VAL) and the one TEST report
+j11 (`margins`, λ 0.75, vigour σv ≤ 0.7 [binds at 0.70], recruitment fixed at the Poisson fit) and j12 (same, λ 0.5), VAL:
+| | Sim A | Sim B margins | PITA BA share > 21 yr (obs 0.209) | PITA dD at 3 cm | composition | > 21 yr classes (obs 264/94/244/162) |
+|---|---|---|---|---|---|---|
+| j11 λ 0.75 | **−269,252** | 19,034 | 0.196 | 0.24 cm/yr | **0.165** | 341 / 251 / 183 / 163 |
+| j12 λ 0.5 | −266,081 | 18,548 | 0.191 | 0.33 cm/yr | 0.169 | 324 / 251 / 191 / 161 |
+(start v2f + vigour −271,735 / 23,389.) j11: Sim A only 2.5k NLL below the Sim A optimum and better than every earlier compromise
+(j6 −265,212, j7 −268,525); composition close to observed for all species (_H 0.327 vs 0.351, ACRU 0.048 vs 0.040, LIST2 0.087 vs 0.081);
+small-tree growth plausible for every species (0.09–0.24 cm/yr at 3 cm). The pole excess partly returns (251 vs 94; j6 166): plausible
+growth + correct composition cannot also clear the poles — the remaining structural trade-off (part of it the FIA ingrowth inconsistency, 5.10).
+**Selected on VAL + physical plausibility: v2g = j11** (results/hbad2/fit_v2g: theta.csv, recr.csv = the Poisson fit, meta.txt).
+
+TEST (reported once; not used for any choice):
+* Sim A (same tracked-tree cohorts, subplot sites): v2g total −265,505 (mort 32,918, ln D −158,459, ln H −139,964; σ_D 0.121, σ_H 0.155);
+  v2f −267,776 (mort 32,350); v1 (FIA regressions, best variant) −246,242 (mort 32,533; σ_D 0.128, σ_H 0.191). v2g beats v1 overall,
+  in diameter and in height, but NOT in mortality (v2f did; the joint compromise costs mortality accuracy).
+* Sim B (free runs, 439 clean natural test plots, 1,552 later visits; median |error| (bias)): BA 11.6 % (+14.5) [persistence 24.3 %,
+  v2f 12.6 %], N ≥ 5 in 18.3 % (+12) [18.2 %, 20.2 %], QMD 18.5 % [16.0 %, 20.5 %], Lorey H 6.6 % [13.1 %, 7.1 %], composition 0.159
+  [0.138, 0.155]; > 21 yr poles 240 vs obs 73 (v2f 351). Persistence still wins on QMD and composition and ties N ≥ 5 in.
