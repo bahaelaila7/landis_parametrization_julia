@@ -390,3 +390,12 @@ TEST (reported once; not used for any choice):
 v2g figures: results/hbad2/figures/v2g_{species_curves,allocation_vs_obs,simB_scatter}.png. Timing check (timing_curves.jl): corr with
 observed free-growing increments dD 0.81, dH 0.94, dH:dD 0.80 (v2c 0.86 / 0.955 / 0.82 — the joint compromise constrains the curves a little).
 Decoded v2g export (tools/hbad2/export_params.jl): results/hbad2/fit_v2g/params_{species,global,recruitment}.csv. At a bound: LITU rH = 3.0 (form-2 upper bound), LIST2 sdimax = 2000 (upper bound; the cap never binds anyway).
+
+## 6. Integration into Pan (2026-10-17, user-approved tree-based loader)
+* Stage 1 (merged into `refactor` 669e54b): plugin src/plugins/HBAD2 (`succession_plugin: hbad2`), Data.load_tree_cohorts (curated_trees →
+  subplot sites, cohorts by species key × birth class × size class, 3 vigour sub-cohorts), exact parity with this prototype (Sim B 1860 sites ×
+  25 yr: max rel diff 0; from the loader 7.2e-15; Sim A 0) — tools/hbad2_parity.jl, docs/hbad2_plugin.md (in the Pan repo).
+* Stage 2 (merged, dc5b082): scenario engine runs hbad2 — roster results/params_yaml/r4_hbad2_v2g.yaml, each FIA plot = 4 subplot sites,
+  plot-level metrics/removal (residual BA/TPA/SDI met exactly), planting with a planted flag, cleanup of cohorts < 1e-3 trees/ha in scenario
+  runs; scenario hash r4_hbad2_v2g 87b47235… (identical t=1/t=2). Timing (2 threads): 10 plots × 100 yr in 2.6 s (HBAD v1 0.9 s).
+* Calibration stays in tools/hbad2 (this prototype harness); Pan's generic fit_params path is not used for hbad2.
