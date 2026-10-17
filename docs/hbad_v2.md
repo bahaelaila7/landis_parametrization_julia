@@ -389,3 +389,4 @@ TEST (reported once; not used for any choice):
   [0.138, 0.155]; > 21 yr poles 240 vs obs 73 (v2f 351). Persistence still wins on QMD and composition and ties N ≥ 5 in.
 v2g figures: results/hbad2/figures/v2g_{species_curves,allocation_vs_obs,simB_scatter}.png. Timing check (timing_curves.jl): corr with
 observed free-growing increments dD 0.81, dH 0.94, dH:dD 0.80 (v2c 0.86 / 0.955 / 0.82 — the joint compromise constrains the curves a little).
+Decoded v2g export (tools/hbad2/export_params.jl): results/hbad2/fit_v2g/params_{species,global,recruitment}.csv. At a bound: LITU rH = 3.0 (form-2 upper bound), LIST2 sdimax = 2000 (upper bound; the cap never binds anyway).
