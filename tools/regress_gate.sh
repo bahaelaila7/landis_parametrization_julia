@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Fixed-seed regression gate (see docs/region4_pnet.md §7). Runs a 40-evaluation Igel MO-CMA-ES search (igel_mu 6,
 # n_reps 1, no Sobol init) of the 8.5.3 production config and dumps the archive objectives (sorted, full precision).
-# PASS ⇔ byte-identical to the baseline produced on split-productive-species (docs/regress/baseline_853_*.txt).
+# PASS ⇔ byte-identical to the CURRENT baseline docs/regress/baseline_853_refactor-step8.txt (re-recorded 2026-10-17 on the
+# verified refactor tree, two identical runs; the older baseline_853_split-productive-species.txt predates the refactor's
+# behaviour-changing bug fixes (docs: /workspace/pan_refactor/BUGS.md) and is kept for history only).
 #   tools/regress_gate.sh <repo_root> <out_dir> [threads=4]
-#   cmp docs/regress/baseline_853_split-productive-species.txt <out_dir>/REGRESS_ARCHIVE.txt
+#   cmp docs/regress/baseline_853_refactor-step8.txt <out_dir>/REGRESS_ARCHIVE.txt
 # Needs the 8.5.3 config + data in the main checkout's runs/ (PAN_DATA below).
 set -u
 ROOT="$1"; OUT="$2"; TH="${3:-4}"
