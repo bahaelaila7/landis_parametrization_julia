@@ -189,7 +189,7 @@ function make_sites_hbad2_arrays(plugin::PluginConfig{P}, off::AbstractVector{<:
   counts = Int32[max(off[s+1] - off[s], 1) for s in 1:ns]
   soa = soa_type(P)((cohort=counts, species=fill(Int32(nsp), ns)))
   base_seed = rand(rng, UInt64)
-  ep = generate_eco_params(pc, generate_params(pc, pc.priors.species_list, ["eco"], [collect(1:nsp)]))
+  ep = [HBAD2Plugin.identity_eco_params(pc)]
   for i in 1:ns
     site = getsite(soa, i)
     site.active = true

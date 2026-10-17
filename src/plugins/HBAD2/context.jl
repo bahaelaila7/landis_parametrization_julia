@@ -86,3 +86,10 @@ function generate_hbad2_eco_params(ctx::HBAD2Context, params::HBAD2Params)::Vect
   end
   return out
 end
+
+"""Resolved parameters for the species of the context in order (eco-local index = global index): what a site sees in an ecoregion that lists all species in order. Independent of the eco table."""
+function identity_eco_params(ctx::HBAD2Context)::HBAD2EcoParams
+  n = length(ctx.priors.species_list); kix = Dict(k => i for (i, k) in enumerate(ctx.keys))
+  return HBAD2EcoParams(SpP[ctx.sp[kix[ctx.species_key[g]]] for g in 1:n], RecP[ctx.rec[kix[ctx.species_key[g]]] for g in 1:n],
+                        Allo[(p = ctx.priors.sp[g]; Allo(p.mq_a, p.mq_b)) for g in 1:n], ctx.glob)
+end

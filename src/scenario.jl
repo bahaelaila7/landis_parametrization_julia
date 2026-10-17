@@ -275,8 +275,9 @@ end
 # Cohort structure (TPA / QMD / height) — HBAD state, else the empirical translation
 # ---------------------------------------------------------------------------------------------------------------------
 @inline _gsp(ps::ParamSet, eco::Integer, esp::Integer) = Int(ps.params.ECO_SPECIES_IDS[eco][esp])
+_native_struct(ps::ParamSet) = ps.plugin === HBADPlugin.HBAD || ps.plugin === HBAD2Plugin.HBAD2     # plugins whose state IS (tph, dq, h) per cohort
 function _cohort_struct(ps::ParamSet, site, k::Int)
-  if ps.plugin === HBADPlugin.HBAD
+  if _native_struct(ps)
     return Float64(site.c_tph[k]), Float64(site.c_dq[k]), Float64(site.c_h[k])
   end
   bio = Float64(site.c_bio[k]); bio > 0 || return 0.0, 0.0, 0.0
@@ -313,6 +314,27 @@ function _site_summary(ps::ParamSet, site)
    c_ag=agb * SC_CARBON * 0.01, dist=dist)
 end
 
+"""
+Metrics of a scenario plot = the per-ha mean over its site(s): one site for Biomass Succession / PnET / HBAD, the 4 subplot sites for HBAD2 (per-ha densities, so the plot is their mean).
+A single site returns its own summary unchanged.
+"""
+function _plot_summary(ps::ParamSet, sites)
+  length(sites) == 1 && return _site_summary(ps, sites[1])
+  sms = [_site_summary(ps, s) for s in sites]; n = length(sms)
+  ba = 0.0; tpa = 0.0; tc = 0.0; bd = 0.0; agb = 0.0; cag = 0.0
+  dist = Dict{Tuple{Int16,Int},NTuple{2,Float64}}()
+  for sm in sms
+    ba += sm.ba; tpa += sm.tpa; tc += sm.tcuft; bd += sm.bdft; agb += sm.agb; cag += sm.c_ag
+    for (k, v) in sm.dist
+      c, bb = get(dist, k, (0.0, 0.0)); dist[k] = (c + v[1], bb + v[2])
+    end
+  end
+  for (k, v) in dist; dist[k] = (v[1] / n, v[2] / n); end
+  ba /= n; tpa /= n
+  qmd = tpa > 0 ? sqrt(ba / (0.005454154 * tpa)) : 0.0
+  (ba=ba, tpa=tpa, qmd=qmd, tcuft=tc / n, bdft=bd / n, agb=agb / n, c_ag=cag / n, dist=dist)
+end
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Management
 # ---------------------------------------------------------------------------------------------------------------------
@@ -326,20 +348,32 @@ function _remove_cohort!(site, k::Int)
   site.old = min(site.old, site.live)
 end
 
-"""Apply one removal to the selected cohorts of a site. Returns (removed AGB g/m², removed total cubic ft³/ac, removed board feet/ac)."""
-function _apply_removal!(ps::ParamSet, pc, site, act, sym_ok::Function)
-  n = Int(site.live); n == 0 && return 0.0, 0.0, 0.0
-  st = [_cohort_struct(ps, site, k) for k in 1:n]; veq = volume_eqs(ps)
+"""
+    _apply_removal!(ps, pc, sites, act, sym_ok) -> (removed AGB g/m², removed total cubic ft³/ac, removed board feet/ac)
+
+Apply one removal to the selected cohorts of a STAND = the site(s) of one scenario plot (`sites`: one site, or the 4 subplot sites of an HBAD2 plot). Cohort selection, residual
+targets (BA / TPA / SDI as per-ha plot means over the sites) and the order of removal (`below`: smallest QMD first, `above`: largest first, over all the stand's cohorts) act on the
+stand as a whole, so a residual target is met exactly by the plot mean. Returned amounts are plot means (per-ha mean over the sites). A single site behaves exactly as before.
+HBAD2: trees are removed at constant size (`c_tph` scaled, dq / h / age kept; reported AGB from the allometry); a cohort leaves only when ALL its trees are removed.
+"""
+function _apply_removal!(ps::ParamSet, pc, sites::AbstractVector, act, sym_ok::Function)
+  ns = length(sites); w = 1.0 / ns
+  cnt = [Int(s.live) for s in sites]; n = sum(cnt); n == 0 && return 0.0, 0.0, 0.0
+  si = Vector{Int}(undef, n); kk = Vector{Int}(undef, n); j0 = 0
+  for (a, c) in enumerate(cnt); for k in 1:c; j0 += 1; si[j0] = a; kk[j0] = k; end; end
+  st = [_cohort_struct(ps, sites[si[j]], kk[j]) for j in 1:n]; veq = volume_eqs(ps)
+  gs = [_gsp(ps, sites[si[j]].eco_id, sites[si[j]].c_species[kk[j]]) for j in 1:n]
+  hb2 = ps.plugin === HBAD2Plugin.HBAD2
   sel = Int[]
   sl = get(act, "selection", Dict{String,Any}())
   alo = Float64(get(sl, "age_lo", 0)); ahi = Float64(get(sl, "age_hi", 9999))
   dlo = Float64(get(sl, "dbh_lo", get(act, "dbh_lo", 0.0))); dhi = Float64(get(sl, "dbh_hi", get(act, "dbh_hi", 999.0)))
-  for k in 1:n
-    sp = String(ps.params.SPECIES_LIST[_gsp(ps, site.eco_id, site.c_species[k])])
+  for j in 1:n
+    sp = String(ps.params.SPECIES_LIST[gs[j]])
     sym_ok(sp) || continue
-    a = Float64(site.c_age[k]); dqi = st[k][2] / 2.54
+    a = Float64(sites[si[j]].c_age[kk[j]]); dqi = st[j][2] / 2.54
     (alo <= a <= ahi && dlo <= dqi <= dhi) || continue
-    push!(sel, k)
+    push!(sel, j)
   end
   isempty(sel) && return 0.0, 0.0, 0.0
   rm = get(act, "removal", Dict{String,Any}())
@@ -353,36 +387,43 @@ function _apply_removal!(ps::ParamSet, pc, site, act, sym_ok::Function)
   elseif typ == "percent_biomass"
     f[sel] .= clamp(val / 100, 0.0, 1.0)
   else
-    total = sum(metric(k) for k in 1:n); excess = total - val
+    total = sum(metric(k) for k in 1:n) * w; excess = total - val
     if excess > 0
       if dir == "proportional"
-        s = sum(metric(k) for k in sel); f[sel] .= s > 0 ? clamp(excess / s, 0.0, 1.0) : 0.0
+        s = sum(metric(k) for k in sel) * w; f[sel] .= s > 0 ? clamp(excess / s, 0.0, 1.0) : 0.0
       else
         order = sort(sel; by=k -> st[k][2], rev=(dir == "above"))
         for k in order
           excess <= 1e-9 && break
-          c = metric(k); c > 0 || continue
+          c = metric(k) * w; c > 0 || continue
           f[k] = min(1.0, excess / c); excess -= f[k] * c
         end
       end
     end
   end
   rb = 0.0; rv = 0.0; rs = 0.0
-  # iterate high→low index so swap-removals do not disturb unvisited cohorts
-  for k in n:-1:1
-    f[k] > 0 || continue
-    b = Float64(site.c_bio[k]); t, dq, h = st[k]
-    v, bf = cohort_volume(veq[_gsp(ps, site.eco_id, site.c_species[k])], t, dq, h)
-    rb += b * f[k]; rv += v * f[k]; rs += bf * f[k]
-    if f[k] >= 0.999 || b * (1 - f[k]) < 1.0
+  # iterate high→low index so swap-removals do not disturb unvisited cohorts (cohorts of one site are contiguous and visited in descending order)
+  for j in n:-1:1
+    f[j] > 0 || continue
+    site = sites[si[j]]; k = kk[j]
+    b = Float64(site.c_bio[k]); t, dq, h = st[j]
+    v, bf = cohort_volume(veq[gs[j]], t, dq, h)
+    rb += b * f[j] * w; rv += v * f[j] * w; rs += bf * f[j] * w
+    if hb2
+      f[j] >= 1.0 ? _remove_cohort!(site, k) : HBAD2Plugin.scale_cohort!(pc, site, k, 1.0 - f[j])
+    elseif f[j] >= 0.999 || b * (1 - f[j]) < 1.0
       _remove_cohort!(site, k)
     else
-      set_cohort_bio!(pc, site, k, FloatType(b * (1 - f[k])))
+      set_cohort_bio!(pc, site, k, FloatType(b * (1 - f[j])))
     end
   end
-  hasproperty(site, :B) && (site.B = FloatType(sum(Float64(site.c_bio[k]) for k in 1:Int(site.live); init=0.0)))
+  for site in sites
+    hb2 ? HBAD2Plugin.refresh_totals!(pc, site) :
+    hasproperty(site, :B) && (site.B = FloatType(sum(Float64(site.c_bio[k]) for k in 1:Int(site.live); init=0.0)))
+  end
   rb, rv, rs
 end
+_apply_removal!(ps::ParamSet, pc, site, act, sym_ok::Function) = _apply_removal!(ps, pc, [site], act, sym_ok)
 
 """Plant `tpa` trees/ac (× survival) of FIA symbol `sym` on a site (new cohort, age 1, QMD 1 cm). Returns false if the species
 cannot be represented in the site's eco cell. CSR capacity must have been reserved by the caller."""
@@ -390,6 +431,11 @@ function _plant!(ps::ParamSet, pc, site, sym::AbstractString, tpa::Real, surviva
   esp = scenario_species(ps, Int(site.eco_id), sym); esp == 0 && return false
   tph = Float64(tpa) / SC_HA_PER_AC * clamp(Float64(survival), 0, 100) / 100
   tph > 0 || return true
+  if ps.plugin === HBAD2Plugin.HBAD2        # D 2.54 cm, H 3 m, age 1, 3 vigour sub-cohorts; planted stand: the planted multipliers (pH, pD, pM) apply to the site from now on
+    plant!(pc, site, esp, tph)
+    site.planted = true
+    return true
+  end
   pr = ps.hb.priors.sp[_gsp(ps, site.eco_id, esp)]
   dq = 1.0; agb = HBADPlugin.agb_of(pr, tph, dq)
   add_cohort!(pc, site, UIntType(esp), FloatType(1), FloatType(agb))
@@ -427,15 +473,18 @@ end
 # Run
 # ---------------------------------------------------------------------------------------------------------------------
 """
-    run_scenario(ps, plots, plan; climate=nothing, seed=1, establishment=true, progress=nothing)
+    run_scenario(ps, plots, plan; climate=nothing, seed=1, establishment=true, progress=nothing, hbad2_cleanup=1e-3)
 
 `plots`: vector of (cn, acres). `plan`: Dict with cycles, period, actions (FE plan JSON). Returns
 Dict(cn => (status, message, metrics::Vector{SCMetrics}, dist::Dict{Int,Dict{(spcd,dbh_lo)=>(tpa,ba)}}, spsym)) and warnings.
+HBAD2 sets: the initial state is built from the TREES of the plot visit (4 subplot sites per plot, `_hbad2_sites`); `hbad2_cleanup` = trees/ha below which a cohort is removed at the end
+of every annual step (0 = off; docs/scenario_engine.md). Ignored by the other plugins.
 """
-function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=1, establishment::Bool=true, progress=nothing)
+function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=1, establishment::Bool=true, progress=nothing, hbad2_cleanup::Real=1e-3)
   SP = ps.plugin; p = ps.params
   cycles = Int(get(plan, "cycles", 10)); period = Int(get(plan, "period", 10)); horizon = cycles * period
   warnings = String[]
+  hb2 = SP === HBAD2Plugin.HBAD2
   info = load_scenario_units(ps.scen, plots, warnings)
   acres = Dict(String(x.cn) => Float64(x.acres) for x in plots)
   results = Dict{String,Any}()
@@ -452,6 +501,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
     isempty(msg) || push!(warnings, msg)
     pid = length(meta) + 1
     push!(meta, (cn=r.cn, plot_id=pid, eco=e, measdate=r.measdate, l4=r.l4, l3=r.l3, lat=r.lat, lon=r.lon, key=r.key))
+    hb2 && continue          # HBAD2 starts from the trees of the visit (_hbad2_sites), not from the cohort table
     for c in eachrow(r.cohorts)
       ntot += c.agb
       j = scenario_species(ps, e, c.sym)
@@ -462,45 +512,58 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
   end
   ndrop > 0 && push!(warnings, "$(round(100 * ndrop / max(ntot, 1e-9), digits=2)) % of initial AGB is in species the parameter set cannot represent in those eco cells (dropped)")
   isempty(meta) && return results, warnings
-  splots = DataFrame(rows)
-  # plots with no representable cohort still simulate (empty start, regeneration only): give them a placeholder row? no — report
-  have = Set(Int.(splots.plot_id))
-  for m in meta
-    Int(m.plot_id) in have || push!(rows, (plot_id=UIntType(m.plot_id), eco_id=m.eco, eco_species_id=UIntType(1), species_id=UIntType(_gsp(ps, m.eco, 1)),
-                                         age_calc=FloatType(1), agb_sum=FloatType(1), measdate=m.measdate, start_measdate=m.measdate, sim_year=0))
+  local pc, soa
+  if hb2
+    pc, soa = _hbad2_sites(ps, meta, seed, !establishment, Float64(hbad2_cleanup), warnings)
+  else
+    splots = DataFrame(rows)
+    # plots with no representable cohort still simulate (empty start, regeneration only): give them a placeholder row? no — report
+    have = Set(Int.(splots.plot_id))
+    for m in meta
+      Int(m.plot_id) in have || push!(rows, (plot_id=UIntType(m.plot_id), eco_id=m.eco, eco_species_id=UIntType(1), species_id=UIntType(_gsp(ps, m.eco, 1)),
+                                           age_calc=FloatType(1), agb_sum=FloatType(1), measdate=m.measdate, start_measdate=m.measdate, sim_year=0))
+    end
+    splots = DataFrame(rows)
+    # the plugin context of this run: HBAD = the set's priors; PnET = the per-request climate (+ the cached base constants / species table); BS = no data
+    attrs = nothing
+    pc = SP === PnETPlugin.PnET ? _pnet_context(ps.scen, climate, meta, horizon, warnings) :
+         SP === HBADPlugin.HBAD ? ps.hb : BiomassSuccessionPlugin.BSTables()
+    SP === PnETPlugin.PnET && (attrs = _pnet_site_attrs(ps.scen, pc.climate, meta, warnings))
+    rng = RNGType(UInt64(seed))
+    soa = make_sites(splots, [Int.(ids) for ids in p.ECO_SPECIES_IDS]; plugin=PluginConfig(pc), rng=rng, spinup=false,
+                     no_establishment=!establishment, site_attrs=attrs)
   end
-  splots = DataFrame(rows)
-  # the plugin context of this run: HBAD = the set's priors; PnET = the per-request climate (+ the cached base constants / species table); BS = no data
-  attrs = nothing
-  pc = SP === PnETPlugin.PnET ? _pnet_context(ps.scen, climate, meta, horizon, warnings) :
-       SP === HBADPlugin.HBAD ? ps.hb : BiomassSuccessionPlugin.BSTables()
-  SP === PnETPlugin.PnET && (attrs = _pnet_site_attrs(ps.scen, pc.climate, meta, warnings))
-  rng = RNGType(UInt64(seed))
-  soa = make_sites(splots, [Int.(ids) for ids in p.ECO_SPECIES_IDS]; plugin=PluginConfig(pc), rng=rng, spinup=false,
-                   no_establishment=!establishment, site_attrs=attrs)
   eco_params = generate_eco_params(pc, p); ctx = make_ctx(pc, eco_params)
-  site_of = Dict(Int(soa.scalar.mapcode[i]) => i for i in 1:soa.n)
+  # scenario plots ("units"): the sites sharing a plot id (mapcode) - one site per plot, except HBAD2: its 4 subplot sites. A plot's sites share its acres and its management.
+  unit_sites = Vector{Vector{Int}}(); uidx = Dict{Int,Int}()
+  for i in 1:soa.n
+    u = get!(uidx, Int(soa.scalar.mapcode[i])) do; push!(unit_sites, Int[]); length(unit_sites); end
+    push!(unit_sites[u], i)
+  end
+  nu = length(unit_sites)
   pm = Dict(m.plot_id => m for m in meta)
-  acr = Dict(i => acres[pm[Int(soa.scalar.mapcode[i])].cn] for i in 1:soa.n)
+  umeta = [pm[Int(soa.scalar.mapcode[unit_sites[u][1]])] for u in 1:nu]
+  acr = Dict(u => acres[umeta[u].cn] for u in 1:nu)
   events = _plan_events(plan, cycles)
-  mets = [SCMetrics[] for _ in 1:soa.n]; dists = [Dict{Int,Dict{Tuple{Int16,Int},NTuple{2,Float64}}}() for _ in 1:soa.n]
-  y0 = [Dates.year(pm[Int(soa.scalar.mapcode[i])].measdate) for i in 1:soa.n]
-  rem = [zeros(3) for _ in 1:soa.n]   # removed (agb g/m², vol m³/ha, sawtimber vol m³/ha) by this cycle's management
+  mets = [SCMetrics[] for _ in 1:nu]; dists = [Dict{Int,Dict{Tuple{Int16,Int},NTuple{2,Float64}}}() for _ in 1:nu]
+  y0 = [Dates.year(umeta[u].measdate) for u in 1:nu]
+  rem = [zeros(3) for _ in 1:nu]   # removed (agb g/m², vol m³/ha, sawtimber vol m³/ha) by this cycle's management (plot means)
+  usites(u) = [getsite(soa, i) for i in unit_sites[u]]
   function manage!(c)
     for (ec, kind, act) in events
       ec == c || continue
       if kind == "plant"
         _plant_all!(ps, pc, soa, collect(1:soa.n), act, warnings)
       elseif kind == "harvest"
-        sites = _select_stands(ps, soa, act, acr, seed + c)
+        sel_units = _select_stands(ps, soa, unit_sites, act, acr, seed + c)
         spf = _sel_species(get(get(act, "selection", Dict()), "species", "all"))
         ok(sp) = spf === nothing || uppercase(sp) in spf || any(s -> get(ps.meta.species_map, s, "") == sp, spf)
-        for i in sites
-          rb, rv, rs = _apply_removal!(ps, pc, getsite(soa, i), act, ok)
-          rem[i][1] += rb; rem[i][2] += rv; rem[i][3] += rs
+        for u in sel_units
+          rb, rv, rs = _apply_removal!(ps, pc, usites(u), act, ok)
+          rem[u][1] += rb; rem[u][2] += rv; rem[u][3] += rs
         end
         pa = get(act, "plant_after", nothing)
-        pa === nothing || _plant_all!(ps, pc, soa, sites, Dict{String,Any}(String(k) => v for (k, v) in pairs(pa)), warnings)
+        pa === nothing || _plant_all!(ps, pc, soa, reduce(vcat, (unit_sites[u] for u in sel_units); init=Int[]), Dict{String,Any}(String(k) => v for (k, v) in pairs(pa)), warnings)
       end
     end
   end
@@ -512,9 +575,9 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
         step!(SP, soa, t, ctx)
       end
     end
-    sms = [_site_summary(ps, getsite(soa, i)) for i in 1:soa.n]
+    sms = [_plot_summary(ps, usites(u)) for u in 1:nu]
     manage!(c)
-    for i in 1:soa.n
+    for i in 1:nu
       sm = sms[i]; r_ = rem[i]; t = c * period
       push!(mets[i], SCMetrics(y0[i] + t, sm.ba, sm.tpa, sm.qmd, sm.tcuft, sm.bdft,
         r_[2], r_[3],
@@ -525,11 +588,43 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
     progress === nothing || progress(c, cycles)
   end
   spsym = Dict{Int16,String}(Int16(v) => k for (k, v) in ps.spcd)
-  for i in 1:soa.n
-    m = pm[Int(soa.scalar.mapcode[i])]
-    results[m.cn] = (status="ok", message="", metrics=mets[i], dist=dists[i], spsym=spsym)
+  for u in 1:nu
+    results[umeta[u].cn] = (status="ok", message="", metrics=mets[u], dist=dists[u], spsym=spsym)
   end
   results, unique(warnings)
+end
+
+"""
+    _hbad2_sites(ps, meta, seed, no_establishment, cleanup, warnings) -> (pc, soa)
+
+Initial HBAD2 state of the scenario plots `meta` (plot_id, eco, key `STATE_UNIT_COUNTY_PLOT`, measdate of the visit): the live trees of each visit from the scenario's FIA database
+(`Data.load_tree_cohorts`, table `curated_trees`, READ_ONLY, ORDER BY the full key) -> the 4 SUBPLOT sites of every plot, each with per-ha densities (a subplot's trees x 4, as in the stage-1
+loader); empty subplots are empty sites. A plot visit without any measured live tree (with estimated age) starts empty on all 4 sites: it regenerates only. Species -> v2 key by the set's
+species_map (else the group key `_S` / `_H`). All sites of a plot carry its plot id as `mapcode` and its ecoregion. Returns the run context (cleanup option on when `cleanup` > 0) and the SoA.
+"""
+function _hbad2_sites(ps::ParamSet, meta, seed::Integer, no_establishment::Bool, cleanup::Float64, warnings)
+  keys_ = String.(ps.params.SPECIES_LIST)
+  pc = HBAD2Plugin.with(ps.h2; fixed=HBAD2Plugin.HBAD2Const(vigour=ps.h2.fixed.vigour, cleanup_tph=cleanup))
+  vk(m) = (k = parse.(Int, split(m.key, "_")); length(k) == 4 || error("scenario plot key '$(m.key)' is not STATE_UNIT_COUNTY_PLOT"); (k[1], k[2], k[3], k[4], Dates.Date(m.measdate)))
+  vis = DataFrame(statecd=Int[], unitcd=Int[], countycd=Int[], plot=Int[], measdate=Dates.Date[])
+  for m in meta; push!(vis, vk(m)); end
+  smap = ps.meta.species_map; dflt = Data.default_key_resolver(keys_)
+  resolve = (sym, grp) -> (k = get(smap, uppercase(strip(sym)), ""); isempty(k) ? dflt(sym, grp) : k)
+  tc = Data.load_tree_cohorts(ps.scen.fia_db, vis, keys_; vigour=pc.fixed.vigour, resolve=resolve)
+  vix = Dict((Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot), Dates.Date(r.measdate)) => v for (v, r) in enumerate(eachrow(tc.visits)))
+  idx = Int[]; eco = Int[]; code = Int[]; nempty = 0
+  for m in meta
+    v = vix[vk(m)]
+    for sb in 1:4
+      s = (v - 1) * 4 + sb
+      tc.site_visit[s] == v && tc.site_subp[s] == sb || error("_hbad2_sites: unexpected site order of the tree loader")
+      push!(idx, s); push!(eco, m.eco); push!(code, m.plot_id)
+    end
+    all(sb -> tc.off[(v-1)*4+sb+1] == tc.off[(v-1)*4+sb], 1:4) && (nempty += 1)
+  end
+  nempty > 0 && push!(warnings, "HBAD2: $nempty plot visit(s) have no measured live trees with an estimated age; they start empty (regeneration only)")
+  soa = make_sites_hbad2(PluginConfig(pc), Data.subset_sites(tc, idx); rng=RNGType(UInt64(seed)), no_establishment=no_establishment, eco_id=eco, mapcode=code)
+  return pc, soa
 end
 
 # reserve CSR capacity (`extra[i]` new cohorts on site i) — every site's count must be set before readjust_soa!
@@ -544,7 +639,7 @@ function _plant_all!(ps::ParamSet, pc, soa, sites, act, warnings)
   spec = String(something(get(act, "species", ""), ""))
   syms = [uppercase(strip(x)) for x in split(spec, ',') if !isempty(strip(x))]
   isempty(syms) && return
-  _reserve!(soa, Dict(i => length(syms) for i in sites))
+  _reserve!(soa, Dict(i => length(syms) * plant_slots_reserved(pc) for i in sites))
   tpa = Float64(something(get(act, "tpa", 0.0), 0.0)); surv = Float64(something(get(act, "survival", 100.0), 100.0))
   for i in sites, sym in syms
     _plant!(ps, pc, getsite(soa, i), sym, tpa, surv) ||
@@ -552,21 +647,23 @@ function _plant_all!(ps::ParamSet, pc, soa, sites, act, warnings)
   end
 end
 
-"""Stands (sites) a harvest applies to: all, or the top-ranked ones until `area_pct` % of the AOI acres is reached."""
-function _select_stands(ps::ParamSet, soa, act, acr, seed)
+"""Stands (scenario plots = units; each is the vector of its site indices) a harvest applies to: all, or the top-ranked ones until `area_pct` % of the AOI acres (`acr[unit]`) is reached."""
+function _select_stands(ps::ParamSet, soa, units, act, acr, seed)
   st = Dict{String,Any}(String(k) => v for (k, v) in pairs(something(get(act, "stands", nothing), Dict())))
   rank = String(get(st, "rank", "all")); pct = Float64(get(st, "area_pct", 100.0))
-  ids = collect(1:soa.n)
+  ids = collect(1:length(units))
   rank == "all" && pct >= 100 && return ids
-  score(i) = (s = getsite(soa, i); n = Int(s.live);
-    rank == "max_biomass" ? sum(Float64(s.c_bio[k]) for k in 1:n; init=0.0) :
-    rank == "oldest" ? maximum(Float64(s.c_age[k]) for k in 1:n; init=0.0) :
-    Float64(hash((seed, Int(s.mapcode))) % 1_000_000))
+  function score(u)
+    ss = [getsite(soa, i) for i in units[u]]
+    rank == "max_biomass" ? sum(sum(Float64(s.c_bio[k]) for k in 1:Int(s.live); init=0.0) for s in ss) / length(ss) :
+    rank == "oldest" ? maximum(maximum(Float64(s.c_age[k]) for k in 1:Int(s.live); init=0.0) for s in ss) :
+    Float64(hash((seed, Int(ss[1].mapcode))) % 1_000_000)
+  end
   order = sort(ids; by=score, rev=true)
   total = sum(values(acr)); target = pct / 100 * total; out = Int[]; acc = 0.0
-  for i in order
+  for u in order
     acc >= target && break
-    push!(out, i); acc += acr[i]
+    push!(out, u); acc += acr[u]
   end
   out
 end
