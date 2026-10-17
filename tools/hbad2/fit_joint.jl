@@ -8,7 +8,7 @@
 include(joinpath(@__DIR__, "common.jl")); include(joinpath(@__DIR__, "cmaes.jl")); include(joinpath(@__DIR__, "simB_lik.jl"))
 tag, θpath, lams = ARGS[1], ARGS[2], parse.(Float64, split(ARGS[3], ",")); EV = length(ARGS) >= 4 ? parse(Int, ARGS[4]) : 12000
 const FB_MODE = get(ENV, "HBAD2_FB", "stand")     # Sim B objective: stand (species × class + Lorey H) | size (plot size-class totals + Lorey H) | margins (size + plot species×{sapling,tree} totals + Lorey H) | both
-OUTD = joinpath(R2DIR, "joint_" * tag); mkpath(OUTD); write_meta(OUTD); open(io -> (println(io, "fb=", FB_MODE); println(io, "recr_fixed=", get(ENV, "HBAD2_RECR_FIXED", "0"))), joinpath(OUTD, "meta.txt"), "a")
+OUTD = joinpath(R2DIR, "joint_" * tag); mkpath(OUTD); write_meta(OUTD); open(io -> (println(io, "fb=", FB_MODE); println(io, "recr_fixed=", get(ENV, "HBAD2_RECR_FIXED", "0")); println(io, "sigv_max=", SIGV_MAX)), joinpath(OUTD, "meta.txt"), "a")
 logio = open(joinpath(OUTD, "log.txt"), "a"); lg(s) = (println(s); println(logio, s); flush(logio); flush(stdout))
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))

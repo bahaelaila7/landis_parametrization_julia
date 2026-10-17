@@ -1,0 +1,6 @@
+form=2
+size_split=5.0,12.7,25.0,40.0
+site=subplot
+vigour=1
+fb=margins
+recr_fixed=1

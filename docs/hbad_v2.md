@@ -358,3 +358,12 @@ Both show the same pine drift (PITA BA share > 21 yr 0.314 / 0.321 vs obs 0.209)
   > 21 yr 0.281 (j7 0.314, obs 0.209). PITA small-tree growth (D 3 cm, O 0.3) j7 0.89, j9 0.93 cm/yr vs v2f 0.36 (others 0.08–0.15):
   the inflation is present at every λ with the species-pooled size objective, with or without free recruitment. Fixing recruitment is
   NOT the remedy; the objective is (→ j10: species-aware `margins` objective, λ 0 first for its ideal point).
+
+### 5.16 Species-aware Sim B objective (`HBAD2_FB=margins`) fixes the composition drift
+`margins` = plot-level size-class totals (species pooled) + plot-level species × {saplings 2.54–12.7 cm, trees ≥ 12.7 cm} totals
+(both Poisson on tallied counts) + Lorey H. j10 (λ 0, vigour, recruitment fixed at the data fit): VAL BA share > 21 yr obs / sim —
+PITA 0.209 / **0.182**, _H 0.351 / 0.361, LIST2 0.081 / 0.072, LITU 0.065 / 0.068, ACRU 0.040 / 0.066, QULA3 0.024 / 0.040: the pine
+take-over is gone (j6 0.321, j9 0.281). Size profile > 21 yr 253 / 171 / 217 / 158 vs obs 264 / 94 / 244 / 162. BUT σv → 1.14 (fast sub-cohort
+×7.2), far above the measured persistent vigour (E5: sd of ln dD ≈ 0.68), and Sim A collapses (λ 0: VAL −223,904).
+→ j11 (λ 0.75) and j12 (λ 0.5) on `margins`, recruitment fixed, σv ≤ 0.7 (HBAD2_SIGV_MAX, data-based bound; recorded in meta.txt and
+checked), ideal fA −272,975 (v2f train) / fB 14,619 (j10 train), nadir fA −236,467 (j10 train) / fB 24,102 (start).

@@ -14,7 +14,9 @@ const SITE_SUB = get(ENV, "HBAD2_SITE", "plot") == "subplot"
 const SITE_MULT = SITE_SUB ? 4.0 : 1.0
 const FORM = parse(Int, get(ENV, "HBAD2_FORM", "1"))
 # persistent growth vigour (E5): every cohort is simulated as 3 vigour sub-cohorts (HBAD2.VIG_Z / VIG_W); scoring aggregates them back
-const VIGOUR = get(ENV, "HBAD2_VIGOUR", "0") == "1"          # potential-growth form (HBAD2.GlobP.form)
+const VIGOUR = get(ENV, "HBAD2_VIGOUR", "0") == "1"
+# upper bound of the vigour spread σv; E5 measured the persistent sd of ln annual dD at ≈ 0.68 (corr 0.49 × residual sd 0.975)
+const SIGV_MAX = parse(Float64, get(ENV, "HBAD2_SIGV_MAX", "2.0"))
 if FORM == 2   # power-exponential: rX = increment at the reference size [cm/yr | m/yr], cX = size exponent, Xmax = decay scale
   merge!(BOUNDS_OVERRIDE, Dict(:rD => (0.01, 3.0), :cD => (-1.5, 3.0), :Dmax => (5.0, 300.0), :rH => (0.005, 3.0), :cH => (-1.5, 3.0), :Hmax => (2.0, 200.0)))
 end
@@ -120,7 +122,7 @@ function decode(θ::AbstractVector, nsp::Int, longevity::Vector{Float64})
     P[s] = SpP(v..., longevity[s])
   end
   g = θ[nsp*NF+1:end]
-  P, HBAD2.GlobP(clamp(g[1], -3, 3), 10.0, clamp(g[2], -1, 1), clamp(g[3], -1, 1), clamp(g[4], -2, 2), FORM, clamp(g[5], -4, 2), VIGOUR ? min(abs(g[6]), 2.0) : 0.0)
+  P, HBAD2.GlobP(clamp(g[1], -3, 3), 10.0, clamp(g[2], -1, 1), clamp(g[3], -1, 1), clamp(g[4], -2, 2), FORM, clamp(g[5], -4, 2), VIGOUR ? min(abs(g[6]), SIGV_MAX) : 0.0)
 end
 
 "Per-species diagnostics: observed vs predicted deaths (tree counts), mean annual ΔD and ΔH of survivors (obs vs sim), RD at start."
@@ -164,6 +166,7 @@ function check_meta(dir)
   m = Dict(split(l, "=")[1] => (length(split(l, "=")) > 1 ? split(l, "=")[2] : "") for l in readlines(f))
   parse(Int, m["form"]) == FORM || error("fit $(dir) has form=$(m["form"]) but HBAD2_FORM=$(FORM)")
   parse(Int, get(m, "vigour", "0")) == (VIGOUR ? 1 : 0) || error("fit $(dir) has vigour=$(get(m, "vigour", "0")) but HBAD2_VIGOUR=$(VIGOUR ? 1 : 0)")
+  haskey(m, "sigv_max") && parse(Float64, m["sigv_max"]) != SIGV_MAX && error("fit $(dir) has sigv_max=$(m["sigv_max"]) but HBAD2_SIGV_MAX=$(SIGV_MAX)")
   get(m, "site", "plot") == (SITE_SUB ? "subplot" : "plot") || error("fit $(dir) has site=$(get(m, "site", "plot")) but HBAD2_SITE=$(SITE_SUB ? "subplot" : "plot")")
   m["size_split"] == join(SIZE_BREAKS, ",") || @warn "fit $(dir) was fitted with size_split=$(m["size_split"]); evaluating with $(join(SIZE_BREAKS, ","))"
 end
