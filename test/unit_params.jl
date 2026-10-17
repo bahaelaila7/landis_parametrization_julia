@@ -1,4 +1,4 @@
-# src/parametrize/utils.jl: build_slots / u_to_params / params_to_u / build_groups / floors / pooling (BiomassSuccession, tiny synthetic setup).
+# src/parametrize/ (utils.jl, slots.jl): build_slots / u_to_params / params_to_u / build_groups / floors / pooling (BiomassSuccession, tiny synthetic setup).
 module UnitParams
 using Test, Random, Pan
 const PU = Pan.PU
