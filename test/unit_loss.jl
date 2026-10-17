@@ -1,4 +1,4 @@
-# Loss functions in src/parametrize/utils.jl: the one loss implementation (calculate_site_loss2_acc! / calculate_species_loss_acc!, scratch-buffer
+# Loss functions in src/loss/ (types, kernels, smoothing, site_loss): the one loss implementation (calculate_site_loss2_acc! / calculate_species_loss_acc!, scratch-buffer
 # based) and its allocating SiteLoss wrapper calculate_site_loss2, plus the allocating bin_ages / smoothen_bin_cdf_forgive against their in-place twins.
 module UnitLoss
 using Test, Random, Pan

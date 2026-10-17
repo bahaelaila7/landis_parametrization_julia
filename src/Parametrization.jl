@@ -1,6 +1,11 @@
 module Parametrization
     using ..PanCore
     include("parametrize/utils.jl")
+    include("loss/types.jl")
+    include("loss/kernels.jl")
+    include("loss/smoothing.jl")
+    include("loss/site_loss.jl")
+    include("parametrize/slots.jl")
     include("parametrize/BiomassSuccession.jl")
     include("parametrize/PnET.jl")
     include("parametrize/HBAD.jl")
