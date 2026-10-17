@@ -8,7 +8,7 @@
 import DuckDB
 using DataFrames
 
-include(joinpath(@__DIR__, "..", "src", "FVS.jl"))
+include(joinpath(@__DIR__, "FVS.jl"))
 using .FVS
 
 db       = length(ARGS) >= 1 ? ARGS[1] : "/workspace/FIASQLITE2PGSQL/FIADB.duckdb"

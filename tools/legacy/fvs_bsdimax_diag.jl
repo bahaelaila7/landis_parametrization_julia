@@ -3,7 +3,7 @@
 # [SpMcDBH(1,ALL,dbh>=5,ht>=10)] into the FVS_Compute table, then prints them.
 #   Run: ./julia_gdal.sh --project=. tools/fvs_bsdimax_diag.jl [n_stands=6]
 using DataFrames, DuckDB, Printf, Dates
-include(joinpath(@__DIR__, "..", "src", "FVS.jl")); using .FVS
+include(joinpath(@__DIR__, "FVS.jl")); using .FVS
 const FIADB  = "/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb"
 const BINDIR = "/workspace/FVStest"
 const LDPATH = "/home/node/.julia/juliaup/julia-1.12.6+0.x64.linux.gnu/lib/julia"

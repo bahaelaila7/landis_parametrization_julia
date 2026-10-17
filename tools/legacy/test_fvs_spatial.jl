@@ -6,7 +6,7 @@
 # forward, and writes total + per-species AGB GeoTIFFs every EVERY years.
 
 using DataFrames
-include(joinpath(@__DIR__, "..", "src", "FVS.jl"))
+include(joinpath(@__DIR__, "FVS.jl"))
 using .FVS
 
 treemap = ARGS[1]

@@ -2,7 +2,7 @@
 # becomes one FVS point — run AUTOES + REGIMPUTE, and check whether the young age-classes finally regenerate
 # (they were all 0 with single-plot stands). Splits any stratum >MAXPLT=500 plots into chunks.
 using DataFrames, DuckDB, Printf, Statistics, Dates
-include(joinpath(@__DIR__, "..", "src", "FVS.jl")); using .FVS
+include(joinpath(@__DIR__, "FVS.jl")); using .FVS
 const FIADB="/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb"; const BINDIR="/workspace/FVStest"
 const LDPATH="/home/node/.julia/juliaup/julia-1.12.6+0.x64.linux.gnu/lib/julia"
 const HORIZONS=[25,50,75,100]; const BINS=[10,20,30,40,50,60,80,100,120,150]

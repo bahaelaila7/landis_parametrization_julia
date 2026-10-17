@@ -3,7 +3,7 @@
 # birth_age = estimated_age so FVS TreeAge tracks initial-tree age → agebin is real. Compare offsets 25/50/75/100.
 #   Run: ./julia_gdal.sh --project=. tools/fvs_compare100.jl
 using DataFrames, DuckDB, Printf, Statistics, Dates, CSV
-include(joinpath(@__DIR__, "..", "src", "FVS.jl")); using .FVS
+include(joinpath(@__DIR__, "FVS.jl")); using .FVS
 const FIADB  = "/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb"
 const BINDIR = "/workspace/FVStest"
 const LDPATH = "/home/node/.julia/juliaup/julia-1.12.6+0.x64.linux.gnu/lib/julia"

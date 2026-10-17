@@ -2,7 +2,7 @@
 # dumps, every cycle, RGNST, expected saplings STxMR, present saplings SAPSTx, seed-source SpCountx, the
 # adjusted per-species regen STxMRA, and SDI vs the gate. Reads the values back from run.out CMPU echoes.
 using DataFrames, DuckDB, Dates
-include(joinpath(@__DIR__,"..","src","FVS.jl")); using .FVS
+include(joinpath(@__DIR__, "FVS.jl")); using .FVS
 const FIADB="/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb"; const BINDIR="/workspace/FVStest"
 const LDPATH="/home/node/.julia/juliaup/julia-1.12.6+0.x64.linux.gnu/lib/julia"
 const HORIZONS=[25,50,75,100]; const REGIMPUTE_SN=joinpath(@__DIR__,"regimpute","Regen_ShadeTolerance_Method_SN_fixed.kcp")  # FIXED: RGNST computes, regen ON

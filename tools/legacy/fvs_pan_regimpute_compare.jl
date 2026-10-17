@@ -4,7 +4,7 @@
 # aggregates Pan candidate-6 AUTOES→strata, and writes one heatmap PNG per stratum (FVS | Pan | FVS−Pan).
 using DataFrames, DuckDB, Printf, Statistics, Dates, CSV
 import CairoMakie; const MK=CairoMakie
-include(joinpath(@__DIR__,"..","src","FVS.jl")); using .FVS
+include(joinpath(@__DIR__, "FVS.jl")); using .FVS
 const FIADB="/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb"; const BINDIR="/workspace/FVStest"
 const LDPATH="/home/node/.julia/juliaup/julia-1.12.6+0.x64.linux.gnu/lib/julia"
 const HORIZONS=[25,50,75,100]; const BINS=[10,20,30,40,50,60,80,100,120,150]; const nb=length(BINS)+1

@@ -5,7 +5,7 @@
 # Stage 1 here: aspatial × curated_nodamage × noauto, end-to-end + cohort×age×AGB sanity.
 #   Run: ./julia_gdal.sh --project=. tools/fvs_benchmark.jl <layout> <estab> <condition>
 using DataFrames, DuckDB, Printf, Statistics, Dates
-include(joinpath(@__DIR__, "..", "src", "FVS.jl"))
+include(joinpath(@__DIR__, "FVS.jl"))
 using .FVS
 include(joinpath(@__DIR__, "fvs_loss.jl")); using .FVSLoss
 
