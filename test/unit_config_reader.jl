@@ -140,7 +140,7 @@ end
   # resolve_gdigel is idempotent (parametrize_GDIgel calls it on an already-resolved dict)
   r = Pan.resolve_gdigel(Dict("mu" => 3)); @test Pan.resolve_gdigel(r) == r
   # every gdigel key the driver reads exists in the schema
-  src = read(joinpath(pkgdir(Pan), "src", "gdigel_driver.jl"), String)
+  src = read(joinpath(pkgdir(Pan), "src", "drivers", "gdigel.jl"), String)
   used = Set(m.captures[1] for m in eachmatch(r"\bo\(\"(\w+)\"\)", src))
   @test !isempty(used) && issubset(used, keys(Pan.GDIGEL_SCHEMA))
 end

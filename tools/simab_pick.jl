@@ -81,7 +81,7 @@ elseif cmd == "pickB"
   nd = [i for i in eachindex(pts) if !any(j -> pts[j][1] <= pts[i][1] && pts[j][2] <= pts[i][2] && pts[j] != pts[i], eachindex(pts))]
   xs = [pts[i][1] for i in nd]; ys = [pts[i][2] for i in nd]
   # knee = the front point farthest below the chord joining the two extremes in normalised objective space (same rule as the Sim A archive,
-  # src/gdigel_driver.jl _write_mo_archive); objectives divided by their maximum over the front. Chosen on the TRAIN objectives only.
+  # src/drivers/gdigel.jl _write_mo_archive); objectives divided by their maximum over the front. Chosen on the TRAIN objectives only.
   o = sortperm(xs); nxs = xs[o] ./ maximum(xs); nys = ys[o] ./ maximum(ys); nn = length(o)
   if nn >= 3
     x1, y1, x2, y2 = nxs[1], nys[1], nxs[nn], nys[nn]; L = hypot(x2 - x1, y2 - y1) + 1e-300

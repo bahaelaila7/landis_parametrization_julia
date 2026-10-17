@@ -11,7 +11,7 @@
 # (a_ref_g, w_ref_g = the group's values at the start set, floored at 10 % of the median so tiny references cannot dominate) and
 # accepts it only if it improves the group's current objective. The assembled set is re-evaluated; if its total
 # F = max(λ ΣA/A_ref, (1−λ) ΣW/W_ref) is worse than the previous set's (cross-group interactions) the round is reverted.
-# Groups, matched pairs, the W term and the evaluation are exactly those of gdigel (shared code in src/gdigel_driver.jl); the
+# Groups, matched pairs, the W term and the evaluation are exactly those of gdigel (shared code in src/drivers/gdigel.jl); the
 # training context is prepared by run_from_yaml (so every loss flag of the config is active), CALIB_SPLIT must be train.
 # Train TOST pass counts (approximate normal-CI version) are logged for information only and never used.
 using Pan, JLD2, CSV, DataFrames, Statistics, Random

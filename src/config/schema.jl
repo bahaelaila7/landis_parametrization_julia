@@ -270,7 +270,7 @@ const SCHEMA_LIST = KeySpec[
   KeySpec("gdigel", :gdigel, nothing, "gdigel driver options (own schema: GDIGEL_LIST)"),
 ]
 
-# gdigel sub-dict (search_mode: gdigel); keys read by src/gdigel_driver.jl and the tools. `weights` and the
+# gdigel sub-dict (search_mode: gdigel); keys read by src/drivers/gdigel.jl and the tools. `weights` and the
 # m/objective cross-check are resolved in `resolve_gdigel`.
 const GDIGEL_LIST = KeySpec[
   KeySpec("mu", :int, 8, "lineages (one per scalarisation weight)"),
