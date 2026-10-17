@@ -165,7 +165,7 @@ end
   site.c_bio[site.live] = trunc(biomass)
 end
 # `capture`: optional diagnostic callback `capture(current_year::Int, soa)` invoked at the end of every spinup year (the back-cast, sim_year < 0) so a
-# caller can record the per-year stand state (tools/plot_spinup_process.jl). `nothing` (default) = no behaviour change and no cost.
+# caller can record the per-year stand state (tools/legacy/plot_spinup_process.jl). `nothing` (default) = no behaviour change and no cost.
 function spinup_cohorts!(empty_soa::PanCore.AnySoA, spinup_cohorts::DataFrame, eco_params::Vector{BiomassSuccessionEcoParams}; capture=nothing)
   #show(spinup_cohorts.year_deficit)
   # year deficit is establisment year.

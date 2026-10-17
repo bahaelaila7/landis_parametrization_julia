@@ -1,6 +1,6 @@
 # Select Sim-B seeds from a finished Sim-A run: the 5 p101-front positions + K crowding-weighted-random
 # picks from the rest of the p101 front, on TRAIN or VAL objectives. Writes a DuckDB `sobol_results`
-# table (same schema tools/extract_archive_seeds.jl emits) that a Sim-B igelmo run loads via
+# table (same schema tools/legacy/extract_archive_seeds.jl emits) that a Sim-B igelmo run loads via
 # `sobol_candidates_db` with `sobol_top_frac: 1.0` and `igel_mu: <N>`. Each seed's params carry its
 # Sim-A growth → with `fix_growth: true` + `igel_freeze_seed_growth: true` that growth is frozen
 # per-lineage in Sim B, and `igel_seed_maturity: true` gives the phase-1 maturing window.
