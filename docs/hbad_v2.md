@@ -387,3 +387,5 @@ TEST (reported once; not used for any choice):
 * Sim B (free runs, 439 clean natural test plots, 1,552 later visits; median |error| (bias)): BA 11.6 % (+14.5) [persistence 24.3 %,
   v2f 12.6 %], N ≥ 5 in 18.3 % (+12) [18.2 %, 20.2 %], QMD 18.5 % [16.0 %, 20.5 %], Lorey H 6.6 % [13.1 %, 7.1 %], composition 0.159
   [0.138, 0.155]; > 21 yr poles 240 vs obs 73 (v2f 351). Persistence still wins on QMD and composition and ties N ≥ 5 in.
+v2g figures: results/hbad2/figures/v2g_{species_curves,allocation_vs_obs,simB_scatter}.png. Timing check (timing_curves.jl): corr with
+observed free-growing increments dD 0.81, dH 0.94, dH:dD 0.80 (v2c 0.86 / 0.955 / 0.82 — the joint compromise constrains the curves a little).
