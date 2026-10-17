@@ -59,7 +59,7 @@ function load_tree_cohorts(db_path::AbstractString, visits::DataFrame, keys::Abs
   nv = nrow(vis)
   breaks = Float64.(size_breaks); bw = Float64(birth_w); mult = Float64(site_mult)
   sub = collect(Int, subplots)
-  con = DBInterface.connect(DuckDB.DB, ":memory:")
+  con = DuckDB.connect(DuckDB.DB())
   df = try
     DuckDB.execute(con, "ATTACH '$(_sql_literal_path(db_path))' AS src (READ_ONLY);")
     tab = _require_table(con, table, "load_tree_cohorts table")
@@ -74,7 +74,7 @@ function load_tree_cohorts(db_path::AbstractString, visits::DataFrame, keys::Abs
       ORDER BY t.STATECD, t.UNITCD, t.COUNTYCD, t.PLOT, t.MEASDATE, t.SUBP, t.TREE, t.CN""",
       [1, 0.0, 0.0, 0.0, 0.0, minimum(sub), maximum(sub)]))
   finally
-    DBInterface.close!(con)
+    nothing   # the in-memory connection is released with the object (as in data/utils.jl)
   end
   nq = vigour ? 3 : 1
   vix = Dict((Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot), Dates.Date(r.measdate)) => i for (i, r) in enumerate(eachrow(vis)))
