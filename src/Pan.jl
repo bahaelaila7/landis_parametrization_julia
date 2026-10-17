@@ -8,7 +8,7 @@ include("Data.jl")
 include("SpatialData.jl")
 include("Spatial.jl")
 using .PanCore
-using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin, PnETPlugin, HBADPlugin
+using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin, PnETPlugin, HBADPlugin, HBAD2Plugin
 import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
 import .Parametrization.PnETParametrization as PNP

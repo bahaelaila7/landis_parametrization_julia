@@ -17,6 +17,7 @@ const PARAMS_FORMAT_VERSION = 1
 plugin_name(::BiomassSuccessionPlugin.BiomassSuccessionParams) = "biomass"
 plugin_name(::PnETPlugin.PnETParams) = "pnet"
 plugin_name(::HBADPlugin.HBADParams) = "hbad"
+plugin_name(::HBAD2Plugin.HBAD2Params) = error("hbad2 parameters are the fixed v2g files (results/hbad2/*.csv, stage 1); no yaml roster")
 params_struct_type(name::AbstractString) =
   lowercase(name) in ("biomass", "biomasssuccession", "bs") ? BiomassSuccessionPlugin.BiomassSuccessionParams :
   lowercase(name) in ("pnet", "pnet-succession") ? PnETPlugin.PnETParams :

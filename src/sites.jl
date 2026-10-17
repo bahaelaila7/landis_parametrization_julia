@@ -52,6 +52,33 @@ function _init_site_plugin!(::Type{_HB}, site, no_establishment::Bool)
   return nothing
 end
 
+function _init_site_plugin!(::Type{_H2}, site, no_establishment::Bool)
+  site.B = zero(FloatType)
+  site.BA = zero(FloatType)
+  site.SDI = zero(FloatType)
+  site.RD = zero(FloatType)
+  site.ryear = Int32(0)
+  site.planted = false
+  site.no_establish = no_establishment
+  site.c_species .= zero(UIntType)
+  site.c_age .= 0.0
+  site.c_tph .= 0.0
+  site.c_dq .= 0.0
+  site.c_h .= 0.0
+  site.c_zq .= 0.0
+  site.c_bio .= zero(FloatType)
+  site.c_O .= 0.0
+  site.c_SDI .= 0.0
+  site.c_V .= 0.0
+  site.c_ropen .= Int32(0)
+  site.sp_mature .= false
+  site.sp_estab .= false
+  site.sp_rate .= 0.0
+  site.sp_ba .= 0.0
+  site.sp_oy .= Int32(0)
+  return nothing
+end
+
 """
     make_sites(splots, eco_species_ids; plugin=bs_plugin(), rng, spinup, no_establishment, site_attrs=nothing) -> SiteSoA
 
@@ -131,4 +158,50 @@ function _make_sites(plugin::PluginConfig{P}, splots::DataFrame, eco_species_ids
     init_sites!(pc, soa, site_attrs)
     return soa
   end
+end
+
+"""
+    make_sites_hbad2(plugin, tc::Data.TreeCohorts; rng, no_establishment=false, eco_id=1, planted=nothing) -> SiteSoA
+
+Initial HBAD2 SoA of tree-based sites (`Data.load_tree_cohorts`): one active site per subplot site of `tc`, one ecoregion `eco_id` whose species are all species of the
+plugin context in order (the cohort's key index IS the eco-local species index, so `plugin.ctx` must have been built with `tc.keys` as its species list). See `make_sites_hbad2_arrays`.
+"""
+function make_sites_hbad2(plugin::PluginConfig{P}, tc::Data.TreeCohorts; kw...) where {P}
+  plugin.ctx.priors.species_list == tc.keys || error("make_sites_hbad2: the plugin context's species list must equal the tree cohorts' keys")
+  return make_sites_hbad2_arrays(plugin, tc.off, tc.key, tc.A, tc.N, tc.D, tc.H, tc.zq; kw...)
+end
+
+"""
+    make_sites_hbad2_arrays(plugin, off, species, age, N, D, H, zq; rng, no_establishment=false, eco_id=1, planted=nothing) -> SiteSoA
+
+HBAD2 SoA from per-site cohort arrays (CSR `off`, 1-based, `off[end]` = total + 1; `species` = eco-local species index). State is copied exactly (Float64); `c_bio` is the reported
+allometric AGB; `planted` (Bool per site) sets the planted-stand flag. Per-site RNG as in `make_sites` (unused by the deterministic kernel). Empty sites get capacity 1.
+"""
+function make_sites_hbad2_arrays(plugin::PluginConfig{P}, off::AbstractVector{<:Integer}, species::AbstractVector{<:Integer}, age::AbstractVector{<:Real}, N::AbstractVector{<:Real},
+                                 D::AbstractVector{<:Real}, H::AbstractVector{<:Real}, zq::AbstractVector{<:Real};
+                                 rng::Random.AbstractRNG, no_establishment::Bool=false, eco_id::Int=1, planted::Union{Nothing,AbstractVector{Bool}}=nothing) where {P}
+  P === HBAD2Plugin.HBAD2 || error("make_sites_hbad2 needs a succession_plugin=hbad2 PluginConfig")
+  pc = plugin.ctx
+  ns = length(off) - 1
+  nsp = length(pc.priors.species_list)
+  counts = Int32[max(off[s+1] - off[s], 1) for s in 1:ns]
+  soa = soa_type(P)((cohort=counts, species=fill(Int32(nsp), ns)))
+  base_seed = rand(rng, UInt64)
+  ep = generate_eco_params(pc, generate_params(pc, pc.priors.species_list, ["eco"], [collect(1:nsp)]))
+  for i in 1:ns
+    site = getsite(soa, i)
+    site.active = true
+    site.rng = RNGType(hash((base_seed, i)))
+    site.ecocode = UIntType(eco_id); site.eco_id = eco_id; site.mapcode = UIntType(i); site.ref_cn = i
+    site.old = zero(UIntType); site.live = zero(UIntType)
+    _init_site_plugin!(P, site, no_establishment)
+    planted === nothing || (site.planted = planted[i])
+    n = off[i+1] - off[i]
+    for (q, c) in enumerate(off[i]:off[i+1]-1)
+      HBAD2Plugin._set_cohort!(site, q, species[c], age[c], N[c], D[c], H[c], zq[c], HBAD2Plugin.agb_of(ep[1].allo[Int(species[c])], Float64(N[c]), Float64(D[c])))
+    end
+    HBAD2Plugin.report_site!(soa.csr, soa.scalar, ep[1], i, Int(soa.refs.cohort[i]) - 1, n)
+  end
+  init_sites!(pc, soa, nothing)
+  return soa
 end

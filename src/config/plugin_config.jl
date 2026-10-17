@@ -1,7 +1,8 @@
 succession_plugin_type(name::AbstractString) = lowercase(name) in ("biomass", "biomasssuccession", "bs") ? _BS :
                                                 lowercase(name) in ("pnet", "pnet-succession") ? _PN :
                                                 lowercase(name) in ("hbad", "hbad-succession") ? _HB :
-                                                error("unknown succession_plugin '$name' (biomass | pnet | hbad)")
+                                                lowercase(name) in ("hbad2", "hbad-v2") ? _H2 :
+                                                error("unknown succession_plugin '$name' (biomass | pnet | hbad | hbad2)")
 
 """
     bs_tables_from_cfg(cfg, db_path) -> BSTables
@@ -43,7 +44,8 @@ function plugin_config(succession_plugin::AbstractString, species_list, eco_spec
     pnet_climate_cache::AbstractString="", pnet_co2_csv::AbstractString="", pnet_generic::AbstractDict=Dict{String,Any}(),
     pnet_soil_texture::AbstractDict=Dict{String,String}(), pnet_soil_csv::AbstractString="",
     hbad_priors_csv::AbstractString="", hbad_coefs_csv::AbstractString="", hbad_init::AbstractString="jitter", hbad_seed_rain::Bool=false,
-    hbad_prob_estab_csv::AbstractString="", hbad_cycle_years::Real=8)
+    hbad_prob_estab_csv::AbstractString="", hbad_cycle_years::Real=8,
+    hbad2_params_dir::AbstractString="", hbad2_vigour::Bool=true)
   SUCC = succession_plugin_type(succession_plugin)
   if SUCC === PnETPlugin.PnET
     (isempty(pnet_climate_cache) || isempty(pnet_co2_csv)) && error("succession_plugin=pnet requires pnet_climate_cache and pnet_co2_csv")
@@ -55,6 +57,10 @@ function plugin_config(succession_plugin::AbstractString, species_list, eco_spec
     (species_list === nothing || eco_species_ids === nothing) && error("the hbad plugin needs species_list and eco_species_ids")
     return PluginConfig(HBADPlugin.HBADContext(species_list, eco_species_ids; priors_csv=hbad_priors_csv, coefs_csv=hbad_coefs_csv,
       init_mode=Symbol(lowercase(hbad_init)), estab_prob_csv=hbad_prob_estab_csv, cycle_years=hbad_cycle_years, seed_rain=hbad_seed_rain, tables=tables))
+  elseif SUCC === HBAD2Plugin.HBAD2
+    (species_list === nothing || eco_species_ids === nothing) && error("the hbad2 plugin needs species_list and eco_species_ids")
+    return PluginConfig(HBAD2Plugin.HBAD2Context(species_list, eco_species_ids; params_dir=hbad2_params_dir, priors_csv=hbad_priors_csv, coefs_csv=hbad_coefs_csv,
+      vigour=hbad2_vigour, tables=tables))
   end
   return PluginConfig(tables)
 end
@@ -69,5 +75,6 @@ function setup_plugin_from_cfg(cfg0::AbstractDict, eco_list::Vector{String}; spe
     pnet_climate_cache=cfg["pnet_climate_cache"], pnet_co2_csv=cfg["pnet_co2_csv"], pnet_generic=Dict{String,Any}(cfg["pnet_generic"]),
     pnet_soil_texture=cfg["pnet_soil_texture"], pnet_soil_csv=cfg["pnet_soil_csv"],
     hbad_priors_csv=cfg["hbad_priors_csv"], hbad_coefs_csv=cfg["hbad_coefs_csv"], hbad_init=cfg["hbad_init"], hbad_seed_rain=cfg["hbad_seed_rain"],
-    hbad_prob_estab_csv=cfg["hbad_prob_estab_csv"], hbad_cycle_years=cfg["cycle_years"])
+    hbad_prob_estab_csv=cfg["hbad_prob_estab_csv"], hbad_cycle_years=cfg["cycle_years"],
+    hbad2_params_dir=cfg["hbad2_params_dir"], hbad2_vigour=cfg["hbad2_vigour"])
 end

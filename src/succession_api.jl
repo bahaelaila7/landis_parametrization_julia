@@ -29,6 +29,7 @@ function add_cohort! end        # add_cohort!(pc, site, species_local, age, agb)
 function per_eco_groups end
 function plant! end            # plant!(pc, site, species_local, tph; kw...): add planted trees to one site (caller handles CSR capacity, see plant_sites!)
 function plant_slot_needed end # plant_slot_needed(pc, site, species_local, age): 1 if plant! appends a cohort, 0 if it merges
+function plant_slots_reserved end # plant_slots_reserved(pc): CSR slots `plant_sites!` reserves per planting (1 for every plugin but HBAD2: its vigour sub-cohorts)
 # Plugin-specific hooks with BiomassSuccession-neutral defaults:
 function init_sites! end       # init_sites!(pc, soa, site_attrs): per-site static attributes (BS: nothing needed)
 function set_cohort_bio! end   # set_cohort_bio!(pc, site, k, newbio): write a cohort's reported biomass (BS: plain assignment)
@@ -67,6 +68,8 @@ function bs_tables end
 bs_plugin(tables::BiomassSuccessionPlugin.BSTables=BiomassSuccessionPlugin.BSTables()) = PluginConfig(tables)
 
 make_sites_like(plugin::PluginConfig, splots, eco_species_ids; kw...) = make_sites(splots, eco_species_ids; plugin=plugin, kw...)
+
+plant_slots_reserved(pc) = 1
 
 # --- BiomassSuccession ---
 const _BS = BiomassSuccessionPlugin.BiomassSuccession
@@ -177,6 +180,40 @@ plant_slot_needed(::_HBContext, site, species_local::Integer, age::Real=1) = HBA
 
 succession_plugin_for(::HBADPlugin.HBADParams) = HBADPlugin.HBAD
 
+# --- HBAD2 (HBAD v2: biomass-free process-based cohort model; stage 1 = fixed v2g parameters) ---
+const _H2 = HBAD2Plugin.HBAD2
+
+params_type(::Type{_H2}) = HBAD2Plugin.HBAD2Params
+
+const _H2Context = HBAD2Plugin.HBAD2Context
+plugin_type(::_H2Context) = _H2
+bs_tables(pc::_H2Context) = pc.tables
+
+make_param_dists(::_H2Context, args...; kw...) = error("hbad2 is calibrated by tools/hbad2 (stage 1: fixed parameters)")
+
+generate_params(pc::_H2Context, args...; kw...) = HBAD2Plugin.generate_hbad2_params(pc, args...; kw...)
+
+generate_eco_params(pc::_H2Context, params) = HBAD2Plugin.generate_hbad2_eco_params(pc, params)
+
+make_ctx(pc::_H2Context, eco_params) = (HBAD2=(eco=eco_params, cst=pc.fixed),)
+
+step!(::Type{_H2}, soa, year::Integer, ctx) = PanCore.process_plugin!(soa, _H2, year; ctx=ctx.HBAD2)
+
+spinup!(::Type{_H2}, soa, spinup_cohorts, eco_params) = error("HBAD2 has no spinup path: run with spinup: false (cohorts start from the observed state)")
+
+add_cohort!(pc::_H2Context, site, args...) = HBAD2Plugin.add_cohort!(pc, site, args...)
+
+per_eco_groups(::Type{_H2}) = Set{Symbol}()
+
+init_sites!(::_H2Context, soa, site_attrs) = soa
+@inline set_cohort_bio!(pc::_H2Context, site, k, newbio) = HBAD2Plugin.set_cohort_bio!(pc, site, k, newbio)
+
+plant!(pc::_H2Context, site, species_local::Integer, tph::Real; eco_params=nothing, kw...) = HBAD2Plugin.plant!(pc, site, species_local, tph; kw...)
+plant_slot_needed(pc::_H2Context, site, species_local::Integer, age::Real=1) = HBAD2Plugin.plant_slot_needed(pc, site, species_local, age)
+plant_slots_reserved(pc::_H2Context) = HBAD2Plugin.plant_slots_reserved(pc.fixed)
+
+succession_plugin_for(::HBAD2Plugin.HBAD2Params) = HBAD2Plugin.HBAD2
+
 """
     plant_sites!(pc, soa, plantings; age=1, eco_params=nothing, kw...)
 
@@ -193,7 +230,7 @@ function plant_sites!(pc, soa, plantings; age::Real=1, eco_params=nothing, kw...
   any_ = false
   for (si, _, _) in plantings
     soa.scalar.active[si] || continue
-    cnt[si] += 1; any_ = true
+    cnt[si] += plant_slots_reserved(pc); any_ = true
   end
   any_ && PanCore.readjust_soa!(soa, (cohort=cnt,))
   for (si, sp, tph) in plantings

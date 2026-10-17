@@ -18,6 +18,8 @@ using Test, Pan
   @testset "unit_loader_errors" begin include("unit_loader_errors.jl") end
   @testset "unit_data_layer" begin include("unit_data_layer.jl") end
   @testset "unit_search_sa" begin include("unit_search_sa.jl") end
+  @testset "unit_hbad2" begin include("unit_hbad2.jl") end
+  @testset "unit_hbad2_parity" begin include("unit_hbad2_parity.jl") end
 
   # Pre-existing asserting scripts: run as subprocesses (they call exit(), define globals / @check macros, or print-and-exit-code).
   julia = Base.julia_cmd()
