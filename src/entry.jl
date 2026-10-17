@@ -136,8 +136,6 @@ function parametrize(; data::Data.DataConfig,
   LinearAlgebra.BLAS.set_num_threads(1)
   @info "search starting" julia_threads=Threads.nthreads() blas_threads=LinearAlgebra.BLAS.get_num_threads()
   mkpath(output_dir)
-  # [5, 10, 20, 40, 60, 80]
-  #bins_idx = vcat(5:5:30, 40:10:80, 100:20:160)
   @info bins_idx
   @info smoothing_window
   scoring.init_perturb_frac > 0 && @info "Initial-condition perturbation: ±$(round(100*scoring.init_perturb_frac;digits=2))% over $(n_reps) reps (best-of), shared seed; perturbed = max(2, bio + clamp(bio·pct, ±$(scoring.init_perturb_cap))) [max deviation $(scoring.init_perturb_cap), floor 2]"
@@ -258,9 +256,6 @@ function parametrize(; data::Data.DataConfig,
   end
 
   println("Initiating param distributions")
-  #greet()
-  #println(splots)
-  #println(splots)
   println("Preprocessing plot results (smoothing and binning)")
   debug = (get(ENV, "JULIA_DEBUG", "") ∈ ["Pan", "all"])
   ref = build_reference(splots, eco_species_ids, loss_params; scoring=scoring, simb=simb, no_establishment=no_establishment, plugin=plugin, rng=rng, spinup=spinup, debug=debug)
@@ -561,20 +556,11 @@ function main()
   seed = 12312315 #404 #1337
   Random.seed!(seed)
   rng = RNGType(rand(UInt64))
-  #filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75a", "8.5.3.75c", "8.5.3.75g", "8.3.5.65o", "8.5.3.75d", "8.5.3.75h", "8.3.5.65h", "8.3.5.65f", "8.3.5.65g", "15.4.1.76b", "8.5.3.75b", "8.5.3.75i", "9.4.7.32b", "8.3.7.35b", "8.3.7.35e", "8.5.1.63h", "8.3.7.35g", "8.3.7.35f", "8.3.5.65l", "8.3.5.65c", "9.5.1.34a"]
-  #filter_ecos = String["8.5.3", "8.3.5", "15.4.1", "9.4.7", "8.3.7", "8.5.1", "9.5.1"]
   #filter_ecos=String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-  #filter_ecos = String["8.3.5.65o", "8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-  #filter_ecos = String["8.5.3.75e", "8.5.3.75f", "8.5.3.75g"]
-  #filter_ecos = String["8.5.3.75f"]
-  #filter_ecos = String["8.5.3.75g"]
-  #filter_ecos = ["8.5.3.75g"]
   filter_ecos = ["8.5.3"]
   filter_plots = NTuple{4,Int}[]#(13, 1, 49, 26)]  # e.g. [(statecd,unitcd,countycd,plot), ...]
   filter_species = String[] #String["PIEL"]        # e.g. ["ACRU", "QURU"]
-  # bins_idx = vcat(10:10:40, 60:20:120)
   t1_bins_idx = [20, 60, 120]
-  # smoothing_window = PU.get_smoothing_window(; smoothing_window=2, smoothing_variance=FloatType(1.2f0))
   t1_smoothing_window = PU.get_smoothing_window(; smoothing_window=2, smoothing_variance=FloatType(1.2f0))
 
   resume_from = "./outputs/search_state_latest.jld2" #nothing             # set to e.g. "./outputs/search_state_latest.jld2" to resume

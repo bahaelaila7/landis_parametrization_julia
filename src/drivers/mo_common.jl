@@ -202,7 +202,6 @@ _mo_archive_sig(state) = hash(sort!([collect(c.fx.objectives) for c in state.arc
 #     loss improves;
 #   • append the per-generation metrics.csv row (iteration,best_train_loss,best_val_loss,pop_size,archive_size).
 # `pop_size` and the val-fit closure are the only per-engine differences and are passed in by each driver.
-_vkey(c) = Tuple(round.(Float64.(collect(c.fx.objectives)), digits=10))          # dedup archive members by train objectives
 _twt(c) = Float64(sum(@view c.fx.objectives[1:2:end]))                            # train W-half (Σ Wasserstein objectives)
 _tat(c) = Float64(sum(@view c.fx.objectives[2:2:end]))                            # train AGB-half (Σ AGB objectives)
 # val_cache key = the (Σ train-W, Σ train-AGB) pair — which IS what's persisted (cv_val_cache's first two columns)

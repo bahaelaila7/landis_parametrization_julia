@@ -15,11 +15,6 @@ function start_writer(::Type{State}, output_dir::AbstractString; buffer_size::In
   ch = Channel{Union{WriterJob{State},Symbol}}(buffer_size)
 
   task = Threads.@spawn begin
-    #ENV["MPLBACKEND"] = "Agg"
-    #Plots.gr(show = false)
-    #function __init__()
-    #  Plots.pythonplot()
-    #end
     #Plots.default(show = false)
     try
       for job in ch

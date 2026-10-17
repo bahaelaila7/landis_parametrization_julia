@@ -128,7 +128,6 @@ struct SpMonth
   q10f::Float64       # Q10Factor at Tave (foliar respiration)
   maintf::Float64     # MaintRespFTempResp
 end
-const SPM0 = SpMonth(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 """Site-month working state (soil bucket + current climate); a mutable struct so the sublayer kernel updates it without allocation."""
 mutable struct MonthWork

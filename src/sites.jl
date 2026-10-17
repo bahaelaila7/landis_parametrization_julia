@@ -65,22 +65,10 @@ function _make_sites(plugin::PluginConfig{P}, splots::DataFrame, eco_species_ids
                      site_attrs=nothing) where {P}
   pc = plugin.ctx
   site_attrs === nothing && (site_attrs = plugin.site_attrs(splots))
-  #eco_ids = unique(select(splots, [:eco_id]))
-  #n_species = maximum(splots.species_id)
-  #plot_ids = unique(select(splots, [:plot_id]))
-  #plot_eco_ids = unique(select(splots, [:plot_id, :eco_id]))
-  #plot_eco_ids = sort!(plot_eco_ids, [:plot_id])
   df = unique(select(splots, [:plot_id, :eco_id]))
   n = nrow(df)
-  #plot_eco_ids = sort!(plot_eco_ids, [:plot_id])
-  #@assert (nrow(plot_ids) == nrow(plot_eco_ids)) "Error: plot_ids and plot_eco_ids are not of equal length!"
 
-  #index = eco_id * plot_id
 
-  #splots_dict::Dict{Int64,DataFrame} = Dict(
-  #    plt_key.plt_cn => DataFrame(plt_df)
-  #    for (plt_key, plt_df) in pairs(groupby(splots, :plt_cn, sort=false))
-  #)
   species_counts = [Int32(length(eco_species_ids[row.eco_id])) for row in eachrow(df)]
   if spinup
     cohort_counts = fill(Int32(2), n)

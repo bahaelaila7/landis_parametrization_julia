@@ -346,18 +346,6 @@ function reproduction_commit_step!(current_time::Int, site::SiteView, params::Bi
   site.sp_seed .= false
 end
 
-function _sprouting_step!(current_time::Int, site::SiteView, params::BiomassSuccessionEcoParams)
-  for sp in 1:length(site.sp_sprout)
-    if site.sp_sprout[sp]
-      new_biomass = calculate_initial_biomass(params.ANPP_MAX_SPP[sp],
-        site.B, params.B_MAX_ECO)
-      add_cohort!(site, UIntType(sp), one(FloatType), new_biomass)
-      site.B += new_biomass
-      site.sp_sprout[sp] = false
-    end
-  end
-end
-
 @inline function plant_establish(sp::Int, site::SiteView, params::BiomassSuccessionEcoParams; rng::Random.AbstractRNG)
   return params.PROB_ESTAB_SPP[sp] > zero(FloatType)
 end
@@ -648,29 +636,3 @@ function succession_step!(current_time::Int, site::SiteView, params::BiomassSucc
 
 end
 
-
-# Order a site's live cohorts young → old (ascending by age). succession_step! then
-# walks from the back (oldest) toward the front, so a dying cohort can be removed by
-# copying the already-processed cohort at the live boundary over it — without
-# reordering any not-yet-processed (younger) cohort. Add a tiebreak key here if
-# same-age ordering must match LANDIS's priority queue.
-function sort_cohorts!(site::SiteView)
-  n = site.live
-  n <= 1 && return
-
-  age = site.c_age          # capture views once (they alias the CSR storage)
-  sp = site.c_species
-  bio = site.c_bio
-  mt = site.c_m_tot
-  cp = site.c_comp
-
-  # young → old; MergeSort = stable, so equal ages keep their original order
-  perm = sortperm(@view(age[1:n]); alg=MergeSort)
-
-  # indexing a view by a Vector copies → safe snapshot, then write back reordered
-  ksp, kage, kbio, kmt, kcp = sp[perm], age[perm], bio[perm], mt[perm], cp[perm]
-  @inbounds for j in 1:n
-    sp[j], age[j], bio[j], mt[j], cp[j] = ksp[j], kage[j], kbio[j], kmt[j], kcp[j]
-  end
-  return
-end

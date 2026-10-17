@@ -23,7 +23,6 @@ default_sufficient_light() = [FloatType.(SUFFICIENT_LIGHT_MATRIX[:, c]) for c in
 const DEFAULT_MIN_REL_RD = (0.15, 0.30, 0.45, 0.60, 0.75)
 const DEFAULT_ESTAB_TPH = 750.0            # trees/ha of a new cohort (see docs)
 const DEFAULT_MATURITY = 20.0              # years (mode of prob_estab_all_species.csv: 236 of 264 rows)
-const DEFAULT_SHADE_TOL = 3
 const DEFAULT_PROB_ESTAB_CYCLE = 0.60      # per-cycle occurrence used when a species/L3 is not in the table (median of prob_estab_all_species.csv = 0.603)
 """Per-cycle -> annual probability: a seedling occurrence p_cycle over `cycle_years` years = 1 - (1 - p_annual)^cycle_years."""
 @inline annual_prob(p_cycle::Real, cycle_years::Real=DEFAULT_CYCLE_YEARS) = 1 - (1 - clamp(Float64(p_cycle), 0.0, 1.0))^(1 / Float64(cycle_years))

@@ -7,11 +7,6 @@ include("Search.jl")
 include("Data.jl")
 include("SpatialData.jl")
 include("Spatial.jl")
-#for file in filter(f -> endswith(f,"Plugin.jl"), readdir("src/plugins";join=false))
-#    println("including plugin $(file)")
-#    include(joinpath("plugins", file))
-#end
-#include("plugins/BiomassSuccessionPlugin.jl")
 using .PanCore
 using .Plugins: BaseSitePlugin, BiomassSuccessionPlugin, PnETPlugin, HBADPlugin
 import .Parametrization as PU
