@@ -46,7 +46,29 @@ yaml: `succession_plugin: hbad2`, `hbad2_params_dir`, `hbad2_vigour`; example `c
 
 `add_cohort!` (AGB-driven injection: ONE mean-field cohort from the HBAD v1 translation), `set_cohort_bio!` (scales N), `plant!(ctx, site, sp, tph; age=1, dq=2.54, h=3)` (3 vigour sub-cohorts, merges into existing planted sub-cohorts of the same species and age),
 `plant_slot_needed` (0 or 3), generic `plant_slots_reserved` (1 for every other plugin, 3 for hbad2; `plant_sites!` reserves that many slots), `spinup!` errors (start from observed cohorts).
-Planting does not set the site's `planted` flag (stand origin is a site attribute: `make_sites_hbad2*(...; planted=...)`).
+`plant!` itself does not set the site's `planted` flag (stand origin is a site attribute: `make_sites_hbad2*(...; planted=...)`); the scenario engine sets it (stage 2, below).
+Stage 2 additions: `scale_cohort!(ctx, site, k, keep)` (management removal at constant size, updates the reported AGB), `refresh_totals!(ctx, site)` (B, BA, SDI after management), `identity_eco_params(ctx)`,
+`HBAD2Context(...; v2tables=)` (context from the tables of a yaml roster), `tables_of(params)`, and the cleanup option below.
+
+## Negligible-cohort cleanup (`HBAD2Const.cleanup_tph`, stage 2)
+
+The kernel never removes cohorts (prototype behaviour; the parity gates rely on it), so a free run accumulates 3 vigour sub-cohorts per species per 5 years. `HBAD2Const(cleanup_tph=thr)`
+(`HBAD2Context(...; fixed=...)` / `with(ctx; fixed=...)`) removes, at the end of every annual step of a site (`site_commit!`, after recruitment, before the reported state: `drop_small_cohorts!`), the cohorts with
+fewer than `thr` trees/ha; the others keep their order (stable compaction, allocation-free; the CSR capacity shrinks at the next `process_plugin!` readjust, so only years in which something is removed allocate).
+**Default 0 = OFF** (stage-1 parity tests and `tools/hbad2_parity.jl` run with it off and stay exact); the scenario engine turns it ON (1e-3 trees/ha, `run_scenario(...; hbad2_cleanup=)`, 0 disables).
+Effect on a 100-year free run (4 plots x 4 subplot sites = 16 sites, no management, recruitment on; cohorts summed over the sites, metrics = max relative difference to cleanup off over the 4 plots and 11 records):
+
+| threshold (trees/ha) | cohorts at 25 / 50 / 75 / 100 yr | max rel. diff BA | TPA | cubic vol | AGB |
+|---|---|---|---|---|---|
+| 0 (off) | 3021 / 5901 / 8781 / 11661 | 0 | 0 | 0 | 0 |
+| 1e-3 (scenario default) | 2894 / 5536 / 7964 / 10290 | 1.7e-5 | 2.3e-5 | 1.8e-5 | 1.5e-5 |
+| 1e-2 | 2801 / 5283 / 7428 / 9257 | 1.7e-4 | 9.3e-4 | 1.6e-4 | 1.0e-4 |
+| 1e-1 | 2402 / 4094 / 5322 / 6326 | 1.4e-2 | 2.0e-2 | 1.3e-2 | 1.1e-2 |
+| 1 | 1081 / 1409 / 1525 / 1534 | 0.11 | 0.26 | 0.095 | 0.089 |
+
+At 1e-3 the metrics change by < 3e-5 but the cohort count falls only ~12 % after 100 years (most recruit classes are suppressed but above 1e-3 trees/ha); 1e-2 is still < 1e-3 relative. Growth of the cohort count is
+therefore not stopped by a small threshold; a larger one trades accuracy for speed (the overtopping loop is O(n^2) per site).
+
 
 ## Tree loader (`src/data/tree_cohorts.jl`)
 

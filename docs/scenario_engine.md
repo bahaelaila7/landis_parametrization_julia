@@ -1,12 +1,12 @@
 # Pan scenario engine (branch `scenario-engine`)
 
-Projects FIA plots forward with **Biomass Succession, PnET-Succession or HBAD** under a parameter set (YAML), a management
+Projects FIA plots forward with **Biomass Succession, PnET-Succession, HBAD or HBAD2** under a parameter set (YAML), a management
 plan (thin / harvest / plant) and — for PnET — a climate scenario. Used by the Forest Explorer fork
 (`/workspace/fe_pan`, branch `forest-explorer-pan`) through a worker process. Plan of the campaign:
 `docs/scenario_campaign_plan.md`.
 
 ## 1. Parameter files (YAML) — `src/params_yaml.jl`
-- One self-contained file per parameter set. Header `pan_params: {plugin: biomass|pnet|hbad, format_version: 1, name,
+- One self-contained file per parameter set. Header `pan_params: {plugin: biomass|pnet|hbad|hbad2, format_version: 1, name,
   description, created, region, provenance}`; the **plugin named in the header decides which engine the file is for**.
 - **Full roster**: every field of the plugin's params struct, mutable or fixed, laid out as
   `global:` (scalars, matrices such as `SUFFICIENT_LIGHT`), `species:` (one row per species), `ecoregions:` (per eco cell,
@@ -99,3 +99,27 @@ their text; the FE adapter re-sends uploaded YAML if the worker restarted.
   biomass below the baseline after CO₂ fertilization early on).
 - Worker protocol test (ping, params, simulate with progress, unknown plot → `no_data`, climate preview, error handling).
 - HBAD unit tests 428/428 and the regression gate IDENTICAL after merging HBAD establishment.
+
+## 7. HBAD2 (HBAD v2, model v2g) in the scenario engine (stage 2)
+`succession_plugin: hbad2`; docs of the plugin: `docs/hbad2_plugin.md`. Same plan JSON, same `SCMetrics` fields, same worker (`default_params {plugin: "hbad2"}` -> `results/params_yaml/r4_hbad2_v2g.yaml`).
+- **Roster** (`params_to_yaml(::HBAD2Params)` / `_hbad2_from_yaml`): `global` (mD2 mA pH pD pM form mSD sigma_v), `species` = one row per v2 KEY (the 10 own species + `_H`, `_S`) with the 15 per-key parameters and rho0 rhoS rhoL D0 H0 A0,
+  `ecoregions` (the 29 eco cells of the Region-4 sets, each listing all keys in order: the parameters do not depend on the cell, the cells only carry `eco_mapping`), `species_map` (every REF_SPECIES symbol -> its own key, else `_S`/`_H` by
+  SFTWD_HRDWD). Unknown globals / species parameters, missing ones, bad `species_map` targets or ecoregions with another species list are errors. Equal (exactly) to the parameters built from `results/hbad2/*.csv`.
+  Produced by `tools/export_params_yaml.jl --hbad2 <base roster> <params_dir> <out> "<name>"`.
+- **Initial state = the trees** of the plot visit (not the curated cohort table): for each requested CN, `Data.load_tree_cohorts` on the scenario's `fia_db` (table `curated_trees`, READ_ONLY, bound parameters, `ORDER BY` the full
+  key) with the visit (state, unit, county, plot, measdate) of the plot (or of its TreeMap donor), species -> key by `species_map`. **Each FIA plot = its 4 SUBPLOT sites** (per-ha densities: subplot trees x 4 as in the loader; empty subplots
+  are empty sites). All 4 sites share the plot's ecoregion, acres, management and plot id (`mapcode`). A visit without a live measured tree with estimated age starts empty on the 4 sites (regeneration only, warning);
+  a plot without curated cohorts takes its donor exactly as for the other plugins (status `no_data`/`out_of_region` unchanged).
+- **Metrics** (`_plot_summary`): per-site summary from the native state (tph, dq, h of every cohort incl. vigour sub-cohorts) -> per-ha MEAN over the plot's 4 sites; BA, TPA, QMD (from mean BA and TPA), volumes by `cohort_volume` at each
+  cohort's (tph, dq, h), the species x 2-inch DBH tally (divided by 4 sites), AGB and carbon from the plugin's reported allometric `c_bio` (reporting only). The volume equation is that of the cohort's KEY: the 10 own species use their species
+  equation, every other species shares `_H` / `_S` and gets the hardwood / softwood equation; the tally reports `_H`/`_S` with synthetic codes -1/-2 (`spsym`).
+- **Management** acts on the STAND = the plot's 4 sites together: stand selection (rank/area) per plot; cohort selection (species, age, DBH) over all 4 sites; residual BA / TPA / SDI targets are plot means (the removal order `below` /
+  `above` runs over all cohorts of the 4 sites by QMD, `proportional` takes the same fraction everywhere), so the target is met exactly by the plot mean (tests: 1e-9 relative). `percent_biomass` scales every selected cohort by (1 - value);
+  `clearcut` empties the sites. Removal is by trees at constant size: `c_tph` x keep, dq/h/age unchanged, reported AGB recomputed; a cohort leaves only when ALL its trees are removed (no 0.999 / 1 g/m2 rule). Removed volume and carbon
+  are plot means. A species filter that names a species mapped to a group key (e.g. QUAL -> `_H`) selects the whole group key.
+- **Planting** (`plant` and `plant_after`): `tpa x survival / 0.4047` trees/ha on EACH of the 4 sites -> 3 vigour sub-cohorts (D 2.54 cm, H 3 m, age 1, shares 1/6, 2/3, 1/6), merging into existing planted sub-cohorts of the same species
+  and age. **Planted-stand rule:** applying a plant action to a plot sets `planted = true` on its 4 sites; from then on the v2g planted multipliers (pH, pD, pM) act on ALL cohorts of those sites (the flag is a stand attribute in the model,
+  not per cohort), also on the pre-existing trees. It is never reset.
+- **Cleanup**: the negligible-cohort cleanup (`hbad2_cleanup`, default 1e-3 trees/ha in scenario runs, 0 = off) is described in `docs/hbad2_plugin.md`.
+- **Determinism**: no random numbers; the annual step is independent of the thread count (`tools/scenario_plugin_check.jl` prints the hash for `r4_hbad2_v2g`; identical at 1 and 2 threads).
+- Limits: stage 1 has no calibration (fixed v2g parameters; the single-species-key volume equations above); carbon/volume are reporting quantities of the cohort state, not dynamics; cost grows with the cohort count (see the cleanup table).
