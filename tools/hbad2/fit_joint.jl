@@ -45,14 +45,32 @@ nadA = isempty(nad) ? a0 : parse(Float64, split(nad, ",")[1]); nadB = isempty(na
 (nadA - idealA[] > 0 && nadB - idealB[] > 0) || error("scalarisation needs nadir > ideal for both objectives (fA $(idealA[])→$(nadA), fB $(idealB[])→$(nadB))")
 lg(@sprintf("scalarisation: ideal fA %.1f fB %.1f | nadir fA %.1f fB %.1f (start %.1f / %.1f)", idealA[], idealB[], nadA, nadB, a0, b0))
 any(l -> 0 < l < 1, lams) && isempty(ide) && @warn "λ strictly between 0 and 1 without HBAD2_IDEAL: the normalisation is arbitrary"
+# HBAD2_FREEZE="mbg,mD,msup,G:mD2,G:mSD": these per-species parameters (names of FREE) and globals (G:<GlobP field among the fitted
+# globals mD2 pH pD pM mSD σv) stay at their start values; CMA-ES searches the remaining coordinates only.
+const GNAMES = ("mD2", "pH", "pD", "pM", "mSD", "σv")
+frz = filter(!isempty, strip.(split(get(ENV, "HBAD2_FREEZE", ""), ",")))
+frozen = Int[]
+for nm in frz
+  if startswith(nm, "G:")
+    g = findfirst(==(nm[3:end]), GNAMES); g === nothing && error("unknown global $(nm)"); push!(frozen, nsp * NF + g)
+  else
+    j = findfirst(==(Symbol(nm)), FREE); j === nothing && error("unknown species parameter $(nm)")
+    append!(frozen, [(s - 1) * NF + j for s in 1:nsp])
+  end
+end
+free_idx = setdiff(1:length(θ0), frozen)
+expand(z) = (θ = copy(θ0); θ[free_idx] = z; θ)
+lg(@sprintf("frozen coordinates %d (%s); searched %d", length(frozen), join(frz, ","), length(free_idx)))
+open(io -> println(io, "freeze=", join(frz, ",")), joinpath(OUTD, "meta.txt"), "a")
 res = DataFrame(lam=Float64[], fA=Float64[], fB=Float64[], vA=Float64[], vB=Float64[])
 for λ in lams
-  f = function (θ)
-    a, b = both(θ, TRA, TRB)
+  f = function (z)
+    a, b = both(expand(z), TRA, TRB)
     x = (a - idealA[]) / (nadA - idealA[]); y = (b - idealB[]) / (nadB - idealB[])
     max(λ * x, (1 - λ) * y) + ρ * (λ * x + (1 - λ) * y)
   end
-  r = cmaes(f, θ0, parse(Float64, get(ENV, "HBAD2_SIGMA", "0.03")); λ=parse(Int, get(ENV, "HBAD2_LAMBDA", "24")), maxevals=EV, logf=lg, log_every=25)
+  r0 = cmaes(f, θ0[free_idx], parse(Float64, get(ENV, "HBAD2_SIGMA", "0.03")); λ=parse(Int, get(ENV, "HBAD2_LAMBDA", "24")), maxevals=EV, logf=lg, log_every=25)
+  r = (x = expand(r0.x),)
   local a, b, va, vb
   a, b = both(r.x, TRA, TRB); va, vb = both(r.x, VAA, VAB)
   lg(@sprintf("λ=%.2f  train fA %.1f fB %.1f | VAL fA %.1f fB %.1f  (start val %.1f / %.1f)", λ, a, b, va, vb, va0, vb0))

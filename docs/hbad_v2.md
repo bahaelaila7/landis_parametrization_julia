@@ -399,3 +399,11 @@ Decoded v2g export (tools/hbad2/export_params.jl): results/hbad2/fit_v2g/params_
   plot-level metrics/removal (residual BA/TPA/SDI met exactly), planting with a planted flag, cleanup of cohorts < 1e-3 trees/ha in scenario
   runs; scenario hash r4_hbad2_v2g 87b47235… (identical t=1/t=2). Timing (2 threads): 10 plots × 100 yr in 2.6 s (HBAD v1 0.9 s).
 * Calibration stays in tools/hbad2 (this prototype harness); Pan's generic fit_params path is not used for hbad2.
+
+### 5.18 v2g mortality shape and the frozen-mortality test (j13)
+v2g VAL deaths obs / sim by D class: ≤ 5 cm 1,757 / 2,172 (+24 %), 5–12.7 1,185 / 1,347 (+14 %), 12.7–20 4,011 / 4,021, 20–30 1,632 / 1,325
+(−19 %), 30–45 739 / 519 (−30 %), > 45 cm 246 / 108 (−56 %); small trees in the open (O ≤ 0.2) 693 / 1,091. Total right (9,570 / 9,491),
+size shape wrong: the joint compromise uses SAPLING mortality as the lever to clear the free-run pole excess and lets large trees live (few
+large-tree deaths → little weight in the Sim A binomial), which also fits the + 12–15 % free-run BA bias and the worse TEST mortality NLL
+(v2g 32,918 vs v1 32,533 vs v2f 32,350). j13 = j11 settings with the mortality parameters FROZEN at the Sim A optimum v2f
+(`HBAD2_FREEZE=mbg,mD,msup,G:mD2,G:mSD,G:pM`, 39 coordinates frozen, 135 searched): can Sim B be served by growth/competition/vigour alone?
