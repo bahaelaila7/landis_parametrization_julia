@@ -6,7 +6,7 @@ using Pan; import JLD2
 const P = Pan
 cfg = Pan.load_config(ARGS[1]); ref = JLD2.load_object(ARGS[2]); out = ARGS[3]
 splots, eco_list, species_list, eco_species_ids, _, _ = P.prepare_from_cfg(cfg)
-p = P.BiomassSuccessionPlugin.generate_biomass_params(species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)), no_establishment=true)
+p = P.BiomassSuccessionPlugin.generate_biomass_params(P.BiomassSuccessionPlugin.BSTables(), species_list, eco_list, eco_species_ids; rng=P.RNGType(UInt64(1)), no_establishment=true)   # default (empty) plugin tables, as before the tables became explicit
 for (e, ids) in enumerate(eco_species_ids), j in eachindex(ids)
   p.S[e][j] = 0.5f0; p.B_MAX_SPP[e][j] = 23500f0; p.ANPP_MAX_SPP[e][j] = 23500f0 / 27.5f0; p.PROB_MORT_SPP[e][j] = 0f0
 end
