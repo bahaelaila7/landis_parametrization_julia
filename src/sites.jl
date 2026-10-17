@@ -175,11 +175,13 @@ end
     make_sites_hbad2_arrays(plugin, off, species, age, N, D, H, zq; rng, no_establishment=false, eco_id=1, planted=nothing) -> SiteSoA
 
 HBAD2 SoA from per-site cohort arrays (CSR `off`, 1-based, `off[end]` = total + 1; `species` = eco-local species index). State is copied exactly (Float64); `c_bio` is the reported
-allometric AGB; `planted` (Bool per site) sets the planted-stand flag. Per-site RNG as in `make_sites` (unused by the deterministic kernel). Empty sites get capacity 1.
+allometric AGB; `planted` (Bool per site) sets the planted-stand flag; `eco_id` is one ecoregion for all sites or one per site (the eco-local species index must be the key index in
+every ecoregion, i.e. all ecoregions list all species in order); `mapcode` (default the site index) is the caller's plot id (the scenario engine groups the subplot sites of a plot by it). Per-site RNG as in `make_sites` (unused by the deterministic kernel). Empty sites get capacity 1.
 """
 function make_sites_hbad2_arrays(plugin::PluginConfig{P}, off::AbstractVector{<:Integer}, species::AbstractVector{<:Integer}, age::AbstractVector{<:Real}, N::AbstractVector{<:Real},
                                  D::AbstractVector{<:Real}, H::AbstractVector{<:Real}, zq::AbstractVector{<:Real};
-                                 rng::Random.AbstractRNG, no_establishment::Bool=false, eco_id::Int=1, planted::Union{Nothing,AbstractVector{Bool}}=nothing) where {P}
+                                 rng::Random.AbstractRNG, no_establishment::Bool=false, eco_id::Union{Integer,AbstractVector{<:Integer}}=1,
+                                 planted::Union{Nothing,AbstractVector{Bool}}=nothing, mapcode::Union{Nothing,AbstractVector{<:Integer}}=nothing) where {P}
   P === HBAD2Plugin.HBAD2 || error("make_sites_hbad2 needs a succession_plugin=hbad2 PluginConfig")
   pc = plugin.ctx
   ns = length(off) - 1
@@ -192,7 +194,8 @@ function make_sites_hbad2_arrays(plugin::PluginConfig{P}, off::AbstractVector{<:
     site = getsite(soa, i)
     site.active = true
     site.rng = RNGType(hash((base_seed, i)))
-    site.ecocode = UIntType(eco_id); site.eco_id = eco_id; site.mapcode = UIntType(i); site.ref_cn = i
+    e = eco_id isa Integer ? Int(eco_id) : Int(eco_id[i])
+    site.ecocode = UIntType(e); site.eco_id = e; site.mapcode = UIntType(mapcode === nothing ? i : mapcode[i]); site.ref_cn = i
     site.old = zero(UIntType); site.live = zero(UIntType)
     _init_site_plugin!(P, site, no_establishment)
     planted === nothing || (site.planted = planted[i])

@@ -112,8 +112,30 @@ function site_commit!(soa::PanCore.AnySoA, i::Int, ep::HBAD2EcoParams, cst::HBAD
     n = recruit_apply!(csr.c_species, csr.c_age, csr.c_tph, csr.c_dq, csr.c_h, csr.c_zq, csr.c_ropen, csr.sp_rate, csr.sp_estab, ep.rec,
                        o, n, so, nsp, Int(sc.ryear[i]), nq)
   end
+  cst.cleanup_tph > 0 && (n = drop_small_cohorts!(csr, o, n, cst.cleanup_tph))
   report_site!(csr, sc, ep, i, o, n)
   return nothing
+end
+
+"""
+    drop_small_cohorts!(csr, o, n, thr) -> Int
+
+Remove the cohorts `o+1:o+n` of a site with fewer than `thr` trees/ha, shifting the others down (their order is kept: the kernel's sums stay in the same order). Returns the new live count.
+Allocation-free. Scratch arrays (`c_O`, `c_SDI`, `c_V`) are recomputed every step and `c_bio` by `report_site!`, so only the state arrays move.
+"""
+function drop_small_cohorts!(csr, o::Int, n::Int, thr::Float64)::Int
+  m = 0
+  @inbounds for k in 1:n
+    j = o + k
+    csr.c_tph[j] < thr && continue                      # (NaN is kept: it is a bug elsewhere, not negligible)
+    m += 1
+    if m != k
+      jj = o + m
+      csr.c_species[jj] = csr.c_species[j]; csr.c_age[jj] = csr.c_age[j]; csr.c_tph[jj] = csr.c_tph[j]; csr.c_dq[jj] = csr.c_dq[j]
+      csr.c_h[jj] = csr.c_h[j]; csr.c_zq[jj] = csr.c_zq[j]; csr.c_ropen[jj] = csr.c_ropen[j]
+    end
+  end
+  return m
 end
 
 """Reported allometric AGB of every cohort and the site totals (BA, SDI, RD = SDI / SDI-weighted species SDImax); sets `live` and `old`."""
@@ -292,4 +314,29 @@ function plant!(ctx::HBAD2Context, site::SiteView, species::Integer, tph::Real; 
     first_ == 0 && (first_ = kk)
   end
   return first_
+end
+
+"""
+    scale_cohort!(ctx, site, k, keep)
+
+Management removal: keep the fraction `keep` (0..1) of the trees of cohort k at constant size (`c_tph` x keep; dq, h, age unchanged) and update its reported AGB.
+Site totals are refreshed by `refresh_totals!` (call it once after a series of removals).
+"""
+function scale_cohort!(ctx::HBAD2Context, site::SiteView, k::Integer, keep::Real)
+  al = _allo_of(ctx, Int(site.eco_id), site.c_species[k])
+  t = site.c_tph[k] * Float64(keep)
+  site.c_tph[k] = t
+  site.c_bio[k] = FloatType(agb_of(al, t, site.c_dq[k]))
+  return nothing
+end
+
+"""Recompute the REPORTED site totals B, BA, SDI from the cohorts after management (RD is recomputed by the next annual step)."""
+function refresh_totals!(ctx::HBAD2Context, site::SiteView)
+  B = 0.0; ba = 0.0; sd = 0.0
+  @inbounds for k in 1:Int(site.live)
+    B += Float64(site.c_bio[k]); D = site.c_dq[k]; N = site.c_tph[k]
+    ba += _PI4E4 * D * D * N; sd += sdi(N, D)
+  end
+  site.B = FloatType(B); site.BA = FloatType(ba); site.SDI = FloatType(sd)
+  return nothing
 end

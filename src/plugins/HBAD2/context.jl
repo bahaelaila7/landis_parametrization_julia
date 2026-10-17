@@ -1,9 +1,14 @@
 # The immutable per-run context of the HBAD2 plugin: the fixed v2 tables, the species -> key mapping, the HBAD v1 priors (REPORTED allometric AGB and the
 # AGB -> state translation of `add_cohort!` only) and the eco -> species table. Built once per (species list, eco table).
 
-"""Kernel options. `vigour`: recruits / planted cohorts enter as 3 vigour sub-cohorts (zq = -sqrt3, 0, sqrt3; shares 1/6, 2/3, 1/6), else as one mean-field cohort."""
+"""
+Kernel options. `vigour`: recruits / planted cohorts enter as 3 vigour sub-cohorts (zq = -sqrt3, 0, sqrt3; shares 1/6, 2/3, 1/6), else as one mean-field cohort.
+`cleanup_tph`: negligible-cohort cleanup (long scenario runs): at the end of every annual step (before the reported state is computed) cohorts with fewer than
+`cleanup_tph` trees/ha are removed, keeping the order of the others. 0 (the default) = OFF: the kernel is then exactly the prototype's (cohorts are never removed).
+"""
 Base.@kwdef struct HBAD2Const
   vigour::Bool = true
+  cleanup_tph::Float64 = 0.0
 end
 
 struct HBAD2Context

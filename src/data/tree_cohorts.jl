@@ -122,3 +122,18 @@ function load_tree_cohorts(db_path::AbstractString, visits::DataFrame, keys::Abs
   r0 > nrows || error("load_tree_cohorts: $(nrows - r0 + 1) rows were not assigned to a site")
   return TreeCohorts(keys_, vis, site_visit, site_subp, off, ckey, cN, cD, cH, cA, czq, vigour, nrows)
 end
+
+"""
+    subset_sites(tc, idx) -> TreeCohorts
+
+The sites `idx` of `tc` in that order (repeats allowed, e.g. two scenario plots sharing a donor visit), with their cohorts; `keys`, `visits` and `vigour` are kept.
+"""
+function subset_sites(tc::TreeCohorts, idx::AbstractVector{<:Integer})
+  off = Int[1]; key = Int32[]; N = Float64[]; D = Float64[]; H = Float64[]; A = Float64[]; zq = Float64[]
+  for s in idx
+    r = tc.off[s]:tc.off[s+1]-1
+    append!(key, tc.key[r]); append!(N, tc.N[r]); append!(D, tc.D[r]); append!(H, tc.H[r]); append!(A, tc.A[r]); append!(zq, tc.zq[r])
+    push!(off, length(key) + 1)
+  end
+  return TreeCohorts(tc.keys, tc.visits, tc.site_visit[idx], tc.site_subp[idx], off, key, N, D, H, A, zq, tc.vigour, tc.n_trees)
+end
