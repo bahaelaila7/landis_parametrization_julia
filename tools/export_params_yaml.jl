@@ -8,8 +8,35 @@
 #   variants that exist. Species with no possible target are omitted (and reported).
 # eco_mapping: the eco-cell rule of the config (EPA L3 field; 4-cell site class from the dominant forested condition's
 #   SITECLCD in the listed L3s, one cell "X" elsewhere).
-using Pan, JLD2, DuckDB, DataFrames, JSON3
+# hbad2 (HBAD v2, v2g): the parameters are the fixed csv files of a directory (results/hbad2), not a JLD2; ecoregions / eco_mapping / region come from an existing roster:
+#   ./julia_gdal.sh --project=. tools/export_params_yaml.jl --hbad2 <base_roster.yaml> <params_dir> <out.yaml> "<name>" ["<description>"] ['<provenance json>']
+# species_map: every FIA symbol of REF_SPECIES (database PAN_FIA_DB, read only) -> its own key if the set has a row for it, else `_S` / `_H` by SFTWD_HRDWD (unknown -> `_H`),
+# i.e. the rule of Data.load_tree_cohorts (default_key_resolver).
+using Pan, JLD2, DuckDB, DataFrames, JSON3, YAML
 const P = Pan
+if ARGS[1] == "--hbad2"
+  base = YAML.load_file(ARGS[2]); dir = ARGS[3]; out = ARGS[4]; name = ARGS[5]
+  desc = length(ARGS) >= 6 ? ARGS[6] : ""
+  prov = length(ARGS) >= 7 ? Dict{String,Any}(String(k) => v for (k, v) in JSON3.read(ARGS[7])) : Dict{String,Any}()
+  t = P.HBAD2Plugin.load_v2_tables(dir); keys_ = String.(t.keys)
+  scen = P.ScenarioConfig()
+  db = DuckDB.DB(scen.fia_db; readonly=true); con = DBInterface.connect(db)
+  ref = DataFrame(DBInterface.execute(con, "SELECT UPPER(TRIM(SPECIES_SYMBOL)) sym, any_value(SFTWD_HRDWD) sh FROM REF_SPECIES WHERE SPECIES_SYMBOL IS NOT NULL GROUP BY 1 ORDER BY 1"))
+  resolve = P.Data.default_key_resolver(keys_)
+  smap = Dict{String,String}(String(r.sym) => resolve(String(r.sym), String(coalesce(r.sh, "H"))) for r in eachrow(ref))
+  eco = String.(base["pan_params"]["region"]["eco_cells"])
+  ids = [collect(1:length(keys_)) for _ in eco]
+  p = P.HBAD2Plugin.HBAD2Params(eco, keys_, [P.UIntType.(i) for i in ids], copy(keys_), t.sp, t.rec, t.glob)
+  prov["params_dir"] = get(prov, "params_dir", dir); prov["species_map_source"] = "REF_SPECIES.SFTWD_HRDWD in $(scen.fia_db)"
+  prov["eco_cells_from"] = ARGS[2]
+  region = Dict{String,Any}(String(k) => v for (k, v) in base["pan_params"]["region"])
+  y = P.params_to_yaml(p; name=name, description=desc, region=region, provenance=prov, species_map=smap, eco_mapping=Dict{String,Any}(String(k) => v for (k, v) in base["eco_mapping"]))
+  q, meta = P.params_from_yaml(y)
+  isempty(P.params_diff(p, q)) || error("round trip failed: $(P.params_diff(p, q))")
+  write(out, y)
+  println("wrote $out: plugin $(meta.plugin), $(length(keys_)) species keys, $(length(eco)) eco cells, species_map $(length(smap)) FIA symbols")
+  exit(0)
+end
 cfg = P.load_config(ARGS[1]); p = P._load_params_from_path(ARGS[2]); out = ARGS[3]; name = ARGS[4]   # (upgrades older HBAD param files)
 desc = length(ARGS) >= 5 ? ARGS[5] : ""
 prov = length(ARGS) >= 6 ? Dict{String,Any}(String(k) => v for (k, v) in JSON3.read(ARGS[6])) : Dict{String,Any}()

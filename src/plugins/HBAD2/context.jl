@@ -27,9 +27,9 @@ Load the v2 parameter files of `params_dir` (default `results/hbad2`, the v2g ex
 function HBAD2Context(species_list::AbstractVector{<:AbstractString}, eco_species_ids::AbstractVector;
                       params_dir::AbstractString=DEFAULT_PARAMS_DIR, priors_csv::AbstractString="", coefs_csv::AbstractString="",
                       vigour::Bool=true, verbose::Bool=true, fixed::HBAD2Const=HBAD2Const(vigour=vigour),
-                      tables::BiomassSuccessionPlugin.BSTables=BiomassSuccessionPlugin.BSTables())
+                      tables::BiomassSuccessionPlugin.BSTables=BiomassSuccessionPlugin.BSTables(), v2tables=nothing)
   pdir = isempty(params_dir) ? DEFAULT_PARAMS_DIR : String(params_dir)
-  t = load_v2_tables(pdir)
+  t = v2tables === nothing ? load_v2_tables(pdir) : v2tables      # v2tables = (keys, sp, rec, glob, meta) of a loaded yaml roster, else the csv files
   grp_csv = joinpath(dirname(HBADPlugin.DEFAULT_COEFS_CSV), "species_group.csv")
   grp_map = Dict{String,String}(String(r.species) => String(r.grp) for r in eachrow(CSV.read(grp_csv, DataFrame)))
   skey = map_species_keys(species_list, t.keys; grp_map=grp_map)
@@ -41,6 +41,12 @@ function HBAD2Context(species_list::AbstractVector{<:AbstractString}, eco_specie
     @info "HBAD2 species -> keys" mapping = join(["$(s)=>$(skey[i])" for (i, s) in enumerate(species_list)], "  ")
   end
   return HBAD2Context(priors, HBADPlugin.eco_gids(eco_species_ids), fixed, t.keys, t.sp, t.rec, t.glob, skey, pdir, tables)
+end
+
+"""The v2 tables (`keys, sp, rec, glob, meta`, per key) of a parameter set whose species ARE the keys (the yaml roster); the input of `HBAD2Context(...; v2tables=)`."""
+function tables_of(p::HBAD2Params)
+  p.KEYS == p.SPECIES_LIST || error("HBAD2 tables_of: the species of the set must be the v2 keys")
+  return (keys=copy(p.KEYS), sp=copy(p.SP), rec=copy(p.REC), glob=p.G, meta=Dict{String,String}())
 end
 
 """A copy of `ctx` with other field values (`with(ctx; fixed=...)`)."""

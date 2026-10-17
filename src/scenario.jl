@@ -90,6 +90,7 @@ struct ParamSet
   spcd::Dict{String,Int}               # parameter species → FIA SPCD (groups: negative synthetic codes)
   scen::ScenarioConfig                 # the data sources (and caches) this set was loaded against
   hb::HBADPlugin.HBADContext           # HBAD priors of THIS set's species list: cohort-structure translation (TPA/QMD/height) for every plugin; the HBAD run context
+  h2::Union{Nothing,HBAD2Plugin.HBAD2Context}   # the HBAD2 run context (hbad2 sets only; species = the v2 keys)
 end
 
 function load_paramset(text::AbstractString, scen::ScenarioConfig=ScenarioConfig())
@@ -106,7 +107,8 @@ function load_paramset(text::AbstractString, scen::ScenarioConfig=ScenarioConfig
     c = get(codes, uppercase(String(s)), 0)
     spcd[String(s)] = c > 0 ? c : (k -= 1)
   end
-  ParamSet(string(hash(text); base=16, pad=16), p, meta, SP, sp_index, eco_index, local_index, spcd, scen, hb)
+  h2 = SP === HBAD2Plugin.HBAD2 ? HBAD2Plugin.HBAD2Context(String.(p.SPECIES_LIST), [Int.(ids) for ids in p.ECO_SPECIES_IDS]; v2tables=HBAD2Plugin.tables_of(p), verbose=false) : nothing
+  ParamSet(string(hash(text); base=16, pad=16), p, meta, SP, sp_index, eco_index, local_index, spcd, scen, hb, h2)
 end
 
 _species_codes(scen::ScenarioConfig) = get_cached!(scen.cache, :species_codes) do

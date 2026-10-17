@@ -17,12 +17,13 @@ const PARAMS_FORMAT_VERSION = 1
 plugin_name(::BiomassSuccessionPlugin.BiomassSuccessionParams) = "biomass"
 plugin_name(::PnETPlugin.PnETParams) = "pnet"
 plugin_name(::HBADPlugin.HBADParams) = "hbad"
-plugin_name(::HBAD2Plugin.HBAD2Params) = error("hbad2 parameters are the fixed v2g files (results/hbad2/*.csv, stage 1); no yaml roster")
+plugin_name(::HBAD2Plugin.HBAD2Params) = "hbad2"
 params_struct_type(name::AbstractString) =
   lowercase(name) in ("biomass", "biomasssuccession", "bs") ? BiomassSuccessionPlugin.BiomassSuccessionParams :
   lowercase(name) in ("pnet", "pnet-succession") ? PnETPlugin.PnETParams :
   lowercase(name) in ("hbad", "hbad-succession") ? HBADPlugin.HBADParams :
-  error("unknown plugin '$name' in pan_params header (biomass | pnet | hbad)")
+  lowercase(name) in ("hbad2", "hbad-v2") ? HBAD2Plugin.HBAD2Params :
+  error("unknown plugin '$name' in pan_params header (biomass | pnet | hbad | hbad2)")
 
 const _ID_FIELDS = (:ECO_LIST, :SPECIES_LIST, :ECO_SPECIES_IDS)
 # per-eco fields (disambiguates when n_species == n_eco); anything else is classified by shape
@@ -158,6 +159,7 @@ function params_from_yaml(text::AbstractString)
   h = doc["pan_params"]; plugin = String(get(h, "plugin", ""))
   T = params_struct_type(plugin)
   fv = Int(get(h, "format_version", 1)); fv <= PARAMS_FORMAT_VERSION || error("format_version $fv is newer than this Pan ($(PARAMS_FORMAT_VERSION))")
+  T === HBAD2Plugin.HBAD2Params && return _hbad2_from_yaml(doc, h)
   spe = doc["species"]; ecos = doc["ecoregions"]; glob = something(get(doc, "global", nothing), Dict{String,Any}())
   species_list = String[String(s["name"]) for s in spe]; spidx = Dict(s => k for (k, s) in enumerate(species_list))
   eco_list = String[String(e["name"]) for e in ecos]
@@ -207,4 +209,72 @@ end
 function params_diff(a, b)
   typeof(a) == typeof(b) || return [:TYPE]
   [f for f in fieldnames(typeof(a)) if !isequal(getfield(a, f), getfield(b, f))]
+end
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# hbad2 roster (HBAD v2, model v2g). The parameters are per species KEY (the 10 own species + the pooled `_S` / `_H` groups), not per ecoregion:
+#   global:     mD2 mA pH pD pM form mSD sigma_v
+#   species:    one row per KEY: name (= the key), the 15 per-key parameters (SP_PARAM_NAMES) and the recruitment parameters (rho0 rhoS rhoL D0 H0 A0)
+#   ecoregions: the eco cells of the region (for the scenario's eco mapping); each lists ALL keys in order, so the eco-local species index IS the key index
+# species_map: FIA symbol -> key (own species, else `_S` / `_H` by SFTWD_HRDWD), as the tree loader resolves species. Unknown keys / missing parameters are errors.
+# ---------------------------------------------------------------------------------------------------------------------
+const _H2_GLOBAL = ("mD2", "mA", "pH", "pD", "pM", "form", "mSD", "sigma_v")
+const _H2_REC = ("rho0", "rhoS", "rhoL", "D0", "H0", "A0")
+
+function params_to_yaml(p::HBAD2Plugin.HBAD2Params; name::AbstractString, description::AbstractString="", region=Dict{String,Any}(),
+                        provenance=Dict{String,Any}(), species_map=Dict{String,String}(), eco_mapping=Dict{String,Any}())
+  sp = String.(p.SPECIES_LIST); eco = String.(p.ECO_LIST); g = p.G
+  p.KEYS == sp || error("hbad2 roster: the species of a parameter set must be the v2 keys themselves (got $(p.KEYS) for $(sp))")
+  all(ids -> Int.(ids) == collect(1:length(sp)), p.ECO_SPECIES_IDS) || error("hbad2 roster: every ecoregion must list all keys in order")
+  doc = OrderedDict{String,Any}()
+  doc["pan_params"] = OrderedDict{String,Any}("plugin" => "hbad2", "format_version" => PARAMS_FORMAT_VERSION,
+    "name" => String(name), "description" => String(description), "created" => string(Dates.today()),
+    "region" => region, "provenance" => provenance)
+  doc["eco_mapping"] = eco_mapping
+  doc["species_map"] = OrderedDict(k => species_map[k] for k in sort(collect(keys(species_map))))
+  doc["global"] = OrderedDict{String,Any}("mD2" => _yamlval(g.mD2), "mA" => _yamlval(g.mA), "pH" => _yamlval(g.pH), "pD" => _yamlval(g.pD), "pM" => _yamlval(g.pM),
+                                          "form" => g.form, "mSD" => _yamlval(g.mSD), "sigma_v" => _yamlval(g.σv))
+  doc["species"] = [begin
+      d = OrderedDict{String,Any}("name" => sp[k])
+      for f in HBAD2Plugin.SP_PARAM_NAMES; d[String(f)] = _yamlval(getfield(p.SP[k], f)); end
+      for f in _H2_REC; d[f] = _yamlval(getfield(p.REC[k], Symbol(f))); end
+      d
+    end for k in eachindex(sp)]
+  doc["ecoregions"] = [OrderedDict{String,Any}("name" => e, "species" => [OrderedDict{String,Any}("species" => s) for s in sp]) for e in eco]
+  hdr = """# Pan succession parameter set - plugin: hbad2 (HBAD v2, model v2g; format $(PARAMS_FORMAT_VERSION)). Parameters are per species KEY (10 own species + the pooled _S / _H groups).
+# species_map: FIA species symbol -> key; eco_mapping: (EPA L3, FIA site class) -> eco cell (the parameters do not depend on the cell).
+"""
+  io = IOBuffer(); print(io, hdr); _emit(io, doc, 0); String(take!(io))
+end
+
+function _hbad2_from_yaml(doc, h)
+  haskey(doc, "species") && haskey(doc, "ecoregions") || error("hbad2 roster: needs `species` and `ecoregions`")
+  spe = doc["species"]; ecos = doc["ecoregions"]; glob = something(get(doc, "global", nothing), Dict{String,Any}())
+  for k in keys(glob); String(k) in _H2_GLOBAL || error("hbad2 roster: unknown global parameter '$k' (expected $(join(_H2_GLOBAL, ", ")))"); end
+  for k in _H2_GLOBAL; haskey(glob, k) || error("hbad2 roster: global parameter '$k' missing"); end
+  names = String[String(s["name"]) for s in spe]
+  allunique(names) || error("hbad2 roster: duplicate species keys")
+  spnames = Set(String.(HBAD2Plugin.SP_PARAM_NAMES)); recnames = Set(_H2_REC)
+  for s in spe
+    for k in keys(s); String(k) == "name" || String(k) in spnames || String(k) in recnames || error("hbad2 roster: unknown parameter '$k' of species $(s["name"])"); end
+    for k in union(spnames, recnames); haskey(s, k) || error("hbad2 roster: parameter '$k' missing for species $(s["name"])"); end
+  end
+  sp = HBAD2Plugin.SpP[HBAD2Plugin.SpP([Float64(s[String(f)]) for f in HBAD2Plugin.SP_PARAM_NAMES]) for s in spe]
+  rec = HBAD2Plugin.RecP[HBAD2Plugin.RecP((Float64(s[f]) for f in _H2_REC)...) for s in spe]
+  G = HBAD2Plugin.GlobP(Float64(glob["mD2"]), Float64(glob["mA"]), Float64(glob["pH"]), Float64(glob["pD"]), Float64(glob["pM"]),
+                        round(Int, glob["form"]), Float64(glob["mSD"]), Float64(glob["sigma_v"]))
+  eco_list = String[String(e["name"]) for e in ecos]
+  for e in ecos
+    lst = String[String(r["species"]) for r in something(get(e, "species", nothing), Any[])]
+    lst == names || error("hbad2 roster: ecoregion $(e["name"]) must list all species keys in the order of `species` (the eco-local species index is the key index)")
+  end
+  esi = [UIntType[UIntType(k) for k in 1:length(names)] for _ in ecos]
+  p = HBAD2Plugin.HBAD2Params(eco_list, names, esi, copy(names), sp, rec, G)
+  smap = Dict{String,String}(String(k) => String(v) for (k, v) in something(get(doc, "species_map", nothing), Dict()))
+  for (k, v) in smap; v in names || error("hbad2 roster: species_map $k -> $v, but $v is not a species key"); end
+  meta = (; plugin="hbad2", name=String(get(h, "name", "")), description=String(get(h, "description", "")),
+          region=get(h, "region", Dict()), provenance=get(h, "provenance", Dict()), species_map=smap,
+          eco_mapping=something(get(doc, "eco_mapping", nothing), Dict{String,Any}()), warnings=String[])
+  p, meta
 end
