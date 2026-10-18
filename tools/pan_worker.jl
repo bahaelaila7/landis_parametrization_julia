@@ -12,7 +12,7 @@ redirect_stdout(stderr)
 
 const PARAMS_DIR = get(ENV, "PAN_PARAMS_DIR", joinpath(dirname(@__DIR__), "results", "params_yaml"))
 # defaults: EPA Region 4 sets (cover all R4 ecoregions incl. GA+FL); GA+FL-specific, cross-validated sets ship as samples
-const DEFAULTS = Dict("biomass" => "r4_biomass_v1.yaml", "pnet" => "r4_pnet_v1.yaml", "hbad" => "r4_hbad_v1.yaml", "hbad2" => "r4_hbad2_v2g.yaml")
+const DEFAULTS = Dict("biomass" => "r4_biomass_v1.yaml", "pnet" => "r4_pnet_v1.yaml", "hbad" => "r4_hbad_v1.yaml", "hbad2" => "r4_hbad2_v2h.yaml")
 const SCEN = P.ScenarioConfig()          # data sources of the scenario engine, read from the PAN_* env once at startup (owns the lazy tables)
 const CACHE = Dict{String,Any}()        # params_id => ParamSet
 

@@ -213,7 +213,7 @@ end
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# hbad2 roster (HBAD v2, model v2g). The parameters are per species KEY (the 10 own species + the pooled `_S` / `_H` groups), not per ecoregion:
+# hbad2 roster (HBAD v2; the model name is pan_params.name, e.g. v2g, v2h). The parameters are per species KEY (the 10 own species + the pooled `_S` / `_H` groups), not per ecoregion:
 #   global:     mD2 mA pH pD pM form mSD sigma_v
 #   species:    one row per KEY: name (= the key), the 15 per-key parameters (SP_PARAM_NAMES) and the recruitment parameters (rho0 rhoS rhoL D0 H0 A0)
 #   ecoregions: the eco cells of the region (for the scenario's eco mapping); each lists ALL keys in order, so the eco-local species index IS the key index
@@ -242,7 +242,7 @@ function params_to_yaml(p::HBAD2Plugin.HBAD2Params; name::AbstractString, descri
       d
     end for k in eachindex(sp)]
   doc["ecoregions"] = [OrderedDict{String,Any}("name" => e, "species" => [OrderedDict{String,Any}("species" => s) for s in sp]) for e in eco]
-  hdr = """# Pan succession parameter set - plugin: hbad2 (HBAD v2, model v2g; format $(PARAMS_FORMAT_VERSION)). Parameters are per species KEY (10 own species + the pooled _S / _H groups).
+  hdr = """# Pan succession parameter set - plugin: hbad2 (HBAD v2; format $(PARAMS_FORMAT_VERSION)). Parameters are per species KEY (10 own species + the pooled _S / _H groups).
 # species_map: FIA species symbol -> key; eco_mapping: (EPA L3, FIA site class) -> eco cell (the parameters do not depend on the cell).
 """
   io = IOBuffer(); print(io, hdr); _emit(io, doc, 0); String(take!(io))
