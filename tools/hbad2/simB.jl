@@ -16,6 +16,15 @@ longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) fo
 JOINT = occursin("/", tag)
 FD = JOINT ? joinpath(R2DIR, "joint_" * split(tag, "/")[1]) : joinpath(R2DIR, "fit_" * tag)
 check_meta(FD); θ = read_theta(joinpath(FD, JOINT ? "theta_$(split(tag, "/")[2]).csv" : "theta.csv"), nsp); P, G = decode(θ, nsp, longev)
+if get(ENV, "HBAD2_SDIMAX_FROM_V1", "0") == "1"      # diagnostic: replace every species' SDIMAX by the data p95 of the HBAD v1 priors (results/hbad/priors.csv)
+  pri = CSV.read(joinpath(@__DIR__, "..", "..", "results", "hbad", "priors.csv"), DataFrame); pk = Dict(String(r.key) => r for r in eachrow(pri))
+  for (s_, k) in enumerate(keys_)
+    r = haskey(pk, k) && !ismissing(pk[k].sdimax_p95_all) ? pk[k] : pk["_" * (k[1] == '_' ? k[2:2] : (any(tr.grp[tr.key .== k] .== "S") ? "S" : "H"))]
+    v = collect(getfield(P[s_], f) for f in fieldnames(SpP)); v[findfirst(==(:sdimax), fieldnames(SpP))] = r.sdimax_p95_all
+    P[s_] = SpP(v...)
+  end
+  @info "SDIMAX from v1 priors p95" sdimax=[round(Int, p.sdimax) for p in P]
+end
 rc = CSV.read(joinpath(R2DIR, SITE_SUB ? "recruitment_coefs_subplot.csv" : "recruitment_coefs.csv"), DataFrame); rcd = Dict(String(r.key) => r for r in eachrow(rc))
 RMULT = parse(Float64, get(ENV, "HBAD2_RECR_MULT", "1"))   # diagnostic only
 R = [RecP(rcd[k].rho0 + log(RMULT), rcd[k].rhoS, rcd[k].rhoL, 2.54, 3.0, 5.0) for k in keys_]

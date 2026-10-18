@@ -456,3 +456,11 @@ TEST (reported once for v2j): Sim A total **−266,253** (mort 32,454; σ_D 0.12
 Sim B (439 test plots, 1,552 visits): BA 12.4 % (+7.7) [persistence 24.3 %], N ≥ 5 in 18.8 % (+8.1) [18.2 %], QMD **15.6 %** [16.0 %], Lorey H 6.7 %
 (+0.8) [13.1 %], composition 0.152 [0.138]; > 21 yr classes 209 / 187 / 164 / 151 vs obs 189 / 73 / 224 / 152. v2j beats persistence on BA,
 QMD and height, ties N ≥ 5 in, loses composition; poles 2.6× after 21 yr.
+
+### 5.21 Is the pole excess missing self-thinning? (diagnostic, negative)
+The fitted SDIMAX values drifted high (LIST2 at the 2,000 bound, others ~1,000–1,600) because the cap hardly matters for tracked trees, so it never
+binds in free runs. Diagnostic (simB.jl `HBAD2_SDIMAX_FROM_V1=1`: every species' SDIMAX replaced by the data p95 of the HBAD v1 priors), v2j VAL:
+BA 23.1 % (−11.3 bias; fitted caps 13.2 %), N ≥ 5 in 29.0 % (−9.2), QMD 19.2 %; > 21 yr classes 264 / 161 / 148 / 117 (obs 264 / 94 / 244 / 162; fitted
+caps 215 / 195 / 168 / 148). The plot-level p95 caps bind far too often at SUBPLOT scale (subplot SDI varies much more) and remove mid/large trees;
+poles fall only to 161. Not the missing process (with one cap per species). Remaining hypotheses for the pole excess / 12.7–25 cm deficit:
+within-cohort size spread of the 5-yr recruit classes (one QMD per class; observation σ fixed 0.11), and gap dynamics below the subplot scale.
