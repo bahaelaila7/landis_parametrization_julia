@@ -166,6 +166,60 @@ function site_year!(soa::PanCore.AnySoA, i::Int, ep::HBAD2EcoParams, cst::HBAD2C
   site_commit!(soa, i, ep, cst)
 end
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Calibration entry points (docs/hbad2_calibration.md): whole years + a fractional last step (Sim A), free years with recruitment on a fixed capacity (Sim B).
+# They run the SAME kernel functions as `process_plugin!` on one site's slice of the SoA arrays; they only skip the reported state (`c_bio`, B, BA, SDI, RD),
+# which the likelihoods do not use. Allocation-free; touch only site `i`.
+# ---------------------------------------------------------------------------------------------------------------------
+
+"""
+    step_site_frac!(soa, i, ep, delta)
+
+One kernel step of length `delta` (prototype `step_site!(..., Δ, ...)`: growth increments, hazard and ageing are scaled by `delta`) on the live cohorts of site `i`.
+"""
+@inline function step_site_frac!(soa::PanCore.AnySoA, i::Int, ep::HBAD2EcoParams, delta::Float64)
+  csr = soa.csr; sc = soa.scalar
+  o = Int(soa.refs.cohort[i]) - 1
+  n = Int(sc.live[i])
+  n > 0 && step_cohorts!(csr.c_species, csr.c_tph, csr.c_dq, csr.c_h, csr.c_age, csr.c_zq, csr.c_O, csr.c_SDI, csr.c_V, ep.sp, ep.G, o + 1, o + n, delta, sc.planted[i])
+  return nothing
+end
+
+"""
+    run_interval!(soa, i, ep, nyr, frac)
+
+Integrate site `i` for `nyr` whole years and then one fractional step of length `frac` (if > 0), no recruitment: a remeasurement interval of `nyr + frac` years (prototype `simulate!`).
+"""
+function run_interval!(soa::PanCore.AnySoA, i::Int, ep::HBAD2EcoParams, nyr::Int, frac::Float64)
+  for _ in 1:nyr
+    step_site_frac!(soa, i, ep, 1.0)
+  end
+  frac > 0 && step_site_frac!(soa, i, ep, frac)
+  return nothing
+end
+
+"""
+    site_year_free!(soa, i, ep, nq) -> Int
+
+One annual step of a free run of site `i` on its fixed capacity (prototype `run_free!` inner step): the kernel step, then recruitment (`nq` = 3 vigour sub-cohorts per class, or 1).
+Advances the site's recruitment clock `ryear`, sets `live`. Returns the number of recruit classes dropped for lack of a free slot (the prototype's `dropped`; 0 when the capacity suffices).
+"""
+function site_year_free!(soa::PanCore.AnySoA, i::Int, ep::HBAD2EcoParams, nq::Int)::Int
+  csr = soa.csr; sc = soa.scalar
+  o = Int(soa.refs.cohort[i]) - 1
+  cap = Int(soa.refs.cohort[i+1]) - Int(soa.refs.cohort[i])
+  n = Int(sc.live[i])
+  n > 0 && step_cohorts!(csr.c_species, csr.c_tph, csr.c_dq, csr.c_h, csr.c_age, csr.c_zq, csr.c_O, csr.c_SDI, csr.c_V, ep.sp, ep.G, o + 1, o + n, 1.0, sc.planted[i])
+  so = Int(soa.refs.species[i]) - 1
+  nsp = Int(soa.refs.species[i+1]) - Int(soa.refs.species[i])
+  yr = Int(sc.ryear[i]) + 1
+  sc.ryear[i] = Int32(yr)
+  recruit_rates!(csr.c_species, csr.c_tph, csr.c_dq, csr.c_ropen, csr.sp_rate, csr.sp_ba, csr.sp_oy, csr.sp_mature, csr.sp_estab, ep.rec, o + 1, o + n, so, nsp, yr, nq)
+  n, dropped = recruit_apply_cap!(csr.c_species, csr.c_age, csr.c_tph, csr.c_dq, csr.c_h, csr.c_zq, csr.c_ropen, csr.sp_rate, csr.sp_estab, ep.rec, o, n, so, nsp, yr, nq, cap)
+  sc.live[i] = n
+  return dropped
+end
+
 function PanCore.process_plugin!(soa::PanCore.AnySoA, ::Type{PluginType}, current_time::Int; ctx::NamedTuple)
   eco = ctx.eco; cst = ctx.cst
   PanCore.@maybe_threads soa.parallel for i in 1:soa.n

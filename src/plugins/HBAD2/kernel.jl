@@ -114,23 +114,28 @@ to the prototype's interleaved loop.
 end
 
 """
-    recruit_apply!(sp, age, N, D, H, zq, ropen, rate, estab, rec, o, n, so, nsp, yr, nq) -> Int
+    recruit_apply_cap!(sp, age, N, D, H, zq, ropen, rate, estab, rec, o, n, so, nsp, yr, nq, cap) -> (n, dropped)
 
 Phase 2 of the recruitment of one site: for every species either merge this year's recruits into the open class (quadratic-mean D, N-weighted H,
 densities add) or close the old class and append a new one (`nq` sub-cohorts at (D0, H0, A0), N = rate x share). Cohorts `o+1:o+n` are the existing ones;
-the slots `o+n+1:` are free (the caller grew the CSR). Returns the new live count.
+the slots `o+n+1:o+cap` are free. A new class that does not fit (`n + nq > cap`) is DROPPED (the prototype's `FreeSites.dropped` diagnostic): the species' open class
+is closed and nothing is appended (the next year opens a new one). Returns the new live count and the number of dropped classes.
 """
-@inline function recruit_apply!(sp, age, N, D, H, zq, ropen, rate, estab, rec::Vector{RecP}, o::Int, n::Int, so::Int, nsp::Int, yr::Int, nq::Int)::Int
-  n0 = n
+@inline function recruit_apply_cap!(sp, age, N, D, H, zq, ropen, rate, estab, rec::Vector{RecP}, o::Int, n::Int, so::Int, nsp::Int, yr::Int, nq::Int, cap::Int)
+  n0 = n; dropped = 0
   @inbounds for k in 1:nsp
     r = rec[k]
     if estab[so+k]
       for i in o+1:o+n0                                  # the previous class of this species closes
         Int(sp[i]) == k && (ropen[i] = 0)
       end
-      for q in 1:nq
-        n += 1; jj = o + n; w = nq == 1 ? 1.0 : VIG_W[q]
-        sp[jj] = eltype(sp)(k); N[jj] = rate[so+k] * w; D[jj] = r.D0; H[jj] = r.H0; age[jj] = r.A0; zq[jj] = nq == 1 ? 0.0 : VIG_Z[q]; ropen[jj] = Int32(yr)
+      if n + nq <= cap
+        for q in 1:nq
+          n += 1; jj = o + n; w = nq == 1 ? 1.0 : VIG_W[q]
+          sp[jj] = eltype(sp)(k); N[jj] = rate[so+k] * w; D[jj] = r.D0; H[jj] = r.H0; age[jj] = r.A0; zq[jj] = nq == 1 ? 0.0 : VIG_Z[q]; ropen[jj] = Int32(yr)
+        end
+      else
+        dropped += 1
       end
       estab[so+k] = false
     else
@@ -148,8 +153,16 @@ the slots `o+n+1:` are free (the caller grew the CSR). Returns the new live coun
       end
     end
   end
-  return n
+  return n, dropped
 end
+
+"""
+    recruit_apply!(sp, age, N, D, H, zq, ropen, rate, estab, rec, o, n, so, nsp, yr, nq) -> Int
+
+[`recruit_apply_cap!`](@ref) without a capacity limit (the caller grew the CSR for every class that opens). Returns the new live count.
+"""
+@inline recruit_apply!(sp, age, N, D, H, zq, ropen, rate, estab, rec::Vector{RecP}, o::Int, n::Int, so::Int, nsp::Int, yr::Int, nq::Int)::Int =
+  recruit_apply_cap!(sp, age, N, D, H, zq, ropen, rate, estab, rec, o, n, so, nsp, yr, nq, typemax(Int))[1]
 
 """Reported allometric AGB (g/m2) of `tph` trees/ha of quadratic mean diameter `dq` (cm): the HBAD v1 cohort mass-QMD relation. Reporting only; never used by the dynamics."""
 @inline agb_of(a::Allo, tph::Float64, dq::Float64) = tph / HBADPlugin.HB_ACRE2HA * exp(a.mq_a + a.mq_b * log(dq / 2.54)) * HBADPlugin.HB_LB

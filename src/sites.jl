@@ -176,17 +176,18 @@ end
 
 HBAD2 SoA from per-site cohort arrays (CSR `off`, 1-based, `off[end]` = total + 1; `species` = eco-local species index). State is copied exactly (Float64); `c_bio` is the reported
 allometric AGB; `planted` (Bool per site) sets the planted-stand flag; `eco_id` is one ecoregion for all sites or one per site (the eco-local species index must be the key index in
-every ecoregion, i.e. all ecoregions list all species in order); `mapcode` (default the site index) is the caller's plot id (the scenario engine groups the subplot sites of a plot by it). Per-site RNG as in `make_sites` (unused by the deterministic kernel). Empty sites get capacity 1.
+every ecoregion, i.e. all ecoregions list all species in order); `mapcode` (default the site index) is the caller's plot id (the scenario engine groups the subplot sites of a plot by it); `extra_capacity` adds that many free cohort slots to every site (free runs with recruitment on a fixed capacity, the calibration's Sim B). Per-site RNG as in `make_sites` (unused by the deterministic kernel). Empty sites get capacity 1.
 """
 function make_sites_hbad2_arrays(plugin::PluginConfig{P}, off::AbstractVector{<:Integer}, species::AbstractVector{<:Integer}, age::AbstractVector{<:Real}, N::AbstractVector{<:Real},
                                  D::AbstractVector{<:Real}, H::AbstractVector{<:Real}, zq::AbstractVector{<:Real};
                                  rng::Random.AbstractRNG, no_establishment::Bool=false, eco_id::Union{Integer,AbstractVector{<:Integer}}=1,
-                                 planted::Union{Nothing,AbstractVector{Bool}}=nothing, mapcode::Union{Nothing,AbstractVector{<:Integer}}=nothing) where {P}
+                                 planted::Union{Nothing,AbstractVector{Bool}}=nothing, mapcode::Union{Nothing,AbstractVector{<:Integer}}=nothing,
+                                 extra_capacity::Integer=0) where {P}
   P === HBAD2Plugin.HBAD2 || error("make_sites_hbad2 needs a succession_plugin=hbad2 PluginConfig")
   pc = plugin.ctx
   ns = length(off) - 1
   nsp = length(pc.priors.species_list)
-  counts = Int32[max(off[s+1] - off[s], 1) for s in 1:ns]
+  counts = Int32[max(off[s+1] - off[s] + extra_capacity, 1) for s in 1:ns]
   soa = soa_type(P)((cohort=counts, species=fill(Int32(nsp), ns)))
   base_seed = rand(rng, UInt64)
   ep = [HBAD2Plugin.identity_eco_params(pc)]
