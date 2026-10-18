@@ -464,3 +464,8 @@ BA 23.1 % (−11.3 bias; fitted caps 13.2 %), N ≥ 5 in 29.0 % (−9.2), QMD 19
 caps 215 / 195 / 168 / 148). The plot-level p95 caps bind far too often at SUBPLOT scale (subplot SDI varies much more) and remove mid/large trees;
 poles fall only to 161. Not the missing process (with one cap per species). Remaining hypotheses for the pole excess / 12.7–25 cm deficit:
 within-cohort size spread of the 5-yr recruit classes (one QMD per class; observation σ fixed 0.11), and gap dynamics below the subplot scale.
+Observation spread (v2j VAL, σ_obs 0.11 / 0.2 / 0.3): > 21 yr poles 195 / 196 / 200, 12.7–25 cm 168 / 165 / 161; N ≥ 5 in bias +5.0 / +2.8 / −1.6 %.
+The pole excess is NOT an observation artefact — the simulated stands really hold too many 5–12.7 cm trees. Earlier per-light-class pole/sapling
+demography matched the tracked data (5.11), so the remaining suspects are where the poles sit (light environment over time: continuous
+recruit inflow vs episodic gap recruitment in real stands) and the 5-yr pooling of recruits. Both need structural work (gap / episodic
+recruitment, or individual-scale spread dynamics), not recalibration.
