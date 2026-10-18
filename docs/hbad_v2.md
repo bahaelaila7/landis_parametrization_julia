@@ -419,3 +419,12 @@ TEST (reported once for v2h): Sim A total −264,319 (mort **32,441**, ln D −1
 (mort 32,533), v2g −265,505 (mort 32,918), v2f −267,776 (mort 32,350): v2h beats v1 overall, in diameter, height AND mortality. Sim B
 (439 test plots, 1,552 visits): BA 12.2 % (+12.7) [persistence 24.3 %], N ≥ 5 in 18.7 % (+11.7) [18.2 %], QMD 20.1 % [16.0 %], Lorey H 6.7 %
 [13.1 %], composition 0.163 [0.138]; > 21 yr poles 283 vs obs 73. Persistence still wins QMD and composition and ties N ≥ 5 in.
+
+### 5.19 Recruitment level (v2h sensitivity) and a fitted global level κ (j14)
+v2h free runs (VAL) with all recruitment rates × m: m 1 / 0.75 / 0.5 — BA bias +11.0 / +7.7 / +3.4 %, N ≥ 5 in bias +10.2 / +7.1 / +3.2 %,
+QMD error 22.2 / 20.0 / **17.6 %** (persistence 19.0 %), composition 0.171 / 0.163 / **0.154**; > 21 yr classes at m 0.5: 203 / 193 / 164 / 147
+(obs 264 / 94 / 244 / 162): halving recruitment fixes most stand-level biases and halves the pole excess, but saplings drop below observed and
+the 12.7–25 cm deficit remains (pole graduation). → one global level κ (ln κ shifts every species' ρ0; species / seed / light structure stays
+the data fit — no equifinality across species) as a nuisance parameter for the mismatch between recruits entering at exactly 2.54 cm and the
+observed ingrowth (median 3.6 cm, net of in-interval deaths): `HBAD2_RECR_KAPPA=1`. j14 = j13 settings (mortality frozen) + κ, warm start j13.
+simB.jl now uses a fit directory's own recr.csv (v2g/v2h recr.csv == the Poisson fit exactly, so their evaluations are unchanged).

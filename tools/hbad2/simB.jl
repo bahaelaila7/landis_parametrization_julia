@@ -19,8 +19,9 @@ check_meta(FD); θ = read_theta(joinpath(FD, JOINT ? "theta_$(split(tag, "/")[2]
 rc = CSV.read(joinpath(R2DIR, SITE_SUB ? "recruitment_coefs_subplot.csv" : "recruitment_coefs.csv"), DataFrame); rcd = Dict(String(r.key) => r for r in eachrow(rc))
 RMULT = parse(Float64, get(ENV, "HBAD2_RECR_MULT", "1"))   # diagnostic only
 R = [RecP(rcd[k].rho0 + log(RMULT), rcd[k].rhoS, rcd[k].rhoL, 2.54, 3.0, 5.0) for k in keys_]
-if JOINT
-  z = vec(CSV.read(joinpath(FD, "recr_$(split(tag, "/")[2]).csv"), DataFrame).theta)
+rfile = JOINT ? joinpath(FD, "recr_$(split(tag, "/")[2]).csv") : joinpath(FD, "recr.csv")   # a fit's own recruitment (free or κ-shifted) when it has one
+if isfile(rfile)
+  z = vec(CSV.read(rfile, DataFrame).theta)
   R = [RecP(clamp(z[3k-2], -12, 2), clamp(z[3k-1], -1, 4), clamp(z[3k], -10, 2), 2.54, 3.0, 5.0) for k in 1:nsp]
 end
 # plots: in SET, ≥ 2 intervals, every interval clean and natural
