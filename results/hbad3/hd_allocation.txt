@@ -1,0 +1,27 @@
+ACRU   n  13162  a   27.1 b 0.0332 c 0.791  sd ln H 0.197
+LIST2  n  14834  a   37.3 b 0.0286 c 0.957  sd ln H 0.184
+LITU   n   6740  a   38.4 b 0.0295 c 0.910  sd ln H 0.160
+MAVI2  n   4976  a   25.3 b 0.0448 c 0.948  sd ln H 0.192
+NYBI   n  15809  a   28.2 b 0.0329 c 0.851  sd ln H 0.206
+PIEL   n  24226  a   30.6 b 0.0472 c 1.426  sd ln H 0.200
+PITA   n  35663  a   35.5 b 0.0311 c 1.156  sd ln H 0.199
+QULA3  n   8591  a   28.8 b 0.0269 c 0.820  sd ln H 0.214
+QUNI   n   9169  a   28.2 b 0.0324 c 0.831  sd ln H 0.198
+TAAS   n   9112  a   31.4 b 0.0325 c 1.033  sd ln H 0.244
+_H     n  62643  a   21.6 b 0.0436 c 0.905  sd ln H 0.415
+_S     n  25083  a   31.4 b 0.0367 c 1.142  sd ln H 0.218
+fitted globals eta lam k mu: [1.49300e-01 1.48000e-02 1.72942e+01 4.93500e-01]
+train: sd ln(H2pred/H2obs)  no-growth 0.1994 | allometry-only 0.1314 | rule (4 globals) 0.1122 | v2fv5 unconditional 0.1232
+               trees  bias_rule  bias_v2
+Oc                                      
+(-1.0, 0.1]  36491.0     0.0026   0.0043
+(0.1, 0.3]   56222.0    -0.0039  -0.0043
+(0.3, 0.6]   23001.0     0.0012  -0.0019
+(0.6, 10.0]   3184.0     0.0063  -0.0111
+val: sd ln(H2pred/H2obs)  no-growth 0.2288 | allometry-only 0.1332 | rule (4 globals) 0.1084 | v2fv5 unconditional 0.1177
+               trees  bias_rule  bias_v2
+Oc                                      
+(-1.0, 0.1]  41872.0    -0.0053   0.0017
+(0.1, 0.3]   63229.0    -0.0147  -0.0048
+(0.3, 0.6]   22688.0    -0.0031   0.0017
+(0.6, 10.0]   2015.0     0.0123   0.0045

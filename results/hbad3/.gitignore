@@ -1,0 +1,4 @@
+resid_*.csv
+interval_climate.csv
+tied_*/
+ladder_*.out
