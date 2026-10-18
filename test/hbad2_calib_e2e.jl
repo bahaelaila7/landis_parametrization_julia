@@ -65,6 +65,13 @@ sig(st) = (st.gen, st.evals, st.sigma, st.best.fx, st.best.x, st.m, st.C, st.pc,
     @test (@allocated Pan.Plugins.HBAD2Plugin.run_interval!(A.soa, 1, ep, A.nyr[1], A.frac[1])) == 0
   end
 
+  @testset "trials: 1 only evaluates the start" begin
+    hc = hcbase(Dict{String,Any}("objective" => "sim_a", "min_sp_trees" => 600))
+    out = joinpath(tmp, "a_one")
+    run_cfg(out, hc; trials=1)
+    st = load(out); @test st.evals == 1 && st.gen == 0 && isfile(joinpath(out, "best", "theta.csv"))
+  end
+
   @testset "joint (kappa, frozen mortality): 200 evaluations, resume == uninterrupted" begin
     hc = hcbase(Dict{String,Any}("objective" => "joint", "fb" => "margins", "lambda" => [0.75], "recruitment" => "kappa", "freeze" => ["mbg", "mD", "msup", "G:mD2", "G:mSD", "G:pM"],
                                  "ckpt_every" => 5, "min_sp_trees" => 600, "ideal" => [-20000.0, 100.0], "nadir" => [-10000.0, 2000.0]))

@@ -100,6 +100,33 @@ end
 println("\n== logged numbers of the prototype runs (results/hbad2/fit_v2fv5/log.txt, joint_j15/log.txt), Pan values above")
 println("  fit_v2fv5: train total -273425.4 (mort 31941.9 D -164983.2 H -140384.2 sigD 0.1117 sigH 0.1548) | val total -272655.4 (mort 32960.9 D -163997.3 H -141619.0 sigD 0.1146 sigH 0.1541)")
 println("  joint_j15 (v2j): lambda=0.75 train fA -270648.8 fB 16462.8 | VAL fA -269744.7 fB 18317.9")
+println("\n== determinism: threaded vs serial site loops (Pan, bit for bit) and the data-based start")
+global CASE = "determinism"
+θj = vcat(HC.read_theta_csv(v2j_theta, nsp), zj)
+for st in (:train, :val)
+  a1 = HC.simA_scores(prob, θj, st); b1 = HC.simB_scores(prob, θj, st)
+  prob.A[st].soa.parallel = false; prob.B[st].soa.parallel = false
+  a2 = HC.simA_scores(prob, θj, st); b2 = HC.simB_scores(prob, θj, st)
+  prob.A[st].soa.parallel = true; prob.B[st].soa.parallel = true
+  cmp!("threads=$(Threads.nthreads()) vs serial $st simA total", a1.total, a2.total); cmp!("threads=$(Threads.nthreads()) vs serial $st simB margins", HC.fb_value(b1, :margins), HC.fb_value(b2, :margins))
+  a1 == a2 && b1 == b2 || (push!(rows, ("serial != threaded $st", 1.0, 0.0, 1.0)); println("  NOT bit-identical: $st"))
+end
+# the prototype's data-based start (the init_theta of fit_simA.jl, evaluated read-only from its source) against Pan's
+let src = read(joinpath(PROTO, "tools", "hbad2", "fit_simA.jl"), String)
+  ex = Meta.parseall(src); fdef = nothing
+  for a in ex.args
+    a isa Expr && a.head == :function && a.args[1] isa Expr && a.args[1].args[1] == :init_theta && (fdef = a)
+  end
+  fdef === nothing && error("init_theta not found in fit_simA.jl")
+  Core.eval(P7, :(tr = $tr7)); Core.eval(P7, :(keys_ = $keys7)); Core.eval(P7, :(nsp = $nsp))
+  Core.eval(P7, :(pri = CSV.read(joinpath($PROTO, "results", "hbad", "priors.csv"), DataFrame); pk = Dict(String(r.key) => r for r in eachrow(pri))))
+  Core.eval(P7, fdef)
+  θp = Base.invokelatest(P7.init_theta)
+  θa = HC.init_theta(HC.load_tracked_trees(x, sw7), keys7, sw7, joinpath(PROTO, "results", "hbad", "priors.csv"))
+  m = maximum(rel.(θa, θp)); push!(rows, ("determinism: data-based start theta (max rel diff over $(length(θp)) coordinates)", m, 0.0, m))
+  @printf("  %-34s max relative difference over %d coordinates %.2e\n", "data-based start theta", length(θp), m)
+end
+
 d = Dict(r[1] => r[2] for r in rows)
 @printf("  Pan fv5:  train total %.1f (mort %.1f D %.1f H %.1f sigD %.4f sigH %.4f) | val total %.1f (mort %.1f D %.1f H %.1f sigD %.4f sigH %.4f)\n",
         [d["v2fv5: simA train $f"] for f in (:total, :mort, :D, :H, :sigD, :sigH)]..., [d["v2fv5: simA val $f"] for f in (:total, :mort, :D, :H, :sigD, :sigH)]...)

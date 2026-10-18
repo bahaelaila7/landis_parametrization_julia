@@ -47,6 +47,13 @@ Status: **RUN** = executed on a tiny input and completed; **STATIC** = names res
 | `hbad_cohorts.jl`, `hbad_priors.jl`, `hbad_translation.jl` | HBAD cohort table, priors CSV, empirical cohort translation (write `results/hbad/*.csv`, which the HBAD plugin reads) | RUN: the chain `hbad_cohorts.jl` -> `hbad_translation.jl` -> `hbad_priors.jl` with the new `PAN_HBAD_OUT=<scratch>` override of `HBAD_OUT` (`hbad_common.jl`), so the tracked `results/hbad` stayed untouched. All three completed. Compared with the tracked `results/hbad`: `cohorts_gafl_head.csv`, `translation_selection.csv`, `priors_dgrowth_by_dbh.csv`, `priors_mortality_table.csv` are byte-identical; the other CSVs differ in the trailing digits (fitted coefficients up to 3e-4 relative, e.g. `g_b1_lnD`; same shapes) and `species_group.csv` lists the same rows in another order, so the fit is not bit-reproducible run to run |
 | `hbad_translate_lib.jl` | Stand-alone translation library (CSV + DataFrames), loaded by `src/plugins/HBAD/priors.jl` | RUN: loaded by `test/hbad_unit.jl` (part of `test/runtests.jl`) |
 
+### HBAD2 calibration (docs/hbad2_calibration.md)
+
+| Tool | What | Status and evidence |
+|---|---|---|
+| `hbad2_intervals_check.jl` | Rebuilds the remeasurement-interval product from the database and compares it with the prototype's Arrow files (order independent) | RUN: 30,703 intervals / 766,365 tracked trees / 183,698 ingrowth rows identical |
+| `hbad2_calib_parity.jl` | Pan's Sim A / Sim B objectives against the prototype harness (read-only, same process) for `fit_v2j` and `fit_v2fv5`, train and val | RUN: max relative difference 1.3e-14, `CALIB PARITY PASS` |
+
 ### Calibration and selection
 
 | Tool | What | Status and evidence |

@@ -1,7 +1,7 @@
 # HBAD2 calibration: interval product, kernel entry points vs the vendored prototype kernel, parameter layout, config schema.
 # (The objectives against the prototype harness on the real data are tools/hbad2_calib_parity.jl; the end-to-end search is test/hbad2_calib_e2e.jl.)
 module UnitHBAD2Calib
-using Test, Random, Pan, DuckDB, DataFrames, Dates, CSV
+using Test, Random, Pan, DuckDB, DataFrames, Dates, CSV, LinearAlgebra
 module Proto
 include("ref_hbad2_proto.jl")
 end
@@ -157,6 +157,35 @@ end
     CSV.write(joinpath(d, "t.csv"), DataFrame(theta=collect(1.0:(3 * 14 + 6))))
     @test length(HC.read_theta_csv(joinpath(d, "t.csv"), 3)) == 3 * 14 + 7 && HC.read_theta_csv(joinpath(d, "t.csv"), 3)[end] ≈ log(0.11)
     @test_throws ErrorException HC.read_theta_csv(joinpath(d, "t.csv"), 4)
+  end
+end
+
+# ---------------------------------------------------------------------------------------------------------------- the CMA-ES engine
+@testset "PlainCMA: resume == uninterrupted, equal to the prototype's cmaes" begin
+  PC = Pan.PlainCMA
+  n = 20; A = LinearAlgebra.Diagonal(range(1.0, 20.0; length=n)); rot = Matrix(LinearAlgebra.qr(randn(Random.Xoshiro(3), n, n)).Q)
+  f(x) = (y = rot' * (x .- 0.3); sum(abs2, A * y) + 0.1 * sum(abs, y))
+  x0 = zeros(n)
+  run!(s, gens) = (for _ in 1:gens; PC.finished(s) && break; xs = PC.ask(s); PC.tell!(s, [f(x) for x in xs]); end; s)
+  full = run!(PC.PlainCMASearch(PC.PlainCMAState(x0, f(x0), 0.1; lambda=8, maxevals=10_000, rng=Random.Xoshiro(1))), 30)
+  part = run!(PC.PlainCMASearch(PC.PlainCMAState(x0, f(x0), 0.1; lambda=8, maxevals=10_000, rng=Random.Xoshiro(1))), 12)
+  mktempdir() do d
+    path = PC.save_state(part, d)
+    @test isfile(path) && islink(joinpath(d, "search_state_latest.jld2")) && basename(path) == "search_state@12.jld2"
+    resumed = run!(PC.load_state(PC.PlainCMASearch, joinpath(d, "search_state_latest.jld2")), 18)
+    a, b = full.st, resumed.st
+    @test a.gen == b.gen == 30 && a.evals == b.evals && a.best.fx == b.best.fx && a.best.x == b.best.x && a.m == b.m && a.sigma == b.sigma && a.C == b.C && a.hist == b.hist && rand(copy(a.rng), 3) == rand(copy(b.rng), 3)
+  end
+  @test full.st.best.fx < f(x0) && issorted(full.st.hist; rev=true) && PC.stop_reason(full.st) == ""
+  budget = run!(PC.PlainCMASearch(PC.PlainCMAState(x0, f(x0), 0.1; lambda=8, maxevals=50, rng=Random.Xoshiro(1))), 100)
+  @test budget.st.evals <= 50 && PC.finished(budget) && PC.stop_reason(budget.st) == "budget"
+  proto = "/workspace/landis_hbad2/tools/hbad2/cmaes.jl"
+  if isfile(proto)                                                              # the prototype's own implementation (read-only), bit for bit
+    m = Module(:ProtoCMA); Core.eval(m, :(using LinearAlgebra, Random, Printf)); Core.eval(m, :(include(p) = Base.include($m, p))); Base.include(m, proto)
+    cmaes_fn = Base.invokelatest(getfield, m, :cmaes)
+    r = Base.invokelatest(cmaes_fn, f, x0, 0.1; λ=8, maxevals=241, log_every=10_000)
+    s = run!(PC.PlainCMASearch(PC.PlainCMAState(x0, f(x0), 0.1; lambda=8, maxevals=241, rng=Random.Xoshiro(1))), 1000)
+    @test r.x == s.st.best.x && r.f == s.st.best.fx && r.σ == s.st.sigma && r.m == s.st.m && r.evals == s.st.evals
   end
 end
 

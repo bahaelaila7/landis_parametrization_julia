@@ -2,8 +2,8 @@
 
 `succession_plugin: hbad2`. The biomass-free, process-based cohort model of the prototype branch `hbad-v2` (`docs/hbad_v2.md` 4.1 and 5.17 there, kernel
 `src/plugins/HBAD2/HBAD2.jl` there) as a Pan succession plugin: module `HBAD2Plugin`, plugin type `HBAD2 <: AbstractPlugin` (`src/plugins/HBAD2/`).
-Stage 1 = the kernel with the FIXED v2g parameters, validated bit for bit against the prototype. Calibration stays in the prototype harness (`tools/hbad2` there);
-`make_param_dists` raises "hbad2 is calibrated by tools/hbad2 (stage 1: fixed parameters)", so no `search_mode` run is possible yet.
+Stage 1 = the kernel with the FIXED v2g parameters, validated bit for bit against the prototype. The CALIBRATION (data, Sim A / Sim B likelihoods, parameter vector, search) is `docs/hbad2_calibration.md`: a run with a `hbad2_calib:` block
+calibrates the plugin (`search_mode: cmaes | igelmo`); `make_param_dists` still raises for the generic Biomass-Succession style search path, which hbad2 does not use.
 
 ## State (SoA, `plugin.jl`)
 

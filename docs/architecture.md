@@ -15,6 +15,7 @@ backticks are Julia identifiers. `PU` = `Pan.Parametrization`, `Data` = `Pan.Dat
 |---|---|---|
 | Engine | `src/PanCore.jl`, `src/types.jl` | `SiteSoA`, `SiteView`, plugin hooks (`scalar_arrays`, `csr_fields`, `csr_arrays`, `process_plugin!`), `@maybe_threads`, `copy_and_reseed_soa`, `reset_soa!`. `FloatType = Float32`, `UIntType = UInt32` (`src/types.jl`). |
 | Plugins | `src/Plugins.jl`, `src/plugins/BaseSitePlugin.jl`, `src/plugins/BiomassSuccession/`, `src/plugins/PnET/`, `src/plugins/HBAD/` | The three succession models (module `Plugins`). Each has `params.jl`, `plugin.jl` (kernel + `process_plugin!`) and, for PnET/HBAD, a `context.jl` (immutable data context). |
+| HBAD2 calibration | `src/hbad2_calib/*.jl` (module `HBAD2Calib`), `src/data/hbad2_intervals.jl`, `src/search/PlainCMA.jl`, `src/drivers/hbad2_calib.jl` | Calibration of the hbad2 plugin on the remeasurement-interval product: Sim A / Sim B likelihoods, parameter vector, CMA-ES / igelmo through `run_search_loop` (`docs/hbad2_calibration.md`). |
 | Plugin interface | `src/succession_api.jl` | Generic functions the fit loop and the drivers call (`step!`, `generate_params`, `make_param_dists`, `make_ctx`, `spinup!`, `add_cohort!`, `plant!`, ...) with one method set per plugin context; `PluginConfig` (`src/succession_api.jl:54`). |
 | Parameter space | `src/Parametrization.jl`, `src/parametrize/utils.jl`, `src/parametrize/slots.jl`, `src/parametrize/{BiomassSuccession,PnET,HBAD}.jl`, `src/config/param_space.jl` | `MutableParam`, `ParamDists`, `ParamSpace` (`src/parametrize/utils.jl:161`), `u_to_params` / `params_to_u` (`src/parametrize/slots.jl:81`, `:137`), per-plugin parameter distributions, `make_param_space` / `build_param_tying` / `cma_blocks` (`src/config/param_space.jl:36`, `:125`, `:54`). |
 | Loss | `src/loss/{types,kernels,smoothing,site_loss,aggregate,scales}.jl` | `LossParams` (`src/loss/types.jl:20`), `LossScales` (`:90`), `SiteLoss` (`:112`); Wasserstein / AGB kernels; `compute_loss_scales` (`src/loss/scales.jl:10`), `build_split_scales` (`:185`). `types`, `kernels`, `smoothing`, `site_loss` are included from `src/Parametrization.jl` (module `Parametrization`). |
@@ -201,7 +202,7 @@ set in `src/config/schema.jl:323` and an atomic counter). The replacements:
 
 ## 9. Design notes in `docs/`
 
-`scenario_engine.md`, `scenario_campaign_plan.md` (scenario engine and worker protocol), `hbad_plugin.md`, `pnet_spec.md`,
+`scenario_engine.md`, `scenario_campaign_plan.md` (scenario engine and worker protocol), `hbad_plugin.md`, `hbad2_plugin.md`, `hbad2_calibration.md`, `pnet_spec.md`,
 `region4_pnet.md`, `volume_equations.md` (plugins and data), `mo_gdigel.md`, `cmaes_gdigel.md` (search), `gafl_calibration_log.md`,
 `gafl_model_comparison.md`, `gafl_pnet_calibration.md`, `simAB_options_experiment.md` (calibration protocol and results),
 `campaign_2026-10-14.md`, `treemap_donors.md`, `plan_deck_and_mo_gdigel.md`.
