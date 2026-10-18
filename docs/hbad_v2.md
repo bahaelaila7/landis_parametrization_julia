@@ -407,3 +407,15 @@ size shape wrong: the joint compromise uses SAPLING mortality as the lever to cl
 large-tree deaths → little weight in the Sim A binomial), which also fits the + 12–15 % free-run BA bias and the worse TEST mortality NLL
 (v2g 32,918 vs v1 32,533 vs v2f 32,350). j13 = j11 settings with the mortality parameters FROZEN at the Sim A optimum v2f
 (`HBAD2_FREEZE=mbg,mD,msup,G:mD2,G:mSD,G:pM`, 39 coordinates frozen, 135 searched): can Sim B be served by growth/competition/vigour alone?
+j13 result (VAL): Sim A total −268,472 (v2g −269,252) but mortality NLL **33,014** (v2g 33,441; v2f 32,872); deaths by D class obs / v2h
+(v2g): ≤ 5 cm 1,757 / 1,711 (2,172), 5–12.7 1,185 / 1,256 (1,347), 12.7–20 4,011 / 4,494 (4,021), 20–30 1,632 / 1,725 (1,325), 30–45 739 / 814
+(519), > 45 cm 246 / 208 (108); total 9,570 / 10,208 (9,491). Sim B margins objective VAL 18,748 (v2g 19,034); stand medians BA 13.6 % (+11.0),
+N ≥ 5 in 20.0 %, QMD 22.2 %, Lorey H 6.7 %, composition 0.171; > 21 yr poles 295 (v2g 251).
+DECISION (made on VAL + plausibility, before any TEST look at j13): **v2h = j13 replaces v2g as the candidate.** Neither dominates on VAL
+(fA −780, fB +286 in v2h's favour); v2h has the observed size shape of mortality (large-tree mortality restored: > 45 cm 208 vs 246, v2g 108),
+which governs long-run projections, while v2g reached its Sim B fit by killing saplings and sparing big trees — a plausibility criterion that
+should have been checked before v2g was selected. v2g's TEST report (5.17) stays as written; TEST is now reported once for v2h.
+TEST (reported once for v2h): Sim A total −264,319 (mort **32,441**, ln D −157,558, ln H −139,202; σ_D 0.123, σ_H 0.157) — v1 −246,242
+(mort 32,533), v2g −265,505 (mort 32,918), v2f −267,776 (mort 32,350): v2h beats v1 overall, in diameter, height AND mortality. Sim B
+(439 test plots, 1,552 visits): BA 12.2 % (+12.7) [persistence 24.3 %], N ≥ 5 in 18.7 % (+11.7) [18.2 %], QMD 20.1 % [16.0 %], Lorey H 6.7 %
+[13.1 %], composition 0.163 [0.138]; > 21 yr poles 283 vs obs 73. Persistence still wins QMD and composition and ties N ≥ 5 in.
