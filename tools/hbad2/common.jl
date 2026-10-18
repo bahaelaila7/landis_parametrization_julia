@@ -1,5 +1,6 @@
 # HBAD v2 Sim A harness: tracked-tree cohorts of undisturbed remeasurement intervals → HBAD2.Sites; joint likelihood.
 using Arrow, DataFrames, CSV, Statistics, Printf, Dates, Random, LinearAlgebra
+using Distributions: Normal, cdf
 include(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD2", "HBAD2.jl")); using .HBAD2
 const R2DIR = joinpath(@__DIR__, "..", "..", "results", "hbad2")
 const BIRTH_W = parse(Int, get(ENV, "HBAD2_BIRTH_W", "10"))      # cohort = (plot, species key, birth-year class of this width)
@@ -17,6 +18,11 @@ const FORM = parse(Int, get(ENV, "HBAD2_FORM", "1"))
 const VIGOUR = get(ENV, "HBAD2_VIGOUR", "0") == "1"
 # upper bound of the vigour spread σv; E5 measured the persistent sd of ln annual dD at ≈ 0.68 (corr 0.49 × residual sd 0.975)
 const SIGV_MAX = parse(Float64, get(ENV, "HBAD2_SIGV_MAX", "2.0"))
+# size-class likelihood (HBAD2_SIZECLS=1): survivors' diameter classes at v2, predicted through the sub-cohorts + a within-sub-cohort lognormal
+# spread σw (a fitted global, the 7th global coordinate ln σw; σw also becomes the observation spread of Sim B)
+const SIZECLS = get(ENV, "HBAD2_SIZECLS", "0") == "1"
+const SZ_EDGES = [0.0, 5.0, 12.7, 25.0, 40.0]          # classes [<5) [5,12.7) [12.7,25) [25,40) [40,∞)
+const SIGMA_W = Ref(0.11)
 if FORM == 2   # power-exponential: rX = increment at the reference size [cm/yr | m/yr], cX = size exponent, Xmax = decay scale
   merge!(BOUNDS_OVERRIDE, Dict(:rD => (0.01, 3.0), :cD => (-1.5, 3.0), :Dmax => (5.0, 300.0), :rH => (0.005, 3.0), :cH => (-1.5, 3.0), :Hmax => (2.0, 200.0)))
 end
@@ -58,7 +64,12 @@ function build_cohorts(tr::DataFrame, set::AbstractString, keys_::Vector{String}
     off[s+1] = ix
   end
   dts = [g.dt[off[s]] for s in eachindex(sites)]; pls = [Bool(g.planted[off[s]]) for s in eachindex(sites)]
-  obs = (n1=Int.(g.n1), s=Int.(g.s), D2o=Float64.(g.D2o), H2o=Float64.(g.H2o), dt=Float64.(g.dt))
+  # survivors' diameter classes at v2 (tree counts) — the SIZE-CLASS term of the likelihood (HBAD2_SIZECLS=1)
+  a = d[d.alive, :]; a.c2 = [searchsortedlast(SZ_EDGES, x) for x in a.dia2_cm]
+  ci = Dict((r.site, r.key, r.bc) => i for (i, r) in enumerate(eachrow(g)))
+  sc = zeros(Int, nrow(g), length(SZ_EDGES))
+  for r in eachrow(a); c = clamp(r.c2, 1, length(SZ_EDGES)); sc[ci[(r.site, r.key, r.bc)], c] += 1; end
+  obs = (n1=Int.(g.n1), s=Int.(g.s), D2o=Float64.(g.D2o), H2o=Float64.(g.H2o), dt=Float64.(g.dt), sc=sc)
   nc = nrow(g)
   if !VIGOUR
     S = Sites(off, g.spi, Float64.(g.N1), Float64.(g.D1), Float64.(g.H1), Float64.(g.A1), floor.(Int, dts), dts .- floor.(dts), pls)
@@ -103,7 +114,7 @@ end
 # ---------------- parameter vector ⇄ species parameters
 # per species (14 free, log-space where positive): Hmax rH cH Dmax rD cD gOD gRD gOH gRH mbg mD msup sdimax ; global: mD2 pH pD pM
 const FREE = (:Hmax, :rH, :cH, :Dmax, :rD, :cD, :gOD, :gRD, :gOH, :gRH, :mbg, :mD, :msup, :sdimax)
-const NGLOB = 6
+const NGLOB = 7
 const LOGP = Set([:Hmax, :rH, :cH, :Dmax, :rD, :cD, :msup, :sdimax])
 const BOUNDS = Dict(:Hmax => (8.0, 70.0), :rH => (1e-3, 0.5), :cH => (0.3, 4.0), :Dmax => (15.0, 250.0), :rD => (1e-3, 0.5), :cD => (0.3, 4.0),
                     :gOD => (-1.0, 8.0), :gRD => (-3.0, 3.0), :gOH => (-1.0, 8.0), :gRH => (-3.0, 3.0), :mbg => (-9.0, -1.0), :mD => (-4.0, 4.0),
@@ -122,7 +133,7 @@ function decode(θ::AbstractVector, nsp::Int, longevity::Vector{Float64})
     P[s] = SpP(v..., longevity[s])
   end
   g = θ[nsp*NF+1:end]
-  P, HBAD2.GlobP(clamp(g[1], -3, 3), 10.0, clamp(g[2], -1, 1), clamp(g[3], -1, 1), clamp(g[4], -2, 2), FORM, clamp(g[5], -4, 2), VIGOUR ? min(abs(g[6]), SIGV_MAX) : 0.0)
+  P, HBAD2.GlobP(clamp(g[1], -3, 3), 10.0, clamp(g[2], -1, 1), clamp(g[3], -1, 1), clamp(g[4], -2, 2), FORM, clamp(g[5], -4, 2), VIGOUR ? min(abs(g[6]), SIGV_MAX) : 0.0) |> (GG -> (SIGMA_W[] = clamp(exp(g[7]), 0.02, 0.6); GG))
 end
 
 "Per-species diagnostics: observed vs predicted deaths (tree counts), mean annual ΔD and ΔH of survivors (obs vs sim), RD at start."
@@ -148,8 +159,9 @@ end
 function read_theta(path, nsp)
   θi = vec(CSV.read(path, DataFrame).theta)
   length(θi) == nsp * NF + NGLOB && return θi
-  length(θi) == nsp * NF + 4 && return vcat(θi, 0.0, 0.3)      # before mSD (v2b/v2c); σv start 0.3
-  length(θi) == nsp * NF + 5 && return vcat(θi, 0.3)           # before σv (v2d–v2f, joint j1–j3)
+  length(θi) == nsp * NF + 4 && return vcat(θi, 0.0, 0.3, log(0.11))      # before mSD (v2b/v2c); σv start 0.3
+  length(θi) == nsp * NF + 5 && return vcat(θi, 0.3, log(0.11)) # before σv (v2d–v2f, joint j1–j3)
+  length(θi) == nsp * NF + 6 && return vcat(θi, log(0.11))     # before σw (all fits up to v2k): the fixed observation spread 0.11
   length(θi) == nsp * 13 + 1 || error("θ length $(length(θi)) not recognised")
   θ = zeros(nsp * NF + NGLOB)
   for s in 1:nsp
@@ -160,7 +172,7 @@ function read_theta(path, nsp)
 end
 
 "Each fit directory records the structural switches it was fitted with; every tool checks them against the current env (HBAD2_FORM, HBAD2_SIZE_SPLIT)."
-function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); println(io, "vigour=", VIGOUR ? 1 : 0); VIGOUR && println(io, "sigv_max=", SIGV_MAX); end; end
+function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); println(io, "vigour=", VIGOUR ? 1 : 0); VIGOUR && println(io, "sigv_max=", SIGV_MAX); SIZECLS && println(io, "sizecls=1"); end; end
 function check_meta(dir)
   f = joinpath(dir, "meta.txt"); isfile(f) || error("$f missing: cannot verify growth form / size split of this fit")
   m = Dict(split(l, "=")[1] => (length(split(l, "=")) > 1 ? split(l, "=")[2] : "") for l in readlines(f))
@@ -169,4 +181,26 @@ function check_meta(dir)
   haskey(m, "sigv_max") && parse(Float64, m["sigv_max"]) != SIGV_MAX && error("fit $(dir) has sigv_max=$(m["sigv_max"]) but HBAD2_SIGV_MAX=$(SIGV_MAX)")
   get(m, "site", "plot") == (SITE_SUB ? "subplot" : "plot") || error("fit $(dir) has site=$(get(m, "site", "plot")) but HBAD2_SITE=$(SITE_SUB ? "subplot" : "plot")")
   m["size_split"] == join(SIZE_BREAKS, ",") || @warn "fit $(dir) was fitted with size_split=$(m["size_split"]); evaluating with $(join(SIZE_BREAKS, ","))"
+end
+
+"Size-class NLL of the survivors (multinomial per cohort; sub-cohorts + lognormal spread σw around each sub-cohort QMD)."
+function size_nll(C, σw::Float64=SIGMA_W[])
+  S = C.S; sc = C.obs.sc; nc = size(sc, 1); K = length(SZ_EDGES)
+  pr = zeros(nc, K); tot = zeros(nc)
+  lb = [log(e) for e in SZ_EDGES[2:end]]
+  @inbounds for i in eachindex(S.N)
+    p = C.parent[i]; n = S.N[i]; n <= 0 && continue
+    μ = log(S.D[i]) - σw^2; prev = 0.0
+    for k in 1:K
+      cum = k < K ? cdf(Normal(), (lb[k] - μ) / σw) : 1.0
+      pr[p, k] += n * (cum - prev); prev = cum
+    end
+    tot[p] += n
+  end
+  nll = 0.0
+  @inbounds for p in 1:nc
+    tot[p] > 0 || continue
+    for k in 1:K; c = sc[p, k]; c == 0 && continue; nll -= c * log(max(pr[p, k] / tot[p], 1e-12)); end
+  end
+  nll
 end

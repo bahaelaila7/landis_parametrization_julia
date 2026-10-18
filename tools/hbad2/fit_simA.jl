@@ -35,11 +35,14 @@ function init_theta()
 end
 θ0 = length(ARGS) >= 2 ? read_theta(ARGS[2], nsp) : init_theta()
 function obj(θ, D)
-  P, G = decode(θ, nsp, longev); simulate!(D.S, P, G); nll_parts(cohort_view(D), D.obs)
+  P, G = decode(θ, nsp, longev); simulate!(D.S, P, G); r = nll_parts(cohort_view(D), D.obs)
+  SIZECLS || return r
+  sz = size_nll(D); merge(r, (total=r.total + sz, size=sz))
 end
 for _ in 1:2; obj(θ0, TR); end
 t0 = time(); for _ in 1:10; obj(θ0, TR); end; lg(@sprintf("eval time train %.1f ms", (time() - t0) * 100))
 pt = obj(θ0, TR); pv = obj(θ0, VA)
+SIZECLS && lg(@sprintf("size-class term: train %.1f val %.1f (σw %.3f)", pt.size, pv.size, SIGMA_W[]))
 lg(@sprintf("START train total %.1f (mort %.1f D %.1f H %.1f σD %.4f σH %.4f) | val total %.1f (mort %.1f D %.1f H %.1f)", pt.total, pt.mort, pt.D, pt.H, pt.sigD, pt.sigH, pv.total, pv.mort, pv.D, pv.H))
 # null: no growth, per-species constant survival (MLE on train)
 function null_parts(D, surv)          # cohort level (the observed cohorts; with vigour the Sites hold 3 sub-cohorts per cohort)
@@ -59,8 +62,9 @@ res = cmaes(θ -> obj(θ, TR).total, θ0, parse(Float64, get(ENV, "HBAD2_SIGMA",
             callback=(g, b, fb) -> (g % 100 == 0 && CSV.write(joinpath(OUTD, "theta.csv"), DataFrame(theta=b))))
 CSV.write(joinpath(OUTD, "theta.csv"), DataFrame(theta=res.x))
 pt = obj(res.x, TR); pv = obj(res.x, VA)
+SIZECLS && lg(@sprintf("size-class term FIT: train %.1f val %.1f (σw %.3f)", pt.size, pv.size, SIGMA_W[]))
 lg(@sprintf("FIT   train total %.1f (mort %.1f D %.1f H %.1f σD %.4f σH %.4f) | val total %.1f (mort %.1f D %.1f H %.1f σD %.4f σH %.4f) evals %d",
             pt.total, pt.mort, pt.D, pt.H, pt.sigD, pt.sigH, pv.total, pv.mort, pv.D, pv.H, pv.sigD, pv.sigH, res.evals))
 P, G = decode(res.x, nsp, longev)
 pdf = DataFrame([nm => [getfield(P[s], nm) for s in 1:nsp] for nm in HBAD2.SP_PARAM_NAMES]); insertcols!(pdf, 1, :key => keys_)
-CSV.write(joinpath(OUTD, "params.csv"), pdf); lg(string(pdf)); lg(@sprintf("global mD2 %.3f pH %.3f pD %.3f pM %.3f mSD %.3f", G.mD2, G.pH, G.pD, G.pM, G.mSD))
+CSV.write(joinpath(OUTD, "params.csv"), pdf); lg(string(pdf)); lg(@sprintf("global mD2 %.3f pH %.3f pD %.3f pM %.3f mSD %.3f σv %.3f σw %.3f", G.mD2, G.pH, G.pD, G.pM, G.mSD, G.σv, SIGMA_W[]))
