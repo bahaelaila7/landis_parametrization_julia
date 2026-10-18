@@ -484,3 +484,4 @@ of ln(dD + 0.02) = 0.68), and the fits sit at it (σv 0.70): the fast sub-cohort
 offset inflates the spread; persistent sd = 0.47 (ln(dD + 0.1)), 0.54 (ln dD, dD > 0.05), saplings+poles 0.48 / 0.56 → data-consistent bound
 **σv ≤ 0.5** (fast sub-cohort ×2.4). Plan: v2fv5 = Sim A fit with σv ≤ 0.5 (warm start v2fv), then j16 = j15 settings from v2fv5 (mortality frozen
 at v2fv5, κ free).
+v2fv5 (Sim A, σv ≤ 0.5, warm v2fv, 12k evals): VAL −272,655 (mort 32,961) — slightly BETTER than v2fv (σv ≤ 0.7: −272,545): the data bound costs nothing on tracked trees. j16 launched.
