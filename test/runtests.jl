@@ -20,12 +20,13 @@ using Test, Pan
   @testset "unit_search_sa" begin include("unit_search_sa.jl") end
   @testset "unit_hbad2" begin include("unit_hbad2.jl") end
   @testset "unit_hbad2_parity" begin include("unit_hbad2_parity.jl") end
+  @testset "unit_hbad2_calib" begin include("unit_hbad2_calib.jl") end
   @testset "unit_scenario_hbad2" begin include("unit_scenario_hbad2.jl") end
 
   # Pre-existing asserting scripts: run as subprocesses (they call exit(), define globals / @check macros, or print-and-exit-code).
   julia = Base.julia_cmd()
   proj = dirname(@__DIR__)
-  for f in ("hbad_unit.jl", "pnet_unit.jl", "disturbance_shock_unit.jl", "mo_gdigel_unit.jl", "split_cap_test.jl", "simab_unit.jl", "resume_search.jl")
+  for f in ("hbad_unit.jl", "pnet_unit.jl", "disturbance_shock_unit.jl", "mo_gdigel_unit.jl", "split_cap_test.jl", "simab_unit.jl", "resume_search.jl", "hbad2_calib_e2e.jl")
     isfile(joinpath(@__DIR__, f)) || continue
     @testset "$f (subprocess)" begin
       cmd = Cmd(`$julia --project=$proj --threads=2 $(joinpath(@__DIR__, f))`; dir=proj)

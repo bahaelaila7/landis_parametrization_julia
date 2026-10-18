@@ -200,7 +200,7 @@ end
   @test all(k -> !haskey(Pan.SCHEMA, k), keys(Pan.RETIRED_KEYS))
   # every default coerces back to itself (the schema is self-consistent)
   for s in Pan.SCHEMA_LIST
-    s.type === :gdigel && continue
+    s.type in (:gdigel, :hbad2_calib) && continue
     d = s.default
     d === nothing && (@test s.nullable; continue)
     @test Pan._resolve_value("", s, deepcopy(d)) == d

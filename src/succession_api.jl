@@ -189,7 +189,7 @@ const _H2Context = HBAD2Plugin.HBAD2Context
 plugin_type(::_H2Context) = _H2
 bs_tables(pc::_H2Context) = pc.tables
 
-make_param_dists(::_H2Context, args...; kw...) = error("hbad2 is calibrated by tools/hbad2 (stage 1: fixed parameters)")
+make_param_dists(::_H2Context, args...; kw...) = error("hbad2 is calibrated by a run with a `hbad2_calib:` block (succession_plugin: hbad2, docs/hbad2_calibration.md); without it the plugin runs with fixed parameters")
 
 generate_params(pc::_H2Context, args...; kw...) = HBAD2Plugin.generate_hbad2_params(pc, args...; kw...)
 

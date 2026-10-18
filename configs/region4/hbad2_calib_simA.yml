@@ -1,0 +1,22 @@
+# HBAD2 Sim A calibration = the prototype's fit_simA.jl (v2fv5, docs/hbad_v2.md 5.22): CMA-ES on the joint tracked-tree NLL (binomial survival of the cohort tree counts +
+# Gaussian ln D, ln H of the survivors, sigma profiled) over the 14 parameters per species key, the globals mD2 pH pD pM mSD sigma_v (sigma_v <= 0.5) and ln sigma_w.
+# Warm start = the v2fv Sim A optimum (results/hbad2/calib/start_v2fv_theta.csv); drop start_theta for the data-based cold start. Docs: docs/hbad2_calibration.md.
+seed: 1337
+succession_plugin: "hbad2"
+search_mode: "cmaes"
+cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"
+output_dir: "${PAN_OUT}/hbad2_calib_simA"
+trials: 12000
+cmaes_lambda: 32
+cmaes_sigma0: 0.03
+hbad2_calib:
+  split_csv: "/workspace/landis_region4/runs_local/gaflst_split/split_plots.csv"
+  form: 2
+  size_split: [5, 12.7, 25, 40]
+  site: subplot
+  vigour: true
+  sigv_max: 0.5
+  objective: sim_a
+  recruitment: fixed
+  start_theta: "results/hbad2/calib/start_v2fv_theta.csv"
+  test_set: false

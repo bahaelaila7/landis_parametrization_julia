@@ -35,7 +35,7 @@ function read_split_plots(path::AbstractString)::DataFrame
     hasproperty(sp, c) || error("read_split_plots: $path lacks the column $c")
   end
   out = DataFrame(statecd=Int.(sp.statecd), unitcd=Int.(sp.unitcd), countycd=Int.(sp.countycd), plot=Int.(sp.plot), set=String.(sp.set),
-                  eco=hasproperty(sp, :eco) ? String.(sp.eco) : fill("", nrow(sp)))
+                  eco=hasproperty(sp, :eco) ? String.(coalesce.(sp.eco, "")) : fill("", nrow(sp)))
   bad = setdiff(unique(out.set), ["train", "val", "test"])
   isempty(bad) || error("read_split_plots: unknown set labels $(bad) in $path (train | val | test)")
   return out

@@ -11,6 +11,7 @@ module Search
     include("search/CCIgel.jl")
     include("search/MOSA.jl")
     include("search/GDIgel.jl")
+    include("search/PlainCMA.jl")
     using .SA
     using .LBSA
     using .MOLBSA
@@ -22,4 +23,5 @@ module Search
     using .CCIgel
     using .MOSA
     using .GDIgel
+    using .PlainCMA
 end

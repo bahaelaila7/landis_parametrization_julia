@@ -379,6 +379,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
 
   seed = cfg["seed"]
   Random.seed!(seed)
+  # succession_plugin: hbad2 with a hbad2_calib block: calibration of the HBAD2 plugin on the remeasurement-interval product (src/drivers/hbad2_calib.jl)
+  is_hbad2_calibration(cfg) && return run_hbad2_calibration(cfg)
   rng = RNGType(rand(UInt64))
 
   # Data-prep inputs (filter_plots, exclude_plots[_csv], split/region/site-class keys, ...) are parsed by the SAME

@@ -1,0 +1,33 @@
+# HBAD2 JOINT calibration = the prototype's joint fit j15 (docs/hbad_v2.md 5.20; selected model v2j; docs/hbad2_calibration.md). A hbad2_calib block with
+# succession_plugin: hbad2 calibrates the plugin on the remeasurement-interval product (tracked trees of the FIA plots) instead of running the Biomass-Succession fit_params machinery.
+#   fA = Sim A tracked-tree joint NLL (TRAIN)              fB = Sim B free-run stand-table objective `margins` (TRAIN, clean natural plots)
+# minimised as the augmented Chebyshev scalarisation max(l fA', (1-l) fB') + rho (l fA' + (1-l) fB'), f' = (f - ideal) / (nadir - ideal), by the prototype's CMA-ES
+# (search_mode cmaes: Search.PlainCMA, lambda 24 / sigma0 0.03 as in the prototype). j15 setup: recruitment fixed at the data fit x one fitted level kappa (0.503 in j15),
+# mortality (mbg mD msup, G:mD2 G:mSD G:pM) frozen at the Sim A optimum fitted WITH vigour (v2fv), sigma_v <= 0.7, l = 0.75.
+# Needs PAN_DATA (slim_r4.duckdb with curated_trees + REF_SPECIES) and PAN_OUT. The split is the one of the prototype (a Pan run's split_plots.csv).
+seed: 1337
+succession_plugin: "hbad2"
+search_mode: "cmaes"
+cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"
+output_dir: "${PAN_OUT}/hbad2_calib_joint"
+trials: 12000              # evaluations (the CMA-ES stops earlier on stagnation, as j15 did)
+cmaes_lambda: 24
+cmaes_sigma0: 0.03
+hbad2_calib:
+  split_csv: "/workspace/landis_region4/runs_local/gaflst_split/split_plots.csv"
+  states: [12, 13]
+  form: 2
+  size_split: [5, 12.7, 25, 40]
+  site: subplot
+  vigour: true
+  sigv_max: 0.7
+  objective: joint
+  fb: margins
+  lambda: [0.75]
+  rho: 0.05
+  ideal: [-272975.3, 14619.3]     # fA: v2f TRAIN optimum; fB: j10 TRAIN (lambda 0 end point)
+  nadir: [-236466.5, 24102.3]     # fA: j10 TRAIN; fB: the start
+  recruitment: kappa
+  freeze: [mbg, mD, msup, "G:mD2", "G:mSD", "G:pM"]
+  start_theta: "results/hbad2/calib/start_v2fv_theta.csv"    # = prototype results/hbad2/fit_v2fv/theta.csv (Sim A optimum with vigour)
+  ckpt_every: 10

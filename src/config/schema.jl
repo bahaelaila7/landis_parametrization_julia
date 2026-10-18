@@ -15,7 +15,7 @@
     KeySpec(name, type, default, doc; nullable=false, choices=(), null_str=true)
 
 One config key. `type` is one of `:bool :int :float :string :path :symbol :intlist :strlist :floatlist :plots :dict :dict_strlist
-:dict_tiermerge :dict_float :intorstr :dual_mode :disturb_path :gdigel`. `:string` and `:path` are both \${VAR}/\$VAR/~ expanded
+:dict_tiermerge :dict_float :intorstr :dual_mode :disturb_path :gdigel :hbad2_calib`. `:string` and `:path` are both \${VAR}/\$VAR/~ expanded
 (every top-level string value always was); `:path` marks file-system paths. `nullable` keys accept `nothing`, and (when `null_str`)
 the strings "null" / "none" (any case). `choices` restricts string/symbol values.
 """
@@ -270,6 +270,7 @@ const SCHEMA_LIST = KeySpec[
   KeySpec("top_seeds", :float, 0.2, "fraction of top seeds"),
   KeySpec("dominance_species", :string, "exact", "species dominance rule"),
   KeySpec("gdigel", :gdigel, nothing, "gdigel driver options (own schema: GDIGEL_LIST)"),
+  KeySpec("hbad2_calib", :hbad2_calib, nothing, "HBAD2 calibration options (own schema: HBAD2_CALIB_LIST; with succession_plugin: hbad2 the run calibrates the plugin, docs/hbad2_calibration.md)"),
 ]
 
 # gdigel sub-dict (search_mode: gdigel); keys read by src/drivers/gdigel.jl and the tools. `weights` and the
@@ -304,6 +305,52 @@ const GDIGEL_LIST = KeySpec[
   KeySpec("wref", :float, nothing, "override the W reference scale"; nullable=true),
   KeySpec("dref", :float, nothing, "override the D reference scale"; nullable=true),
 ]
+
+# hbad2_calib sub-dict (succession_plugin: hbad2 + this key given => the run calibrates HBAD2, src/drivers/hbad2_calib.jl; docs/hbad2_calibration.md). The prototype's HBAD2_* environment
+# switches are yaml keys here; the budget / seed knobs of the search reuse the top-level keys (trials, cmaes_lambda, cmaes_sigma0, search_mode, resume_from, output_dir, cohorts_db_path,
+# val_frac, test_frac, split_seed).
+const HBAD2_CALIB_LIST = KeySpec[
+  # ---- data
+  KeySpec("states", :intlist, [12, 13], "FIPS state codes of the plots (GA + FL)"),
+  KeySpec("trees_table", :string, "curated_trees", "tree table of cohorts_db_path (read READ_ONLY)"),
+  KeySpec("split_csv", :path, "", "split_plots.csv (statecd, unitcd, countycd, plot, set[, eco]) of a Pan run; empty = draw a plot split from val_frac / test_frac / split_seed"),
+  KeySpec("intervals_cache", :path, "", "directory of the Arrow cache of the remeasurement-interval product; empty = <output_dir>/hbad2_intervals"),
+  KeySpec("rebuild_intervals", :bool, false, "rebuild the interval cache even if it exists"),
+  KeySpec("longevity_csv", :path, "/workspace/species_longevity_ref.csv", "per-species LANDIS longevity (species_symbol, longevity_yr)"),
+  KeySpec("recruitment_csv", :path, "results/hbad2/params_recruitment.csv", "data fit of the recruitment coefficients (key, rho0, rhoS, rhoL) = the Poisson fit on observed sapling ingrowth"),
+  KeySpec("priors_csv", :path, "results/hbad/priors.csv", "HBAD v1 priors (key, sdimax_p95_all): SDIMAX of the data-based start (only without start_theta)"),
+  # ---- model structure (prototype HBAD2_FORM, HBAD2_SIZE_SPLIT, HBAD2_SITE, HBAD2_VIGOUR, HBAD2_SIGV_MAX, HBAD2_BIRTH_W, HBAD2_MIN_SP_TREES, HBAD2_SIZECLS)
+  KeySpec("form", :int, 2, "potential growth form: 1 Chapman-Richards state form | 2 power-exponential"),
+  KeySpec("size_split", :floatlist, [5.0, 12.7, 25.0, 40.0], "initial diameter-class breaks (cm) that split a birth class into cohorts"),
+  KeySpec("site", :string, "subplot", "simulation site: subplot (4 per plot, densities x4) | plot"; choices=("subplot", "plot")),
+  KeySpec("vigour", :bool, true, "every cohort is 3 vigour sub-cohorts (Gauss-Hermite)"),
+  KeySpec("sigv_max", :float, 0.7, "upper bound of the vigour spread sigma_v (data: persistent sd of ln dD 0.47-0.68)"),
+  KeySpec("birth_w", :int, 10, "width (yr) of the birth-year classes"),
+  KeySpec("min_sp_trees", :int, 3000, "TRAIN trees a species needs for its own key (else the pooled _S / _H key)"),
+  KeySpec("sizecls", :bool, false, "add the survivors' size-class likelihood to Sim A (fits sigma_w)"),
+  KeySpec("bounds", :dict, Dict{String,Any}(), "per-species parameter box overrides {Hmax: [lo, hi], ...} on top of the form's default box"),
+  # ---- objective
+  KeySpec("objective", :string, "sim_a", "sim_a: minimise the Sim A joint NLL | joint: augmented Chebyshev scalarisation of (fA Sim A, fB Sim B)"; choices=("sim_a", "joint")),
+  KeySpec("fb", :string, "margins", "Sim B objective: stand | size | margins | plotstand | both"; choices=("stand", "size", "margins", "plotstand", "both")),
+  KeySpec("simb_sigma", :float, 0.16, "lognormal observation spread of the Sim B tally operator"),
+  KeySpec("lambda", :floatlist, [0.5], "joint: weights lambda of fA in the scalarisation, one search per weight (lambda 1 = Sim A only, 0 = Sim B only)"),
+  KeySpec("rho", :float, 0.05, "joint: augmentation weight of the Chebyshev scalarisation"),
+  KeySpec("ideal", :floatlist, Float64[], "joint: ideal point [fA, fB] on TRAIN (empty = start - 5 % |start|)"),
+  KeySpec("nadir", :floatlist, Float64[], "joint: nadir point [fA, fB] on TRAIN (empty = the start)"),
+  # ---- parameters
+  KeySpec("recruitment", :string, "fixed", "recruitment coordinates: free (3 per key) | fixed (the data fit) | kappa (data fit x one fitted level kappa)"; choices=("free", "fixed", "kappa")),
+  KeySpec("freeze", :strlist, String[], "coordinates kept at their start: species parameters (mbg, mD, msup, ...) and globals G:mD2 G:pH G:pD G:pM G:mSD G:sigma_v"),
+  KeySpec("start_theta", :path, "", "start model vector (csv column theta); empty = data-based start"),
+  KeySpec("start_recr", :path, "", "start recruitment vector for recruitment: free (csv column theta); empty = the data fit"),
+  # ---- search
+  KeySpec("cma_seed", :int, 1, "RNG seed of the CMA-ES"),
+  KeySpec("cma_stall", :int, 150, "CMA-ES stops when the best improved by less than cma_ftol over this many generations"),
+  KeySpec("cma_ftol", :float, 1e-9, "relative improvement threshold of the stagnation stop"),
+  KeySpec("ckpt_every", :int, 10, "write a checkpoint every n generations (and at every new best)"),
+  KeySpec("box", :float, 0.3, "search_mode igelmo: half width of the box around the start (raw coordinate units) the engine's [0,1]^d u-space maps to"),
+  KeySpec("test_set", :bool, false, "also evaluate the TEST set at the end (information; never used by the search)"),
+]
+const HBAD2_CALIB_SCHEMA = Dict{String,KeySpec}(s.name => s for s in HBAD2_CALIB_LIST)
 
 const SCHEMA = Dict{String,KeySpec}(s.name => s for s in SCHEMA_LIST)
 const GDIGEL_SCHEMA = Dict{String,KeySpec}(s.name => s for s in GDIGEL_LIST)
@@ -491,6 +538,7 @@ function _coerce(w, spec::KeySpec, v)
   t === :disturb_path && return _to_disturb_path(w, spec, v)
   t === :dual_mode && return (try _parse_dual_mode(v) catch e; e isa ErrorException ? throw(ConfigError("$w$(spec.name): " * e.msg)) : rethrow() end)
   t === :gdigel && return resolve_gdigel(v)
+  t === :hbad2_calib && return resolve_hbad2_calib(v)
   error("config schema: unknown type $t for $(spec.name)")
 end
 
@@ -533,8 +581,9 @@ _default_of(spec::KeySpec) = deepcopy(spec.default)
 
 function _resolve_value(where_::AbstractString, spec::KeySpec, v)
   if _isnullish(v, spec)
-    spec.nullable || spec.type === :gdigel && v === nothing || throw(ConfigError("$where_$(spec.name): must not be null"))
+    spec.nullable || spec.type in (:gdigel, :hbad2_calib) && v === nothing || throw(ConfigError("$where_$(spec.name): must not be null"))
     spec.type === :gdigel && return resolve_gdigel(Dict{String,Any}())
+    spec.type === :hbad2_calib && return resolve_hbad2_calib(Dict{String,Any}())
     return nothing
   end
   return _coerce(where_, spec, v)
@@ -559,7 +608,7 @@ function _resolve_table(d::AbstractDict, specs::Dict{String,KeySpec}, speclist::
   end
   for s in speclist
     haskey(vals, s.name) && continue
-    vals[s.name] = s.type === :gdigel ? resolve_gdigel(Dict{String,Any}()) : _default_of(s)
+    vals[s.name] = s.type === :gdigel ? resolve_gdigel(Dict{String,Any}()) : s.type === :hbad2_calib ? resolve_hbad2_calib(Dict{String,Any}()) : _default_of(s)
   end
   return vals, given
 end
@@ -576,6 +625,24 @@ function resolve_gdigel(d)
   if vals["weights"] === nothing
     vals["weights"] = (vals["objective"] == "mo" && vals["m"] == 3) ? 4 : 8
   end
+  return vals
+end
+
+"""
+    resolve_hbad2_calib(d::AbstractDict) -> Dict{String,Any}
+
+Validate a `hbad2_calib:` sub-dict against `HBAD2_CALIB_LIST` and fill the defaults (unknown keys are errors with suggestions). Idempotent.
+"""
+function resolve_hbad2_calib(d)
+  d isa AbstractDict || throw(ConfigError("hbad2_calib: expected a mapping, got $(repr(d))"))
+  vals, given = _resolve_table(d, HBAD2_CALIB_SCHEMA, HBAD2_CALIB_LIST, "hbad2_calib.")
+  vals["form"] in (1, 2) || throw(ConfigError("hbad2_calib.form: must be 1 or 2, got $(vals["form"])"))
+  all(l -> 0.0 <= l <= 1.0, vals["lambda"]) && !isempty(vals["lambda"]) || throw(ConfigError("hbad2_calib.lambda: need a non-empty list of weights in [0, 1], got $(vals["lambda"])"))
+  length(vals["ideal"]) in (0, 2) || throw(ConfigError("hbad2_calib.ideal: empty or [fA, fB], got $(vals["ideal"])"))
+  length(vals["nadir"]) in (0, 2) || throw(ConfigError("hbad2_calib.nadir: empty or [fA, fB], got $(vals["nadir"])"))
+  isempty(vals["size_split"]) || issorted(vals["size_split"]) || throw(ConfigError("hbad2_calib.size_split: must be increasing, got $(vals["size_split"])"))
+  vals["sigv_max"] > 0 || throw(ConfigError("hbad2_calib.sigv_max: must be > 0"))
+  vals["recruitment"] == "free" || isempty(vals["start_recr"]) || throw(ConfigError("hbad2_calib.start_recr: only used with recruitment: free"))
   return vals
 end
 
@@ -656,11 +723,15 @@ Markdown-style listing of every key: name, type, default and doc line (for `docs
 function config_docs()
   io = IOBuffer()
   for s in SCHEMA_LIST
-    println(io, "- `", s.name, "` (", s.type, s.nullable ? ", nullable" : "", "; default ", s.type === :gdigel ? "{}" : repr(s.default), "): ", s.doc)
+    println(io, "- `", s.name, "` (", s.type, s.nullable ? ", nullable" : "", "; default ", s.type in (:gdigel, :hbad2_calib) ? "{}" : repr(s.default), "): ", s.doc)
   end
   println(io, "\ngdigel sub-keys:")
   for s in GDIGEL_LIST
     println(io, "- `gdigel.", s.name, "` (", s.type, s.nullable ? ", nullable" : "", "; default ", repr(s.default), "): ", s.doc)
+  end
+  println(io, "\nhbad2_calib sub-keys:")
+  for s in HBAD2_CALIB_LIST
+    println(io, "- `hbad2_calib.", s.name, "` (", s.type, s.nullable ? ", nullable" : "", "; default ", repr(s.default), "): ", s.doc)
   end
   String(take!(io))
 end

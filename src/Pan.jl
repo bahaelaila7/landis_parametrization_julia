@@ -13,7 +13,7 @@ import .Parametrization as PU
 import .Parametrization.BiomassSuccessionParametrization as BSP
 import .Parametrization.PnETParametrization as PNP
 import .Parametrization.HBADParametrization as HBP
-using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel, GDIgel, Common
+using .Search: SA, LBSA, MOLBSA, CMAES, MOCMAES, IgelMOCMAES, CMAMAE, NSGA2, CCIgel, GDIgel, PlainCMA, Common
 import .Data as Data
 import .SpatialData
 import .Spatial
@@ -82,6 +82,7 @@ include("drivers/cmame.jl")
 include("drivers/molbsa.jl")
 include("drivers/sa.jl")
 include("drivers/gdigel.jl")
+include("drivers/hbad2_calib.jl")
 include("entry.jl")
 include("diagnostics.jl")
 include("spatial_sim.jl")
