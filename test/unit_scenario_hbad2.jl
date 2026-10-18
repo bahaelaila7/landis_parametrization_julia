@@ -7,16 +7,16 @@ const P = Pan
 const HB2 = Pan.Plugins.HBAD2Plugin
 const YAML_PATH = joinpath(dirname(@__DIR__), "results", "params_yaml", "r4_hbad2_v2g.yaml")
 
-@testset "hbad2 roster v2h (yaml) == results/hbad2/v2h csv" begin
-  pv, metav = P.params_from_yaml(read(joinpath(dirname(@__DIR__), "results", "params_yaml", "r4_hbad2_v2h.yaml"), String))
+@testset "hbad2 roster $(m) (yaml) == results/hbad2/$(m) csv" for m in ("v2h", "v2i")
+  pv, metav = P.params_from_yaml(read(joinpath(dirname(@__DIR__), "results", "params_yaml", "r4_hbad2_$(m).yaml"), String))
   @test pv isa HB2.HBAD2Params && metav.plugin == "hbad2" && length(pv.SPECIES_LIST) == 12
-  ctxv = HB2.HBAD2Context(String.(pv.SPECIES_LIST), [Int.(i) for i in pv.ECO_SPECIES_IDS]; params_dir=joinpath(dirname(@__DIR__), "results", "hbad2", "v2h"), verbose=false)
+  ctxv = HB2.HBAD2Context(String.(pv.SPECIES_LIST), [Int.(i) for i in pv.ECO_SPECIES_IDS]; params_dir=joinpath(dirname(@__DIR__), "results", "hbad2", m), verbose=false)
   qv = P.generate_params(ctxv, String.(pv.SPECIES_LIST), String.(pv.ECO_LIST), [Int.(i) for i in pv.ECO_SPECIES_IDS])
   @test isempty(P.params_diff(pv, qv))
   pv2, _ = P.params_from_yaml(P.params_to_yaml(pv; name="x", species_map=metav.species_map, eco_mapping=metav.eco_mapping))
   @test isempty(P.params_diff(pv, pv2))
   pg, _ = P.params_from_yaml(read(YAML_PATH, String))
-  @test !isempty(P.params_diff(pg, pv))          # v2h is a different parameter set than v2g
+  @test !isempty(P.params_diff(pg, pv))          # v2h / v2i are different parameter sets than v2g
 end
 
 @testset "hbad2 roster (yaml)" begin
