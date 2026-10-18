@@ -469,3 +469,18 @@ The pole excess is NOT an observation artefact — the simulated stands really h
 demography matched the tracked data (5.11), so the remaining suspects are where the poles sit (light environment over time: continuous
 recruit inflow vs episodic gap recruitment in real stands) and the 5-yr pooling of recruits. Both need structural work (gap / episodic
 recruitment, or individual-scale spread dynamics), not recalibration.
+
+### 5.22 Pole flow budget → the cause; re-measured vigour; σv ≤ 0.5
+tools/hbad2/pole_budget.jl (v2j, VAL clean natural plots; model through the lognormal operator, data from tracked trees; trees/ha/yr):
+| | stock | inflow | deaths | outflow | rates |
+|---|---|---|---|---|---|
+| poles 5–12.7 cm model | 323 | 16.5 | 7.4 | 6.6 | turnover 0.043 /yr |
+| poles data | 278 | 9.9 (+3.5 first-tallied) | 6.7 | 4.9 | turnover 0.042 /yr |
+| saplings 2.54–5 cm model | 298 | 27.0 (recruits) | 11.7 | 16.5 | death 0.039, graduation **0.055** /yr |
+| saplings data | 273 | 23.7 (new tallied) | 10.6 | 9.9 | death 0.039, graduation **0.036** /yr |
+Poles die and graduate at the observed rates; saplings die at the observed rate; recruitment is close. The pole excess is SAPLING GRADUATION
+53 % too fast (Sim A agrees: the ≤ 5 cm class ends the interval ~5 % too large in ln D in v2h–v2j). The vigour bound came from E5 (persistent sd
+of ln(dD + 0.02) = 0.68), and the fits sit at it (σv 0.70): the fast sub-cohort grows ×3.4. E5b (tools/hbad2/vigour_persistence2.jl): the +0.02
+offset inflates the spread; persistent sd = 0.47 (ln(dD + 0.1)), 0.54 (ln dD, dD > 0.05), saplings+poles 0.48 / 0.56 → data-consistent bound
+**σv ≤ 0.5** (fast sub-cohort ×2.4). Plan: v2fv5 = Sim A fit with σv ≤ 0.5 (warm start v2fv), then j16 = j15 settings from v2fv5 (mortality frozen
+at v2fv5, κ free).
