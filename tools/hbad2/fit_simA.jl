@@ -42,16 +42,16 @@ t0 = time(); for _ in 1:10; obj(θ0, TR); end; lg(@sprintf("eval time train %.1f
 pt = obj(θ0, TR); pv = obj(θ0, VA)
 lg(@sprintf("START train total %.1f (mort %.1f D %.1f H %.1f σD %.4f σH %.4f) | val total %.1f (mort %.1f D %.1f H %.1f)", pt.total, pt.mort, pt.D, pt.H, pt.sigD, pt.sigH, pv.total, pv.mort, pv.D, pv.H))
 # null: no growth, per-species constant survival (MLE on train)
-function null_parts(D, surv)
-  nm = 0.0; sD = 0.0; sH = 0.0; c = 0
-  for i in eachindex(D.S.N)
-    n1 = D.coh.n1[i]; n1 == 0 && continue; s = D.coh.s[i]; p = clamp(surv[D.S.sp[i]]^D.coh.dt[i], 1e-9, 1 - 1e-9)
+function null_parts(D, surv)          # cohort level (the observed cohorts; with vigour the Sites hold 3 sub-cohorts per cohort)
+  nm = 0.0; sD = 0.0; sH = 0.0; c = 0; co = D.coh
+  for i in 1:nrow(co)
+    n1 = co.n1[i]; n1 == 0 && continue; s = co.s[i]; p = clamp(surv[co.spi[i]]^co.dt[i], 1e-9, 1 - 1e-9)
     nm -= s * log(p) + (n1 - s) * log(1 - p)
-    s > 0 && (sD += s * log(D.S.D0[i] / D.coh.D2o[i])^2; sH += s * log(D.S.H0[i] / D.coh.H2o[i])^2; c += 1)
+    s > 0 && (sD += s * log(co.D1[i] / co.D2o[i])^2; sH += s * log(co.H1[i] / co.H2o[i])^2; c += 1)
   end
   (total=nm + 0.5c * log(sD / c) + 0.5c * log(sH / c), mort=nm, D=0.5c * log(sD / c), H=0.5c * log(sH / c))
 end
-surv = [begin m = TR.coh[TR.S.sp .== s, :]; (sum(m.s) / sum(m.n1))^(1 / mean(m.dt)) end for s in 1:nsp]
+surv = [begin m = TR.coh[TR.coh.spi .== s, :]; (sum(m.s) / sum(m.n1))^(1 / mean(m.dt)) end for s in 1:nsp]
 nt = null_parts(TR, surv); nv = null_parts(VA, surv)
 lg(@sprintf("NULL  train total %.1f (mort %.1f D %.1f H %.1f) | val total %.1f (mort %.1f D %.1f H %.1f)", nt.total, nt.mort, nt.D, nt.H, nv.total, nv.mort, nv.D, nv.H))
 maxe = parse(Int, get(ENV, "HBAD2_EVALS", "20000"))

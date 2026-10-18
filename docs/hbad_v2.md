@@ -437,3 +437,9 @@ TEST (reported once for v2i): Sim A total **−266,157** (mort 32,448; σ_D 0.12
 Sim B (439 test plots, 1,552 visits): BA 12.8 % (+7.6) [persistence 24.3 %], N ≥ 5 in 18.6 % (+7.4) [18.2 %], QMD 16.5 % [16.0 %], Lorey H 6.7 %
 (+0.5) [13.1 %], composition 0.153 [0.138]; > 21 yr classes 231 / 197 / 166 / 151 vs obs 189 / 73 / 224 / 152. Remaining: poles 2.7× after 21 yr,
 12.7–25 cm deficit, composition worse than persistence; QMD and N ≥ 5 in now ≈ persistence; BA and height far better than persistence.
+
+### 5.20 Consistency fix: mortality optimum WITH vigour (v2fv), then joint fit (j15)
+v2i Sim A VAL deaths by D class obs / v2i: 12.7–20 cm 4,011 / 4,512 (+12 %), 20–30 1,632 / 1,727 (+6 %), 30–45 739 / 814 (+10 %); total 9,570 /
+10,231 (+7 %). Cause: v2h/v2i froze mortality at v2f, the Sim A optimum WITHOUT vigour; with vigour (σv 0.7) the slow sub-cohorts add
+suppression mortality on top. Consistent procedure: (1) v2fv = Sim A fit with vigour on (σv ≤ 0.7, warm start v2f, 15k evals); (2) j15 = j14
+settings with mortality frozen at v2fv and κ free.
