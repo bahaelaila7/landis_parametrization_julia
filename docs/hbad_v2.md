@@ -445,3 +445,14 @@ suppression mortality on top. Consistent procedure: (1) v2fv = Sim A fit with vi
 settings with mortality frozen at v2fv and κ free.
 v2fv (Sim A with vigour, σv ≤ 0.7): VAL −272,545 (mort 32,947) — the best Sim A fit (v2f without vigour −271,797); deaths obs / v2fv: total 9,570 /
 9,500, ≤ 5 cm 1,757 / 1,523, 5–12.7 1,185 / 1,148, 12.7–20 4,011 / 4,255, 20–30 1,632 / 1,628, 30–45 739 / 761. j15 launched from v2fv.
+j15 (VAL): κ **0.503**; Sim A −269,745 (v2i −269,918), mortality NLL 33,015 (v2i 33,009), deaths total 9,901 (+3.5 %; v2i +7 %), 12.7–20 cm
+4,416 (+10 %; v2i +12 %); Sim B margins 18,318 (v2i 18,363); stand: BA 13.2 % (+4.7), N ≥ 5 in 20.5 % (+5.0), QMD 17.4 % (v2i 18.4 %),
+Lorey H 6.4 % (+0.2), composition 0.154 (v2i 0.156); > 21 yr classes 215 / 195 / 168 / 148 (v2i 237 / 206 / 168 / 149; obs 264 / 94 / 244 / 162).
+DECISION (VAL tie: Sim A −173, Sim B +45 in j15's favour on B; tie-breaks = consistent construction (mortality optimum fitted WITH vigour),
+total deaths closer to observed, slightly better free-run QMD / composition / poles): **v2j = j15 replaces v2i** (results/hbad2/fit_v2j).
+Remaining in both: diameter growth of tracked survivors under-predicted (VAL dD 0.359 vs 0.406 cm/yr, −12 %), poles ~2× after 21 yr,
+12.7–25 cm deficit. TEST reported once below.
+TEST (reported once for v2j): Sim A total **−266,253** (mort 32,454; σ_D 0.121, σ_H 0.155) — v1 −246,242 (mort 32,533), v2i −266,157, v2h −264,319.
+Sim B (439 test plots, 1,552 visits): BA 12.4 % (+7.7) [persistence 24.3 %], N ≥ 5 in 18.8 % (+8.1) [18.2 %], QMD **15.6 %** [16.0 %], Lorey H 6.7 %
+(+0.8) [13.1 %], composition 0.152 [0.138]; > 21 yr classes 209 / 187 / 164 / 151 vs obs 189 / 73 / 224 / 152. v2j beats persistence on BA,
+QMD and height, ties N ≥ 5 in, loses composition; poles 2.6× after 21 yr.
