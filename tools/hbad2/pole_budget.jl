@@ -14,7 +14,8 @@ tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
 P, G = decode(read_theta(joinpath(FD, "theta.csv"), nsp), nsp, longev)
-z = vec(CSV.read(joinpath(FD, "recr.csv"), DataFrame).theta)
+rcp = CSV.read(joinpath(R2DIR, SITE_SUB ? "recruitment_coefs_subplot.csv" : "recruitment_coefs.csv"), DataFrame); rcd = Dict(String(r.key) => r for r in eachrow(rcp))
+z = isfile(joinpath(FD, "recr.csv")) ? vec(CSV.read(joinpath(FD, "recr.csv"), DataFrame).theta) : reduce(vcat, [[rcd[k].rho0, rcd[k].rhoS, rcd[k].rhoL] for k in keys_])   # Sim A fits: the data fit
 R = [RecP(clamp(z[3k-2], -12, 2), clamp(z[3k-1], -1, 4), clamp(z[3k], -10, 2), 2.54, 3.0, 5.0) for k in 1:nsp]
 B = build_simB(SET, keys_); _reset!(B); F = B.F; S = F.S
 Fge(D, T) = D <= 0 ? 0.0 : 1 - cdf(Normal(), (log(T) - (log(D) - σo^2)) / σo)

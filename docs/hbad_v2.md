@@ -485,3 +485,16 @@ offset inflates the spread; persistent sd = 0.47 (ln(dD + 0.1)), 0.54 (ln dD, dD
 **σv ≤ 0.5** (fast sub-cohort ×2.4). Plan: v2fv5 = Sim A fit with σv ≤ 0.5 (warm start v2fv), then j16 = j15 settings from v2fv5 (mortality frozen
 at v2fv5, κ free).
 v2fv5 (Sim A, σv ≤ 0.5, warm v2fv, 12k evals): VAL −272,655 (mort 32,961) — slightly BETTER than v2fv (σv ≤ 0.7: −272,545): the data bound costs nothing on tracked trees. j16 launched.
+
+### 5.23 j16 negative; the pole problem is two different defects
+j16 (σv ≤ 0.5 + κ): VAL Sim A −268,902 / Sim B 18,587 — dominated by v2j (−269,745 / 18,318); sapling graduation 0.072 /yr (data 0.036), poles
+231 at > 21 yr. The joint fit re-inflates sapling growth through other parameters whatever the vigour bound. ψ test (microplot under-represents
+saplings by 1.41; simB.jl HBAD2_SAP_PSI): with the Sim A fit v2fv5 the profile barely changes (poles 318 → 298) — rejected.
+Budget of the Sim A-only fit v2fv5 (Poisson recruitment, no κ): recruit inflow 51 vs data 24 trees/ha/yr (→ κ ≈ 0.5 in the joint fits),
+sapling graduation 0.046 vs 0.036 /yr. Threshold crossing of TRACKED survivors (tools/hbad2/crossing_check.jl, v2fv5 VAL): fraction above T at
+the next visit, data / model — 2.54–5 → 5 cm 0.345 / 0.299 (0.86), 5–12.7 → 12.7 cm 0.247 / 0.150 (**0.61**), 12.7–25 → 25 cm 0.106 / 0.100.
+⇒ (1) on tracked trees the model crosses thresholds TOO SLOWLY: the within-cohort size spread is too narrow (only the cohort mean QMD is in
+the Sim A likelihood, nothing constrains the spread) → the 12.7–25 cm deficit; (2) in free runs saplings graduate too fast — a recruit
+light-environment effect (recruits favour open subplots), not the growth of existing saplings.
+Fix for (1): a Sim A likelihood term on the SIZE CLASSES of the survivors (multinomial per cohort over 2.54/5/12.7/25/40 cm, predicted
+through the vigour sub-cohorts + a within-sub-cohort lognormal spread σw that becomes a fitted global parameter) — v2s.

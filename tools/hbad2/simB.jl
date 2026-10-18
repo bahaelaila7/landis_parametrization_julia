@@ -4,7 +4,10 @@
 #   ./julia_gdal.sh --project=. --threads=4 tools/hbad2/simB.jl <tag> [set=val]
 include(joinpath(@__DIR__, "common.jl"))
 using Distributions: Normal, ccdf
-const OBS_SIGMA = parse(Float64, get(ENV, "HBAD2_OBS_SIGMA", "0"))   # within-cohort sd of ln D for the observation operator (0 = mean-field)
+const OBS_SIGMA = parse(Float64, get(ENV, "HBAD2_OBS_SIGMA", "0"))
+# ψ (diagnostic, HBAD2_SAP_PSI): the microplot under-represents the true sapling (< 12.7 cm) density by ψ. Applied consistently: initial
+# saplings × ψ, recruitment × ψ, and the model's sapling part ÷ ψ when compared with the (microplot-expanded) observations.
+const SAP_PSI = parse(Float64, get(ENV, "HBAD2_SAP_PSI", "1"))
 tag = ARGS[1]; SET = length(ARGS) >= 2 ? ARGS[2] : "val"
 iv = DataFrame(Arrow.Table(joinpath(R2DIR, "intervals.arrow"))); raw = DataFrame(Arrow.Table(joinpath(R2DIR, "interval_trees.arrow")))
 ig = DataFrame(Arrow.Table(joinpath(R2DIR, "interval_ingrowth.arrow")))
@@ -65,6 +68,7 @@ CAP_EXTRA = VIGOUR ? 330 : 120; QZ = VIGOUR ? collect(VIG_Z) : [0.0]; QW = VIGOU
 off = [1]; spv = Int[]; N0 = Float64[]; D0 = Float64[]; H0 = Float64[]; A0 = Float64[]; live = Int[]; site_plot = Int[]; zq = Float64[]
 for (pi_, t) in enumerate(init)
   t.bc = floor.(Int, -t.age ./ BIRTH_W) .* 100 .+ dclass.(t.dia_cm)
+  SAP_PSI != 1 && (t = copy(t); t.w_ha = t.w_ha .* ifelse.(t.dia_cm .< 12.7, SAP_PSI, 1.0))
   for tt in (SITE_SUB ? [t[t.sb .== b, :] for b in 1:4] : [t])        # subplot sites: each subplot (empty ones too) is a site, N per ha ×4
     if nrow(tt) > 0
       g = combine(groupby(tt, [:key, :bc]), :w_ha => (w -> sum(w) * SITE_MULT) => :N, [:w_ha, :dia_cm] => ((w, x) -> sqrt(sum(w .* x .^ 2) / sum(w))) => :D,
@@ -92,12 +96,14 @@ plotstand(k, D, H, N) = OBS_SIGMA > 0 ? stand_ln([keys_[x] for x in k], D, H, N,
 # observation operator: each cohort = lognormal D with quadratic mean D_c and sd σ of ln D; FIA tallies trees ≥ 2.54 cm
 Nab(N, Dq, σ, T) = N * ccdf(Normal(), (log(T) - (log(Dq) - σ^2)) / σ)
 BAab(N, Dq, σ, T) = N * (pi / 4) * (Dq / 100)^2 * ccdf(Normal(), (log(T) - (log(Dq) - σ^2)) / σ - 2σ)
-function stand_ln(key, D, H, w, σ)
+function stand_ln(key, D, H, w0, σ)
+  w = [w0[i] * ((1 - Nab(1.0, D[i], σ, 12.7)) / SAP_PSI + Nab(1.0, D[i], σ, 12.7)) for i in eachindex(D)]   # microplot-equivalent density (ψ)
   ba = [BAab(w[i], D[i], σ, 2.54) for i in eachindex(D)]; BA = sum(ba); N = sum(Nab(w[i], D[i], σ, 2.54) for i in eachindex(D))
   cl(a, b) = sum(Nab(w[i], D[i], σ, max(a, 2.54)) - (b < 1e8 ? Nab(w[i], D[i], σ, b) : 0.0) for i in eachindex(D))
   (BA=BA, N=N, N5=sum(Nab(w[i], D[i], σ, 12.7) for i in eachindex(D)), Nc=[cl(0, 5), cl(5, 12.7), cl(12.7, 25), cl(25, 1e9)],
    QMD=sqrt(BA / N * 4 / pi) * 100, HL=sum(ba .* H) / BA, comp=[sum(ba[key .== k]) for k in keys_] ./ BA)
 end
+SAP_PSI != 1 && (R = [RecP(r.rho0 + log(SAP_PSI), r.rhoS, r.rhoL, r.D0, r.H0, r.A0) for r in R])
 t0 = time(); run_free!(F, P, G, R, years, snap); @info "free runs" secs=round(time() - t0, digits=2) dropped=sum(F.dropped)
 sites_of = [findall(==(p), site_plot) for p in 1:npl]
 cat_(xs, j) = reduce(vcat, (x[j] for x in xs); init=(j == 1 ? Int[] : Float64[]))
