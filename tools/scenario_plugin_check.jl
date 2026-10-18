@@ -10,7 +10,7 @@ plots = [(cn=c, acres=10.0 + i) for (i, c) in enumerate(cns)]
 plan = Dict("cycles" => 3, "period" => 5, "actions" => Any[
   Dict("kind" => "harvest", "cycle" => 1, "selection" => Dict("species" => "all"), "removal" => Dict("type" => "percent_biomass", "value" => 30.0), "stands" => Dict("rank" => "all", "area_pct" => 100)),
   Dict("kind" => "plant", "cycle" => 2, "species" => "PITA,QUAL", "tpa" => 200.0, "survival" => 80.0)])
-for f in ("r4_biomass_v1", "r4_hbad_v1", "r4_pnet_v1", "r4_hbad2_v2g", "r4_hbad2_v2h", "r4_hbad2_v2i")
+for f in ("r4_biomass_v1", "r4_hbad_v1", "r4_pnet_v1", "r4_hbad2_v2g", "r4_hbad2_v2h", "r4_hbad2_v2i", "r4_hbad2_v2j")
   ps = P.load_paramset(read(joinpath("results", "params_yaml", f * ".yaml"), String), scen)
   res, warns = P.run_scenario(ps, plots, plan; seed=3)
   io = IOBuffer()
