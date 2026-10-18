@@ -241,3 +241,20 @@ function compare_interval_products(a::HBAD2Intervals, b::HBAD2Intervals)
           trees=(rows_a=nrow(a.trees), rows_b=nrow(b.trees), only_a=only(ta, tb), only_b=only(tb, ta)),
           ingrowth=(rows_a=nrow(a.ingrowth), rows_b=nrow(b.ingrowth), only_a=only(ga, gb), only_b=only(gb, ga)))
 end
+
+"""
+    list_hbad2_plots(db_path; states, table) -> DataFrame
+
+The distinct plots (`statecd unitcd countycd plot`, sorted) of the tree table in the given states (database opened READ_ONLY); the population a plot split is drawn from when a run has no split file.
+"""
+function list_hbad2_plots(db_path::AbstractString; states::AbstractVector{<:Integer}=[12, 13], table::AbstractString="curated_trees")::DataFrame
+  isfile(db_path) || error("list_hbad2_plots: database not found: $db_path")
+  con = DuckDB.connect(DuckDB.DB())
+  DuckDB.execute(con, "ATTACH '$(_sql_literal_path(db_path))' AS src (READ_ONLY);")
+  tab = _require_table(con, table, "list_hbad2_plots table")
+  DuckDB.register_data_frame(con, DataFrame(st=Int.(collect(states))), "states_in")
+  df = DataFrame(DuckDB.execute(con, """
+    SELECT DISTINCT t.STATECD AS statecd, t.UNITCD AS unitcd, t.COUNTYCD AS countycd, t.PLOT AS plot
+    FROM src.$(tab) t JOIN states_in s ON s.st = t.STATECD ORDER BY 1, 2, 3, 4"""))
+  return DataFrame(statecd=Int.(df.statecd), unitcd=Int.(df.unitcd), countycd=Int.(df.countycd), plot=Int.(df.plot))
+end
