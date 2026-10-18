@@ -4,12 +4,14 @@
 include(joinpath(@__DIR__, "common.jl"))
 using Distributions: Normal, cdf
 tag = ARGS[1]; SET = length(ARGS) >= 2 ? ARGS[2] : "val"; FD = joinpath(R2DIR, "fit_" * tag); check_meta(FD)
-σo = parse(Float64, get(ENV, "HBAD2_OBS_SIGMA", "0.11"))
+
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
 P, G = decode(read_theta(joinpath(FD, "theta.csv"), nsp), nsp, longev)
 C = build_cohorts(tr, SET, keys_); simulate!(C.S, P, G)
+σo = haskey(ENV, "HBAD2_OBS_SIGMA") ? parse(Float64, ENV["HBAD2_OBS_SIGMA"]) : SIGMA_W[]   # the fit's σw (0.11 for fits before σw)
+@printf("within-sub-cohort spread σ = %.3f\n", σo)
 Fge(D, T) = D <= 0 ? 0.0 : 1 - cdf(Normal(), (log(T) - (log(D) - σo^2)) / σo)
 d = tr[tr.set .== SET, :]; al = d.out .== "alive"
 for (lo, T) in ((2.54, 5.0), (5.0, 12.7), (12.7, 25.0))

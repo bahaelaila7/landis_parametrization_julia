@@ -498,3 +498,15 @@ the Sim A likelihood, nothing constrains the spread) → the 12.7–25 cm defici
 light-environment effect (recruits favour open subplots), not the growth of existing saplings.
 Fix for (1): a Sim A likelihood term on the SIZE CLASSES of the survivors (multinomial per cohort over 2.54/5/12.7/25/40 cm, predicted
 through the vigour sub-cohorts + a within-sub-cohort lognormal spread σw that becomes a fitted global parameter) — v2s.
+v2s (Sim A + size-class term, σv ≤ 0.5, σw fitted): VAL size-class NLL 33,452 → 31,987 but σw shrinks to 0.083 and the crossing ratios do not
+move (5 cm 0.88, 12.7 cm 0.61, 25 cm 0.92); with finer initial size classes (2.5-cm steps below 15 cm) 0.93 / 0.66 / 1.08. A global
+within-cohort spread is the wrong mechanism, and pole diameter growth is ~10 % low on tracked trees (≤ 12.7 cm ln D residual −0.02).
+
+### 5.24 Direction 1 (pole excess) — closing summary (user: "follow the directions one by one")
+Established: pole death and graduation rates per stock are right in free runs (turnover 0.043 vs 0.042 /yr); sapling death rate is right; the
+excess comes from SAPLING→POLE graduation in free runs (+28 % with the Sim A fit, +53–100 % in joint fits, which re-inflate sapling growth to
+supply the observed ≥ 5 in ingrowth that is 1.41× what the microplot saplings imply); recruitment from the data fit is 2.2× too high in free
+runs (κ ≈ 0.5 fitted). On TRACKED trees the model crosses thresholds too slowly (poles → 12.7 cm 0.61–0.66 of observed) — the 12.7–25 cm
+deficit. Rejected: recruitment level alone, self-thinning caps, observation spread, microplot under-representation (ψ), a tighter vigour
+bound, a global within-cohort spread. Open (structural): the light environment in which recruits establish and grow (recruits favour open
+subplots: graduation too fast) and individual-level size variation inside cohorts (tracked poles too slow). Selected model stays **v2j**.

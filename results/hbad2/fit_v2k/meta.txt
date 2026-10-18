@@ -1,0 +1,6 @@
+form=2
+size_split=5.0,12.7,25.0,40.0
+site=subplot
+vigour=1
+sigv_max=0.5
+source=joint_j16 λ 0.75 (margins, recruitment = data fit × κ, mortality frozen at v2fv5 = Sim A optimum with vigour σv ≤ 0.5)
