@@ -45,7 +45,7 @@ for k in keys_
   rows(set) = [(BAsp=get(spd, (r.site, k), 0.0), RD=r.SDI / 600, dt=r.dt, y=get(cnt, (r.site, k), 0)) for r in eachrow(st) if r.set == set]
   T = rows("train"); V = rows("val")
   yT = Float64[r.y for r in T]; yV = Float64[r.y for r in V]; oT = log.([r.dt for r in T]); oV = log.([r.dt for r in V])
-  Xf(R, f) = reduce(vcat, (f(r)' for r in R))
+  Xf(R, f) = (m = length(f(R[1])); X = Matrix{Float64}(undef, length(R), m); for (i, r) in enumerate(R); X[i, :] = f(r); end; X)   # preallocated (reduce(vcat) is quadratic)
   specs = (r -> [1.0], r -> [1.0, log1p(r.BAsp)], r -> [1.0, r.RD], r -> [1.0, log1p(r.BAsp), r.RD])
   devs = Float64[]; local b, predv
   for (j, f) in enumerate(specs)
