@@ -163,3 +163,48 @@ SDImax.
   3. Write `tools/hbad3/fit3.jl` reusing the tie machinery of fit_tied.jl.
   4. Compare val against v2fv5 (−272,655.4) and against T5.
   5. Run the climate holdout tests: the 2007–10 drought period, and AWC/CWD blocks.
+
+## 7. Results (2026-10-18/19)
+
+### 7.1 GA+FL in-sample (Sim A val; v2fv5 = −272,655 with 175 coordinates)
+| fit | coordinates | val | note |
+|---|---|---|---|
+| H3a (stress (1−g)^γ) | 36 | −269,796 | 97.3 % of v2's gain over null; diameter is the main loss (+2,034) |
+| H3b (Kobe on relative growth) | 36 | −269,788 | same as H3a; light response ≈ linear (large K); SDImax at its bound |
+| H3c (diagnostic: mortality decoupled from growth, SDImax fixed 1,500) | 36 | −270,087 | k halves (6.5 → 3.2); shaded growth 2–3× low (was ~100×) |
+| H3d (Kobe on absolute growth) | 35 | −269,520 | worse |
+
+v2 ladder (v2 kernel, tied coordinates):
+
+| ladder step | coordinates | val | change vs full fit |
+|---|---|---|---|
+| T1 (competition tied to ST) | 135 | −271,906 | |
+| T2 (mortality tied to traits) | 137 | −271,474 | |
+| T3 (shapes global) | 131 | −270,796 | |
+| T4 (only rD and rH per species) | 55 | −271,132 | +1,524 |
+| T5 (growth rates from traits) | 39 | −265,531 | the species growth rate is NOT derivable from traits |
+
+### 7.2 VIABILITY OUTSIDE GA+FL (the decisive test; user: "quickly determine viability elsewhere")
+GA+FL-fitted models are scored unchanged on Region 4 plots outside GA+FL: R4 split val, 340,642 tracked trees, 13 L3s. Tools:
+`tools/hbad3/transfer_eval.jl`, `scripts/hbad3/transfer_climate.py`, `tools/hbad3/fit_climate.jl`.
+
+- **Neither GA+FL calibration transfers cleanly.** Growth ratio (obs/sim) is 1.05 in GA+FL vs 1.14 (v2fv5) / 1.16 (H3b) outside. Mortality O/E is
+  1.00 overall, but 0.78–1.36 by L3.
+- **Climate-structured residuals are the same for both models.**
+  - Mortality O/E vs drought anomaly: 0.86 → 1.11 from wet to dry.
+  - Mortality O/E vs AET/PET: 1.08 → 0.82 as the water index rises.
+  - Cold L3s (< 14 °C): O/E 0.82.
+  - Growth ratio vs soil AWC: 1.07 → 1.23.
+  - HBAD3's GA+FL water term (ω 0.27) does not capture any of this. HBAD3 is no more transferable than v2 on any axis.
+- **4-coordinate refits on R4 outside GA+FL, from H3b:**
+
+  | refit | R4 val gain | GA+FL val | finding |
+  |---|---|---|---|
+  | climate (ω, drought mW, temperature τg / τm on spatial normals) | −775 | **+437** | removes the climate-structured mortality bias (0.10 → 0.02–0.05), but hurts GA+FL |
+  | control (shifts of eD, mbg, ln ms, ln k; no climate) | −3,483 | −117 | most of the transfer error is the mortality split (stress ms ×7.5, background −0.23), which GA+FL alone does not identify |
+  | both | −3,761 | **+781** | the climate terms cost GA+FL ≈ 900: coefficients fitted on spatial normals absorb regional confounds and do not transfer |
+  | anomaly-driven climate (W / W_normal) + control | see 7.3 | | |
+
+- **Consequences:**
+  1. Calibrate region-wide (R4 incl. GA+FL), not on GA+FL alone. The mortality split and the growth level need the region's variety.
+  2. Climate terms on spatial normals are not viable as climate sensitivity.

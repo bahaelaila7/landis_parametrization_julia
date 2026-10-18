@@ -2,11 +2,12 @@
 driven by PRISM L4 monthly ppt and Thornthwaite PET (same as climate_join.py). Each month: W += P; AET = min(PET, W·(1 - exp(-PET/AWC))) …
 simplified to the standard 'supply-limited' form AET = min(PET, W); W = min(AWC, W - AET) (no runoff before capacity). Spun up 1980-1989.
 Index: growing-season (Apr-Oct) ratio R = ΣAET / ΣPET per year (1 = no water limitation); interval value = mean over its years; normal = 1991-2020.
-Output results/hbad3/interval_water.csv (iid, aetpet_iv, aetpet_n)."""
+Output results/hbad3/interval_water{SUF}.csv (iid, aetpet_iv, aetpet_n)."""
 import sys, numpy as np, pandas as pd, duckdb, pyarrow.ipc as ip
 R = sys.argv[1]
-pc = pd.read_csv(f"{R}/results/hbad3/plot_climate.csv"); ic = pd.read_csv(f"{R}/results/hbad3/interval_climate.csv")
-iv = ip.open_file(f"{R}/results/hbad2/intervals.arrow").read_all().to_pandas()[["iid", "d1", "d2"]]
+IVP = sys.argv[2] if len(sys.argv) > 2 else f"{R}/results/hbad2/intervals.arrow"; SUF = sys.argv[3] if len(sys.argv) > 3 else ""
+pc = pd.read_csv(f"{R}/results/hbad3/plot_climate{SUF}.csv"); ic = pd.read_csv(f"{R}/results/hbad3/interval_climate{SUF}.csv")
+iv = ip.open_file(IVP).read_all().to_pandas()[["iid", "d1", "d2"]]
 iv["y1"] = pd.to_datetime(iv.d1).dt.year; iv["y2"] = np.maximum(pd.to_datetime(iv.d2).dt.year - 1, iv.y1)
 pr = duckdb.connect("/workspace/PRISM_LT/PRISM_LT_EPA/prism_lt_epa.duckdb", read_only=True)
 ids = sorted(pc.l4.dropna().unique())
@@ -38,5 +39,5 @@ for r in ivp.itertuples():
   rt = plot_ratio[(r.st, r.u, r.c, r.p)]
   vals = [rt[y] for y in range(r.y1, r.y2 + 1) if y in rt]; nv = [rt[y] for y in range(1991, 2021) if y in rt]
   out.append(dict(iid=r.iid, aetpet_iv=np.mean(vals) if vals else np.nan, aetpet_n=np.mean(nv), aetpet_min_iv=np.min(vals) if vals else np.nan))
-O = pd.DataFrame(out); O.to_csv(f"{R}/results/hbad3/interval_water.csv", index=False)
+O = pd.DataFrame(out); O.to_csv(f"{R}/results/hbad3/interval_water{SUF}.csv", index=False)
 print(O.describe().T)

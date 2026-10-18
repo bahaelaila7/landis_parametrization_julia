@@ -1,4 +1,4 @@
 resid_*.csv
 interval_climate.csv
-tied_*/
 ladder_*.out
+fit3_*.out

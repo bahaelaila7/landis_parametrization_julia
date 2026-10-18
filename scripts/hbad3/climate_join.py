@@ -5,7 +5,8 @@ Interval values: means over the calendar years spanned by the interval [year(d1)
 Soil: plot_soil_r4.csv (awc_mm). Output results/hbad3/{plot_climate,interval_climate}.csv."""
 import sys, duckdb, numpy as np, pandas as pd, pyarrow.ipc as ip
 R = sys.argv[1]  # repo root
-iv = ip.open_file(f"{R}/results/hbad2/intervals.arrow").read_all().to_pandas()
+IVP = sys.argv[2] if len(sys.argv) > 2 else f"{R}/results/hbad2/intervals.arrow"; SUF = sys.argv[3] if len(sys.argv) > 3 else ""
+iv = ip.open_file(IVP).read_all().to_pandas()
 slim = duckdb.connect("/workspace/landis_region4/data_r4/slim_r4.duckdb", read_only=True)
 l4 = slim.execute("select statecd st, unitcd u, countycd c, plot p, any_value(epa_l4) l4, count(distinct epa_l4) n from curated_cohorts_landis_stdorg group by all").df()
 assert (l4.n == 1).all(), "plot with several L4"
@@ -39,7 +40,7 @@ for (l, y), g in m.groupby(["l4", "y"]):
                    ppt_gs=g.ppt.values[3:9].sum(), cwd_gs=np.clip(pet[3:9] - g.ppt.values[3:9], 0, None).sum()))
 Y = pd.DataFrame(rows); V = ["tmean", "tmin_jan", "tmax_jul", "ppt", "vpd_jja", "pet", "cwd", "ppt_gs", "cwd_gs"]
 nrm = Y[(Y.y >= 1991) & (Y.y <= 2020)].groupby("l4")[V].mean().add_suffix("_n").reset_index()
-pc = pc.merge(nrm, how="left"); pc.to_csv(f"{R}/results/hbad3/plot_climate.csv", index=False)
+pc = pc.merge(nrm, how="left"); pc.to_csv(f"{R}/results/hbad3/plot_climate{SUF}.csv", index=False)
 iv = iv.merge(pc[["st", "u", "c", "p", "l4"]], how="left")
 Yi = Y.set_index(["l4", "y"])
 out = []
@@ -51,7 +52,7 @@ for r in iv.itertuples():
 IC = pd.concat([iv[["iid", "st", "u", "c", "p", "l4"]].reset_index(drop=True), pd.DataFrame(out).add_suffix("_iv")], axis=1)
 IC = IC.merge(nrm, how="left")
 for v in V: IC[v + "_an"] = IC[v + "_iv"] - IC[v + "_n"]
-IC.to_csv(f"{R}/results/hbad3/interval_climate.csv", index=False)
+IC.to_csv(f"{R}/results/hbad3/interval_climate{SUF}.csv", index=False)
 print(IC[[v + "_n" for v in V]].describe().T[["mean", "std", "min", "max"]])
 print(IC[[v + "_an" for v in V]].describe().T[["mean", "std", "min", "max"]])
 print("intervals with climate", IC.tmean_iv.notna().mean())

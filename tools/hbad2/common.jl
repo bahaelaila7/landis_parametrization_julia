@@ -28,8 +28,10 @@ if FORM == 2   # power-exponential: rX = increment at the reference size [cm/yr 
 end
 
 "Tracked trees of undisturbed intervals with their species key (own key if ≥ MIN_SP_TREES train trees, else _S/_H)."
-function load_trees()
-  iv = DataFrame(Arrow.Table(joinpath(R2DIR, "intervals.arrow"))); tr = DataFrame(Arrow.Table(joinpath(R2DIR, "interval_trees.arrow")))
+# HBAD2_DATA_DIR: another directory with the same interval product (e.g. the Region 4 product built by Pan; default = R2DIR)
+const DATA_DIR = get(ENV, "HBAD2_DATA_DIR", R2DIR)
+function load_trees(dir=DATA_DIR)
+  iv = DataFrame(Arrow.Table(joinpath(dir, "intervals.arrow"))); tr = DataFrame(Arrow.Table(joinpath(dir, "interval_trees.arrow")))
   ok = Set(iv.iid[.!(iv.trt .| iv.dst .| iv.harv) .& (iv.dt .> 2)])
   ivd = Dict(r.iid => r for r in eachrow(iv))
   tr = filter(r -> r.iid in ok && r.age > 0 && r.ht_m > 0 && r.dia_cm > 0, tr)

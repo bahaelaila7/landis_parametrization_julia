@@ -1,0 +1,9 @@
+form=2
+size_split=5.0,12.7,25.0,40.0
+site=subplot
+vigour=1
+sigv_max=0.5
+tie=eD:sp,cD:g,Dmax:g,lnK:ST,gR:g,mbg:WD+ST,mD:g,ms:ST,sdimax:g
+water=1
+sform=2
+gfix=
