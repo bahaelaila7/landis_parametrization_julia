@@ -428,3 +428,12 @@ the 12.7–25 cm deficit remains (pole graduation). → one global level κ (ln 
 the data fit — no equifinality across species) as a nuisance parameter for the mismatch between recruits entering at exactly 2.54 cm and the
 observed ingrowth (median 3.6 cm, net of in-interval deaths): `HBAD2_RECR_KAPPA=1`. j14 = j13 settings (mortality frozen) + κ, warm start j13.
 simB.jl now uses a fit directory's own recr.csv (v2g/v2h recr.csv == the Poisson fit exactly, so their evaluations are unchanged).
+j14 (VAL): fitted κ = **0.579**; Sim A −269,918 (v2h −268,472, v2g −269,252), mortality NLL 33,009 with the same size shape as v2h (mortality
+frozen: ≤ 5 cm 1,710 vs obs 1,757, 30–45 cm 814 vs 739); Sim B margins 18,363 (v2h 18,748) → j14 DOMINATES v2h on both VAL objectives.
+Stand (VAL): BA 13.7 % (+4.8 bias; v2h +11.0), N ≥ 5 in 20.6 % (+4.7), QMD **18.4 %** (< persistence 19.0 %), Lorey H 6.5 % (−0.1), composition
+0.156; > 21 yr classes 237 / 206 / 168 / 149 vs obs 264 / 94 / 244 / 162 (poles 2.2×; 12.7–25 cm deficit remains).
+DECISION (VAL, dominance, before TEST): **v2i = j14 replaces v2h** (results/hbad2/fit_v2i). TEST reported once below.
+TEST (reported once for v2i): Sim A total **−266,157** (mort 32,448; σ_D 0.121, σ_H 0.155) — v1 −246,242 (mort 32,533), v2h −264,319, v2g −265,505.
+Sim B (439 test plots, 1,552 visits): BA 12.8 % (+7.6) [persistence 24.3 %], N ≥ 5 in 18.6 % (+7.4) [18.2 %], QMD 16.5 % [16.0 %], Lorey H 6.7 %
+(+0.5) [13.1 %], composition 0.153 [0.138]; > 21 yr classes 231 / 197 / 166 / 151 vs obs 189 / 73 / 224 / 152. Remaining: poles 2.7× after 21 yr,
+12.7–25 cm deficit, composition worse than persistence; QMD and N ≥ 5 in now ≈ persistence; BA and height far better than persistence.

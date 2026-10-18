@@ -1,0 +1,6 @@
+form=2
+size_split=5.0,12.7,25.0,40.0
+site=subplot
+vigour=1
+sigv_max=0.7
+source=joint_j14 λ 0.75 (margins, recruitment = data fit × κ 0.579, mortality frozen at v2f)
