@@ -443,3 +443,5 @@ v2i Sim A VAL deaths by D class obs / v2i: 12.7–20 cm 4,011 / 4,512 (+12 %), 2
 10,231 (+7 %). Cause: v2h/v2i froze mortality at v2f, the Sim A optimum WITHOUT vigour; with vigour (σv 0.7) the slow sub-cohorts add
 suppression mortality on top. Consistent procedure: (1) v2fv = Sim A fit with vigour on (σv ≤ 0.7, warm start v2f, 15k evals); (2) j15 = j14
 settings with mortality frozen at v2fv and κ free.
+v2fv (Sim A with vigour, σv ≤ 0.7): VAL −272,545 (mort 32,947) — the best Sim A fit (v2f without vigour −271,797); deaths obs / v2fv: total 9,570 /
+9,500, ≤ 5 cm 1,757 / 1,523, 5–12.7 1,185 / 1,148, 12.7–20 4,011 / 4,255, 20–30 1,632 / 1,628, 30–45 739 / 761. j15 launched from v2fv.
