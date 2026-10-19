@@ -74,6 +74,20 @@ function hd_table(keys_)
   h = CSV.read(joinpath(R3DIR, "hd_allometry.csv"), DataFrame); d = Dict(String(r.key) => (r.a, r.b, r.c) for r in eachrow(h))
   [d[k] for k in keys_]
 end
+"H–D allometry per key fitted to the TRAIN trees (Chapman–Richards on ln H, log parameters, damped Gauss–Newton; as scripts/hbad3/hd_allocation.py)."
+function fit_hd(tr, keys_)
+  map(keys_) do k
+    t = tr[(tr.key .== k) .& (tr.set .== "train"), :]; D = Float64.(t.dia_cm); y = log.(Float64.(t.ht_m))
+    f(p) = log.(1.37 .+ exp(p[1]) .* (1 .- exp.(-exp(p[2]) .* D)) .^ exp(p[3])) .- y
+    p = [log(30.0), log(0.03), 0.0]; μ = 1e-3; r = f(p); c = sum(abs2, r)
+    for _ in 1:200
+      J = hcat([(f(p .+ 1e-6 .* (1:3 .== j)) .- r) ./ 1e-6 for j in 1:3]...)
+      δ = -((J' * J + μ * I) \ (J' * r)); pn = p .+ δ; rn = f(pn); cn = sum(abs2, rn)
+      if cn < c; p, r, μ = pn, rn, μ / 3; abs(c - cn) < 1e-10 * c && (c = cn; break); c = cn; else; μ *= 5; end
+    end
+    (exp(p[1]), exp(p[2]), exp(p[3]))
+  end
+end
 function decode3(sv::AbstractMatrix, gv::AbstractVector, hd, longev)   # sv: nsp × length(FREE3) encoded; gv: encoded globals
   nsp = size(sv, 1)
   P = [HBAD3.SpP3([dec3(FREE3[j], sv[s, j]) for j in 1:length(FREE3)]..., hd[s]..., longev[s]) for s in 1:nsp]

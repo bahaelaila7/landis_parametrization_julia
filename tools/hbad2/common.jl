@@ -34,6 +34,13 @@ function load_trees(dir=DATA_DIR)
   iv = DataFrame(Arrow.Table(joinpath(dir, "intervals.arrow"))); tr = DataFrame(Arrow.Table(joinpath(dir, "interval_trees.arrow")))
   ok = Set(iv.iid[.!(iv.trt .| iv.dst .| iv.harv) .& (iv.dt .> 2)])
   ivd = Dict(r.iid => r for r in eachrow(iv))
+  # HBAD2_REGION: restrict to a named region of the R4 product (scripts/hbad3/process_checks.py definitions): GAFL | APP | IP | WSP | NCSC
+  rg = get(ENV, "HBAD2_REGION", "")
+  if !isempty(rg)
+    inreg(r) = rg == "GAFL" ? r.st in (12, 13) : r.st in (12, 13) ? false : rg == "APP" ? startswith(coalesce(r.l3, ""), "8.4.") : rg == "IP" ? coalesce(r.l3, "") == "8.3.3" :
+               rg == "WSP" ? (r.st in (1, 28) && coalesce(r.l3, "") in ("8.3.5", "8.3.6", "8.5.2")) : rg == "NCSC" ? (r.st in (37, 45) && coalesce(r.l3, "") in ("8.3.4", "8.3.5", "8.5.1")) : error("unknown region $rg")
+    ok = intersect(ok, Set(r.iid for r in eachrow(iv) if inreg(r)))
+  end
   tr = filter(r -> r.iid in ok && r.age > 0 && r.ht_m > 0 && r.dia_cm > 0, tr)
   tr.set = [coalesce(ivd[i].set, "") for i in tr.iid]; tr.dt = [ivd[i].dt for i in tr.iid]; tr.y1 = [year(ivd[i].d1) for i in tr.iid]
   tr.l3 = [coalesce(ivd[i].l3, "") for i in tr.iid]; tr.planted = [ivd[i].planted for i in tr.iid]

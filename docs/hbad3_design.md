@@ -236,3 +236,27 @@ change is what the 2 anomaly terms add on top of the regional re-levelling.
    - Anomaly-driven drought mortality transfers but is small.
    - FIA remeasurements identify little climate response of growth. The model's climate sensitivity would rest mostly on the drought-
      mortality term plus external (literature / physiological) priors.
+
+### 7.5 Process grounding per region (the user's meaning of "viability": the model's processes exist in data from other regions)
+The user's correction (2026-10-19): viability means *calibratable elsewhere*: each process must be grounded in data from other regions. It
+does NOT mean that a GA+FL calibration transfers (that is §7.2–7.4, kept for the record).
+
+Data-only checks (`scripts/hbad3/process_checks.py`, 40 s; `results/hbad3/process_checks.txt`) in 5 regions: GA+FL, APP (Appalachian L3s
+8.4.x), IP (8.3.3), WSP (AL/MS plains + Mississippi alluvium), NCSC (NC/SC Piedmont and plains).
+
+| process | GA+FL | APP | IP | WSP | NCSC |
+|---|---|---|---|---|---|
+| P1 light: relative growth at O .1–.3 / .3–.6 / .6–1 | .69/.50/.41 | .68/.48/.35 | .65/.46/.43 | .66/.43/.32 | .67/.44/.34 |
+| P2 crowding: open-grown growth, RD < .25 → .75–1 | −8 % | −12 % | −6 % | −5 % | −16 % |
+| P3 height from D (sd): none → allometry → +4 globals | .182→.137→.122 | .157→.122→.113 | .155→.120→.110 | .226→.170→.150 | .204→.141→.124 |
+| P4 mortality, slowest → fastest growth quintile (prev. interval) | 3.6→0.46 % | 3.4→0.41 % | 3.6→0.40 % | 4.6→0.67 % | 4.0→0.46 % |
+| P5 drought-anomaly mortality, wet → dry | +15 % | +16 % | +14 % | +22 % | +5 % |
+| P6 recruitment: seed source present / RD < .25 vs .5–.75 | ×3.4 / ×2.8 | ×2.1 / ×3.5 | ×3.1 / ×1.7 | ×1.9 / ×3.2 | ×2.1 / ×3.6 |
+
+- **Every process is grounded in every region, with a similar shape.**
+- **P1 corrects §3 S2d.** At tree level a plain exponential e^{−aO} (a 1.7–2.1) fits as well as the saturating form in every region, so the
+  half-saturation K is not needed. The cohort-level "saturation" was an artefact of the model's own O.
+- **P3:** η ≈ 0 in 4 of 5 regions, so 3 globals suffice.
+- **Next (layer 2): local calibration of one HBAD3 structure in GA+FL, APP and WSP** (fit3 R_<region>). The structure follows these
+  checks: exponential light (lnK const), Kobe stress mortality, σv ≤ 0.7, SDImax fixed, H–D fitted to each region. The checks are: share of
+  the gain over null, parameters off their bounds, and residual diagnostics.
