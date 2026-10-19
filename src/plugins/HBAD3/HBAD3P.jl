@@ -13,14 +13,16 @@
 #   self-thinning while RD > 1: remove SDI in proportion to SDI_i (1 − min(1, g_i))
 module HBAD3P
 
-export SpPP, GlobPP, SitesP, simulate!
+export SpPP, GlobPP, SitesP, simulate!, RecGP, FreeSitesP, run_free!
 
 struct SpPP
   lnε::Float64       # growth efficiency (calibrated)
   Hmax::Float64      # trait: maximum height [m]
   ST::Float64        # trait: shade-tolerance class 1-5
   longevity::Float64 # trait [yr]
+  lnF::Float64       # fecundity (calibrated on sapling ingrowth; free runs only)
 end
+SpPP(lnε, Hmax, ST, longevity) = SpPP(lnε, Hmax, ST, longevity, -Inf)
 struct GlobPP
   b::Float64; a::Float64; gR::Float64; θ::Float64; ω::Float64          # growth
   s::Float64; c::Float64; η::Float64; λ::Float64; μ::Float64; kh::Float64   # height
@@ -94,5 +96,65 @@ function simulate!(S::SitesP, P::AbstractVector{SpPP}, G::GlobPP)
     S.frac[s] > 0 && step_site!(S, P, G, lo, hi, S.frac[s], pl, w, wn)
   end
   S
+end
+# ---------------------------------------------------------------- free runs: recruitment into the 1-in tally (process form, docs §7.6 R3)
+"Recruitment globals: light window λ = λ0 e^{λ1 (ST − 3)} on stand RD (= SDI / sdimax); background seed rain ε0 where no conspecific seed tree is present."
+struct RecGP
+  λ0::Float64; λ1::Float64; ε0::Float64
+end
+const RSCALE = 185.2           # one FIA microplot sapling in trees/ha
+const DSEED = 12.7             # seed trees: D ≥ 5 in
+const RCLASS = 5               # recruits of one species within RCLASS years form one cohort
+const D_REC = 2.54; const A_REC = 5.0
+"Free-run store: SitesP with a per-site capacity, live counts, the open recruit slot per (key, site), and the plot-level seed presence (static, from the start)."
+struct FreeSitesP
+  S::SitesP; live::Vector{Int}; open_slot::Matrix{Int}; open_year::Matrix{Int}; dropped::Vector{Int}
+  seedplot::BitMatrix            # nsp × nsites: a conspecific seed tree anywhere on the PLOT at the start (dispersal between subplots)
+end
+@inline function recruit_siteP!(F::FreeSitesP, P::AbstractVector{SpPP}, G::GlobPP, Rg::RecGP, s::Int, yr::Int)
+  S = F.S; lo = S.off[s]; cap = S.off[s+1] - S.off[s]; n = F.live[s]; hi = lo + n - 1; nsp = length(P)
+  tot = 0.0
+  @inbounds for i in lo:hi; tot += sdi(S.N[i], S.D[i]); end
+  RD = tot / G.sdimax
+  @inbounds for k in 1:nsp
+    p = P[k]; seed = F.seedplot[k, s]
+    for i in lo:hi; (S.sp[i] == k && S.D[i] >= DSEED && S.N[i] > 0) && (seed = true); end
+    rate = RSCALE * exp(p.lnF - Rg.λ0 * exp(Rg.λ1 * (p.ST - 3)) * RD) * (seed ? 1.0 : Rg.ε0)
+    rate <= 0 && continue
+    h0 = hstar(p, G, D_REC)
+    j = F.open_slot[k, s]
+    if j == 0 || yr - F.open_year[k, s] >= RCLASS
+      if n + 3 <= cap
+        j = lo + n; n += 3; F.open_slot[k, s] = j; F.open_year[k, s] = yr
+        for q in 1:3
+          jj = j + q - 1; w = (1 / 6, 2 / 3, 1 / 6)[q]
+          S.sp[jj] = k; S.N[jj] = rate * w; S.N0[jj] = rate * w; S.D[jj] = D_REC; S.H[jj] = h0; S.A[jj] = A_REC; S.zq[jj] = (-sqrt(3.0), 0.0, sqrt(3.0))[q]
+        end
+      else
+        F.dropped[s] += 1; F.open_slot[k, s] = 0
+      end
+    else
+      for q in 1:3
+        jj = j + q - 1; add = rate * (1 / 6, 2 / 3, 1 / 6)[q]; n0 = S.N[jj]; m = n0 + add
+        S.D[jj] = sqrt((n0 * S.D[jj]^2 + add * D_REC^2) / m); S.H[jj] = (n0 * S.H[jj] + add * h0) / m; S.N[jj] = m; S.N0[jj] += add
+      end
+    end
+  end
+  F.live[s] = n
+  nothing
+end
+"Free run of every site for years[s] years from its current state: annual step then recruitment; snap(s, yr) after each year (site-private writes only)."
+function run_free!(F::FreeSitesP, P::AbstractVector{SpPP}, G::GlobPP, Rg::RecGP, years::Vector{Int}, snap)
+  S = F.S
+  Threads.@threads :static for s in 1:length(F.live)
+    lo = S.off[s]
+    for y in 1:years[s]
+      n = F.live[s]
+      n > 0 && step_site!(S, P, G, lo, lo + n - 1, 1.0, S.planted[s], S.W[s], S.Wn[s])
+      recruit_siteP!(F, P, G, Rg, s, y)
+      snap(s, y)
+    end
+  end
+  F
 end
 end # module
