@@ -319,3 +319,53 @@ User goal (2026-10-19):
 - Drought anomaly on mortality (mW).
 - Shared through the growth-stress term.
 - CO₂ / temperature: from the literature, as scenario assumptions; the FIA data do not identify them.
+
+### 8.1 HBAD3P results (2026-10-19) — `fit3p_P_<region>`, `freerun_P_<region>.out`
+**Sim A (val)**
+
+| region | model | coordinates | val | gain / tree | at bounds |
+|---|---|---|---|---|---|
+| GA+FL | v2fv5 | 175 | −272,655 | 0.770 | — |
+| GA+FL | HBAD3 | 33 | −269,774 | 0.750 | — |
+| GA+FL | **H3P** | **33** | **−273,469** | **0.777** | none |
+| APP | HBAD3 | 30 | −217,762 | 0.663 | ω |
+| APP | **H3P** | 30 | **−218,694** | **0.675** | ω = 0 |
+| WSP | HBAD3 | 27 | −185,459 | 0.763 | — |
+| WSP | **H3P** | 27 | **−188,445** | **0.791** | σv = 0.7 (cap) |
+
+H3P beats v2 in GA+FL with 1/5 of the coordinates; the null baselines are identical. It beats HBAD3 everywhere.
+
+**Free runs** (first → last visit of val plots, ≈ 10–15 yr, process recruitment fitted on train ingrowth). Bias / median |rel err|; persistence in brackets.
+
+| region | plots | BA | stems ≥ 12.7 cm | QMD | Lorey H |
+|---|---|---|---|---|---|
+| GA+FL | 434 | −0.7 % / 16.8 % (−30.5 / 32.4) | −10.8 % / 24.7 % (−24.5 / 28.0) | −1.1 % / 8.6 % (−10.8 / 12.5) | −2.0 % / 7.5 % (−18.4 / 16.9) |
+| APP | 434 | +3.4 % / 12.7 % (−24.5 / 23.4) | −10.2 % / 21.5 % (−13.9 / 17.9) | +2.3 % / 8.7 % (−9.8 / 11.1) | 0.0 % / 6.1 % (−13.0 / 12.1) |
+| WSP | 518 | +2.7 % / 18.9 % (−31.3 / 34.0) | −6.1 % / 24.4 % (−27.7 / 27.3) | −0.9 % / 8.4 % (−10.9 / 13.5) | +2.3 % / 7.4 % (−17.9 / 19.2) |
+
+- **BA, QMD and Lorey H are within ±3.4 % bias in all 3 regions**, and the error is ≈ half that of persistence.
+- **Known weakness:** stems ≥ 12.7 cm are under-predicted by 6–11 % (in-growth into the merchantable class). In APP the median error is
+  worse than persistence (21.5 vs 17.9 %).
+- No recruit classes were dropped.
+- Recruitment globals agree across regions: λ0 5.0–6.4, λ1 −0.25…−0.63, ε0 0.34–0.74.
+
+### 8.2 CHECKPOINT / resume (2026-10-19, container restart)
+- Branch hbad3 @ this commit.
+- **Environment:**
+  - `source wt_env.sh`
+  - Region env: `HBAD2_FORM=2 HBAD2_SIZE_SPLIT=5,12.7,25,40 HBAD2_SITE=subplot HBAD2_VIGOUR=1 HBAD2_SIGV_MAX=0.7 HBAD2_DATA_DIR=results/hbad2_r4 HBAD3_WATER_CSV=results/hbad3/interval_water_r4.csv HBAD2_REGION=<GAFL|APP|IP|WSP|NCSC|L3:x.y.z>`
+- **Regenerate untracked inputs if missing:**
+  - `results/hbad2_r4/*.arrow`: copy from /workspace/landis_hbad2_r4/results/hbad2_r4/intervals/ (the Pan R4 interval product, branch hbad2-r4).
+  - `results/hbad3/{plot,interval}_climate_r4.csv`: `scripts/hbad3/climate_join.py <repo> results/hbad2_r4/intervals.arrow _r4`
+  - `interval_water_r4.csv`: `water_balance.py`, same args.
+  - Python: a scratch venv with numpy pandas pyarrow scipy duckdb.
+- **Tools:**
+  - `tools/hbad3/fit3p.jl <tag>`: Sim A fit of one region.
+  - `tools/hbad3/freerun3p.jl <tag>`: free runs + recruitment fit.
+  - `scripts/hbad3/process_checks.py`, `process_replace*.py`: data checks.
+- **Next steps (user goal: HBAD3 calibrated on EVERY R4 ecoregion, as process-grounded as possible; informative for harvest H/BA/density;
+  responsive to climate):**
+  1. Look at the in-growth weakness into 12.7 cm (recruit entry size / sapling growth) and the σv cap in WSP; then freeze the H3P structure.
+  2. Port H3P to Pan: plugin + calibration (Sim A + recruitment fit + free-run check), with parity gates, on a new branch from refactor
+     (hbad2-r4 holds the R4 split + recruitment tool).
+  3. Calibrate every R4 L3 (14; the small ones 15.4.1, 8.3.2, 8.5.2 need pooling or a lower key threshold); report val per L3 + free runs.
