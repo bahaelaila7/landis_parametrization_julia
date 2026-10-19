@@ -260,3 +260,62 @@ Data-only checks (`scripts/hbad3/process_checks.py`, 40 s; `results/hbad3/proces
 - **Next (layer 2): local calibration of one HBAD3 structure in GA+FL, APP and WSP** (fit3 R_<region>). The structure follows these
   checks: exponential light (lnK const), Kobe stress mortality, σv ≤ 0.7, SDImax fixed, H–D fitted to each region. The checks are: share of
   the gain over null, parameters off their bounds, and residual diagnostics.
+
+### 7.6 Process replacements of the empirical equations (data only, 5 regions, held-out half of the plots)
+`scripts/hbad3/process_replace.py`, `process_replace2.py`; `results/hbad3/process_replace*.txt`.
+
+**R1 potential growth.** Empirical r(D/20)^c e^{−D/Dmax} (3/key) vs a stem-volume balance with one efficiency ε per key:
+dV = ε (D/20)^b e^{−aO}, dD = dV/(2DH).
+- Held-out sd of ln D2: process ≤ empirical in 4 of 5 regions (tie in IP).
+- Globals agree across regions: b 1.84–1.93 (pipe model), a 2.4–2.9; maintenance ρ ≈ 0, so it is dropped.
+- With a hydraulic limit ×(1 − (H/1.1 Hmax)^θ), large-tree growth is unbiased: > 40 cm, GA+FL .424 vs .421 obs, NCSC .415 vs .422,
+  WSP .532 vs .523 (without the limit, 10–25 % over).
+
+**R2 background mortality.** Empirical U-shape (2/key + 1) + stress vs h = m0/LONGEVITY + ms e^{−β g}(D/20)^ζ (+ ST slope).
+- 6–8 globals and 0 per key capture 78–93 % of the per-key model's deviance gain.
+- Consistent across regions: ζ −0.56…−0.79 (small trees have small reserves); β 2.0–3.4; m0 1.0–1.6; σST < 0 in all regions
+  (tolerant species survive low growth).
+- The large-tree height risk is not needed (→ 0).
+
+**R3 recruitment.** Per-key Poisson (3/key) vs F_k × light window e^{−λ0 e^{λ1(ST−3)} RD} × seed presence.
+- Held-out deviance ≤ empirical in 3 regions, ≈ in NCSC, slightly worse in IP.
+- λ0 3.8–5.3; λ1 < 0 everywhere.
+- The seed-source effect is presence only (ρS ≈ 0.02–0.08).
+
+**R4 height–diameter curve.** Per-key curve (3/key) vs a trait curve: Hmax_k (99.5 % height) + initial slenderness s + shape c (2 globals).
+- Held-out sd equal (≤ 0.0004) in all regions.
+- s 0.8–1.14 m/cm, c 0.78–0.93.
+
+**Local calibrations of HBAD3** (structure of §7.5, `fit3_R_<region>`):
+
+| region | coordinates | val gain over null per tracked tree | at bounds |
+|---|---|---|---|
+| GA+FL | 33 | 0.750 | none |
+| APP | 30 | 0.663 | ω = 0 (no growth–water effect in the humid mountains) |
+| WSP | 27 | 0.763 | none |
+
+## 8. HBAD3P — the process-grounded model (`src/plugins/HBAD3/HBAD3P.jl`, `tools/hbad3/fit3p.jl`)
+User goal (2026-10-19):
+- Informative for harvest: height, BA, density.
+- Responsive to climate.
+- Minimise empirical equations, which carry implicit conditions, in favour of process grounding.
+- Finally calibrate HBAD3 on every R4 ecoregion.
+
+**Equations** (header of HBAD3P.jl):
+- **growth:** dV = ε_k (D/20)^b · 20^1.605 · e^{−aO} · e^{gR·RD} · max(0, 1 − (H/1.1 Hmax_k)^θ) · W^ω · e^{σv z}; dD = dV/(2DH)
+- **height:** trait curve H*(D) from Hmax_k with s, c; light rule with η, λ, μ, kh
+- **mortality:** e^{pM}[m0/LONGEVITY + ms e^{σST(ST−3)} e^{−β g}(D/20)^ζ] e^{mW(Wn − W)/0.1} + age term
+- **self-thinning:** at a constant SDImax
+- **recruitment** (free runs; to be added to the kernel): F_k × light window × seed presence
+
+**Parameter count:**
+- Per key: ε_k (+ F_k for recruitment).
+- Traits per key: Hmax, ST, LONGEVITY.
+- Globals: b a gR θ ω | s c η λ μ kh | m0 ms σST β ζ mW | pD pH pM σv = 21 (+ λ0 λ1 ε0 for recruitment).
+- An R4 region with 30 keys has ≈ 30 + 30 + 24 calibrated numbers, against ≈ 450 for v2.
+
+**Climate pathways:**
+- AET/PET (monthly bucket with soil AWC) on growth (ω).
+- Drought anomaly on mortality (mW).
+- Shared through the growth-stress term.
+- CO₂ / temperature: from the literature, as scenario assumptions; the FIA data do not identify them.
