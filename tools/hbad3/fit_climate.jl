@@ -47,6 +47,7 @@ function params(z)
 end
 z0 = mode == "climate" ? [gv0[gi(:ω)], 0.0, 0.0, 0.0] : mode == "control" ? zeros(4) : ANOM ? [gv0[gi(:ω)], 0.0, 0.0, 0.0, 0.0, 0.0] : [gv0[gi(:ω)], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 #   mode both: the climate coordinates + the control shifts (8)
+haskey(ENV, "HBAD3_Z0") && (z0 = parse.(Float64, split(ENV["HBAD3_Z0"], ",")); length(z0) == (mode == "climate" || mode == "control" ? 4 : ANOM ? 6 : 8) || error("HBAD3_Z0 length"))   # start vector (e.g. from another mode's optimum)
 function sc(z, C); P, G = params(z); eval3(C, P, G); end
 lg(@sprintf("climate-pathway test %s / %s: R4-outside train %d trees, val %d trees; GA+FL val", tag, mode, sum(TR4.obs.n1), sum(VA4.obs.n1)))
 b = (sc(z0, TR4), sc(z0, VA4), sc(z0, VAG))

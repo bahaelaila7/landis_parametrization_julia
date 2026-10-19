@@ -208,3 +208,31 @@ GA+FL-fitted models are scored unchanged on Region 4 plots outside GA+FL: R4 spl
 - **Consequences:**
   1. Calibrate region-wide (R4 incl. GA+FL), not on GA+FL alone. The mortality split and the growth level need the region's variety.
   2. Climate terms on spatial normals are not viable as climate sensitivity.
+
+### 7.3 Anomaly-driven climate (the form climate scenarios use)
+Site W = interval AET/PET ÷ the plot's own 1991–2020 normal; no temperature terms. The run is warm-started at the control optimum, so the
+change is what the 2 anomaly terms add on top of the regional re-levelling.
+
+| | R4 train | R4 val | GA+FL val |
+|---|---|---|---|
+| change | −157 | +316 (mortality −132, D/H +449) | −87 (mortality −7) |
+
+- Fitted: ω → 0 (no growth response); mW 0.39 (hazard ×1.47 per 10 % relative AET/PET drop).
+- **Drought-anomaly mortality is the one climate effect that is consistent in and out of GA+FL.** It is small at the likelihood level (≈ 0.02 %).
+- The water response of growth is not identifiable in these remeasurements.
+
+### 7.4 Viability verdict (2026-10-19)
+1. **GA+FL-only calibrations (v2 or HBAD3) are not viable elsewhere.**
+   - Growth is under-predicted by ≈ 15 % out of region, against 5 % in region.
+   - Mortality is biased by −22 % to +36 % by L3.
+   - Most of the error is a mortality split (stress vs background) and a growth level that GA+FL alone does not identify. A 4-coordinate
+     regional re-levelling fixes most of it, and also slightly improves GA+FL.
+   - → **Calibrate region-wide (R4 incl. GA+FL), then vet in GA+FL.**
+2. **HBAD3 transfers no better than v2.**
+   - Its advantages are 5× fewer coordinates (cheaper region-wide calibration) and explicit hooks for climate drivers.
+   - In-sample it is 2,600–2,900 worse than v2 in GA+FL.
+3. **Climate sensitivity.**
+   - Spatial-normal climate terms absorb regional confounds and do not transfer.
+   - Anomaly-driven drought mortality transfers but is small.
+   - FIA remeasurements identify little climate response of growth. The model's climate sensitivity would rest mostly on the drought-
+     mortality term plus external (literature / physiological) priors.
