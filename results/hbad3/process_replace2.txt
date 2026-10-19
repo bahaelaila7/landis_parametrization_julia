@@ -1,0 +1,33 @@
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: divide by zero encountered in log
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: invalid value encountered in multiply
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: divide by zero encountered in log
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: invalid value encountered in multiply
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: divide by zero encountered in log
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: invalid value encountered in multiply
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: divide by zero encountered in log
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: invalid value encountered in multiply
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: divide by zero encountered in log
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+/workspace/landis_hbad3/scripts/hbad3/process_replace2.py:51: RuntimeWarning: invalid value encountered in multiply
+  def dev(mu, m): mu = np.maximum(mu[m], 1e-12); yy = y[m]; return 2 * np.mean(np.where(yy > 0, yy * np.log(yy / mu), 0) - (yy - mu))
+== R3 recruitment: held-out Poisson deviance per site-key (lower better)
+  APP   keys 30 sites  33327 | null 0.10711 emp(90) 0.08999 proc(35) 0.08955 | δ 23349.68 ρS 0.03 λ0 4.64 λ1 -0.43 ε0 0.000
+  GAFL  keys 34 sites  42142 | null 0.09531 emp(102) 0.07760 proc(39) 0.07643 | δ 1.60 ρS 0.08 λ0 3.79 λ1 -0.22 ε0 0.000
+  IP    keys 18 sites  14918 | null 0.13163 emp(54) 0.10896 proc(23) 0.10967 | δ 1.20 ρS 0.02 λ0 5.34 λ1 -0.81 ε0 0.000
+  NCSC  keys 27 sites  30354 | null 0.14291 emp(81) 0.11317 proc(32) 0.11335 | δ 300.41 ρS 0.03 λ0 3.98 λ1 -0.29 ε0 0.000
+  WSP   keys 28 sites  26887 | null 0.13373 emp(84) 0.11359 proc(33) 0.11302 | δ 1.30 ρS 0.06 λ0 4.12 λ1 -0.38 ε0 0.000
+
+== R4 height rule with the H–D curve per key (3/key) vs from the trait Hmax_k + 2 globals: held-out sd ln(H2pred/H2obs)
+  APP   keys 30 | per-key curve (90+4) 0.1136 | trait curve (Hmax + 2 + 4) 0.1140  (s 1.14 m/cm, c 0.83)
+  GAFL  keys 34 | per-key curve (102+4) 0.1236 | trait curve (Hmax + 2 + 4) 0.1239  (s 1.07 m/cm, c 0.85)
+  IP    keys 18 | per-key curve (54+4) 0.1108 | trait curve (Hmax + 2 + 4) 0.1108  (s 0.80 m/cm, c 0.78)
+  NCSC  keys 27 | per-key curve (81+4) 0.1253 | trait curve (Hmax + 2 + 4) 0.1255  (s 0.86 m/cm, c 0.82)
+  WSP   keys 28 | per-key curve (84+4) 0.1511 | trait curve (Hmax + 2 + 4) 0.1512  (s 1.00 m/cm, c 0.93)

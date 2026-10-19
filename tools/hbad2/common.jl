@@ -37,7 +37,7 @@ function load_trees(dir=DATA_DIR)
   # HBAD2_REGION: restrict to a named region of the R4 product (scripts/hbad3/process_checks.py definitions): GAFL | APP | IP | WSP | NCSC
   rg = get(ENV, "HBAD2_REGION", "")
   if !isempty(rg)
-    inreg(r) = rg == "GAFL" ? r.st in (12, 13) : r.st in (12, 13) ? false : rg == "APP" ? startswith(coalesce(r.l3, ""), "8.4.") : rg == "IP" ? coalesce(r.l3, "") == "8.3.3" :
+    inreg(r) = startswith(rg, "L3:") ? coalesce(r.l3, "") == rg[4:end] : rg == "GAFL" ? r.st in (12, 13) : r.st in (12, 13) ? false : rg == "APP" ? startswith(coalesce(r.l3, ""), "8.4.") : rg == "IP" ? coalesce(r.l3, "") == "8.3.3" :
                rg == "WSP" ? (r.st in (1, 28) && coalesce(r.l3, "") in ("8.3.5", "8.3.6", "8.5.2")) : rg == "NCSC" ? (r.st in (37, 45) && coalesce(r.l3, "") in ("8.3.4", "8.3.5", "8.5.1")) : error("unknown region $rg")
     ok = intersect(ok, Set(r.iid for r in eachrow(iv) if inreg(r)))
   end
