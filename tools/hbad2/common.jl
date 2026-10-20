@@ -16,6 +16,10 @@ const SITE_MULT = SITE_SUB ? 4.0 : 1.0
 const FORM = parse(Int, get(ENV, "HBAD2_FORM", "1"))
 # persistent growth vigour (E5): every cohort is simulated as 3 vigour sub-cohorts (HBAD2.VIG_Z / VIG_W); scoring aggregates them back
 const VIGOUR = get(ENV, "HBAD2_VIGOUR", "0") == "1"
+# vigour quadrature (Gauss–Hermite, probabilists'): HBAD2_VIG_N = 3 (default, HBAD2.VIG_Z / VIG_W) or 5 (tails to ±2.86: the fast-growing tail of saplings)
+const VIG_N = parse(Int, get(ENV, "HBAD2_VIG_N", "3"))
+const VQ_Z = VIG_N == 5 ? (-2.856970013872806, -1.355626179974266, 0.0, 1.355626179974266, 2.856970013872806) : VIG_Z
+const VQ_W = VIG_N == 5 ? (0.011257411327721, 0.222075922005613, 0.533333333333333, 0.222075922005613, 0.011257411327721) : VIG_W
 # upper bound of the vigour spread σv; E5 measured the persistent sd of ln annual dD at ≈ 0.68 (corr 0.49 × residual sd 0.975)
 const SIGV_MAX = parse(Float64, get(ENV, "HBAD2_SIGV_MAX", "2.0"))
 # size-class likelihood (HBAD2_SIZECLS=1): survivors' diameter classes at v2, predicted through the sub-cohorts + a within-sub-cohort lognormal
@@ -64,7 +68,8 @@ function build_cohorts(tr::DataFrame, set::AbstractString, keys_::Vector{String}
     [:w_ha, :alive] => ((w, a) -> sum(w[a])) => :N2o,
     [:w_ha, :dia2_cm, :alive] => ((w, x, a) -> any(a) ? sqrt(sum(w[a] .* x[a] .^ 2) / sum(w[a])) : NaN) => :D2o,
     [:w_ha, :ht2_m, :alive] => ((w, x, a) -> any(a) ? sum(w[a] .* x[a]) / sum(w[a]) : NaN) => :H2o,
-    :dt => first => :dt, :l3 => first => :l3, :planted => first => :planted)
+    :dt => first => :dt, :l3 => first => :l3, :planted => first => :planted,
+    [:w_ha, :cr] => ((w, c) -> (m = .!ismissing.(c) .& (coalesce.(c, 0) .> 0); any(m) ? sum(w[m] .* c[m]) / sum(w[m]) / 100 : 0.4)) => :CR1)
   sort!(g, [:site, :key, :bc]); g.spi = [kix[k] for k in g.key]
   sites = unique(g.site); off = Vector{Int}(undef, length(sites) + 1); off[1] = 1
   ix = 1
@@ -84,9 +89,9 @@ function build_cohorts(tr::DataFrame, set::AbstractString, keys_::Vector{String}
     S = Sites(off, g.spi, Float64.(g.N1), Float64.(g.D1), Float64.(g.H1), Float64.(g.A1), floor.(Int, dts), dts .- floor.(dts), pls)
     return (S=S, coh=g, obs=obs, parent=collect(1:nc), agg=nothing)
   end
-  q = length(VIG_Z); rep(x) = repeat(x; inner=q)
-  S = Sites((off .- 1) .* q .+ 1, rep(g.spi), rep(Float64.(g.N1)) .* repeat(collect(VIG_W), nc), rep(Float64.(g.D1)), rep(Float64.(g.H1)), rep(Float64.(g.A1)),
-            floor.(Int, dts), dts .- floor.(dts), pls, repeat(collect(VIG_Z), nc))
+  q = length(VQ_Z); rep(x) = repeat(x; inner=q)
+  S = Sites((off .- 1) .* q .+ 1, rep(g.spi), rep(Float64.(g.N1)) .* repeat(collect(VQ_W), nc), rep(Float64.(g.D1)), rep(Float64.(g.H1)), rep(Float64.(g.A1)),
+            floor.(Int, dts), dts .- floor.(dts), pls, repeat(collect(VQ_Z), nc))
   agg = (N0=Float64.(g.N1), N=zeros(nc), D=zeros(nc), H=zeros(nc), D0=Float64.(g.D1), H0=Float64.(g.H1), sp=Int32.(g.spi))
   (S=S, coh=g, obs=obs, parent=rep(collect(1:nc)), agg=agg)
 end

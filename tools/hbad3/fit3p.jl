@@ -14,18 +14,22 @@ TD = key_traits(tr, keys_, longev)
 Hmax = [quantile(tr.ht_m[(tr.key .== k) .& (tr.set .== "train")], 0.995) for k in keys_]
 lg("region " * get(ENV, "HBAD2_REGION", "(none)") * " | keys " * join(keys_, ",") * " | Hmax " * join(round.(Hmax; digits=1), ","))
 # ---- globals: name, start, lo, hi, log-encoded
+# HBAD3P_COUPLED=1: the survival light coefficient am is tied to the growth one (am = a, the original coupled form)
+const COUPLED = get(ENV, "HBAD3P_COUPLED", "0") == "1"
 const GSPEC = [(:b, 1.88, 1.0, 3.0, false), (:a, 2.6, 0.1, 10.0, true), (:gR, -0.1, -2.0, 1.0, false), (:θ, 8.0, 1.0, 40.0, true), (:ω, 0.2, 0.0, 5.0, false),
                (:s, 1.0, 0.2, 3.0, true), (:c, 0.85, 0.3, 2.0, true), (:η, 0.0, -1.0, 2.0, false), (:λ, 0.026, 1e-3, 0.3, true), (:μ, 0.3, -0.5, 2.0, false), (:kh, 6.0, 0.2, 30.0, true),
                (:m0, 1.2, 0.01, 10.0, true), (:ms, 0.035, 1e-4, 1.0, true), (:σST, -0.2, -2.0, 2.0, false), (:β, 2.6, 0.1, 20.0, true), (:ζ, -0.65, -3.0, 2.0, false),
-               (:mW, 0.3, -2.0, 3.0, false), (:pD, 0.1, -1.0, 1.0, false), (:pH, 0.3, -1.0, 1.0, false), (:pM, -0.2, -2.0, 2.0, false), (:σv, 0.5, 0.0, SIGV_MAX, false)]
+               (:mW, 0.3, -2.0, 3.0, false), (:pD, 0.1, -1.0, 1.0, false), (:pH, 0.3, -1.0, 1.0, false), (:pM, -0.2, -2.0, 2.0, false), (:σv, 0.5, 0.0, SIGV_MAX, false), (:am, 2.6, 0.1, 20.0, true), (:ρ, 1e-4, 1e-7, 0.05, true), (:f0, 0.05, 0.0, 0.6, false),
+               (:φ, 0.5, 0.0, 2.0, false), (:crhi, 0.5, 0.2, 0.95, false), (:crlo, 0.33, 0.05, 0.8, false), (:kc, 3.0, 0.1, 30.0, true), (:τr, 0.1, 1e-3, 1.0, true), (:τe, 0.01, 1e-4, 0.5, true)]
 gfix = Dict{Symbol,Float64}()
 for x in filter(!isempty, strip.(split(get(ENV, "HBAD3P_FIX", ""), ",")))
   a_, b_ = split(x, ":"); gfix[Symbol(a_)] = parse(Float64, b_)
 end
+COUPLED && (gfix[:am] = NaN)
 gfree = [j for j in eachindex(GSPEC) if !haskey(gfix, GSPEC[j][1])]
 genc(j, v) = GSPEC[j][5] ? log(v) : v
 function gdec(j, z); lo, hi = GSPEC[j][3], GSPEC[j][4]; clamp(GSPEC[j][5] ? exp(z) : (GSPEC[j][1] == :σv ? abs(z) : z), lo, hi); end
-gv0 = [genc(j, get(gfix, GSPEC[j][1], GSPEC[j][2])) for j in eachindex(GSPEC)]
+gv0 = [genc(j, (v = get(gfix, GSPEC[j][1], GSPEC[j][2]); isnan(v) ? GSPEC[j][2] : v)) for j in eachindex(GSPEC)]
 # ---- data
 function water_pair(path)
   w = CSV.read(path, DataFrame); Dict(Int(r.iid) => (Float64(r.aetpet_iv), Float64(r.aetpet_n)) for r in eachrow(w))
@@ -34,7 +38,8 @@ wp = water_pair(get(ENV, "HBAD3_WATER_CSV", joinpath(R3DIR, "interval_water.csv"
 function buildP(set)
   C = build_cohorts(tr, set, keys_); S = C.S; ns = length(S.off) - 1
   iids = [C.coh.site[C.parent[S.off[s]]] ÷ 10 for s in 1:ns]
-  SP = HBAD3P.SitesP(S.off, S.sp, S.N0, S.D0, S.H0, S.A0, S.nyr, S.frac, S.planted, S.zq, [wp[i][1] for i in iids], [wp[i][2] for i in iids])
+  SP = HBAD3P.SitesP(S.off, S.sp, S.N0, S.D0, S.H0, S.A0, S.nyr, S.frac, S.planted, S.zq, [wp[i][1] for i in iids], [wp[i][2] for i in iids],
+                     [Float64(C.coh.CR1[C.parent[i]]) for i in eachindex(S.sp)])
   (S=SP, coh=C.coh, obs=C.obs, parent=C.parent, agg=C.agg)
 end
 TRc = buildP("train"); VAc = buildP("val")
@@ -48,11 +53,20 @@ function eps_start()
   [log(median(x)) for x in r]
 end
 z0 = vcat(eps_start(), gv0[gfree])
+# HBAD3P_START=<fit3p dir>: warm start from its z.csv (same region/keys; globals of the same layout)
+if haskey(ENV, "HBAD3P_START")
+  zs = vec(CSV.read(joinpath(ENV["HBAD3P_START"], "z.csv"), DataFrame).z)
+  length(zs) == length(z0) - 3 && !COUPLED && (zs = vcat(zs, zs[nsp+findfirst(j -> GSPEC[j][1] == :a, gfree)]))   # older fit without am: start am = a
+  nmiss = length(z0) - length(zs)                                                             # older fit without ρ / f0: their start values
+  nmiss > 0 && (zs = vcat(zs, z0[end-nmiss+1:end]))
+  length(zs) == length(z0) || error("HBAD3P_START: z length $(length(zs)) ≠ $(length(z0))")
+  z0 = zs
+end
 function params(z)
   gv = copy(gv0); gv[gfree] = z[nsp+1:end]; g = Dict(GSPEC[j][1] => gdec(j, gv[j]) for j in eachindex(GSPEC))
   P = [HBAD3P.SpPP(clamp(z[k], -8.0, 6.0), Hmax[k], TD.ST[k], longev[k]) for k in 1:nsp]
   G = HBAD3P.GlobPP(g[:b], g[:a], g[:gR], g[:θ], g[:ω], g[:s], g[:c], g[:η], g[:λ], g[:μ], g[:kh], g[:m0], g[:ms], g[:σST], g[:β], g[:ζ], g[:mW], 10.0,
-                    g[:pD], g[:pH], g[:pM], g[:σv], 1500.0)
+                    g[:pD], g[:pH], g[:pM], g[:σv], 1500.0, COUPLED ? g[:a] : g[:am], g[:ρ], g[:f0], g[:φ], g[:crhi], g[:crlo], g[:kc], g[:τr], g[:τe])
   P, G
 end
 function obj(z, C); P, G = params(z); HBAD3P.simulate!(C.S, P, G); nll_parts(cohort_view(C), C.obs); end

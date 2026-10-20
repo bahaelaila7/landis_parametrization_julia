@@ -28,7 +28,17 @@ struct GlobPP
   s::Float64; c::Float64; η::Float64; λ::Float64; μ::Float64; kh::Float64   # height
   m0::Float64; ms::Float64; σST::Float64; β::Float64; ζ::Float64; mW::Float64; mA::Float64   # mortality
   pD::Float64; pH::Float64; pM::Float64; σv::Float64; sdimax::Float64
+  am::Float64      # light coefficient of the SURVIVAL carbon balance (stress uses e^{−am O}; am = a couples it to the growth light response)
+  ρ::Float64       # maintenance respiration per unit stem volume: net dV = gross − ρ D² H (size decline of net growth); 0 = none
+  f0::Float64      # diffuse-light floor: light = f0 + (1 − f0) e^{−a O} (sunflecks / diffuse light under a closed canopy); 0 = none
+  φ::Float64       # crown: leaf area ∝ (CR / 0.4)^φ (pipe model: sapwood at the crown base); 0 = no crown effect
+  crhi::Float64; crlo::Float64; kc::Float64       # crown-ratio target CR* = crlo + (crhi − crlo) e^{−kc O} (crown recession under shade)
+  τr::Float64; τe::Float64                        # relaxation rates toward CR*: recession (CR > CR*) and re-expansion (CR < CR*) [1/yr]
 end
+const CR_OFF = (0.0, 0.4, 0.4, 1.0, 0.0, 0.0)    # no crown effect, constant CR
+GlobPP(b, a, gR, θ, ω, s, c, η, λ, μ, kh, m0, ms, σST, β, ζ, mW, mA, pD, pH, pM, σv, sdimax) = GlobPP(b, a, gR, θ, ω, s, c, η, λ, μ, kh, m0, ms, σST, β, ζ, mW, mA, pD, pH, pM, σv, sdimax, a, 0.0, 0.0, CR_OFF...)
+GlobPP(b, a, gR, θ, ω, s, c, η, λ, μ, kh, m0, ms, σST, β, ζ, mW, mA, pD, pH, pM, σv, sdimax, am) = GlobPP(b, a, gR, θ, ω, s, c, η, λ, μ, kh, m0, ms, σST, β, ζ, mW, mA, pD, pH, pM, σv, sdimax, am, 0.0, 0.0, CR_OFF...)
+GlobPP(b, a, gR, θ, ω, s, c, η, λ, μ, kh, m0, ms, σST, β, ζ, mW, mA, pD, pH, pM, σv, sdimax, am, ρ, f0) = GlobPP(b, a, gR, θ, ω, s, c, η, λ, μ, kh, m0, ms, σST, β, ζ, mW, mA, pD, pH, pM, σv, sdimax, am, ρ, f0, CR_OFF...)
 "SoA store (the v2 harness layout) + per-site water index W (period AET/PET) and its plot normal Wn."
 struct SitesP
   off::Vector{Int}; sp::Vector{Int32}
@@ -37,10 +47,11 @@ struct SitesP
   O::Vector{Float64}; S::Vector{Float64}; V::Vector{Float64}
   nyr::Vector{Int}; frac::Vector{Float64}; planted::Vector{Bool}; zq::Vector{Float64}
   W::Vector{Float64}; Wn::Vector{Float64}
+  CR0::Vector{Float64}; CR::Vector{Float64}       # per cohort: crown ratio (fraction of height with live crown), initial and working
 end
-function SitesP(off, sp, N0, D0, H0, A0, nyr, frac, planted, zq, W, Wn)
+function SitesP(off, sp, N0, D0, H0, A0, nyr, frac, planted, zq, W, Wn, CR0=fill(0.4, length(sp)))
   n = length(sp)
-  SitesP(off, Int32.(sp), N0, D0, H0, A0, copy(N0), copy(D0), copy(H0), copy(A0), zeros(n), zeros(n), zeros(n), nyr, frac, planted, zq, W, Wn)
+  SitesP(off, Int32.(sp), N0, D0, H0, A0, copy(N0), copy(D0), copy(H0), copy(A0), zeros(n), zeros(n), zeros(n), nyr, frac, planted, zq, W, Wn, CR0, copy(CR0))
 end
 nsites(S::SitesP) = length(S.off) - 1
 @inline sdi(N, D) = N * (D / 25.4)^1.605
@@ -65,14 +76,20 @@ nsites(S::SitesP) = length(S.off) - 1
   wω = W^G.ω; cr = exp(G.gR * RD)
   @inbounds for i in lo:hi
     p = P[sp[i]]; Di = D[i]; Hi = H[i]
-    g = exp(-G.a * O[i]) * cr * wω * exp(G.σv * S.zq[i]); V[i] = min(g, 1.0)
+    fcr = (S.CR[i] / 0.4)^G.φ                                          # crown: leaf area per unit sapwood at breast height
+    vgz = exp(G.σv * S.zq[i]); cw = cr * wω * vgz * fcr
+    lt = G.f0 + (1 - G.f0) * exp(-G.a * O[i])
+    g = lt * cw; V[i] = min(g, 1.0)
+    gm = exp(-G.am * O[i]) * cw                                        # survival carbon balance (own light response)
     hyd = max(0.0, 1 - min(Hi / (1.1 * p.Hmax), 1.0)^G.θ)
-    dV = exp(p.lnε) * (Di / 20)^G.b * 122.98 * g * hyd * fD           # 20^1.605 = 122.98
+    dV = max(exp(p.lnε) * (Di / 20)^G.b * 122.98 * g * hyd * fD - G.ρ * Di^2 * Hi, 0.0)   # gross (20^1.605 = 122.98) − maintenance
     dD = dV / (2 * Di * max(Hi, 1.37)) * Δ
     Lh = exp(-G.kh * O[i]); hs = hstar(p, G, Di)
     dH = (hstar(p, G, Di + dD) - hs) * (1 + G.η * (1 - Lh)) + G.λ * Δ * (hs * (1 + G.μ * (1 - Lh)) - Hi)
-    h = fM * (G.m0 / p.longevity + G.ms * exp(G.σST * (p.ST - 3)) * exp(-G.β * g) * (Di / 20)^G.ζ) + exp(G.mA * (A[i] / p.longevity - 1))
+    h = fM * (G.m0 / p.longevity + G.ms * exp(G.σST * (p.ST - 3)) * exp(-G.β * gm) * (Di / 20)^G.ζ) + exp(G.mA * (A[i] / p.longevity - 1))
     N[i] *= exp(-h * Δ); D[i] = Di + dD; H[i] = Hi + max(dH * fH, 0.0)
+    crt = G.crlo + (G.crhi - G.crlo) * exp(-G.kc * O[i]); c_ = S.CR[i]   # crown recession / re-expansion toward the light-dependent target
+    S.CR[i] = clamp(c_ + (c_ > crt ? G.τr : G.τe) * (crt - c_) * Δ, 0.05, 0.95)
   end
   for _ in 1:6
     tot = 0.0; ws = 0.0
@@ -90,7 +107,7 @@ end
 function simulate!(S::SitesP, P::AbstractVector{SpPP}, G::GlobPP)
   Threads.@threads :static for s in 1:nsites(S)
     lo = S.off[s]; hi = S.off[s+1] - 1
-    @inbounds for i in lo:hi; S.N[i] = S.N0[i]; S.D[i] = S.D0[i]; S.H[i] = S.H0[i]; S.A[i] = S.A0[i]; end
+    @inbounds for i in lo:hi; S.N[i] = S.N0[i]; S.D[i] = S.D0[i]; S.H[i] = S.H0[i]; S.A[i] = S.A0[i]; S.CR[i] = S.CR0[i]; end
     pl = S.planted[s]; w = S.W[s]; wn = S.Wn[s]
     for _ in 1:S.nyr[s]; step_site!(S, P, G, lo, hi, 1.0, pl, w, wn); end
     S.frac[s] > 0 && step_site!(S, P, G, lo, hi, S.frac[s], pl, w, wn)
@@ -106,6 +123,9 @@ const RSCALE = 185.2           # one FIA microplot sapling in trees/ha
 const DSEED = 12.7             # seed trees: D ≥ 5 in
 const RCLASS = 5               # recruits of one species within RCLASS years form one cohort
 const D_REC = 2.54; const A_REC = 5.0
+"Vigour quadrature of recruits (set by the caller to the run's quadrature): nodes and weights."
+const VQZ = Ref{Any}((-sqrt(3.0), 0.0, sqrt(3.0))); const VQW = Ref{Any}((1 / 6, 2 / 3, 1 / 6))   # prototype: type-unstable in the recruitment step only
+set_quadrature!(z, w) = (VQZ[] = Tuple(Float64.(z)); VQW[] = Tuple(Float64.(w)); nothing)
 "Free-run store: SitesP with a per-site capacity, live counts, the open recruit slot per (key, site), and the plot-level seed presence (static, from the start)."
 struct FreeSitesP
   S::SitesP; live::Vector{Int}; open_slot::Matrix{Int}; open_year::Matrix{Int}; dropped::Vector{Int}
@@ -124,18 +144,20 @@ end
     h0 = hstar(p, G, D_REC)
     j = F.open_slot[k, s]
     if j == 0 || yr - F.open_year[k, s] >= RCLASS
-      if n + 3 <= cap
-        j = lo + n; n += 3; F.open_slot[k, s] = j; F.open_year[k, s] = yr
-        for q in 1:3
-          jj = j + q - 1; w = (1 / 6, 2 / 3, 1 / 6)[q]
-          S.sp[jj] = k; S.N[jj] = rate * w; S.N0[jj] = rate * w; S.D[jj] = D_REC; S.H[jj] = h0; S.A[jj] = A_REC; S.zq[jj] = (-sqrt(3.0), 0.0, sqrt(3.0))[q]
+      zq_ = VQZ[]; wq_ = VQW[]; nq = length(zq_)
+      if n + nq <= cap
+        j = lo + n; n += nq; F.open_slot[k, s] = j; F.open_year[k, s] = yr
+        for q in 1:nq
+          jj = j + q - 1; w = wq_[q]
+          S.sp[jj] = k; S.N[jj] = rate * w; S.N0[jj] = rate * w; S.D[jj] = D_REC; S.H[jj] = h0; S.A[jj] = A_REC; S.zq[jj] = zq_[q]; S.CR[jj] = G.crhi; S.CR0[jj] = G.crhi
         end
       else
         F.dropped[s] += 1; F.open_slot[k, s] = 0
       end
     else
-      for q in 1:3
-        jj = j + q - 1; add = rate * (1 / 6, 2 / 3, 1 / 6)[q]; n0 = S.N[jj]; m = n0 + add
+      wq_ = VQW[]
+      for q in 1:length(wq_)
+        jj = j + q - 1; add = rate * wq_[q]; n0 = S.N[jj]; m = n0 + add
         S.D[jj] = sqrt((n0 * S.D[jj]^2 + add * D_REC^2) / m); S.H[jj] = (n0 * S.H[jj] + add * h0) / m; S.N[jj] = m; S.N0[jj] += add
       end
     end

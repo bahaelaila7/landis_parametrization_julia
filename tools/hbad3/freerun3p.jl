@@ -11,7 +11,7 @@ tag = ARGS[1]; SET = length(ARGS) >= 2 ? ARGS[2] : "val"; FD = joinpath(R3DIR, "
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_); kix = Dict(k => i for (i, k) in enumerate(keys_))
 spc = CSV.read(joinpath(FD, "species.csv"), DataFrame); String.(spc.key) == keys_ || error("keys of fit $(tag) differ from this region's keys")
 gl = CSV.read(joinpath(FD, "globals.csv"), DataFrame); gd = Dict(Symbol(r.name) => Float64(r.value) for r in eachrow(gl))
-G = HBAD3P.GlobPP((gd[f] for f in fieldnames(HBAD3P.GlobPP))...)
+G = HBAD3P.GlobPP((get(gd, f, f == :am ? gd[:a] : f in (:ρ, :f0, :φ, :τr, :τe) ? 0.0 : f in (:crhi, :crlo) ? 0.4 : f == :kc ? 1.0 : NaN) for f in fieldnames(HBAD3P.GlobPP))...)   # older fits: am = a
 big = Set(k for k in keys_ if k[1] != '_'); keyof(s, g) = s in big ? s : "_" * g
 iv = DataFrame(Arrow.Table(joinpath(DATA_DIR, "intervals.arrow"))); raw = DataFrame(Arrow.Table(joinpath(DATA_DIR, "interval_trees.arrow")))
 ig = DataFrame(Arrow.Table(joinpath(DATA_DIR, "interval_ingrowth.arrow")))
@@ -54,6 +54,7 @@ lF = rr.x[1:nsp] .+ log(4.0)           # per subplot-site density (×4: a microp
 Rg = HBAD3P.RecGP(exp(rr.x[nsp+1]), rr.x[nsp+2], exp(rr.x[nsp+3]))
 println(@sprintf("recruitment fit (TRAIN %d rows): λ0 %.2f λ1 %.2f ε0 %.3f | F per key %s", length(RT.Y), Rg.λ0, Rg.λ1, Rg.ε0, join(round.(exp.(rr.x[1:nsp]); sigdigits=3), ",")))
 P = [HBAD3P.SpPP(log(spc.eps[k]), spc.Hmax[k], spc.ST[k], spc.longevity[k], lF[k]) for k in 1:nsp]
+HBAD3P.set_quadrature!(VQ_Z, VQ_W)
 # ---------------- free-run plots: all intervals of the plot clean, natural, in the region, set == SET, ≥ 2 intervals
 ivr.pk = collect(zip(ivr.st, ivr.u, ivr.c, ivr.p))
 allp = combine(groupby(iv, [:st, :u, :c, :p]), :iid => (x -> all(i -> i in regiids && natural(i), x)) => :ok, nrow => :n, :set => first => :set)
@@ -80,6 +81,7 @@ function obsvals(D, H, Wt)             # tree records, Wt = trees/ha of the plot
   (BA=ba, N12=n12, QMD=n12 > 0 ? sqrt(s2 / n12) : NaN, LH=ba12 > 0 ? lh / ba12 : NaN)
 end
 rawby = Dict(k.iid => DataFrame(g) for (k, g) in pairs(groupby(raw, :iid))); igby = Dict(k.iid => DataFrame(g) for (k, g) in pairs(groupby(ig, :iid)))
+grp0 = Int8[]; CRv = Float64[]                          # initial group of each slot: 1 cohort QMD >= 12.7 at the first visit, 2 < 12.7, 3 recruit slot
 off = [1]; spv = Int32[]; N0 = Float64[]; D0 = Float64[]; H0 = Float64[]; A0 = Float64[]; zq = Float64[]; live = Int[]; Ws = Float64[]; Wns = Float64[]
 yrs = Int[]; seedm = falses(nsp, 4nrow(plots)); res = NamedTuple[]; pl_site = Int[]
 for (pi_, r) in enumerate(eachrow(plots))
@@ -89,7 +91,14 @@ for (pi_, r) in enumerate(eachrow(plots))
   ws = mean(first.(wd[i] for i in ivs.iid)); wn = wd[i1][2]
   tL = rawby[iL]; tL = tL[(tL.out .== "alive") .& (tL.dia2_cm .> 0), :]; gL = get(igby, iL, ig[1:0, :])
   o1 = obsvals(t1.dia_cm, t1.ht_m, t1.w_ha); oL = obsvals(vcat(tL.dia2_cm, gL.dia_cm), vcat(tL.ht2_m, gL.ht_m), vcat(tL.w2_ha, gL.w_ha))
-  push!(res, (st=r.st, u=r.u, c=r.c, p=r.p, T=T, obs1=o1, obsL=oL))
+  # stems >= 12.7 at the last visit by origin: big at the first visit / crossed from < 12.7 / new since the first visit (FIA tree ids)
+  d1 = Dict((x.sb, x.tr) => x.dia_cm for x in eachrow(t1)); ob = [0.0, 0.0, 0.0]
+  for x in eachrow(tL)
+    x.dia2_cm >= 12.7 || continue; d0 = get(d1, (x.sb, x.tr), nothing)
+    ob[d0 === nothing ? 3 : d0 >= 12.7 ? 1 : 2] += x.w2_ha
+  end
+  for x in eachrow(gL); x.dia_cm >= 12.7 && (ob[3] += x.w_ha); end
+  push!(res, (st=r.st, u=r.u, c=r.c, p=r.p, T=T, obs1=o1, obsL=oL, ob=ob))
   for sb in 1:4
     s = length(off); t = t1[t1.sb .== sb, :]
     t.bc = floor.(Int, -t.age ./ 10) .* 100 .+ dclass.(t.dia_cm)
@@ -97,18 +106,19 @@ for (pi_, r) in enumerate(eachrow(plots))
     n = 0
     if nrow(t) > 0
       gg = combine(groupby(t, [:key, :bc]), :w_ha => (x -> 4sum(x)) => :N, [:w_ha, :dia_cm] => ((w, d) -> sqrt(sum(w .* d .^ 2) / sum(w))) => :D,
-                   [:w_ha, :ht_m] => ((w, h) -> sum(w .* h) / sum(w)) => :H, [:w_ha, :age] => ((w, a) -> sum(w .* a) / sum(w)) => :A)
-      for g in eachrow(gg), q in 1:3
-        push!(spv, kix[g.key]); push!(N0, g.N * (1 / 6, 2 / 3, 1 / 6)[q]); push!(D0, g.D); push!(H0, max(g.H, 1.37)); push!(A0, g.A); push!(zq, (-sqrt(3.0), 0.0, sqrt(3.0))[q]); n += 1
+                   [:w_ha, :ht_m] => ((w, h) -> sum(w .* h) / sum(w)) => :H, [:w_ha, :age] => ((w, a) -> sum(w .* a) / sum(w)) => :A,
+                   [:w_ha, :cr] => ((w, c) -> (m = .!ismissing.(c) .& (coalesce.(c, 0) .> 0); any(m) ? sum(w[m] .* c[m]) / sum(w[m]) / 100 : 0.4)) => :CR)
+      for g in eachrow(gg), q in 1:length(VQ_Z)
+        push!(grp0, g.D >= 12.7 ? 1 : 2); push!(CRv, g.CR); push!(spv, kix[g.key]); push!(N0, g.N * VQ_W[q]); push!(D0, g.D); push!(H0, max(g.H, 1.37)); push!(A0, g.A); push!(zq, VQ_Z[q]); n += 1
       end
     end
-    cap = n + 3nsp * (ceil(Int, T / HBAD3P.RCLASS) + 1)
-    for _ in 1:(cap-n); push!(spv, 1); push!(N0, 0.0); push!(D0, 2.54); push!(H0, 1.37); push!(A0, 0.0); push!(zq, 0.0); end
+    cap = n + length(VQ_Z) * nsp * (ceil(Int, T / HBAD3P.RCLASS) + 1)
+    for _ in 1:(cap-n); push!(grp0, 3); push!(CRv, 0.4); push!(spv, 1); push!(N0, 0.0); push!(D0, 2.54); push!(H0, 1.37); push!(A0, 0.0); push!(zq, 0.0); end
     push!(off, off[end] + cap); push!(live, n); push!(Ws, ws); push!(Wns, wn); push!(yrs, round(Int, T)); push!(pl_site, pi_)
   end
 end
 ns = length(live)
-S = HBAD3P.SitesP(off, spv, copy(N0), copy(D0), copy(H0), copy(A0), zeros(Int, ns), zeros(ns), fill(false, ns), copy(zq), Ws, Wns)
+S = HBAD3P.SitesP(off, spv, copy(N0), copy(D0), copy(H0), copy(A0), zeros(Int, ns), zeros(ns), fill(false, ns), copy(zq), Ws, Wns, copy(CRv))
 F = HBAD3P.FreeSitesP(S, copy(live), zeros(Int, nsp, ns), zeros(Int, nsp, ns), zeros(Int, ns), seedm[:, 1:ns])
 HBAD3P.run_free!(F, P, G, Rg, yrs, (s, y) -> nothing)
 println("dropped recruit classes: ", sum(F.dropped))
@@ -121,6 +131,17 @@ for (pi_, r) in enumerate(res)
   for v in (:BA, :N12, :QMD, :LH); push!(rows, (r.T, String(v), getfield(r.obs1, v), getfield(r.obsL, v), getfield(sv, v))); end
 end
 CSV.write(joinpath(FD, "freerun_$(SET).csv"), rows)
+# decomposition of stems >= 12.7 at the last visit (sums over plots, per ha): simulated (lognormal operator) vs observed (tree ids)
+sim3 = zeros(3); obs3 = zeros(3); init_small = 0.0
+for (pi_, r) in enumerate(res)
+  obs3 .+= r.ob
+  for s in findall(==(pi_), pl_site), i in off[s]:off[s]+F.live[s]-1
+    sim3[grp0[i]] += above(S.D[i]) * S.N[i] / 4
+  end
+end
+np_ = length(res)
+println(@sprintf("stems >= 12.7 at the last visit, mean per ha over %d plots — big at first visit: obs %.1f sim %.1f | crossed from < 12.7: obs %.1f sim %.1f | new since first visit: obs %.1f sim %.1f",
+                 np_, obs3[1] / np_, sim3[1] / np_, obs3[2] / np_, sim3[2] / np_, obs3[3] / np_, sim3[3] / np_))
 println(@sprintf("%-4s %6s | %9s %9s | %22s | %22s", "var", "plots", "obs1 mean", "obsL mean", "SIM: bias  med|rel err|", "PERSIST: bias med|re|"))
 for v in ("BA", "N12", "QMD", "LH")
   d = rows[(rows.var .== v) .& isfinite.(rows.obsL) .& isfinite.(rows.sim) .& isfinite.(rows.obs1) .& (rows.obsL .> 0), :]
