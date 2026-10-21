@@ -186,13 +186,14 @@ function read_theta(path, nsp)
 end
 
 "Each fit directory records the structural switches it was fitted with; every tool checks them against the current env (HBAD2_FORM, HBAD2_SIZE_SPLIT)."
-function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); println(io, "vigour=", VIGOUR ? 1 : 0); VIGOUR && println(io, "sigv_max=", SIGV_MAX); SIZECLS && println(io, "sizecls=1"); end; end
+function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); println(io, "vigour=", VIGOUR ? 1 : 0); VIGOUR && println(io, "sigv_max=", SIGV_MAX); VIGOUR && println(io, "vig_n=", VIG_N); SIZECLS && println(io, "sizecls=1"); end; end
 function check_meta(dir)
   f = joinpath(dir, "meta.txt"); isfile(f) || error("$f missing: cannot verify growth form / size split of this fit")
   m = Dict(split(l, "=")[1] => (length(split(l, "=")) > 1 ? split(l, "=")[2] : "") for l in readlines(f))
   parse(Int, m["form"]) == FORM || error("fit $(dir) has form=$(m["form"]) but HBAD2_FORM=$(FORM)")
   parse(Int, get(m, "vigour", "0")) == (VIGOUR ? 1 : 0) || error("fit $(dir) has vigour=$(get(m, "vigour", "0")) but HBAD2_VIGOUR=$(VIGOUR ? 1 : 0)")
   haskey(m, "sigv_max") && parse(Float64, m["sigv_max"]) != SIGV_MAX && error("fit $(dir) has sigv_max=$(m["sigv_max"]) but HBAD2_SIGV_MAX=$(SIGV_MAX)")
+  haskey(m, "vig_n") && parse(Int, m["vig_n"]) != VIG_N && error("fit $(dir) has vig_n=$(m["vig_n"]) (vigour quadrature nodes) but HBAD2_VIG_N=$(VIG_N)")
   get(m, "site", "plot") == (SITE_SUB ? "subplot" : "plot") || error("fit $(dir) has site=$(get(m, "site", "plot")) but HBAD2_SITE=$(SITE_SUB ? "subplot" : "plot")")
   m["size_split"] == join(SIZE_BREAKS, ",") || @warn "fit $(dir) was fitted with size_split=$(m["size_split"]); evaluating with $(join(SIZE_BREAKS, ","))"
 end

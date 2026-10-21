@@ -7,7 +7,7 @@
 #   (env as fit3p) ./julia_gdal.sh --project=. --threads=4 tools/hbad3/freerun3p.jl <fit3p tag> [set]
 include(joinpath(@__DIR__, "common3.jl")); include(joinpath(@__DIR__, "..", "hbad2", "cmaes.jl"))
 include(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD3", "HBAD3P.jl")); import .HBAD3P
-tag = ARGS[1]; SET = length(ARGS) >= 2 ? ARGS[2] : "val"; FD = joinpath(R3DIR, "fit3p_" * tag)
+tag = ARGS[1]; SET = length(ARGS) >= 2 ? ARGS[2] : "val"; FD = joinpath(R3DIR, "fit3p_" * tag); check_meta(FD)
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_); kix = Dict(k => i for (i, k) in enumerate(keys_))
 spc = CSV.read(joinpath(FD, "species.csv"), DataFrame); String.(spc.key) == keys_ || error("keys of fit $(tag) differ from this region's keys")
 gl = CSV.read(joinpath(FD, "globals.csv"), DataFrame); gd = Dict(Symbol(r.name) => Float64(r.value) for r in eachrow(gl))
@@ -61,7 +61,7 @@ allp = combine(groupby(iv, [:st, :u, :c, :p]), :iid => (x -> all(i -> i in regii
 plots = allp[allp.ok .& (allp.n .>= 2) .& (coalesce.(allp.set, "") .== SET), :]
 println("free-run plots ($(SET)): ", nrow(plots))
 ivbp = Dict((k.st, k.u, k.c, k.p) => sort(DataFrame(g), :k) for (k, g) in pairs(groupby(iv, [:st, :u, :c, :p])))
-σw = 0.16; above(D) = 1 - cdf(Normal(), (log(12.7) - log(D)) / σw)
+σw = 0.16; above(D) = 1 - cdf(Normal(), (log(12.7) - (log(D) - σw^2)) / σw)   # D = cohort QMD = lognormal median × e^{σw²}
 function standvals(D, H, N)            # per ha; N already per ha of the plot
   ba = 0.0; ba12 = 0.0; n12 = 0.0; s2 = 0.0; lh = 0.0
   for i in eachindex(D)
@@ -144,6 +144,8 @@ println(@sprintf("stems >= 12.7 at the last visit, mean per ha over %d plots —
                  np_, obs3[1] / np_, sim3[1] / np_, obs3[2] / np_, sim3[2] / np_, obs3[3] / np_, sim3[3] / np_))
 println(@sprintf("%-4s %6s | %9s %9s | %22s | %22s", "var", "plots", "obs1 mean", "obsL mean", "SIM: bias  med|rel err|", "PERSIST: bias med|re|"))
 for v in ("BA", "N12", "QMD", "LH")
+  rv = rows[rows.var .== v, :]; nsimnan = count(i -> isfinite(rv.obsL[i]) && rv.obsL[i] > 0 && !isfinite(rv.sim[i]), 1:nrow(rv))
+  nsimnan > 0 && println(@sprintf("  %s: %d plots with observed values but no simulated stems ≥ 12.7 cm are EXCLUDED from the row below", v, nsimnan))
   d = rows[(rows.var .== v) .& isfinite.(rows.obsL) .& isfinite.(rows.sim) .& isfinite.(rows.obs1) .& (rows.obsL .> 0), :]
   re_s = (d.sim .- d.obsL) ./ d.obsL; re_p = (d.obs1 .- d.obsL) ./ d.obsL
   println(@sprintf("%-4s %6d | %9.2f %9.2f | %+8.1f %%  %8.1f %%   | %+8.1f %%  %8.1f %%", v, nrow(d), mean(d.obs1), mean(d.obsL),

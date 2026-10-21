@@ -5,7 +5,7 @@
 #   (env as fit3p) ./julia_gdal.sh --project=. --threads=4 tools/hbad3/crossing3p.jl <fit3p tag> [threshold cm = 12.7]
 include(joinpath(@__DIR__, "common3.jl"))
 include(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD3", "HBAD3P.jl")); import .HBAD3P
-tag = ARGS[1]; THR = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 12.7; FD = joinpath(R3DIR, "fit3p_" * tag)
+tag = ARGS[1]; THR = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 12.7; FD = joinpath(R3DIR, "fit3p_" * tag); check_meta(FD)
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
 spc = CSV.read(joinpath(FD, "species.csv"), DataFrame); gl = CSV.read(joinpath(FD, "globals.csv"), DataFrame)
 gd = Dict(Symbol(r.name) => Float64(r.value) for r in eachrow(gl)); G = HBAD3P.GlobPP((get(gd, f, f == :am ? gd[:a] : f in (:ρ, :f0, :φ, :τr, :τe) ? 0.0 : f in (:crhi, :crlo) ? 0.4 : f == :kc ? 1.0 : NaN) for f in fieldnames(HBAD3P.GlobPP))...)   # older fits: am = a
@@ -27,7 +27,7 @@ obs = combine(groupby(d, [:site, :key, :bc]), :out => (o -> count(!=("missing"),
               :gD => (g -> (x = filter(isfinite, g); isempty(x) ? NaN : sum(x))) => :gsum,
               [:out, :dia2_cm] => ((o, x) -> count(i -> o[i] == "alive" && x[i] >= THR, eachindex(o))) => :x)
 ci = Dict((r.site, r.key, r.bc) => i for (i, r) in enumerate(eachrow(C.coh)))
-above(D) = 1 - cdf(Normal(), (log(THR) - log(D)) / 0.16)
+above(D) = 1 - cdf(Normal(), (log(THR) - (log(D) - 0.16^2)) / 0.16)   # D = sub-cohort QMD = lognormal median × e^{σ²}
 pS = zeros(nrow(C.coh)); pX = zeros(nrow(C.coh)); pG = zeros(nrow(C.coh))
 for i in eachindex(SP.N)
   p = C.parent[i]; N0c = C.agg.N0[p]; pS[p] += SP.N[i] / N0c; pX[p] += SP.N[i] * above(SP.D[i]) / N0c

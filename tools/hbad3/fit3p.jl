@@ -53,14 +53,21 @@ function eps_start()
   [log(median(x)) for x in r]
 end
 z0 = vcat(eps_start(), gv0[gfree])
-# HBAD3P_START=<fit3p dir>: warm start from its z.csv (same region/keys; globals of the same layout)
+znames = vcat(["ε:" * k for k in keys_], [String(GSPEC[j][1]) for j in gfree])   # coordinate names, saved with z.csv
+# HBAD3P_START=<fit3p dir>: warm start from its z.csv (same region/keys), coordinates matched BY NAME; a coordinate absent from the start fit keeps its
+# start value (am: the start fit's a). Older z.csv without names: positional, accepted only for the full layout of that time (nsp + 30 or nsp + 24).
 if haskey(ENV, "HBAD3P_START")
-  zs = vec(CSV.read(joinpath(ENV["HBAD3P_START"], "z.csv"), DataFrame).z)
-  length(zs) == length(z0) - 3 && !COUPLED && (zs = vcat(zs, zs[nsp+findfirst(j -> GSPEC[j][1] == :a, gfree)]))   # older fit without am: start am = a
-  nmiss = length(z0) - length(zs)                                                             # older fit without ρ / f0: their start values
-  nmiss > 0 && (zs = vcat(zs, z0[end-nmiss+1:end]))
-  length(zs) == length(z0) || error("HBAD3P_START: z length $(length(zs)) ≠ $(length(z0))")
-  z0 = zs
+  zt = CSV.read(joinpath(ENV["HBAD3P_START"], "z.csv"), DataFrame)
+  if hasproperty(zt, :name)
+    zd = Dict(String(n) => v for (n, v) in zip(zt.name, zt.z))
+  else
+    nz = nrow(zt); nfull = nsp + length(GSPEC)
+    nz in (nfull, nfull - 6) || error("HBAD3P_START: unnamed z.csv of length $(nz) (layout ambiguous: expected $(nfull) or $(nfull - 6)); refit or add names")
+    zd = Dict(n => v for (n, v) in zip(vcat(["ε:" * k for k in keys_], [String(GSPEC[j][1]) for j in 1:nz-nsp]), zt.z))
+  end
+  !haskey(zd, "am") && haskey(zd, "a") && (zd["am"] = zd["a"])
+  miss = [n for n in znames if !haskey(zd, n)]; isempty(miss) || lg("HBAD3P_START: not in the start fit (start values): " * join(miss, ","))
+  z0 = [get(zd, n, z0[i]) for (i, n) in enumerate(znames)]
 end
 function params(z)
   gv = copy(gv0); gv[gfree] = z[nsp+1:end]; g = Dict(GSPEC[j][1] => gdec(j, gv[j]) for j in eachindex(GSPEC))
@@ -89,7 +96,7 @@ function save(z)
   P, G = params(z)
   CSV.write(joinpath(OUTD, "species.csv"), DataFrame(key=keys_, eps=exp.(z[1:nsp]), Hmax=Hmax, ST=TD.ST, longevity=longev))
   CSV.write(joinpath(OUTD, "globals.csv"), DataFrame(name=String.(collect(fieldnames(HBAD3P.GlobPP))), value=[getfield(G, f) for f in fieldnames(HBAD3P.GlobPP)]))
-  CSV.write(joinpath(OUTD, "z.csv"), DataFrame(z=z))
+  CSV.write(joinpath(OUTD, "z.csv"), DataFrame(name=znames, z=z))
 end
 res = cmaes(z -> obj(z, TRc).total, z0, parse(Float64, get(ENV, "HBAD2_SIGMA", "0.15")); λ=parse(Int, get(ENV, "HBAD2_LAMBDA", "24")), maxevals=parse(Int, get(ENV, "HBAD2_EVALS", "6000")),
             logf=lg, log_every=25, callback=(g, b, fb) -> (g % 50 == 0 && save(b)))
@@ -99,5 +106,5 @@ lg(@sprintf("FIT   train %.1f (mort %.1f D %.1f H %.1f) | VAL %.1f (mort %.1f D 
 lg(@sprintf("GAIN over null: train %.1f | val %.1f; val gain per tracked tree %.4f", NULLT - pt.total, NULLV - pv.total, (NULLV - pv.total) / pv.ntrees))
 P, G = params(res.x); lg(string(G))
 atb = [String(GSPEC[j][1]) for j in gfree if (v = getfield(G, GSPEC[j][1]); isapprox(v, GSPEC[j][3]; atol=1e-9, rtol=1e-6) || isapprox(v, GSPEC[j][4]; atol=1e-9, rtol=1e-6))]
-append!(atb, [keys_[k] * ":ε" for k in 1:nsp if abs(res.x[k]) >= 5.999])
+append!(atb, [keys_[k] * ":ε" for k in 1:nsp if res.x[k] <= -7.999 || res.x[k] >= 5.999])   # ε clamp in params(): [−8, 6]
 lg("AT BOUNDS: " * (isempty(atb) ? "none" : join(atb, " ")))
