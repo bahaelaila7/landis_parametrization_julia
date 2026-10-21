@@ -6,6 +6,11 @@ include(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD3", "HBAD3.jl")); 
 using DuckDB
 const SFORM = parse(Int, get(ENV, "HBAD3_SFORM", "1"))    # growth-stress hazard form (HBAD3.stress)
 const R3DIR = joinpath(@__DIR__, "..", "..", "results", "hbad3")
+# external inputs (read-only), under the workspace root (env WORKSPACE, default: the parent folder of this repo) — tools/hbad3/pipeline3p.env
+const WSROOT = get(ENV, "WORKSPACE", normpath(joinpath(@__DIR__, "..", "..", "..")))
+const SLIM_DB = get(ENV, "HBAD3_SLIM_DB", joinpath(WSROOT, "landis_region4", "data_r4", "slim_r4.duckdb"))
+const SHADETOL_CSV = get(ENV, "HBAD3_SHADETOL_CSV", joinpath(WSROOT, "landis_region4", "data_r4", "shadetol_all_species.csv"))
+const LONGEVITY_CSV = get(ENV, "HBAD3_LONGEVITY_CSV", joinpath(WSROOT, "species_longevity_ref.csv"))
 SITE_SUB && VIGOUR || error("HBAD3 harness expects HBAD2_SITE=subplot and HBAD2_VIGOUR=1")
 
 # ---------------------------------------------------------------- per-species parameter space
@@ -25,12 +30,13 @@ function gdec3(nm, z); lo, hi = GBOUNDS3[nm]; clamp(nm in GLOG3 ? exp(z) : (nm =
 
 # ---------------------------------------------------------------- traits per key (tree-weighted over member species, TRAIN trees)
 function key_traits(tr, keys_, longev)
-  st = CSV.read("/workspace/landis_region4/data_r4/shadetol_all_species.csv", DataFrame); std_ = Dict(String(r.sym) => Float64(r.shade_class) for r in eachrow(st))
-  db = DBInterface.connect(DuckDB.DB, "/workspace/landis_region4/data_r4/slim_r4.duckdb"; readonly=true)
+  st = CSV.read(SHADETOL_CSV, DataFrame); std_ = Dict(String(r.sym) => Float64(r.shade_class) for r in eachrow(st))
+  db = DBInterface.connect(DuckDB.DB, SLIM_DB; readonly=true)
   rs = DataFrame(DBInterface.execute(db, "SELECT SPECIES_SYMBOL s, CAST(WOOD_SPGR_GREENVOL_DRYWT AS DOUBLE) wd FROM REF_SPECIES ORDER BY SPECIES_SYMBOL"))
   DBInterface.close!(db)
   wdd = Dict(String(r.s) => r.wd for r in eachrow(rs) if !ismissing(r.wd))
   trn = tr[tr.set .== "train", :]
+  miss = sort(setdiff(unique(trn.sym), keys(std_))); isempty(miss) || @info "species without a shade class in $(SHADETOL_CSV) (class 3 used)" miss
   rows = map(enumerate(keys_)) do (i, k)
     t = trn[trn.key .== k, :]; c = combine(groupby(t, :sym), nrow => :n)
     wavg(d, dflt) = (v = [get(d, s, dflt) for s in c.sym]; sum(v .* c.n) / sum(c.n))

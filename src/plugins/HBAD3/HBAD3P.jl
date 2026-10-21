@@ -1,16 +1,19 @@
-# HBAD3P — process-grounded HBAD3 (docs/hbad3_design.md §8). Every per-species empirical equation of HBAD v2/HBAD3 is replaced by a process form whose
-# parameters are global (shared by all species, consistent across R4 regions in the data checks §7.5-7.6) or species TRAITS; per species only the growth
-# efficiency ε (and the fecundity F, recruitment) is calibrated. Cohort state: N, D (QMD cm), H (m), A (yr), vigour quantile z. No biomass.
-#   SDI_i = N_i (D_i/25.4)^1.605; RD = ΣSDI / SDIMAX (SDIMAX constant); overtopping O_i = (Σ SDI of taller + ½ equal + ½ own) / SDIMAX
-#   growth   stem-volume balance  dV = ε (D/20)^b 20^1.605 · e^{−a O} · e^{gR RD} · max(0, 1 − (H / 1.1 Hmax)^θ) · W^ω · e^{σv z}      [cm² m / yr]
-#            (pipe-model leaf area ∝ D^b; Beer–Lambert light; crowding; hydraulic limitation of tall trees; water supply/demand AET/PET)
-#            dD = dV / (2 D H)                                                                                     (V ∝ D² H at constant height)
-#   height   trait allometry H*(D) = 1.37 + (Hmax − 1.37)(1 − exp(−s D / (Hmax − 1.37)))^c  (initial slenderness s, shape c);
-#            dH = [H*(D + dD) − H*(D)](1 + η(1 − Lh)) + λ (H*(D)(1 + μ(1 − Lh)) − H),  Lh = e^{−kh O}   (shade elongation, relaxation), ≥ 0
-#   mortality h = e^{pM}[m0 / LONGEVITY + ms e^{σST (ST − 3)} e^{−β g} (D/20)^ζ] · e^{mW (Wn − W)/0.1} + e^{mA (A/LONGEVITY − 1)}
-#            g = e^{−a O} e^{gR RD} W^ω e^{σv z} (realised relative growth: carbon-starvation stress, Kobe/SORTIE; reserves ∝ size: ζ < 0;
-#            shade-tolerant species survive low growth: σST < 0); drought ANOMALY of the period vs the plot normal (Wn − W)
-#   self-thinning while RD > 1: remove SDI in proportion to SDI_i (1 − min(1, g_i))
+# HBAD3P — process-grounded HBAD3 (docs/hbad3_design.md §8; pipeline docs/hbad3p_pipeline.md). Every per-species empirical equation of HBAD v2/HBAD3 is
+# replaced by a process form whose parameters are global (shared by all species) or species TRAITS; per species only the growth efficiency ε (and the
+# fecundity F of free runs) is calibrated. Cohort state: N [trees/ha], D (QMD cm), H (m), A (yr), crown ratio CR, vigour node z. No biomass.
+# One annual step of a site (step_site!; Δ = 1 or the final fraction of a year), all rates from the START-of-step state (explicit Euler):
+#   SDI_i = N_i (D_i/25.4)^1.605; RD = ΣSDI / sdimax; overtopping O_i = (Σ_{H_j > H_i} SDI_j + ½ Σ_{j≠i, H_j = H_i} SDI_j + ½ SDI_i) / sdimax
+#   crowding/water/vigour/crown   cw = e^{gR RD} · W^ω · e^{σv z} · (CR/0.4)^φ          (W = period AET/PET, φ: pipe-model leaf area at the crown base)
+#   growth   light L = f0 + (1 − f0) e^{−a O};  g = L·cw;  hydraulic hyd = max(0, 1 − min(H / 1.1 Hmax, 1)^θ)
+#            dV = max(ε (D/20)^b · 122.98 · g · hyd · fD − ρ D² H, 0)  [cm² m / yr]  (122.98: fixed unit constant of ε);  dD = dV Δ / (2 D max(H, 1.37))
+#   height   H*(D) = 1.37 + (Hmax − 1.37)(1 − exp(−s D / (Hmax − 1.37)))^c;  Lh = e^{−kh O}
+#            dH = [H*(D + dD) − H*(D)](1 + η(1 − Lh)) + λΔ (H*(D)(1 + μ(1 − Lh)) − H);  H += max(fH dH, 0)
+#   mortality gm = e^{−am O} cw;  h = fM [m0/LONGEVITY + ms e^{σST (ST − 3)} e^{−β gm} (D/20)^ζ] + e^{mA (A/LONGEVITY − 1)},  fM = (planted ? e^{pM} : 1) e^{mW (Wn − W)/0.1}
+#            N *= e^{−h Δ}   (carbon-starvation stress of the realised relative growth gm; drought ANOMALY of the period vs the plot normal Wn)
+#   crown    CR* = crlo + (crhi − crlo) e^{−kc O};  CR += (CR > CR* ? τr : τe)(CR* − CR) Δ, clamped to [0.05, 0.95]
+#   self-thinning after the step, ≤ 6 passes while ΣSDI > sdimax: remove the excess SDI in proportion to SDI_i (1 − min(1, g_i)) (+1e−9 SDI_i)
+#   planted stands: fD = e^{pD}, fH = e^{pH}, e^{pM} in fM (1 otherwise).  A += Δ.
+# Free runs (run_free!): step, then recruitment at D = 2.54 cm (recruit_siteP!): rate = RSCALE e^{lnF − λ0 e^{λ1 (ST−3)} RD} (seed ? 1 : ε0) × rmult × Δ.
 module HBAD3P
 
 export SpPP, GlobPP, SitesP, simulate!, RecGP, FreeSitesP, run_free!
@@ -82,7 +85,7 @@ nsites(S::SitesP) = length(S.off) - 1
     g = lt * cw; V[i] = min(g, 1.0)
     gm = exp(-G.am * O[i]) * cw                                        # survival carbon balance (own light response)
     hyd = max(0.0, 1 - min(Hi / (1.1 * p.Hmax), 1.0)^G.θ)
-    dV = max(exp(p.lnε) * (Di / 20)^G.b * 122.98 * g * hyd * fD - G.ρ * Di^2 * Hi, 0.0)   # gross (20^1.605 = 122.98) − maintenance
+    dV = max(exp(p.lnε) * (Di / 20)^G.b * 122.98 * g * hyd * fD - G.ρ * Di^2 * Hi, 0.0)   # gross − maintenance; 122.98 is a fixed unit constant of ε (NB: 20^1.605 = 122.50, the label of older docs)
     dD = dV / (2 * Di * max(Hi, 1.37)) * Δ
     Lh = exp(-G.kh * O[i]); hs = hstar(p, G, Di)
     dH = (hstar(p, G, Di + dD) - hs) * (1 + G.η * (1 - Lh)) + G.λ * Δ * (hs * (1 + G.μ * (1 - Lh)) - Hi)
@@ -126,12 +129,15 @@ const D_REC = 2.54; const A_REC = 5.0
 "Vigour quadrature of recruits (set by the caller to the run's quadrature): nodes and weights."
 const VQZ = Ref{Any}((-sqrt(3.0), 0.0, sqrt(3.0))); const VQW = Ref{Any}((1 / 6, 2 / 3, 1 / 6))   # prototype: type-unstable in the recruitment step only
 set_quadrature!(z, w) = (VQZ[] = Tuple(Float64.(z)); VQW[] = Tuple(Float64.(w)); nothing)
-"Free-run store: SitesP with a per-site capacity, live counts, the open recruit slot per (key, site), and the plot-level seed presence (static, from the start)."
+"Free-run store: SitesP with a per-site capacity, live counts, the open recruit slot per (key, site), the plot-level seed presence (static, from the start)
+and a per-site recruitment multiplier (the area convention of the stand densities: tools/hbad3/lib3p.jl; 0 = no recruitment, e.g. a nonforest subplot)."
 struct FreeSitesP
   S::SitesP; live::Vector{Int}; open_slot::Matrix{Int}; open_year::Matrix{Int}; dropped::Vector{Int}
   seedplot::BitMatrix            # nsp × nsites: a conspecific seed tree anywhere on the PLOT at the start (dispersal between subplots)
+  rmult::Vector{Float64}
 end
-@inline function recruit_siteP!(F::FreeSitesP, P::AbstractVector{SpPP}, G::GlobPP, Rg::RecGP, s::Int, yr::Int)
+FreeSitesP(S, live, open_slot, open_year, dropped, seedplot) = FreeSitesP(S, live, open_slot, open_year, dropped, seedplot, ones(length(live)))
+@inline function recruit_siteP!(F::FreeSitesP, P::AbstractVector{SpPP}, G::GlobPP, Rg::RecGP, s::Int, yr::Int, Δ::Float64=1.0)   # Δ: length of the year just stepped
   S = F.S; lo = S.off[s]; cap = S.off[s+1] - S.off[s]; n = F.live[s]; hi = lo + n - 1; nsp = length(P)
   tot = 0.0
   @inbounds for i in lo:hi; tot += sdi(S.N[i], S.D[i]); end
@@ -139,7 +145,7 @@ end
   @inbounds for k in 1:nsp
     p = P[k]; seed = F.seedplot[k, s]
     for i in lo:hi; (S.sp[i] == k && S.D[i] >= DSEED && S.N[i] > 0) && (seed = true); end
-    rate = RSCALE * exp(p.lnF - Rg.λ0 * exp(Rg.λ1 * (p.ST - 3)) * RD) * (seed ? 1.0 : Rg.ε0)
+    rate = RSCALE * exp(p.lnF - Rg.λ0 * exp(Rg.λ1 * (p.ST - 3)) * RD) * (seed ? 1.0 : Rg.ε0) * F.rmult[s] * Δ
     rate <= 0 && continue
     h0 = hstar(p, G, D_REC)
     j = F.open_slot[k, s]
@@ -165,15 +171,16 @@ end
   F.live[s] = n
   nothing
 end
-"Free run of every site for years[s] years from its current state: annual step then recruitment; snap(s, yr) after each year (site-private writes only)."
-function run_free!(F::FreeSitesP, P::AbstractVector{SpPP}, G::GlobPP, Rg::RecGP, years::Vector{Int}, snap)
+"Free run of every site for years[s] whole years (+ a final partial year frac[s]) from its current state: step then recruitment (recruits of a partial year ×
+its length); snap(s, yr) after each year (site-private writes only)."
+function run_free!(F::FreeSitesP, P::AbstractVector{SpPP}, G::GlobPP, Rg::RecGP, years::Vector{Int}, snap; frac::Vector{Float64}=zeros(length(F.live)))
   S = F.S
   Threads.@threads :static for s in 1:length(F.live)
     lo = S.off[s]
-    for y in 1:years[s]
-      n = F.live[s]
-      n > 0 && step_site!(S, P, G, lo, lo + n - 1, 1.0, S.planted[s], S.W[s], S.Wn[s])
-      recruit_siteP!(F, P, G, Rg, s, y)
+    for y in 1:years[s] + (frac[s] > 0)
+      Δ = y <= years[s] ? 1.0 : frac[s]; n = F.live[s]
+      n > 0 && step_site!(S, P, G, lo, lo + n - 1, Δ, S.planted[s], S.W[s], S.Wn[s])
+      recruit_siteP!(F, P, G, Rg, s, y, Δ)
       snap(s, y)
     end
   end

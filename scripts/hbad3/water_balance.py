@@ -3,13 +3,14 @@ driven by PRISM L4 monthly ppt and Thornthwaite PET (same as climate_join.py). E
 simplified to the standard 'supply-limited' form AET = min(PET, W); W = min(AWC, W - AET) (no runoff before capacity). Spun up 1980-1989.
 Index: growing-season (Apr-Oct) ratio R = ΣAET / ΣPET per year (1 = no water limitation); interval value = mean over its years; normal = 1991-2020.
 Output results/hbad3/interval_water{SUF}.csv (iid, aetpet_iv, aetpet_n)."""
-import sys, numpy as np, pandas as pd, duckdb, pyarrow.ipc as ip
+import os, sys, numpy as np, pandas as pd, duckdb, pyarrow.ipc as ip
+WS = os.environ.get("WORKSPACE", os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))   # workspace root (tools/hbad3/pipeline3p.env)
 R = sys.argv[1]
 IVP = sys.argv[2] if len(sys.argv) > 2 else f"{R}/results/hbad2/intervals.arrow"; SUF = sys.argv[3] if len(sys.argv) > 3 else ""
 pc = pd.read_csv(f"{R}/results/hbad3/plot_climate{SUF}.csv"); ic = pd.read_csv(f"{R}/results/hbad3/interval_climate{SUF}.csv")
 iv = ip.open_file(IVP).read_all().to_pandas()[["iid", "d1", "d2"]]
 iv["y1"] = pd.to_datetime(iv.d1).dt.year; iv["y2"] = np.maximum(pd.to_datetime(iv.d2).dt.year - 1, iv.y1)
-pr = duckdb.connect("/workspace/PRISM_LT/PRISM_LT_EPA/prism_lt_epa.duckdb", read_only=True)
+pr = duckdb.connect(os.environ.get("HBAD3_PRISM_DB", f"{WS}/PRISM_LT/PRISM_LT_EPA/prism_lt_epa.duckdb"), read_only=True)
 ids = sorted(pc.l4.dropna().unique())
 m = pr.execute("select EPA_L4_ID l4, YEAR y, MONTH mo, CAST(CAST(ppt_mean AS VARCHAR) AS DOUBLE) ppt, CAST(CAST(tmean_mean AS VARCHAR) AS DOUBLE) tmean from EPA_L4_monthly where EPA_L4_ID in (select unnest(?)) and YEAR >= 1980 order by l4, y, mo", [ids]).df()
 lat = pc.groupby("l4").lat.mean()

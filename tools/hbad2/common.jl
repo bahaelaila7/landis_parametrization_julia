@@ -9,7 +9,10 @@ const MIN_SP_TREES = parse(Int, get(ENV, "HBAD2_MIN_SP_TREES", "3000"))
 # differ in size are kept apart instead of being lumped into one quadratic mean (mean-field threshold artefact, docs/hbad_v2.md §5)
 const BOUNDS_OVERRIDE = Dict{Symbol,Tuple{Float64,Float64}}()
 const SIZE_BREAKS = (b = get(ENV, "HBAD2_SIZE_SPLIT", ""); isempty(b) ? Float64[] : parse.(Float64, split(b, ",")))
-dclass(D) = searchsortedfirst(SIZE_BREAKS, D)
+# classes closed below, [b_i, b_{i+1}) — a tree of exactly 12.7 cm (5 in, tallied on the SUBPLOT) is not lumped with microplot saplings. HBAD2_DCLASS=legacy:
+# the older rule (closed above, searchsortedfirst) for evaluating fits made with it (their meta.txt has no dclass line)
+const DCLASS = get(ENV, "HBAD2_DCLASS", "lower")
+dclass(D) = DCLASS == "legacy" ? searchsortedfirst(SIZE_BREAKS, D) : searchsortedlast(SIZE_BREAKS, D) + 1
 # simulation site: "plot" (all 4 subplots pooled) or "subplot" (each FIA subplot is a site; densities ×4 → per ha; competition is local, E4)
 const SITE_SUB = get(ENV, "HBAD2_SITE", "plot") == "subplot"
 const SITE_MULT = SITE_SUB ? 4.0 : 1.0
@@ -186,13 +189,14 @@ function read_theta(path, nsp)
 end
 
 "Each fit directory records the structural switches it was fitted with; every tool checks them against the current env (HBAD2_FORM, HBAD2_SIZE_SPLIT)."
-function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); println(io, "vigour=", VIGOUR ? 1 : 0); VIGOUR && println(io, "sigv_max=", SIGV_MAX); VIGOUR && println(io, "vig_n=", VIG_N); SIZECLS && println(io, "sizecls=1"); end; end
+function write_meta(dir); open(joinpath(dir, "meta.txt"), "w") do io; println(io, "form=", FORM); println(io, "size_split=", join(SIZE_BREAKS, ",")); println(io, "site=", SITE_SUB ? "subplot" : "plot"); println(io, "vigour=", VIGOUR ? 1 : 0); VIGOUR && println(io, "sigv_max=", SIGV_MAX); VIGOUR && println(io, "vig_n=", VIG_N); println(io, "dclass=", DCLASS); SIZECLS && println(io, "sizecls=1"); end; end
 function check_meta(dir)
   f = joinpath(dir, "meta.txt"); isfile(f) || error("$f missing: cannot verify growth form / size split of this fit")
   m = Dict(split(l, "=")[1] => (length(split(l, "=")) > 1 ? split(l, "=")[2] : "") for l in readlines(f))
   parse(Int, m["form"]) == FORM || error("fit $(dir) has form=$(m["form"]) but HBAD2_FORM=$(FORM)")
   parse(Int, get(m, "vigour", "0")) == (VIGOUR ? 1 : 0) || error("fit $(dir) has vigour=$(get(m, "vigour", "0")) but HBAD2_VIGOUR=$(VIGOUR ? 1 : 0)")
   haskey(m, "sigv_max") && parse(Float64, m["sigv_max"]) != SIGV_MAX && error("fit $(dir) has sigv_max=$(m["sigv_max"]) but HBAD2_SIGV_MAX=$(SIGV_MAX)")
+  get(m, "dclass", "legacy") == DCLASS || error("fit $(dir) has cohort size-class rule dclass=$(get(m, "dclass", "legacy")) but HBAD2_DCLASS=$(DCLASS)")
   haskey(m, "vig_n") && parse(Int, m["vig_n"]) != VIG_N && error("fit $(dir) has vig_n=$(m["vig_n"]) (vigour quadrature nodes) but HBAD2_VIG_N=$(VIG_N)")
   get(m, "site", "plot") == (SITE_SUB ? "subplot" : "plot") || error("fit $(dir) has site=$(get(m, "site", "plot")) but HBAD2_SITE=$(SITE_SUB ? "subplot" : "plot")")
   m["size_split"] == join(SIZE_BREAKS, ",") || @warn "fit $(dir) was fitted with size_split=$(m["size_split"]); evaluating with $(join(SIZE_BREAKS, ","))"

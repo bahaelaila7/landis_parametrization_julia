@@ -5,17 +5,13 @@
 #   (env as fit3p) ./julia_gdal.sh --project=. --threads=4 tools/hbad3/crossing3p.jl <fit3p tag> [threshold cm = 12.7]
 include(joinpath(@__DIR__, "common3.jl"))
 include(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD3", "HBAD3P.jl")); import .HBAD3P
+include(joinpath(@__DIR__, "lib3p.jl"))
 tag = ARGS[1]; THR = length(ARGS) >= 2 ? parse(Float64, ARGS[2]) : 12.7; FD = joinpath(R3DIR, "fit3p_" * tag); check_meta(FD)
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
-spc = CSV.read(joinpath(FD, "species.csv"), DataFrame); gl = CSV.read(joinpath(FD, "globals.csv"), DataFrame)
-gd = Dict(Symbol(r.name) => Float64(r.value) for r in eachrow(gl)); G = HBAD3P.GlobPP((get(gd, f, f == :am ? gd[:a] : f in (:ρ, :f0, :φ, :τr, :τe) ? 0.0 : f in (:crhi, :crlo) ? 0.4 : f == :kc ? 1.0 : NaN) for f in fieldnames(HBAD3P.GlobPP))...)   # older fits: am = a
-P = [HBAD3P.SpPP(log(spc.eps[k]), spc.Hmax[k], spc.ST[k], spc.longevity[k]) for k in 1:nsp]
-w = CSV.read(get(ENV, "HBAD3_WATER_CSV", joinpath(R3DIR, "interval_water.csv")), DataFrame); wp = Dict(Int(r.iid) => (r.aetpet_iv, r.aetpet_n) for r in eachrow(w))
+M = load_fit3p(FD, keys_); P, G = M.P, M.G; wp = water_pairs(); FAREA = meta_farea(FD)
 d = tr[tr.set .== "val", :]
-C = build_cohorts(tr, "val", keys_); S = C.S; ns = length(S.off) - 1
-iids = [C.coh.site[C.parent[S.off[s]]] ÷ 10 for s in 1:ns]
-SP = HBAD3P.SitesP(S.off, S.sp, S.N0, S.D0, S.H0, S.A0, S.nyr, S.frac, S.planted, S.zq, [wp[i][1] for i in iids], [wp[i][2] for i in iids],
-                   [Float64(C.coh.CR1[C.parent[i]]) for i in eachindex(S.sp)])
+C = sima_sites(tr, "val", keys_, wp, FAREA ? interval_forest(DataFrame(Arrow.Table(joinpath(DATA_DIR, "intervals.arrow"))), forest_table()) : nothing)
+SP = C.S; S = SP; ns = length(S.off) - 1
 # start-of-interval overtopping per cohort (zero-length run), then the real run
 SP0 = HBAD3P.SitesP(S.off, S.sp, S.N0, S.D0, S.H0, S.A0, zeros(Int, ns), fill(1e-9, ns), S.planted, S.zq, SP.W, SP.Wn, SP.CR0)
 HBAD3P.simulate!(SP0, P, G); O0 = copy(SP0.O)
@@ -27,10 +23,10 @@ obs = combine(groupby(d, [:site, :key, :bc]), :out => (o -> count(!=("missing"),
               :gD => (g -> (x = filter(isfinite, g); isempty(x) ? NaN : sum(x))) => :gsum,
               [:out, :dia2_cm] => ((o, x) -> count(i -> o[i] == "alive" && x[i] >= THR, eachindex(o))) => :x)
 ci = Dict((r.site, r.key, r.bc) => i for (i, r) in enumerate(eachrow(C.coh)))
-above(D) = 1 - cdf(Normal(), (log(THR) - (log(D) - 0.16^2)) / 0.16)   # D = sub-cohort QMD = lognormal median × e^{σ²}
+aboveT(D) = 1 - cdf(Normal(), (log(THR) - (log(D) - 0.16^2)) / 0.16)   # D = sub-cohort QMD = lognormal median × e^{σ²}
 pS = zeros(nrow(C.coh)); pX = zeros(nrow(C.coh)); pG = zeros(nrow(C.coh))
 for i in eachindex(SP.N)
-  p = C.parent[i]; N0c = C.agg.N0[p]; pS[p] += SP.N[i] / N0c; pX[p] += SP.N[i] * above(SP.D[i]) / N0c
+  p = C.parent[i]; N0c = C.agg.N0[p]; pS[p] += SP.N[i] / N0c; pX[p] += SP.N[i] * aboveT(SP.D[i]) / N0c
   pG[p] += SP.N[i] * (SP.D[i] - SP.D0[i])                       # survivor-weighted increment (normalised below)
 end
 pG ./= max.(pS .* C.agg.N0, 1e-12)

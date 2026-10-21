@@ -3,17 +3,18 @@ Plot -> EPA L4 (curated_cohorts_landis_stdorg.epa_l4, slim_r4.duckdb, read-only)
 Normals 1991-2020: tmean, Jan tmin, Jul tmax, annual ppt, JJA vpdmax, Thornthwaite PET and climatic water deficit CWD = Σ max(0, PET - ppt).
 Interval values: means over the calendar years spanned by the interval [year(d1), year(d2)-1] and anomalies vs the normals.
 Soil: plot_soil_r4.csv (awc_mm). Output results/hbad3/{plot_climate,interval_climate}.csv."""
-import sys, duckdb, numpy as np, pandas as pd, pyarrow.ipc as ip
+import os, sys, duckdb, numpy as np, pandas as pd, pyarrow.ipc as ip
+WS = os.environ.get("WORKSPACE", os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))   # workspace root (tools/hbad3/pipeline3p.env)
 R = sys.argv[1]  # repo root
 IVP = sys.argv[2] if len(sys.argv) > 2 else f"{R}/results/hbad2/intervals.arrow"; SUF = sys.argv[3] if len(sys.argv) > 3 else ""
 iv = ip.open_file(IVP).read_all().to_pandas()
-slim = duckdb.connect("/workspace/landis_region4/data_r4/slim_r4.duckdb", read_only=True)
+slim = duckdb.connect(os.environ.get("HBAD3_SLIM_DB", f"{WS}/landis_region4/data_r4/slim_r4.duckdb"), read_only=True)
 l4 = slim.execute("select statecd st, unitcd u, countycd c, plot p, any_value(epa_l4) l4, count(distinct epa_l4) n from curated_cohorts_landis_stdorg group by all").df()
 assert (l4.n == 1).all(), "plot with several L4"
-soil = pd.read_csv("/workspace/landis_region4/data_r4/plot_soil_r4.csv").rename(columns={"statecd": "st", "unitcd": "u", "countycd": "c", "plot": "p"})
+soil = pd.read_csv(os.environ.get("HBAD3_SOIL_CSV", f"{WS}/landis_region4/data_r4/plot_soil_r4.csv")).rename(columns={"statecd": "st", "unitcd": "u", "countycd": "c", "plot": "p"})
 pc = iv[["st", "u", "c", "p"]].drop_duplicates().merge(l4[["st", "u", "c", "p", "l4"]], how="left").merge(soil[["st", "u", "c", "p", "lat", "lon", "awc_mm"]], how="left")
 print("plots", len(pc), "with L4", pc.l4.notna().mean(), "with soil", pc.awc_mm.notna().mean())
-pr = duckdb.connect("/workspace/PRISM_LT/PRISM_LT_EPA/prism_lt_epa.duckdb", read_only=True)
+pr = duckdb.connect(os.environ.get("HBAD3_PRISM_DB", f"{WS}/PRISM_LT/PRISM_LT_EPA/prism_lt_epa.duckdb"), read_only=True)
 cols = ["ppt", "tmin", "tmean", "tmax", "vpdmax"]
 sel = ", ".join(f"CAST(CAST({c}_mean AS VARCHAR) AS DOUBLE) {c}" for c in cols)
 ids = sorted(pc.l4.dropna().unique())

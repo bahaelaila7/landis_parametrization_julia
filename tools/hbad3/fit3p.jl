@@ -5,14 +5,19 @@
 #   HBAD3_WATER_CSV=results/hbad3/interval_water_r4.csv [HBAD3P_FIX="ω:0,mW:0"] ./julia_gdal.sh --project=. --threads=4 tools/hbad3/fit3p.jl <tag>
 include(joinpath(@__DIR__, "common3.jl")); include(joinpath(@__DIR__, "..", "hbad2", "cmaes.jl"))
 include(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD3", "HBAD3P.jl")); import .HBAD3P
-tag = ARGS[1]; OUTD = joinpath(R3DIR, "fit3p_" * tag); mkpath(OUTD); write_meta(OUTD)
+include(joinpath(@__DIR__, "lib3p.jl"))
+# HBAD3P_FAREA (default 1): stand densities per ha of the FORESTED subplot (lib3p.jl); recorded in meta.txt, read by every later stage
+const FAREA = get(ENV, "HBAD3P_FAREA", "1") == "1"
+tag = ARGS[1]; OUTD = joinpath(R3DIR, "fit3p_" * tag); mkpath(OUTD); write_meta(OUTD); open(io -> println(io, "farea=", FAREA ? 1 : 0), joinpath(OUTD, "meta.txt"), "a")
 logio = open(joinpath(OUTD, "log.txt"), "w"); lg(s) = (println(s); println(logio, s); flush(logio); flush(stdout))
 tr = load_trees(); keys_ = sort(unique(tr.key)); nsp = length(keys_)
-lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
+lon = CSV.read(LONGEVITY_CSV, DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
+lg_defaults = sort(unique([s for s in tr.sym if !haskey(lond, s)]))   # species without a LONGEVITY entry (300 yr used)
 TD = key_traits(tr, keys_, longev)
 Hmax = [quantile(tr.ht_m[(tr.key .== k) .& (tr.set .== "train")], 0.995) for k in keys_]
 lg("region " * get(ENV, "HBAD2_REGION", "(none)") * " | keys " * join(keys_, ",") * " | Hmax " * join(round.(Hmax; digits=1), ","))
+lg("species without LONGEVITY (300 yr used): " * (isempty(lg_defaults) ? "none" : join(lg_defaults, ",")))
 # ---- globals: name, start, lo, hi, log-encoded
 # HBAD3P_COUPLED=1: the survival light coefficient am is tied to the growth one (am = a, the original coupled form)
 const COUPLED = get(ENV, "HBAD3P_COUPLED", "0") == "1"
@@ -31,18 +36,9 @@ genc(j, v) = GSPEC[j][5] ? log(v) : v
 function gdec(j, z); lo, hi = GSPEC[j][3], GSPEC[j][4]; clamp(GSPEC[j][5] ? exp(z) : (GSPEC[j][1] == :σv ? abs(z) : z), lo, hi); end
 gv0 = [genc(j, (v = get(gfix, GSPEC[j][1], GSPEC[j][2]); isnan(v) ? GSPEC[j][2] : v)) for j in eachindex(GSPEC)]
 # ---- data
-function water_pair(path)
-  w = CSV.read(path, DataFrame); Dict(Int(r.iid) => (Float64(r.aetpet_iv), Float64(r.aetpet_n)) for r in eachrow(w))
-end
-wp = water_pair(get(ENV, "HBAD3_WATER_CSV", joinpath(R3DIR, "interval_water.csv")))
-function buildP(set)
-  C = build_cohorts(tr, set, keys_); S = C.S; ns = length(S.off) - 1
-  iids = [C.coh.site[C.parent[S.off[s]]] ÷ 10 for s in 1:ns]
-  SP = HBAD3P.SitesP(S.off, S.sp, S.N0, S.D0, S.H0, S.A0, S.nyr, S.frac, S.planted, S.zq, [wp[i][1] for i in iids], [wp[i][2] for i in iids],
-                     [Float64(C.coh.CR1[C.parent[i]]) for i in eachindex(S.sp)])
-  (S=SP, coh=C.coh, obs=C.obs, parent=C.parent, agg=C.agg)
-end
-TRc = buildP("train"); VAc = buildP("val")
+wp = water_pairs()
+IFOR = FAREA ? interval_forest(DataFrame(Arrow.Table(joinpath(DATA_DIR, "intervals.arrow"))), forest_table()) : nothing
+TRc = sima_sites(tr, "train", keys_, wp, IFOR); VAc = sima_sites(tr, "val", keys_, wp, IFOR)
 # ---- start ε per key: open-grown-like cohorts' volume increment at the start globals (median ratio)
 function eps_start()
   co = TRc.coh; o = TRc.obs; r = [Float64[] for _ in 1:nsp]
