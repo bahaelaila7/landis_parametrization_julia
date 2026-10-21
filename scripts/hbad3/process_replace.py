@@ -56,6 +56,10 @@ for rg, g in (s.groupby("reg") if RUN_R1 else []):
   def volh(p):       # + hydraulic limitation of tall trees: × max(0, 1 − (H/Hmax)^θ), θ global (p[-1] = ln θ)
     e, a, b, th = np.exp(p[:nk])[kk], np.exp(p[nk]), p[nk+1], np.exp(p[nk+2])
     return e * (D / 20) ** b * 20 ** 1.605 * np.exp(-a * O) * np.maximum(1 - np.minimum(H / (1.1 * Hx), 1) ** th, 0) / (2 * D * H)
+  def volsap(p):     # sapwood pipe model: leaf area ∝ sapwood area D² − max(0, D − 2 s)² (s = sapwood thickness, global) + hydraulic limit
+    e, a, sw, th = np.exp(p[:nk])[kk], np.exp(p[nk]), np.exp(p[nk+1]), np.exp(p[nk+2])
+    SA = D ** 2 - np.maximum(D - 2 * sw, 0) ** 2
+    return e * SA * np.exp(-a * O) * np.maximum(1 - np.minimum(H / (1.1 * Hx), 1) ** th, 0) / (2 * D * H)
   def loss(f, p, m):
     d2 = D[m] + np.maximum(f(p)[m], -0.2) * dt[m]
     return np.mean(np.log(np.maximum(d2, 0.1) / D2[m]) ** 2)
@@ -63,11 +67,12 @@ for rg, g in (s.groupby("reg") if RUN_R1 else []):
   pv = np.concatenate([np.full(nk, np.log(2.0)), [np.log(0.002)], [np.log(2)], [1.605]])
   re = minimize(lambda p: loss(emp, p, tr_), pe, method="L-BFGS-B"); rv = minimize(lambda p: loss(vol, p, tr_), pv, method="L-BFGS-B")
   rh = minimize(lambda p: loss(volh, p, tr_), np.concatenate([rv.x[:nk] + 0.3, [rv.x[nk+1], rv.x[nk+2]], [np.log(3.0)]]), method="L-BFGS-B"); th_ = np.sqrt(loss(volh, rh.x, ~tr_))
+  rs = minimize(lambda p: loss(volsap, p, tr_), np.concatenate([rv.x[:nk] + np.log(122.98 / 400), [rv.x[nk+1]], [np.log(6.0)], [np.log(5.0)]]), method="L-BFGS-B"); ts_ = np.sqrt(loss(volsap, rs.x, ~tr_))
   te = np.sqrt(loss(emp, re.x, ~tr_)); tv = np.sqrt(loss(vol, rv.x, ~tr_)); t0 = np.sqrt(np.mean(np.log(D[~tr_] / D2[~tr_]) ** 2))
   dc = pd.cut(D, [0, 5, 12.7, 25, 40, 1e9], labels=["<5", "5-13", "13-25", "25-40", ">40"])
-  tab = pd.DataFrame({"dc": dc, "o": g.gD.values, "e": emp(re.x), "v": vol(rv.x), "h": volh(rh.x)})[~tr_].groupby("dc", observed=True).mean()
-  print(f"  {rg:5s} keys {nk:2d} | none {t0:.4f} emp({3*nk+1}) {te:.4f} vol({nk+3}) {tv:.4f} hyd({nk+3}) {th_:.4f} | b {rh.x[nk+1]:.2f} θ {np.exp(rh.x[nk+2]):.2f} | obs/emp/vol/hyd "
-        + " ".join(f"{i}:{r.o:.3f}/{r.e:.3f}/{r.v:.3f}/{r.h:.3f}" for i, r in tab.iterrows()))
+  tab = pd.DataFrame({"dc": dc, "o": g.gD.values, "e": emp(re.x), "v": vol(rv.x), "h": volh(rh.x), "s": volsap(rs.x)})[~tr_].groupby("dc", observed=True).mean()
+  print(f"  {rg:5s} keys {nk:2d} | none {t0:.4f} emp({3*nk+1}) {te:.4f} vol({nk+3}) {tv:.4f} hyd({nk+3}) {th_:.4f} sap({nk+3}) {ts_:.4f} | b {rh.x[nk+1]:.2f} θ {np.exp(rh.x[nk+2]):.2f} sw {np.exp(rs.x[nk+1]):.1f} cm | obs/hyd/sap "
+        + " ".join(f"{i}:{r.o:.3f}/{r.h:.3f}/{r.s:.3f}" for i, r in tab.iterrows()))
 # ---------------- R2 mortality (trees with growth in the previous interval: P4 linkage)
 print("\n== R2 mortality: empirical U-shape (2/key + 1) + growth stress vs process (intrinsic 4.605/LONGEVITY + growth stress + height risk; 4 globals)")
 print("   held-out binomial deviance per tree (lower better) | annual mortality % by D class obs / emp / proc")
@@ -80,7 +85,7 @@ ref = m.groupby(["reg", "key", pd.cut(m.dia_cm, [0, 5, 12.7, 25, 40, 1e9])], obs
 m["grel"] = (m.gprev.clip(lower=0) / ref).clip(upper=3).fillna(1.0)
 m["Hmax"] = m.groupby(["reg", "key"]).ht_m.transform(lambda x: x.quantile(0.99))
 m["dead"] = (m.out == "dead").astype(float)
-for rg, g in m.groupby("reg"):
+for rg, g in (m.groupby("reg") if os.environ.get("RUN_R2", "1") == "1" else []):
   keys = sorted(g.key.unique()); ki = {k: i for i, k in enumerate(keys)}; kk = g.key.map(ki).values; nk = len(keys)
   D, dt, y, gr, Hr, L = g.dia_cm.values, g.dt.values, g.dead.values, g.grel.values, (g.ht_m / g.Hmax).values, g.L.values
   stz = (g.ST.values - 3) / 1.0
