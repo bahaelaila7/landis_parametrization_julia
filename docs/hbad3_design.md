@@ -369,3 +369,16 @@ H3P beats v2 in GA+FL with 1/5 of the coordinates; the null baselines are identi
   2. Port H3P to Pan: plugin + calibration (Sim A + recruitment fit + free-run check), with parity gates, on a new branch from refactor
      (hbad2-r4 holds the R4 split + recruitment tool).
   3. Calibrate every R4 L3 (14; the small ones 15.4.1, 8.3.2, 8.5.2 need pooling or a lower key threshold); report val per L3 + free runs.
+
+### 8.3 Crown-ratio state + ingrowth diagnosis (2026-10-22)
+- **Fit Pcr_GAFL** (crown-ratio state, 5-point vigour quadrature, maintenance ρ, diffuse-light floor f0, own survival light coefficient am;
+  warm start from Prf): **val −278,579** (train −276,772), 42 coordinates (12 per key + 30 global), no parameters at bounds. This is the best
+  GA+FL fit (v2fv5 −272,655 with 175).
+- **Ingrowth diagnosis** (`tools/hbad3/crossing3p.jl Pcr_GAFL`; tracked val cohorts starting below 12.7 cm, one interval):
+  - Survival is right (sim / obs 1.026). Crossing 12.7 cm is too low (0.71): small trees grow too slowly.
+  - The deficit is concentrated in OPEN-grown cohorts (overtopping O < 0.1): diameter growth sim / obs 0.66–0.84 in every size class, natural
+    and planted alike. Partly and fully shaded cohorts are mostly within 10–15 % (0.73–0.99).
+- **Suspect: gR = +0.43.** The crowding term e^{gR·RD} increases growth with stand density, which is not physical; it likely absorbs site
+  quality (dense stands on good sites). Its size (≈ 27 % between RD 0.2 and 0.8) matches the open-grown deficit of young, low-density stands.
+  - Test: refit with gR fixed at 0 (`HBAD3P_FIX=gR:0.0`, warm start from Pcr) → `fit3p_Pgr0_GAFL`, then rerun crossing3p.
+  - If val holds and crossing improves, keep gR ≤ 0 and add site quality as an explicit site input.
