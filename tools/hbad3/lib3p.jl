@@ -224,12 +224,12 @@ function free_store(B, nsp)
 end
 "Simulated vs observed plot values (rows T var obs1 obsL sim): subplot sites per ha (× outm: of the plot when farea) → plot = Σ over the 4 sites / 4."
 function plot_values(F, B)
-  S = F.S; rows = DataFrame(T=Float64[], var=String[], obs1=Float64[], obsL=Float64[], sim=Float64[])
+  S = F.S; rows = DataFrame(st=Int[], u=Int[], c=Int[], p=Int[], T=Float64[], var=String[], obs1=Float64[], obsL=Float64[], sim=Float64[])   # FIA plot identity per row
   for (pi_, r) in enumerate(B.res)
     Dv = Float64[]; Hv = Float64[]; Nv = Float64[]
     for s in findall(==(pi_), B.pl_site), i in B.off[s]:B.off[s]+F.live[s]-1; push!(Dv, S.D[i]); push!(Hv, S.H[i]); push!(Nv, S.N[i] * B.outm[s] / 4); end
     sv = standvals(Dv, Hv, Nv)
-    for v in (:BA, :N12, :QMD, :LH); push!(rows, (r.T, String(v), getfield(r.obs1, v), getfield(r.obsL, v), getfield(sv, v))); end
+    for v in (:BA, :N12, :QMD, :LH); push!(rows, (r.st, r.u, r.c, r.p, r.T, String(v), getfield(r.obs1, v), getfield(r.obsL, v), getfield(sv, v))); end
   end
   rows
 end
