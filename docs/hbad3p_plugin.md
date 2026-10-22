@@ -57,8 +57,22 @@ Config keys (`succession_plugin: hbad3p`, `hbad3p_params_dir`, `hbad3p_vigour`) 
   If the fractions cannot be read from the database, a = 1 and rmult = 1 with a warning.
 * **Plot-level values.** A plot's metrics are the mean of its 4 subplot sites per ha of the plot: state x a (`_cohort_struct` returns tph x area; `c_bio`, `B`, `BA`, `SDI` are already x a). Volumes, QMD and the species x DBH tally therefore use plot-ha densities.
 * **Seed presence** `sp_seed[k]` = a tree of key k with D >= 12.7 cm on any subplot of the visit (plot-level, static, dispersal between subplots), as the prototype's `seedm`.
-* **Water.** W = Wn = the plot normal AET/PET of the table (`plot_normal_water.csv`, 29,592 R4 plots: the `aetpet_n` of `interval_water_r4.csv` joined to `intervals.arrow` by interval id; identical across a plot's intervals, spread 0). A plot without a normal takes the regional median (0.9534) with a
-  warning. In projections the water index is the plot normal, so the drought anomaly term e^{mW (Wn - W)/0.1} is 1 and W^ω is the plot's long-run water supply (no climate response in this plugin version).
+* **Water (climate).** `run_scenario` computes every plot's water index from the request's climate (`scenario.jl:_hbad3p_water!`, `HBAD3PPlugin.water_index`,
+  a line-by-line port of the reference `scripts/hbad3/water_balance.py`):
+  * **PET** (potential evapotranspiration, mm/month): Thornthwaite, from the monthly mean temperature (= (tmin + tmax)/2 of the scenario climate) and the
+    day length at the plot's latitude. **AET** (actual evapotranspiration): what a monthly soil bucket of capacity AWC (= (field capacity − wilting point) ×
+    rooting depth: SOLUS at the plot's location, else the FIA plot's soil table; floored at 5 mm) can supply: each month W += P, AET = min(PET, W),
+    W = min(AWC, W − AET); spun up from 1980, full at the start.
+  * annual index = April–October ΣAET / ΣPET (1 = no water limitation); **Wn** = its 1991–2020 mean under the scenario's baseline WITHOUT changes (the
+    normal of the fit; replaces the table value); **W** of simulated year t (calendar year = visit year + t − 1) = trailing mean over
+    `HBAD3P_WATER_WINDOW` = 5 years (the fit's W is a remeasurement-interval mean; median interval 5 yr).
+  * a smooth baseline (the default `forecast`, or `average` with K > 1) has no interannual variability and its index sits above the normal (median +0.046
+    on 300 R4 plots: −19 % drought mortality, +5.5 % growth with no climate change), so years after 2024 take Wn + (scenario − baseline); observed years
+    and a replayed baseline (`repeat`, `average` K = 1) keep their own values. An unchanged baseline therefore gives exactly W = Wn after the window.
+  * parity: `tools/hbad3p_water_parity.jl` recomputes the fit's plot normals from the reference inputs (PRISM tmean, L4-mean latitude, plot AWC):
+    max |error| 4e-16 on 400 plots; the engine's own choices ((tmin+tmax)/2, the plot's latitude) move Wn by ≤ 0.005.
+  * Climate acts through W only: growth × W^ω and mortality × e^{mW (Wn − W)/0.1}; temperature enters through PET, there is no CO₂ term.
+  * Without a climate database (or for plots without an L4) W = Wn = the table's plot normal (regional median 0.9534 when missing), with a warning.
 * **Management** (scenario): removal at constant tree size (`scale_cohort!`: N x keep; D, H, CR, A unchanged; a cohort leaves only when ALL its trees are removed), residual BA / TPA / SDI targets are met exactly by the plot mean. **Planting**: `tpa` x survival is the density per ha of the forested stand
   (the state density; the plot value is x a), 5 vigour nodes at D = 2.54, H = H*(2.54), A = 1, CR = crhi, `planted` set (fD, fH, fM apply from then on). `hbad2_cleanup` (trees/ha, default 1e-3 in scenario runs, 0 = off) removes negligible cohorts after every step.
 * `add_cohort!` (AGB-driven injection used by the generic `make_sites` path) creates ONE mean-field cohort (zq = 0, CR 0.4) from the HBAD v1 translation; `init_sites!` sets W = Wn = the regional median there.
@@ -69,7 +83,7 @@ Config keys (`succession_plugin: hbad3p`, `hbad3p_params_dir`, `hbad3p_vigour`) 
 * `test/unit_hbad3p_parity.jl` (in `runtests.jl`): the plugin vs the REFERENCE kernel `landis_hbad3/src/plugins/HBAD3/HBAD3P.jl` (included by a path relative to the worktree's parent; the test is skipped with a warning if the prototype tree is absent): 300 random sites
   (heights tied, planted, partial years, RD > 1 so the self-thinning loop acts, perturbed globals and traits); 20-year free runs with recruitment (class merging, seed presence, rmult incl. 0) with ample and with tight capacity (dropped classes), and through `process_plugin!`.
 * `tools/hbad3p_parity_simA.jl` (end to end, needs the prototype tree and its data products; ~2.5 min): the plugin kernel on the prototype's own Sim A VAL (and TRAIN) site arrays reproduces the fit's validation NLL. Output: `results/hbad3p/parity_simA_P3_GAFL.txt`.
-* `test/unit_scenario_hbad3p.jl` (needs the FIA database): roster, sites, forest area, water normals, constant-size removal with exactly met residual targets, planting, no-op and thinning scenario runs, determinism, thread independence.
+* `test/unit_scenario_hbad3p.jl` (needs the FIA database): roster, sites, forest area, water normals, climate (water index: normal vs table, baseline = no anomaly, drought scenario lowers W and BA, year mapping), constant-size removal with exactly met residual targets, planting, no-op and thinning scenario runs, determinism, thread independence.
 
 Results (2 threads; full output in the session report):
 

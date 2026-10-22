@@ -179,6 +179,50 @@ else
     @test r["0"].status == "no_data"
   end
 
+  @testset "climate: water index from the scenario climate (normal, baseline = no anomaly, drought scenario, year mapping)" begin
+    if !isfile(SCEN.climate_db)
+      @info "climate DB not found: HBAD3P climate tests skipped"
+    else
+      pc, soa, units, meta, w = start()
+      wat = P._hbad3p_water!(ps, soa, meta, 60, nothing, w)
+      @test wat !== nothing
+      for m in meta
+        k4 = join(split(m.key, "_"), "_"); tab = get(ps.h3.wn, k4, NaN)
+        wn = soa.scalar.Wn[units[m.plot_id][1]]
+        @test all(i -> soa.scalar.Wn[i] == wn, units[m.plot_id])
+        isnan(tab) || @test abs(wn - tab) < 0.02          # the fit's table: L4-mean latitude, FIA-plot soil; here the plot's latitude / location soil
+        ww = wat.W[m.plot_id]; yrs = wat.first_year:(wat.first_year + length(ww) - 1)
+        fut = [ww[i] for (i, y) in enumerate(yrs) if y >= 2024 + P.HBAD3P_WATER_WINDOW]
+        @test !isempty(fut) && all(x -> x ≈ wn, fut)        # the unchanged baseline is the normal: no spurious anomaly
+        obs = [ww[i] for (i, y) in enumerate(yrs) if 1995 <= y <= 2020]
+        @test maximum(obs) - minimum(obs) > 0.005             # observed years keep their own (smoothed) variability
+      end
+      dry = Dict{String,Any}("baseline" => Dict{String,Any}("mode" => "forecast"), "co2" => Dict{String,Any}("mode" => "constant"),
+              "changes" => Any[Dict{String,Any}("var" => "tmean", "kind" => "add", "value" => 3.0, "shape" => "step", "start_year" => 2025),
+                               Dict{String,Any}("var" => "ppt", "kind" => "mul", "value" => -30.0, "shape" => "step", "start_year" => 2025)])
+      pc2, soa2, units2, meta2, w2 = start()
+      wd = P._hbad3p_water!(ps, soa2, meta2, 60, dry, w2)
+      for m in meta2
+        ww = wd.W[m.plot_id]; yrs = wd.first_year:(wd.first_year + length(ww) - 1); wn = soa2.scalar.Wn[units2[m.plot_id][1]]
+        @test wn ≈ soa.scalar.Wn[units[m.plot_id][1]]       # the normal ignores the scenario's changes
+        @test all(ww[i] < wn - 0.02 for (i, y) in enumerate(yrs) if y >= 2030)
+        # year mapping: simulated year t = visit year + t − 1
+        P._hbad3p_set_water!(soa2, wd, 7); y = Dates.year(m.measdate) + 6
+        @test soa2.scalar.W[units2[m.plot_id][1]] == ww[y - wd.first_year + 1]
+      end
+      noop = Dict("cycles" => 5, "period" => 10, "actions" => Any[])
+      rb, _ = P.run_scenario(ps, plots, noop; seed=3)
+      rd, _ = P.run_scenario(ps, plots, noop; seed=3, climate=dry)
+      rd2, _ = P.run_scenario(ps, plots, noop; seed=3, climate=dry)
+      for c in keys(rb)
+        rb[c].status == "ok" || continue
+        @test rd[c].metrics[end].ba < rb[c].metrics[end].ba           # hotter and drier: less growth, more drought mortality
+        @test rd[c].metrics[1].ba == rb[c].metrics[1].ba              # same start
+        @test [m.ba for m in rd[c].metrics] == [m.ba for m in rd2[c].metrics]   # deterministic
+      end
+    end
+  end
+
   @testset "thread independence of the annual step on scenario plots" begin
     function run_steps(serial)
       pc, soa, units, = start()

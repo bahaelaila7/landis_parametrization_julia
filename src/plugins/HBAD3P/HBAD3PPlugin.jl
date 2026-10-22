@@ -17,6 +17,7 @@ const DEFAULT_PARAMS_DIR = joinpath(REPO_ROOT, "results", "hbad3p", "P3_GAFL")
 
 include("params.jl")   # SpPP, GlobPP, RecGP, Allo, HBAD3PParams, HBAD3PEcoParams, csv loader, species -> key mapping
 include("context.jl")  # HBAD3PConst, HBAD3PContext, generate_*
+include("water.jl")    # thornthwaite_pet, water_index, trailing_mean, water_normal (the reference water balance)
 include("kernel.jl")   # step_cohorts! (reference step_site!), recruitment rates / application, allometric AGB
 include("plugin.jl")   # SoA layout, process_plugin!, add_cohort!, plant!, scale_cohort!
 

@@ -565,6 +565,8 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
                      no_establishment=!establishment, site_attrs=attrs)
   end
   eco_params = generate_eco_params(pc, p); ctx = make_ctx(pc, eco_params)
+  # HBAD3P: the water index of every site for each simulated year, from the request's climate (nothing = W stays at the table's plot normal)
+  water = hb3 ? _hbad3p_water!(ps, soa, meta, horizon, climate, warnings) : nothing
   # scenario plots ("units"): the sites sharing a plot id (mapcode) - one site per plot, except HBAD2 / HBAD3P: their 4 subplot sites. A plot's sites share its acres and its management.
   unit_sites = Vector{Vector{Int}}(); uidx = Dict{Int,Int}()
   for i in 1:soa.n
@@ -603,6 +605,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
   for c in 0:cycles
     if c > 0
       for t in ((c - 1) * period + 1):(c * period)
+        water === nothing || _hbad3p_set_water!(soa, water, t)
         step!(SP, soa, t, ctx)
       end
     end
@@ -664,7 +667,7 @@ end
 Initial HBAD3P state of the scenario plots `meta` (plot_id, eco, key `STATE_UNIT_COUNTY_PLOT`, measdate of the visit): the live trees of each visit from the scenario's FIA database
 (`Data.load_tree_cohorts3p`) -> the 4 SUBPLOT sites of every plot: cohorts per key x birth decade x diameter class (closed below at 5, 12.7, 25, 40 cm), 5 vigour nodes, crown ratio (FIA CR/100, else 0.4), densities x 4 / a with
 a = max(forested fraction of the subplot, 0.25) (farea = 1 sets; the fractions come from SUBP_COND x COND of the FIA database, else a = 1 with a warning). W = Wn = the plot normal of the set's table (plots without a normal take
-the regional median, warning): no drought anomaly in projections. Empty subplots are empty sites (a nonforest one does not recruit). All sites of a plot carry its plot id as `mapcode` and its ecoregion.
+the regional median, warning) at the start; `run_scenario` then sets Wn and the yearly W from the request's climate (`_hbad3p_water!`). Empty subplots are empty sites (a nonforest one does not recruit). All sites of a plot carry its plot id as `mapcode` and its ecoregion.
 """
 function _hbad3p_sites(ps::ParamSet, meta, seed::Integer, no_establishment::Bool, cleanup::Float64, warnings)
   keys_ = String.(ps.params.SPECIES_LIST)
@@ -738,6 +741,76 @@ function _select_stands(ps::ParamSet, soa, units, act, acr, seed)
     push!(out, u); acc += acr[u]
   end
   out
+end
+
+# --- HBAD3P water index from the scenario climate ------------------------------------------------------------------
+"Years of the trailing mean of the annual water index: the median length of the fit's remeasurement intervals (the fit's W is an interval mean)."
+const HBAD3P_WATER_WINDOW = 5
+
+"""
+    _hbad3p_water!(ps, soa, meta, horizon, climate, warnings) -> nothing | (first_year, W::Dict{plot_id => Vector}, y0::Dict{plot_id => Int})
+
+Water index of every HBAD3P plot (HBAD3PPlugin.water_index = the reference bucket: Thornthwaite PET, AWC bucket, April–October ΣAET/ΣPET) for 1980 … the end of the run,
+from the request's climate (`scenario_climate`: PRISM through 2024, then the scenario baseline with its changes; tmean = (tmin + tmax)/2) at the plot's L4 and latitude,
+with AWC = (field capacity − wilting point) × rooting depth of the location's SOLUS soil (located plots), else of the FIA plot's soil table.
+* Wn = the plot's 1991–2020 mean of the baseline WITHOUT changes (the normal of the fit). It replaces the table value on the plot's sites.
+* A smooth baseline (forecast / averaged windows) has no interannual variability: its index sits above the normal (the bucket is nonlinear), which would read as a
+  permanent wet anomaly. Years after the last observed year therefore take Wn + (scenario − baseline) (the scenario's effect on the normal); observed years and a
+  replayed baseline (`repeat`, `average` with K = 1) keep their own values. The series is then a trailing mean over HBAD3P_WATER_WINDOW years (the fit's interval means).
+Returns nothing (W = Wn = table, a warning) without a climate database.
+"""
+function _hbad3p_water!(ps::ParamSet, soa, meta, horizon::Int, climate, warnings)
+  scen = ps.scen
+  if !isfile(scen.climate_db)
+    push!(warnings, "HBAD3P: $(scen.climate_db) not found — the water index stays at the plot normal (no climate response)")
+    return nothing
+  end
+  ms = [m for m in meta if !isempty(m.l4)]
+  length(ms) < length(meta) && push!(warnings, "HBAD3P: $(length(meta) - length(ms)) plot(s) have no L4 ecoregion; their water index stays at the plot normal")
+  isempty(ms) && return nothing
+  l4s = sort(unique(String(m.l4) for m in ms)); y1 = H3W_START; y2 = maximum(Dates.year(m.measdate) for m in ms) + horizon + 1
+  sc = climate === nothing ? DEFAULT_CLIMATE : climate
+  bl = ClimateScenario._get(sc, :baseline, DEFAULT_CLIMATE["baseline"])
+  base_sc = Dict{String,Any}("baseline" => bl, "co2" => Dict{String,Any}("mode" => "constant"), "changes" => Any[])
+  years, cs, _ = scenario_climate(scen, l4s, y1, y2, sc)
+  _, cb, _ = scenario_climate(scen, l4s, y1, y2, base_sc)
+  mode = String(ClimateScenario._get(bl, :mode, "forecast")); K = Int(ClimateScenario._get(bl, :K, 3))
+  replay = mode == "repeat" || (mode == "average" && K == 1)
+  last_obs = 2024                                             # scenario_climate: PRISM observed through 2024
+  soil = isfile(scen.soil_csv) ? PnETPlugin.load_plot_soil(scen.soil_csv) : Dict()
+  located = [m for m in ms if isfinite(m.lon)]
+  lsoil = Dict(zip((m.plot_id for m in located), soil_at(scen, Float64[m.lon for m in located], Float64[m.lat for m in located])))
+  awc_of(v) = v === nothing ? NaN : (v.soil_fc - v.soil_wp) * v.soil_rd
+  W = Dict{Int,Vector{Float64}}(); Wn = Dict{Int,Float64}(); y0 = Dict{Int,Int}(); nawc = 0; nlat = 0
+  for m in ms
+    v = get(lsoil, m.plot_id, nothing); v === nothing && (v = get(soil, Tuple(parse.(Int, split(m.key, "_"))), nothing))
+    awc = awc_of(v); (isfinite(awc) && awc > 0) || (nawc += 1; awc = H3W_DEFAULT_AWC)
+    lat = isfinite(m.lat) ? m.lat : (nlat += 1; 33.0)
+    s = cs[String(m.l4)]; b = cb[String(m.l4)]
+    ws = HBAD3PPlugin.water_index(0.5 .* (s["tmin"] .+ s["tmax"]), s["ppt"], lat, awc)
+    wb = HBAD3PPlugin.water_index(0.5 .* (b["tmin"] .+ b["tmax"]), b["ppt"], lat, awc)
+    wn = HBAD3PPlugin.water_normal(wb, years)
+    weff = [ws[i] - wb[i] + ((y <= last_obs || replay) ? wb[i] : wn) for (i, y) in enumerate(years)]
+    W[m.plot_id] = HBAD3PPlugin.trailing_mean(weff, HBAD3P_WATER_WINDOW); Wn[m.plot_id] = wn; y0[m.plot_id] = Dates.year(m.measdate)
+  end
+  nawc > 0 && push!(warnings, "HBAD3P: $nawc plot(s) have no soil data; their water bucket uses AWC = $(H3W_DEFAULT_AWC) mm")
+  nlat > 0 && push!(warnings, "HBAD3P: $nlat plot(s) have no latitude; 33° was used for the day length of the PET")
+  for i in 1:soa.n
+    pid = Int(soa.scalar.mapcode[i]); haskey(Wn, pid) || continue
+    soa.scalar.Wn[i] = Wn[pid]; soa.scalar.W[i] = Wn[pid]
+  end
+  return (first_year=y1, W=W, y0=y0)
+end
+const H3W_START = 1980                 # bucket spin-up start (the reference)
+const H3W_DEFAULT_AWC = 100.0
+
+"""Set every HBAD3P site's period water index for simulated year t (calendar year = visit year + t − 1: the fit's interval runs from the visit year to the year before the next visit)."""
+function _hbad3p_set_water!(soa, water, t::Int)
+  for i in 1:soa.n
+    pid = Int(soa.scalar.mapcode[i]); w = get(water.W, pid, nothing); w === nothing && continue
+    k = water.y0[pid] + t - 1 - water.first_year + 1
+    soa.scalar.W[i] = w[clamp(k, 1, length(w))]
+  end
 end
 
 # --- PnET climate + site attributes -----------------------------------------------------------------------------------
