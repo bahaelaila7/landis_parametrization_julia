@@ -109,9 +109,11 @@ if MODE == "model"; let
     HBAD3P.step_site!(S, P, Gt, 1, n, Δ, pl, Wv, Wn)
     Nr, Dr, Hr, Ar, CRr = copy(N), copy(D), copy(H), copy(A), copy(CR); ref_step!(Nr, Dr, Hr, Ar, CRr, z, sp, P, Gt, Δ, pl, Wv, Wn)
     nst += sum(N .* (D ./ 25.4) .^ 1.605) > G.sdimax
-    maxd = max(maxd, maximum(abs.(S.N .- Nr) ./ max.(Nr, 1e-12)), maximum(abs.(S.D .- Dr)), maximum(abs.(S.H .- Hr)), maximum(abs.(S.CR .- CRr)), maximum(abs.(S.A .- Ar)))
+    dN = maximum(abs.(S.N .- Nr) ./ max.(Nr, 1e-12)); dD_ = maximum(abs.(S.D .- Dr) ./ max.(abs.(Dr), 1)); dH_ = maximum(abs.(S.H .- Hr) ./ max.(abs.(Hr), 1)); dC = maximum(abs.(S.CR .- CRr))   # relative: perturbed globals can drive D to 1e6+
+    get(ENV, "K1_DIAG", "0") == "1" && max(dN, dD_, dH_, dC) > 1e-12 && println("      K1 trial $(trial): n $(n) dN $(dN) dD $(dD_) dH $(dH_) dCR $(dC) | N $(round.(S.N; sigdigits=4)) ref $(round.(Nr; sigdigits=4))")
+    maxd = max(maxd, dN, dD_, dH_, dC, maximum(abs.(S.A .- Ar)))
   end
-  check("K1", maxd < 1e-9, "step_site! = independent reference step on 300 random sites (ties, planted, partial years, $(nst) over sdimax): max diff $(maxd)")
+  check("K1", maxd < 1e-9, "step_site! = independent reference step on 300 random sites (ties, planted, partial years, $(nst) over sdimax): max relative diff $(maxd)")
   # K2 invariants and determinism on the real VAL sites with the fitted parameters
   IFOR = FAREA ? interval_forest(T.iv, forest_table()) : nothing
   VA = sima_sites(tr, "val", keys_, wp, IFOR); S = VA.S
