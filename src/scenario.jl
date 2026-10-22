@@ -668,6 +668,9 @@ the regional median, warning): no drought anomaly in projections. Empty subplots
 """
 function _hbad3p_sites(ps::ParamSet, meta, seed::Integer, no_establishment::Bool, cleanup::Float64, warnings)
   keys_ = String.(ps.params.SPECIES_LIST)
+  nsp = length(keys_)                                   # sites store the GLOBAL key index as the species; that equals the eco-local index only when every eco cell lists all keys in order
+  all(ids -> Int.(ids) == collect(1:nsp), ps.params.ECO_SPECIES_IDS) ||
+    error("_hbad3p_sites: every ecoregion cell of an hbad3p roster must list all $(nsp) keys in the global order (eco-local index = key index); this roster does not")
   pc = HBAD3PPlugin.with(ps.h3; fixed=HBAD3PPlugin.HBAD3PConst(vigour=ps.h3.fixed.vigour, cleanup_tph=cleanup))
   vk(m) = (k = parse.(Int, split(m.key, "_")); length(k) == 4 || error("scenario plot key '$(m.key)' is not STATE_UNIT_COUNTY_PLOT"); (k[1], k[2], k[3], k[4], Dates.Date(m.measdate)))
   vis = DataFrame(statecd=Int[], unitcd=Int[], countycd=Int[], plot=Int[], measdate=Dates.Date[])
