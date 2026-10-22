@@ -202,7 +202,7 @@ set in `src/config/schema.jl:323` and an atomic counter). The replacements:
 
 ## 9. Design notes in `docs/`
 
-`scenario_engine.md`, `scenario_campaign_plan.md` (scenario engine and worker protocol), `hbad_plugin.md`, `hbad2_plugin.md`, `hbad2_calibration.md`, `pnet_spec.md`,
+`scenario_engine.md`, `scenario_campaign_plan.md` (scenario engine and worker protocol), `hbad_plugin.md`, `hbad2_plugin.md`, `hbad3p_plugin.md`, `hbad2_calibration.md`, `pnet_spec.md`,
 `region4_pnet.md`, `volume_equations.md` (plugins and data), `mo_gdigel.md`, `cmaes_gdigel.md` (search), `gafl_calibration_log.md`,
 `gafl_model_comparison.md`, `gafl_pnet_calibration.md`, `simAB_options_experiment.md` (calibration protocol and results),
 `campaign_2026-10-14.md`, `treemap_donors.md`, `plan_deck_and_mo_gdigel.md`.

@@ -101,3 +101,10 @@ Status: **RUN** = executed on a tiny input and completed; **STATIC** = names res
 ## Legacy
 
 See `tools/legacy/README.md`. The Pan-calling legacy tools were not run; `tools/check_tool_api.jl` still works on them.
+
+### HBAD3P (docs/hbad3p_plugin.md)
+| Tool | What it does | Result |
+|---|---|---|
+| `hbad3p_export_params.jl` | Exports a prototype fit directory (`fit3p_<tag>`) as the plugin's parameter directory, the plot-normal water table and the yaml roster | `results/hbad3p/P3_GAFL`, `results/params_yaml/r4_hbad3p_gafl.yaml` |
+| `hbad3p_parity_simA.jl` | The plugin kernel on the prototype's Sim A VAL / TRAIN site arrays vs the logged FIT NLL and the reference kernel | VAL NLL -272207.8631 (log -272207.9), plugin = reference to 0; `results/hbad3p/parity_simA_P3_GAFL.txt` |
+

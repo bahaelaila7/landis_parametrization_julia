@@ -1,12 +1,12 @@
 # Pan scenario engine (branch `scenario-engine`)
 
-Projects FIA plots forward with **Biomass Succession, PnET-Succession, HBAD or HBAD2** under a parameter set (YAML), a management
+Projects FIA plots forward with **Biomass Succession, PnET-Succession, HBAD, HBAD2 or HBAD3P** under a parameter set (YAML), a management
 plan (thin / harvest / plant) and — for PnET — a climate scenario. Used by the Forest Explorer fork
 (`/workspace/fe_pan`, branch `forest-explorer-pan`) through a worker process. Plan of the campaign:
 `docs/scenario_campaign_plan.md`.
 
 ## 1. Parameter files (YAML) — `src/params_yaml.jl`
-- One self-contained file per parameter set. Header `pan_params: {plugin: biomass|pnet|hbad|hbad2, format_version: 1, name,
+- One self-contained file per parameter set. Header `pan_params: {plugin: biomass|pnet|hbad|hbad2|hbad3p, format_version: 1, name,
   description, created, region, provenance}`; the **plugin named in the header decides which engine the file is for**.
 - **Full roster**: every field of the plugin's params struct, mutable or fixed, laid out as
   `global:` (scalars, matrices such as `SUFFICIENT_LIGHT`), `species:` (one row per species), `ecoregions:` (per eco cell,
@@ -123,3 +123,9 @@ their text; the FE adapter re-sends uploaded YAML if the worker restarted.
 - **Cleanup**: the negligible-cohort cleanup (`hbad2_cleanup`, default 1e-3 trees/ha in scenario runs, 0 = off) is described in `docs/hbad2_plugin.md`.
 - **Determinism**: no random numbers; the annual step is independent of the thread count (`tools/scenario_plugin_check.jl` prints the hash for `r4_hbad2_v2g`; identical at 1 and 2 threads).
 - Limits: stage 1 has no calibration (fixed v2g parameters; the single-species-key volume equations above); carbon/volume are reporting quantities of the cohort state, not dynamics; cost grows with the cohort count (see the cleanup table).
+
+## 8. HBAD3P (process-grounded HBAD3, fit P3_GAFL) in the scenario engine
+`succession_plugin: hbad3p`; docs of the plugin: `docs/hbad3p_plugin.md`. Same plan JSON, `SCMetrics` fields and worker (`default_params {plugin: "hbad3p"}` -> `results/params_yaml/r4_hbad3p_gafl.yaml`). Started from the TREES of the plot visit like HBAD2
+(4 subplot sites per plot, `Data.load_tree_cohorts3p`, `_hbad3p_sites`) but with 5 vigour nodes, crown ratio, diameter classes closed below at 5 / 12.7 / 25 / 40 cm, the forest-area convention (densities x 4 / a, a = max(forested fraction of the subplot, 0.25), the fractions
+from SUBP_COND x COND of the scenario's FIA database) and the plot-normal water index (W = Wn: no drought anomaly in projections; plots without a normal take the regional median, with a warning). Plot metrics = mean of the 4 sites x a. Removal at constant size, planting (density per
+forested ha), `hbad2_cleanup` as for HBAD2. Roster: `params_to_yaml(::HBAD3PParams)`; export: `tools/hbad3p_export_params.jl`.

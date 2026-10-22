@@ -22,6 +22,9 @@ using Test, Pan
   @testset "unit_hbad2_parity" begin include("unit_hbad2_parity.jl") end
   @testset "unit_hbad2_calib" begin include("unit_hbad2_calib.jl") end
   @testset "unit_scenario_hbad2" begin include("unit_scenario_hbad2.jl") end
+  @testset "unit_hbad3p" begin include("unit_hbad3p.jl") end
+  @testset "unit_hbad3p_parity" begin include("unit_hbad3p_parity.jl") end
+  @testset "unit_scenario_hbad3p" begin include("unit_scenario_hbad3p.jl") end
 
   # Pre-existing asserting scripts: run as subprocesses (they call exit(), define globals / @check macros, or print-and-exit-code).
   julia = Base.julia_cmd()
