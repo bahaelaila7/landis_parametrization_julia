@@ -12,7 +12,7 @@ redirect_stdout(stderr)
 
 const PARAMS_DIR = get(ENV, "PAN_PARAMS_DIR", joinpath(dirname(@__DIR__), "results", "params_yaml"))
 # defaults: EPA Region 4 sets (cover all R4 ecoregions incl. GA+FL); GA+FL-specific, cross-validated sets ship as samples
-const DEFAULTS = Dict("biomass" => "r4_biomass_v1.yaml", "pnet" => "r4_pnet_v1.yaml", "hbad" => "r4_hbad_v1.yaml", "hbad2" => "r4_hbad2_v2j.yaml")
+const DEFAULTS = Dict("biomass" => "r4_biomass_v1.yaml", "pnet" => "r4_pnet_v1.yaml", "hbad" => "r4_hbad_v1.yaml", "hbad2" => "r4_hbad2_v2j.yaml", "hbad3p" => "r4_hbad3p_gafl.yaml")
 const SCEN = P.ScenarioConfig()          # data sources of the scenario engine, read from the PAN_* env once at startup (owns the lazy tables)
 const CACHE = Dict{String,Any}()        # params_id => ParamSet
 
@@ -64,7 +64,7 @@ _plots(req) = [(cn=String(p["cn"]), acres=Float64(get(p, "acres", 1.0)), l4=Stri
 
 function handle(id, req)
   op = String(get(req, "op", ""))
-  op == "ping" && return (version="pan-worker/1", plugins=["biomass", "pnet", "hbad", "hbad2"], threads=Threads.nthreads(), params_dir=PARAMS_DIR)
+  op == "ping" && return (version="pan-worker/1", plugins=["biomass", "pnet", "hbad", "hbad2", "hbad3p"], threads=Threads.nthreads(), params_dir=PARAMS_DIR)
   op == "load_params" && return _describe(_load(String(req["yaml"])))
   op == "default_params" && return _describe(_default(String(req["plugin"])))
   op == "list_params" && return [(file=f, path=joinpath(PARAMS_DIR, f)) for f in sort(readdir(PARAMS_DIR)) if endswith(f, ".yaml")]

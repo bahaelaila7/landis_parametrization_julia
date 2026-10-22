@@ -35,6 +35,8 @@ function parametrize(; data::Data.DataConfig,
   hbad_init::String="jitter",                          # hbad: start candidates default | jitter | prior (see HBADPlugin.INIT_MODE)
   hbad2_params_dir::String="",                         # hbad2: directory of the fixed v2 parameter csv files ("" = results/hbad2, the v2g export)
   hbad2_vigour::Bool=true,                             # hbad2: recruits / planted trees enter as 3 vigour sub-cohorts
+  hbad3p_params_dir::String="",                        # hbad3p: directory of the fixed parameter csv files ("" = results/hbad3p/P3_GAFL)
+  hbad3p_vigour::Bool=true,                            # hbad3p: recruits / planted trees enter as 5 vigour sub-cohorts
   cmaes_blocks::String="eco",                          # CMA-ES covariance blocks: "eco" (per cell, legacy) | "l3" (per L3 + tail)
   search_mode::String="lbsa",
   context_only::Bool=false,   # prepare the training context exactly as a search would, hand it to `post_search_hook` (if any), skip the search
@@ -191,13 +193,18 @@ function parametrize(; data::Data.DataConfig,
     spinup && error("succession_plugin=hbad2 requires spinup: false (cohorts start from the observed state)")
     no_establishment || @info "succession_plugin=hbad2: recruitment is ON (3 vigour sub-cohorts per 5-year class, stage 1: fixed v2g parameters, no search)"
   end
+  if SUCC === HBAD3PPlugin.HBAD3P
+    spinup && error("succession_plugin=hbad3p requires spinup: false (cohorts start from the observed state)")
+    no_establishment || @info "succession_plugin=hbad3p: recruitment is ON (5 vigour sub-cohorts per 5-year class, fixed parameters, no search)"
+  end
   # The plugin of the run: an immutable context (BS tables | PnET climate + constants | HBAD priors + options) and the site-attribute builder, passed
   # explicitly to the drivers, `make_sites` and `fit_params` - no module-level plugin state.
   plugin = plugin_config(succession_plugin, species_list, eco_species_ids, eco_list; tables=tables, cohorts_db_path=cohorts_db_path, tablename=tablename,
     pnet_climate_cache=pnet_climate_cache, pnet_co2_csv=pnet_co2_csv, pnet_generic=pnet_generic, pnet_soil_texture=pnet_soil_texture, pnet_soil_csv=pnet_soil_csv,
     hbad_priors_csv=hbad_priors_csv, hbad_coefs_csv=hbad_coefs_csv, hbad_init=hbad_init, hbad_seed_rain=hbad_seed_rain,
     hbad_prob_estab_csv=hbad_prob_estab_csv, hbad_cycle_years=hbad_cycle_years,
-    hbad2_params_dir=hbad2_params_dir, hbad2_vigour=hbad2_vigour)
+    hbad2_params_dir=hbad2_params_dir, hbad2_vigour=hbad2_vigour,
+    hbad3p_params_dir=hbad3p_params_dir, hbad3p_vigour=hbad3p_vigour)
   n_species = length(species_list)
   n_ecoregions = length(eco_list)
   n_plots = maximum(splots.plot_id)
@@ -458,6 +465,8 @@ function run_from_yaml(yaml_path::String; overrides::AbstractDict=Dict{String,An
     hbad_cycle_years=cfg["cycle_years"],
     hbad2_params_dir=cfg["hbad2_params_dir"],
     hbad2_vigour=cfg["hbad2_vigour"],
+    hbad3p_params_dir=cfg["hbad3p_params_dir"],
+    hbad3p_vigour=cfg["hbad3p_vigour"],
     cmaes_blocks=cfg["cmaes_blocks"],
     param_tier_merge=cfg["param_tier_merge"],
     TRIALS=cfg["trials"],

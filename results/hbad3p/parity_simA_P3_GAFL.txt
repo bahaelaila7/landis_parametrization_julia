@@ -1,0 +1,11 @@
+region GAFL | keys ACRU,LIST2,LITU,MAVI2,NYBI,PIEL,PITA,QULA3,QUNI,TAAS,_H,_S | tracked trees 409644 | threads 2
+PASS P1    exported parameters equal the prototype's load_fit3p species traits and all 32 globals exactly
+      val: 19184 sites, 400960 sub-cohorts | log FIT -272207.9 | reference NLL -272207.863110 (mort 32380.360 D -165043.182 H -139545.041) | plugin NLL -272207.863110 (mort 32380.360 D -165043.182 H -139545.041)
+PASS E-val1plugin val NLL -272207.8631 vs logged FIT -272207.9: relative difference 1.355e-07 (<= 1e-6)
+PASS E-val2plugin val NLL = reference kernel NLL: relative difference 0.000e+00 (<= 1e-12)
+PASS E-val3plugin vs reference final state over 400960 sub-cohorts: max rel diff N 0.00e+00 D 0.00e+00 H 0.00e+00, max abs diff CR 0.00e+00
+      train: 17984 sites, 401965 sub-cohorts | log FIT -271807.5 | reference NLL -271807.479211 (mort 31360.690 D -164390.287 H -138777.883) | plugin NLL -271807.479211 (mort 31360.690 D -164390.287 H -138777.883)
+PASS E-train1plugin train NLL -271807.4792 vs logged FIT -271807.5: relative difference 7.648e-08 (<= 1e-6)
+PASS E-train2plugin train NLL = reference kernel NLL: relative difference 0.000e+00 (<= 1e-12)
+PASS E-train3plugin vs reference final state over 401965 sub-cohorts: max rel diff N 0.00e+00 D 0.00e+00 H 0.00e+00, max abs diff CR 0.00e+00
+PARITY PASS

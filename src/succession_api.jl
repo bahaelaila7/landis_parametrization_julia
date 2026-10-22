@@ -214,6 +214,45 @@ plant_slots_reserved(pc::_H2Context) = HBAD2Plugin.plant_slots_reserved(pc.fixed
 
 succession_plugin_for(::HBAD2Plugin.HBAD2Params) = HBAD2Plugin.HBAD2
 
+# --- HBAD3P (process-grounded HBAD3 cohort model; fixed parameters, scenario engine / tree-based sites) ---
+const _H3 = HBAD3PPlugin.HBAD3P
+
+params_type(::Type{_H3}) = HBAD3PPlugin.HBAD3PParams
+
+const _H3Context = HBAD3PPlugin.HBAD3PContext
+plugin_type(::_H3Context) = _H3
+bs_tables(pc::_H3Context) = pc.tables
+
+make_param_dists(::_H3Context, args...; kw...) = error("hbad3p has fixed parameters (results/hbad3p/P3_GAFL, fitted by the prototype pipeline); it has no search path in Pan")
+
+generate_params(pc::_H3Context, args...; kw...) = HBAD3PPlugin.generate_hbad3p_params(pc, args...; kw...)
+
+generate_eco_params(pc::_H3Context, params) = HBAD3PPlugin.generate_hbad3p_eco_params(pc, params)
+
+make_ctx(pc::_H3Context, eco_params) = (HBAD3P=(eco=eco_params, cst=pc.fixed),)
+
+step!(::Type{_H3}, soa, year::Integer, ctx) = PanCore.process_plugin!(soa, _H3, year; ctx=ctx.HBAD3P)
+
+spinup!(::Type{_H3}, soa, spinup_cohorts, eco_params) = error("HBAD3P has no spinup path: run with spinup: false (cohorts start from the observed state)")
+
+add_cohort!(pc::_H3Context, site, args...) = HBAD3PPlugin.add_cohort!(pc, site, args...)
+
+per_eco_groups(::Type{_H3}) = Set{Symbol}()
+
+function init_sites!(pc::_H3Context, soa, site_attrs)      # generic make_sites path: no water data -> W = Wn = the regional median (no drought anomaly)
+  for i in 1:soa.n
+    soa.scalar.W[i] = pc.wn_median; soa.scalar.Wn[i] = pc.wn_median
+  end
+  return soa
+end
+@inline set_cohort_bio!(pc::_H3Context, site, k, newbio) = HBAD3PPlugin.set_cohort_bio!(pc, site, k, newbio)
+
+plant!(pc::_H3Context, site, species_local::Integer, tph::Real; eco_params=nothing, kw...) = HBAD3PPlugin.plant!(pc, site, species_local, tph; kw...)
+plant_slot_needed(pc::_H3Context, site, species_local::Integer, age::Real=1) = HBAD3PPlugin.plant_slot_needed(pc, site, species_local, age)
+plant_slots_reserved(pc::_H3Context) = HBAD3PPlugin.plant_slots_reserved(pc.fixed)
+
+succession_plugin_for(::HBAD3PPlugin.HBAD3PParams) = HBAD3PPlugin.HBAD3P
+
 """
     plant_sites!(pc, soa, plantings; age=1, eco_params=nothing, kw...)
 

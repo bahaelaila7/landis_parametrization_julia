@@ -91,6 +91,7 @@ struct ParamSet
   scen::ScenarioConfig                 # the data sources (and caches) this set was loaded against
   hb::HBADPlugin.HBADContext           # HBAD priors of THIS set's species list: cohort-structure translation (TPA/QMD/height) for every plugin; the HBAD run context
   h2::Union{Nothing,HBAD2Plugin.HBAD2Context}   # the HBAD2 run context (hbad2 sets only; species = the v2 keys)
+  h3::Union{Nothing,HBAD3PPlugin.HBAD3PContext}   # the HBAD3P run context (hbad3p sets only; species = the keys; carries the plot-normal water table)
 end
 
 function load_paramset(text::AbstractString, scen::ScenarioConfig=ScenarioConfig())
@@ -108,7 +109,25 @@ function load_paramset(text::AbstractString, scen::ScenarioConfig=ScenarioConfig
     spcd[String(s)] = c > 0 ? c : (k -= 1)
   end
   h2 = SP === HBAD2Plugin.HBAD2 ? HBAD2Plugin.HBAD2Context(String.(p.SPECIES_LIST), [Int.(ids) for ids in p.ECO_SPECIES_IDS]; v2tables=HBAD2Plugin.tables_of(p), verbose=false) : nothing
-  ParamSet(string(hash(text); base=16, pad=16), p, meta, SP, sp_index, eco_index, local_index, spcd, scen, hb, h2)
+  h3 = SP === HBAD3PPlugin.HBAD3P ? _hbad3p_context(p, meta) : nothing
+  ParamSet(string(hash(text); base=16, pad=16), p, meta, SP, sp_index, eco_index, local_index, spcd, scen, hb, h2, h3)
+end
+
+"""The HBAD3P run context of a roster: tables of the set, plus the plot-normal water table of its `data.plot_normal_water` csv (path relative to the repository root); a missing table is a warning in `meta.warnings` (every plot then takes W = Wn = 0.9)."""
+function _hbad3p_context(p, meta)
+  wn = Dict{String,Float64}(); med = 0.9
+  f = String(get(meta.data, "plot_normal_water", ""))
+  if !isempty(f)
+    path = isabspath(f) ? f : normpath(joinpath(@__DIR__, "..", f))
+    if isfile(path)
+      wn, med = HBAD3PPlugin.load_plot_normals(path)
+    else
+      push!(meta.warnings, "HBAD3P: plot-normal water table $(path) not found; every plot uses W = Wn = $(med)")
+    end
+  else
+    push!(meta.warnings, "HBAD3P: the roster has no data.plot_normal_water table; every plot uses W = Wn = $(med)")
+  end
+  HBAD3PPlugin.HBAD3PContext(String.(p.SPECIES_LIST), [Int.(ids) for ids in p.ECO_SPECIES_IDS]; tables3=HBAD3PPlugin.tables_of(p), verbose=false, wn=wn, wn_median=med)
 end
 
 _species_codes(scen::ScenarioConfig) = get_cached!(scen.cache, :species_codes) do
@@ -275,9 +294,12 @@ end
 # Cohort structure (TPA / QMD / height) — HBAD state, else the empirical translation
 # ---------------------------------------------------------------------------------------------------------------------
 @inline _gsp(ps::ParamSet, eco::Integer, esp::Integer) = Int(ps.params.ECO_SPECIES_IDS[eco][esp])
-_native_struct(ps::ParamSet) = ps.plugin === HBADPlugin.HBAD || ps.plugin === HBAD2Plugin.HBAD2     # plugins whose state IS (tph, dq, h) per cohort
+_native_struct(ps::ParamSet) = ps.plugin === HBADPlugin.HBAD || ps.plugin === HBAD2Plugin.HBAD2 || ps.plugin === HBAD3PPlugin.HBAD3P     # plugins whose state IS (tph, dq, h) per cohort
+_tree_based(ps::ParamSet) = ps.plugin === HBAD2Plugin.HBAD2 || ps.plugin === HBAD3PPlugin.HBAD3P    # plugins started from the TREES of the plot visit (4 subplot sites per plot)
 function _cohort_struct(ps::ParamSet, site, k::Int)
-  if _native_struct(ps)
+  if ps.plugin === HBAD3PPlugin.HBAD3P       # state per ha of the forested subplot -> per ha of the plot (x area)
+    return Float64(site.c_tph[k]) * Float64(site.area), Float64(site.c_dq[k]), Float64(site.c_h[k])
+  elseif _native_struct(ps)
     return Float64(site.c_tph[k]), Float64(site.c_dq[k]), Float64(site.c_h[k])
   end
   bio = Float64(site.c_bio[k]); bio > 0 || return 0.0, 0.0, 0.0
@@ -363,7 +385,7 @@ function _apply_removal!(ps::ParamSet, pc, sites::AbstractVector, act, sym_ok::F
   for (a, c) in enumerate(cnt); for k in 1:c; j0 += 1; si[j0] = a; kk[j0] = k; end; end
   st = [_cohort_struct(ps, sites[si[j]], kk[j]) for j in 1:n]; veq = volume_eqs(ps)
   gs = [_gsp(ps, sites[si[j]].eco_id, sites[si[j]].c_species[kk[j]]) for j in 1:n]
-  hb2 = ps.plugin === HBAD2Plugin.HBAD2
+  hb2 = ps.plugin === HBAD2Plugin.HBAD2; hb3 = ps.plugin === HBAD3PPlugin.HBAD3P
   sel = Int[]
   sl = get(act, "selection", Dict{String,Any}())
   alo = Float64(get(sl, "age_lo", 0)); ahi = Float64(get(sl, "age_hi", 9999))
@@ -411,6 +433,8 @@ function _apply_removal!(ps::ParamSet, pc, sites::AbstractVector, act, sym_ok::F
     rb += b * f[j] * w; rv += v * f[j] * w; rs += bf * f[j] * w
     if hb2
       f[j] >= 1.0 ? _remove_cohort!(site, k) : HBAD2Plugin.scale_cohort!(pc, site, k, 1.0 - f[j])
+    elseif hb3
+      f[j] >= 1.0 ? _remove_cohort!(site, k) : HBAD3PPlugin.scale_cohort!(pc, site, k, 1.0 - f[j])
     elseif f[j] >= 0.999 || b * (1 - f[j]) < 1.0
       _remove_cohort!(site, k)
     else
@@ -418,7 +442,7 @@ function _apply_removal!(ps::ParamSet, pc, sites::AbstractVector, act, sym_ok::F
     end
   end
   for site in sites
-    hb2 ? HBAD2Plugin.refresh_totals!(pc, site) :
+    hb2 ? HBAD2Plugin.refresh_totals!(pc, site) : hb3 ? HBAD3PPlugin.refresh_totals!(pc, site) :
     hasproperty(site, :B) && (site.B = FloatType(sum(Float64(site.c_bio[k]) for k in 1:Int(site.live); init=0.0)))
   end
   rb, rv, rs
@@ -432,6 +456,11 @@ function _plant!(ps::ParamSet, pc, site, sym::AbstractString, tpa::Real, surviva
   tph = Float64(tpa) / SC_HA_PER_AC * clamp(Float64(survival), 0, 100) / 100
   tph > 0 || return true
   if ps.plugin === HBAD2Plugin.HBAD2        # D 2.54 cm, H 3 m, age 1, 3 vigour sub-cohorts; planted stand: the planted multipliers (pH, pD, pM) apply to the site from now on
+    plant!(pc, site, esp, tph)
+    site.planted = true
+    return true
+  end
+  if ps.plugin === HBAD3PPlugin.HBAD3P      # D 2.54 cm, H* (recruit height), age 1, CR = crhi, 5 vigour sub-cohorts; tpa = trees per ha of the forested stand (the state density); planted stand
     plant!(pc, site, esp, tph)
     site.planted = true
     return true
@@ -477,14 +506,14 @@ end
 
 `plots`: vector of (cn, acres). `plan`: Dict with cycles, period, actions (FE plan JSON). Returns
 Dict(cn => (status, message, metrics::Vector{SCMetrics}, dist::Dict{Int,Dict{(spcd,dbh_lo)=>(tpa,ba)}}, spsym)) and warnings.
-HBAD2 sets: the initial state is built from the TREES of the plot visit (4 subplot sites per plot, `_hbad2_sites`); `hbad2_cleanup` = trees/ha below which a cohort is removed at the end
-of every annual step (0 = off; docs/scenario_engine.md). Ignored by the other plugins.
+HBAD2 / HBAD3P sets: the initial state is built from the TREES of the plot visit (4 subplot sites per plot, `_hbad2_sites` / `_hbad3p_sites`); `hbad2_cleanup` = trees/ha below which a cohort is removed at the end
+of every annual step (0 = off; docs/scenario_engine.md; it applies to HBAD3P as well). Ignored by the other plugins.
 """
 function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=1, establishment::Bool=true, progress=nothing, hbad2_cleanup::Real=1e-3)
   SP = ps.plugin; p = ps.params
   cycles = Int(get(plan, "cycles", 10)); period = Int(get(plan, "period", 10)); horizon = cycles * period
   warnings = String[]
-  hb2 = SP === HBAD2Plugin.HBAD2
+  hb2 = SP === HBAD2Plugin.HBAD2; hb3 = SP === HBAD3PPlugin.HBAD3P
   info = load_scenario_units(ps.scen, plots, warnings)
   acres = Dict(String(x.cn) => Float64(x.acres) for x in plots)
   results = Dict{String,Any}()
@@ -501,7 +530,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
     isempty(msg) || push!(warnings, msg)
     pid = length(meta) + 1
     push!(meta, (cn=r.cn, plot_id=pid, eco=e, measdate=r.measdate, l4=r.l4, l3=r.l3, lat=r.lat, lon=r.lon, key=r.key))
-    hb2 && continue          # HBAD2 starts from the trees of the visit (_hbad2_sites), not from the cohort table
+    (hb2 || hb3) && continue          # HBAD2 / HBAD3P start from the trees of the visit (_hbad2_sites / _hbad3p_sites), not from the cohort table
     for c in eachrow(r.cohorts)
       ntot += c.agb
       j = scenario_species(ps, e, c.sym)
@@ -515,6 +544,8 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
   local pc, soa
   if hb2
     pc, soa = _hbad2_sites(ps, meta, seed, !establishment, Float64(hbad2_cleanup), warnings)
+  elseif hb3
+    pc, soa = _hbad3p_sites(ps, meta, seed, !establishment, Float64(hbad2_cleanup), warnings)
   else
     splots = DataFrame(rows)
     # plots with no representable cohort still simulate (empty start, regeneration only): give them a placeholder row? no — report
@@ -534,7 +565,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
                      no_establishment=!establishment, site_attrs=attrs)
   end
   eco_params = generate_eco_params(pc, p); ctx = make_ctx(pc, eco_params)
-  # scenario plots ("units"): the sites sharing a plot id (mapcode) - one site per plot, except HBAD2: its 4 subplot sites. A plot's sites share its acres and its management.
+  # scenario plots ("units"): the sites sharing a plot id (mapcode) - one site per plot, except HBAD2 / HBAD3P: their 4 subplot sites. A plot's sites share its acres and its management.
   unit_sites = Vector{Vector{Int}}(); uidx = Dict{Int,Int}()
   for i in 1:soa.n
     u = get!(uidx, Int(soa.scalar.mapcode[i])) do; push!(unit_sites, Int[]); length(unit_sites); end
@@ -624,6 +655,44 @@ function _hbad2_sites(ps::ParamSet, meta, seed::Integer, no_establishment::Bool,
   end
   nempty > 0 && push!(warnings, "HBAD2: $nempty plot visit(s) have no measured live trees with an estimated age; they start empty (regeneration only)")
   soa = make_sites_hbad2(PluginConfig(pc), Data.subset_sites(tc, idx); rng=RNGType(UInt64(seed)), no_establishment=no_establishment, eco_id=eco, mapcode=code)
+  return pc, soa
+end
+
+"""
+    _hbad3p_sites(ps, meta, seed, no_establishment, cleanup, warnings) -> (pc, soa)
+
+Initial HBAD3P state of the scenario plots `meta` (plot_id, eco, key `STATE_UNIT_COUNTY_PLOT`, measdate of the visit): the live trees of each visit from the scenario's FIA database
+(`Data.load_tree_cohorts3p`) -> the 4 SUBPLOT sites of every plot: cohorts per key x birth decade x diameter class (closed below at 5, 12.7, 25, 40 cm), 5 vigour nodes, crown ratio (FIA CR/100, else 0.4), densities x 4 / a with
+a = max(forested fraction of the subplot, 0.25) (farea = 1 sets; the fractions come from SUBP_COND x COND of the FIA database, else a = 1 with a warning). W = Wn = the plot normal of the set's table (plots without a normal take
+the regional median, warning): no drought anomaly in projections. Empty subplots are empty sites (a nonforest one does not recruit). All sites of a plot carry its plot id as `mapcode` and its ecoregion.
+"""
+function _hbad3p_sites(ps::ParamSet, meta, seed::Integer, no_establishment::Bool, cleanup::Float64, warnings)
+  keys_ = String.(ps.params.SPECIES_LIST)
+  pc = HBAD3PPlugin.with(ps.h3; fixed=HBAD3PPlugin.HBAD3PConst(vigour=ps.h3.fixed.vigour, cleanup_tph=cleanup))
+  vk(m) = (k = parse.(Int, split(m.key, "_")); length(k) == 4 || error("scenario plot key '$(m.key)' is not STATE_UNIT_COUNTY_PLOT"); (k[1], k[2], k[3], k[4], Dates.Date(m.measdate)))
+  vis = DataFrame(statecd=Int[], unitcd=Int[], countycd=Int[], plot=Int[], measdate=Dates.Date[])
+  for m in meta; push!(vis, vk(m)); end
+  smap = ps.meta.species_map; dflt = Data.default_key_resolver(keys_)
+  resolve = (sym, grp) -> (k = get(smap, uppercase(strip(sym)), ""); isempty(k) ? dflt(sym, grp) : k)
+  tc = Data.load_tree_cohorts3p(ps.scen.fia_db, vis, keys_; vigour=pc.fixed.vigour, farea=pc.farea, resolve=resolve)
+  pc.farea && !tc.forest_ok && push!(warnings, "HBAD3P: the forested fraction of the subplots could not be read from $(ps.scen.fia_db) (SUBP_COND x COND); stand densities use a = 1 (no forest-area scaling) and every subplot recruits")
+  vix = Dict((Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot), Dates.Date(r.measdate)) => v for (v, r) in enumerate(eachrow(tc.visits)))
+  idx = Int[]; eco = Int[]; code = Int[]; nempty = 0; W = Float64[]; nmiss = 0
+  for m in meta
+    v = vix[vk(m)]
+    k4 = join(vk(m)[1:4], "_")
+    wn = get(ps.h3.wn, k4, NaN)
+    isnan(wn) && (nmiss += 1; wn = ps.h3.wn_median)
+    for sb in 1:4
+      s = (v - 1) * 4 + sb
+      tc.site_visit[s] == v && tc.site_subp[s] == sb || error("_hbad3p_sites: unexpected site order of the tree loader")
+      push!(idx, s); push!(eco, m.eco); push!(code, m.plot_id); push!(W, wn)
+    end
+    all(sb -> tc.off[(v-1)*4+sb+1] == tc.off[(v-1)*4+sb], 1:4) && (nempty += 1)
+  end
+  nempty > 0 && push!(warnings, "HBAD3P: $nempty plot visit(s) have no measured live trees with an estimated age; they start empty (regeneration only)")
+  nmiss > 0 && push!(warnings, "HBAD3P: $nmiss plot(s) have no plot-normal water index in the parameter set's table; the regional median $(round(ps.h3.wn_median; digits=4)) was used (W = Wn)")
+  soa = make_sites_hbad3p(PluginConfig(pc), Data.subset_sites(tc, idx); rng=RNGType(UInt64(seed)), no_establishment=no_establishment, eco_id=eco, mapcode=code, W=W, Wn=W)
   return pc, soa
 end
 

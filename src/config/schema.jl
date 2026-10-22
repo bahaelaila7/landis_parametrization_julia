@@ -158,7 +158,7 @@ const SCHEMA_LIST = KeySpec[
   KeySpec("param_tier_merge", :dict_tiermerge, Dict{String,Any}(), "{param => {species => {cell => group}}} ties split site cells per species"),
   KeySpec("cmaes_blocks", :string, "eco", "CMA-ES covariance blocks: eco | l3"),
   # ---- succession plugins --------------------------------------------------------------------------------------------
-  KeySpec("succession_plugin", :string, "biomass", "biomass | pnet | hbad | hbad2"),
+  KeySpec("succession_plugin", :string, "biomass", "biomass | pnet | hbad | hbad2 | hbad3p"),
   KeySpec("pnet_climate_cache", :path, "", "pnet: PRISM monthly climate cache (JLD2)"),
   KeySpec("pnet_co2_csv", :path, "", "pnet: annual CO2 csv (year, co2_ppm)"),
   KeySpec("pnet_generic", :dict, Dict{String,Any}(), "pnet: PnETConst field overrides"),
@@ -170,6 +170,8 @@ const SCHEMA_LIST = KeySpec[
   KeySpec("hbad_seed_rain", :bool, false, "hbad: every species of the ecoregion is a seed source"),
   KeySpec("hbad2_params_dir", :path, "", "hbad2: directory of params_{species,global,recruitment}.csv (empty = results/hbad2, the v2g export)"),
   KeySpec("hbad2_vigour", :bool, true, "hbad2: recruits / planted trees enter as 3 vigour sub-cohorts"),
+  KeySpec("hbad3p_params_dir", :path, "", "hbad3p: directory of params_{species,global,recruitment}.csv + meta.txt (empty = results/hbad3p/P3_GAFL)"),
+  KeySpec("hbad3p_vigour", :bool, true, "hbad3p: recruits / planted trees enter as 5 vigour sub-cohorts (Gauss-Hermite nodes)"),
   KeySpec("hbad_prob_estab_csv", :path, "", "hbad: per-cycle (species, L3) PROB_ESTAB table (empty = constant fallback)"),
   # ---- BiomassSuccession data tables ---------------------------------------------------------------------------------
   KeySpec("fix_longevity", :float, nothing, "fixed LONGEVITY for all species"; nullable=true),

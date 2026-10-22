@@ -79,6 +79,35 @@ function _init_site_plugin!(::Type{_H2}, site, no_establishment::Bool)
   return nothing
 end
 
+function _init_site_plugin!(::Type{_H3}, site, no_establishment::Bool)
+  site.B = zero(FloatType)
+  site.BA = zero(FloatType)
+  site.SDI = zero(FloatType)
+  site.RD = zero(FloatType)
+  site.ryear = Int32(0)
+  site.planted = false
+  site.no_establish = no_establishment
+  site.W = 0.9; site.Wn = 0.9; site.area = 1.0; site.rmult = 1.0
+  site.c_species .= zero(UIntType)
+  site.c_age .= 0.0
+  site.c_tph .= 0.0
+  site.c_dq .= 0.0
+  site.c_h .= 0.0
+  site.c_zq .= 0.0
+  site.c_cr .= 0.4
+  site.c_bio .= zero(FloatType)
+  site.c_O .= 0.0
+  site.c_SDI .= 0.0
+  site.c_V .= 0.0
+  site.c_ropen .= Int32(0)
+  site.sp_seed .= false
+  site.sp_estab .= false
+  site.sp_rate .= 0.0
+  site.sp_oy .= Int32(0)
+  return nothing
+end
+
+
 """
     make_sites(splots, eco_species_ids; plugin=bs_plugin(), rng, spinup, no_establishment, site_attrs=nothing) -> SiteSoA
 
@@ -207,5 +236,61 @@ function make_sites_hbad2_arrays(plugin::PluginConfig{P}, off::AbstractVector{<:
     HBAD2Plugin.report_site!(soa.csr, soa.scalar, ep[1], i, Int(soa.refs.cohort[i]) - 1, n)
   end
   init_sites!(pc, soa, nothing)
+  return soa
+end
+
+"""
+    make_sites_hbad3p(plugin, tc::Data.TreeCohorts3P; rng, no_establishment=false, eco_id=1, W=nothing, Wn=nothing, planted=nothing, mapcode=nothing) -> SiteSoA
+
+Initial HBAD3P SoA of tree-based sites (`Data.load_tree_cohorts3p`): one active site per subplot site of `tc` with its forest-area convention (`area`, `rmult`) and plot-level seed presence; the cohort's key index IS the
+eco-local species index (the plugin context must have been built with `tc.keys` as its species list). See `make_sites_hbad3p_arrays`.
+"""
+function make_sites_hbad3p(plugin::PluginConfig{P}, tc::Data.TreeCohorts3P; kw...) where {P}
+  plugin.ctx.priors.species_list == tc.keys || error("make_sites_hbad3p: the plugin context's species list must equal the tree cohorts' keys")
+  return make_sites_hbad3p_arrays(plugin, tc.off, tc.key, tc.A, tc.N, tc.D, tc.H, tc.zq, tc.CR; area=tc.area, rmult=tc.rmult, seedplot=tc.seed, kw...)
+end
+
+"""
+    make_sites_hbad3p_arrays(plugin, off, species, age, N, D, H, zq, CR; rng, no_establishment=false, eco_id=1, planted=nothing, mapcode=nothing, extra_capacity=0,
+                             W=nothing, Wn=nothing, area=nothing, rmult=nothing, seedplot=nothing) -> SiteSoA
+
+HBAD3P SoA from per-site cohort arrays (CSR `off`, 1-based, `off[end]` = total + 1; `species` = eco-local species index). State is copied exactly (Float64); `c_bio` is the reported allometric AGB (x the site's area).
+Per-site attributes (scalar or vector over sites): `W`, `Wn` (water indices; default the context's regional median), `area` (a, default 1), `rmult` (recruitment multiplier, default 1), `planted`, `mapcode`; `seedplot`
+(nsp x nsites BitMatrix, plot-level seed presence, default none); `extra_capacity` free cohort slots per site (free runs on a fixed capacity). Empty sites get capacity 1.
+"""
+function make_sites_hbad3p_arrays(plugin::PluginConfig{P}, off::AbstractVector{<:Integer}, species::AbstractVector{<:Integer}, age::AbstractVector{<:Real}, N::AbstractVector{<:Real},
+                                  D::AbstractVector{<:Real}, H::AbstractVector{<:Real}, zq::AbstractVector{<:Real}, CR::AbstractVector{<:Real};
+                                  rng::Random.AbstractRNG, no_establishment::Bool=false, eco_id::Union{Integer,AbstractVector{<:Integer}}=1,
+                                  planted::Union{Nothing,AbstractVector{Bool}}=nothing, mapcode::Union{Nothing,AbstractVector{<:Integer}}=nothing,
+                                  extra_capacity::Integer=0, W=nothing, Wn=nothing, area=nothing, rmult=nothing, seedplot=nothing) where {P}
+  P === HBAD3PPlugin.HBAD3P || error("make_sites_hbad3p needs a succession_plugin=hbad3p PluginConfig")
+  pc = plugin.ctx
+  ns = length(off) - 1
+  nsp = length(pc.priors.species_list)
+  at(x, i, d) = x === nothing ? d : (x isa AbstractVector ? x[i] : x)
+  counts = Int32[max(off[s+1] - off[s] + extra_capacity, 1) for s in 1:ns]
+  soa = soa_type(P)((cohort=counts, species=fill(Int32(nsp), ns)))
+  base_seed = rand(rng, UInt64)
+  ep = HBAD3PPlugin.identity_eco_params(pc)
+  for i in 1:ns
+    site = getsite(soa, i)
+    site.active = true
+    site.rng = RNGType(hash((base_seed, i)))
+    e = eco_id isa Integer ? Int(eco_id) : Int(eco_id[i])
+    site.ecocode = UIntType(e); site.eco_id = e; site.mapcode = UIntType(mapcode === nothing ? i : mapcode[i]); site.ref_cn = i
+    site.old = zero(UIntType); site.live = zero(UIntType)
+    _init_site_plugin!(P, site, no_establishment)
+    planted === nothing || (site.planted = planted[i])
+    site.W = Float64(at(W, i, pc.wn_median)); site.Wn = Float64(at(Wn, i, pc.wn_median))
+    site.area = Float64(at(area, i, 1.0)); site.rmult = Float64(at(rmult, i, 1.0))
+    if seedplot !== nothing
+      for k in 1:nsp; site.sp_seed[k] = seedplot[k, i]; end
+    end
+    n = off[i+1] - off[i]
+    for (q, c) in enumerate(off[i]:off[i+1]-1)
+      HBAD3PPlugin._set_cohort!(site, q, species[c], age[c], N[c], D[c], H[c], zq[c], CR[c], HBAD3PPlugin.agb_of(ep.allo[Int(species[c])], Float64(N[c]) * site.area, Float64(D[c])))
+    end
+    HBAD3PPlugin.report_site!(soa.csr, soa.scalar, ep, i, Int(soa.refs.cohort[i]) - 1, n)
+  end
   return soa
 end

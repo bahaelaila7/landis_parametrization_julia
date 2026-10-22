@@ -18,12 +18,14 @@ plugin_name(::BiomassSuccessionPlugin.BiomassSuccessionParams) = "biomass"
 plugin_name(::PnETPlugin.PnETParams) = "pnet"
 plugin_name(::HBADPlugin.HBADParams) = "hbad"
 plugin_name(::HBAD2Plugin.HBAD2Params) = "hbad2"
+plugin_name(::HBAD3PPlugin.HBAD3PParams) = "hbad3p"
 params_struct_type(name::AbstractString) =
   lowercase(name) in ("biomass", "biomasssuccession", "bs") ? BiomassSuccessionPlugin.BiomassSuccessionParams :
   lowercase(name) in ("pnet", "pnet-succession") ? PnETPlugin.PnETParams :
   lowercase(name) in ("hbad", "hbad-succession") ? HBADPlugin.HBADParams :
   lowercase(name) in ("hbad2", "hbad-v2") ? HBAD2Plugin.HBAD2Params :
-  error("unknown plugin '$name' in pan_params header (biomass | pnet | hbad | hbad2)")
+  lowercase(name) in ("hbad3p", "hbad-3p") ? HBAD3PPlugin.HBAD3PParams :
+  error("unknown plugin '$name' in pan_params header (biomass | pnet | hbad | hbad2 | hbad3p)")
 
 const _ID_FIELDS = (:ECO_LIST, :SPECIES_LIST, :ECO_SPECIES_IDS)
 # per-eco fields (disambiguates when n_species == n_eco); anything else is classified by shape
@@ -160,6 +162,7 @@ function params_from_yaml(text::AbstractString)
   T = params_struct_type(plugin)
   fv = Int(get(h, "format_version", 1)); fv <= PARAMS_FORMAT_VERSION || error("format_version $fv is newer than this Pan ($(PARAMS_FORMAT_VERSION))")
   T === HBAD2Plugin.HBAD2Params && return _hbad2_from_yaml(doc, h)
+  T === HBAD3PPlugin.HBAD3PParams && return _hbad3p_from_yaml(doc, h)
   spe = doc["species"]; ecos = doc["ecoregions"]; glob = something(get(doc, "global", nothing), Dict{String,Any}())
   species_list = String[String(s["name"]) for s in spe]; spidx = Dict(s => k for (k, s) in enumerate(species_list))
   eco_list = String[String(e["name"]) for e in ecos]
@@ -276,5 +279,76 @@ function _hbad2_from_yaml(doc, h)
   meta = (; plugin="hbad2", name=String(get(h, "name", "")), description=String(get(h, "description", "")),
           region=get(h, "region", Dict()), provenance=get(h, "provenance", Dict()), species_map=smap,
           eco_mapping=something(get(doc, "eco_mapping", nothing), Dict{String,Any}()), warnings=String[])
+  p, meta
+end
+
+# ---------------------------------------------------------------------------------------------------------------------
+# hbad3p roster (HBAD3P process model; docs/hbad3p_plugin.md). The parameters are per species KEY (the species with their own parameters + the pooled `_S` / `_H` groups), not per ecoregion:
+#   global:     the 32 GlobPP parameters (ASCII names, HBAD3PPlugin.GLOB_YAML), the recruitment globals lam0 lam1 eps0, `farea` (density convention of the fit) and `vig_n` (vigour quadrature nodes, must be 5)
+#   species:    one row per KEY: name (= the key), lneps (ln of the growth efficiency ε), Hmax, ST, longevity, lnF (fecundity)
+#   ecoregions: the eco cells of the region (scenario eco mapping); each lists ALL keys in order, so the eco-local species index IS the key index
+#   data:       `plot_normal_water`: csv (st,u,c,p,wn) of the plot-normal water index AET/PET (path relative to the repository root); the scenario engine sets W = Wn = the plot's normal
+# species_map: FIA symbol -> key (own species, else `_S` / `_H` by SFTWD_HRDWD). Unknown keys / missing parameters are errors.
+# ---------------------------------------------------------------------------------------------------------------------
+const _H3_REC = ("lam0", "lam1", "eps0")
+const _H3_SPECIES = ("lneps", "Hmax", "ST", "longevity", "lnF")
+const _H3_GLOBAL = (HBAD3PPlugin.GLOB_YAML..., _H3_REC..., "farea", "vig_n")
+
+function params_to_yaml(p::HBAD3PPlugin.HBAD3PParams; name::AbstractString, description::AbstractString="", region=Dict{String,Any}(),
+                        provenance=Dict{String,Any}(), species_map=Dict{String,String}(), eco_mapping=Dict{String,Any}(), data=Dict{String,Any}())
+  sp = String.(p.SPECIES_LIST); eco = String.(p.ECO_LIST); g = p.G
+  p.KEYS == sp || error("hbad3p roster: the species of a parameter set must be the keys themselves (got $(p.KEYS) for $(sp))")
+  all(ids -> Int.(ids) == collect(1:length(sp)), p.ECO_SPECIES_IDS) || error("hbad3p roster: every ecoregion must list all keys in order")
+  doc = OrderedDict{String,Any}()
+  doc["pan_params"] = OrderedDict{String,Any}("plugin" => "hbad3p", "format_version" => PARAMS_FORMAT_VERSION,
+    "name" => String(name), "description" => String(description), "created" => string(Dates.today()),
+    "region" => region, "provenance" => provenance)
+  doc["eco_mapping"] = eco_mapping
+  doc["species_map"] = OrderedDict(k => species_map[k] for k in sort(collect(keys(species_map))))
+  gl = OrderedDict{String,Any}()
+  for (f, y) in zip(HBAD3PPlugin.GLOB_NAMES, HBAD3PPlugin.GLOB_YAML); gl[y] = _yamlval(getfield(g, f)); end
+  gl["lam0"] = _yamlval(p.REC.λ0); gl["lam1"] = _yamlval(p.REC.λ1); gl["eps0"] = _yamlval(p.REC.ε0)
+  gl["farea"] = p.FAREA; gl["vig_n"] = length(HBAD3PPlugin.VIG_Z)
+  doc["global"] = gl
+  doc["data"] = data
+  doc["species"] = [OrderedDict{String,Any}("name" => sp[k], "lneps" => _yamlval(p.SP[k].lnε), "Hmax" => _yamlval(p.SP[k].Hmax), "ST" => _yamlval(p.SP[k].ST),
+                                            "longevity" => _yamlval(p.SP[k].longevity), "lnF" => _yamlval(p.SP[k].lnF)) for k in eachindex(sp)]
+  doc["ecoregions"] = [OrderedDict{String,Any}("name" => e, "species" => [OrderedDict{String,Any}("species" => s) for s in sp]) for e in eco]
+  hdr = """# Pan succession parameter set - plugin: hbad3p (HBAD3P process model; format $(PARAMS_FORMAT_VERSION)). Parameters are per species KEY (own species + the pooled _S / _H groups).
+# species_map: FIA species symbol -> key; eco_mapping: (EPA L3, FIA site class) -> eco cell (the parameters do not depend on the cell); data.plot_normal_water: plot-normal AET/PET table.
+"""
+  io = IOBuffer(); print(io, hdr); _emit(io, doc, 0); String(take!(io))
+end
+
+function _hbad3p_from_yaml(doc, h)
+  haskey(doc, "species") && haskey(doc, "ecoregions") || error("hbad3p roster: needs `species` and `ecoregions`")
+  spe = doc["species"]; ecos = doc["ecoregions"]; glob = something(get(doc, "global", nothing), Dict{String,Any}())
+  for k in keys(glob); String(k) in _H3_GLOBAL || error("hbad3p roster: unknown global parameter '$k' (expected $(join(_H3_GLOBAL, ", ")))"); end
+  for k in _H3_GLOBAL; haskey(glob, k) || error("hbad3p roster: global parameter '$k' missing"); end
+  Int(glob["vig_n"]) == length(HBAD3PPlugin.VIG_Z) || error("hbad3p roster: vig_n = $(glob["vig_n"]), but the plugin's vigour quadrature has $(length(HBAD3PPlugin.VIG_Z)) nodes")
+  Int(glob["farea"]) in (0, 1) || error("hbad3p roster: farea must be 0 or 1")
+  names = String[String(s["name"]) for s in spe]
+  allunique(names) || error("hbad3p roster: duplicate species keys")
+  spnames = Set(_H3_SPECIES)
+  for s in spe
+    for k in keys(s); String(k) == "name" || String(k) in spnames || error("hbad3p roster: unknown parameter '$k' of species $(s["name"])"); end
+    for k in spnames; haskey(s, k) || error("hbad3p roster: parameter '$k' missing for species $(s["name"])"); end
+  end
+  sp = HBAD3PPlugin.SpPP[HBAD3PPlugin.SpPP(Float64(s["lneps"]), Float64(s["Hmax"]), Float64(s["ST"]), Float64(s["longevity"]), Float64(s["lnF"])) for s in spe]
+  G = HBAD3PPlugin.GlobPP(Float64[glob[y] for y in HBAD3PPlugin.GLOB_YAML])
+  rec = HBAD3PPlugin.RecGP(Float64(glob["lam0"]), Float64(glob["lam1"]), Float64(glob["eps0"]))
+  eco_list = String[String(e["name"]) for e in ecos]
+  for e in ecos
+    lst = String[String(r["species"]) for r in something(get(e, "species", nothing), Any[])]
+    lst == names || error("hbad3p roster: ecoregion $(e["name"]) must list all species keys in the order of `species` (the eco-local species index is the key index)")
+  end
+  esi = [UIntType[UIntType(k) for k in 1:length(names)] for _ in ecos]
+  p = HBAD3PPlugin.HBAD3PParams(eco_list, names, esi, copy(names), sp, rec, G, Int(glob["farea"]))
+  smap = Dict{String,String}(String(k) => String(v) for (k, v) in something(get(doc, "species_map", nothing), Dict()))
+  for (k, v) in smap; v in names || error("hbad3p roster: species_map $k -> $v, but $v is not a species key"); end
+  meta = (; plugin="hbad3p", name=String(get(h, "name", "")), description=String(get(h, "description", "")),
+          region=get(h, "region", Dict()), provenance=get(h, "provenance", Dict()), species_map=smap,
+          eco_mapping=something(get(doc, "eco_mapping", nothing), Dict{String,Any}()), warnings=String[],
+          data=Dict{String,Any}(String(k) => v for (k, v) in something(get(doc, "data", nothing), Dict())))
   p, meta
 end

@@ -1,0 +1,11 @@
+form=2
+size_split=5.0,12.7,25.0,40.0
+site=subplot
+vigour=1
+sigv_max=1.2
+vig_n=5
+dclass=lower
+farea=1
+source=/workspace/landis_hbad3/results/hbad3/fit3p_P3_GAFL
+region=GAFL
+fit_log=FIT   train -271807.5 (mort 31360.7 D -164390.3 H -138777.9) | VAL -272207.9 (mort 32380.4 D -165043.2 H -139545.0 σD 0.1086 σH 0.1530) | evals 4993
