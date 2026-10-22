@@ -109,3 +109,15 @@ first, then recruitment, and a final partial year counts with weight Δ. After e
 - Recruitment uses seed **presence**, not seed-source abundance. Val calibration by key is poor (e.g. PITA observed 828 vs expected 307 in GA+FL),
   and the light window e^{−λ RD} under-predicts open stands.
 - 122.98 in the growth equation is a fixed unit constant of ε. Older docs called it 20^1.605, but 20^1.605 = 122.50.
+
+## Runs through the pipeline (2026-10-22)
+
+| region | tag | start | val NLL | gain / tracked tree | free run (val): BA / N≥12.7 / QMD / Lorey H bias | in-growth into 12.7 cm (sim/obs) | checks |
+|---|---|---|---|---|---|---|---|
+| GA+FL | P3_GAFL | warm (Pcr, σ 0.01) | −272,208 | 0.803 | +4.5 / −13.2 / +5.4 / +3.2 % | 0.639 | data 23 + model 14 PASS |
+| APP (8.4.x outside GA+FL) | P3_APP | cold (σ 0.15) | −219,177 | 0.706 | +0.5 / −18.7 / +8.3 / +2.0 % | 0.458 | data 23 + model 14 PASS |
+
+- The same scripts and config ran both regions; only `REGION` and `TAG` changed.
+- Both regions under-predict in-growth into 12.7 cm. QMD is high, i.e. too few small stems reach 12.7 cm.
+- At bounds: μ (GA+FL); ω, f0, crlo (APP).
+- Val NLLs are comparable only within one data convention (dclass / farea); older fits used `dclass=legacy`, `farea=0`.
