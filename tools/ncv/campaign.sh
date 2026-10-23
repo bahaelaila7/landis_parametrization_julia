@@ -38,11 +38,12 @@ latest() { local f; f=$(ls "$1" 2>/dev/null | grep -E "$2" | sort -t@ -k2 -n); [
            [ "$(echo "$f" | wc -l)" -ge 2 ] && echo "$f" | tail -2 | head -1 || echo "$f" | tail -1; }
 # ---------------------------------------------------------------- budgets (production = the Oct-14 recipe; smoke = tiny)
 if [ "$SMOKE" = 1 ]; then
-  declare -A GDT=([bs]=40 [hbad]=40 [pnet]=24); GDMU="mu=4 ckpt_every=1"; GDMO="mu=4 weights=4 patience=3 rel_tol=0.005 ckpt_every=1"
+  declare -A GDT=([bs]=40 [hbad]=40 [pnet]=24); GDMU="mu=4 patience=3 rel_tol=0.005 ckpt_every=1"; GDMO="mu=4 weights=4 patience=3 rel_tol=0.005 ckpt_every=1"
   declare -A SROOT=([bs]="S" [hbad]="gmult" [pnet]="foln"); declare -A SMIN=([bs]="S~" [hbad]="gmult~" [pnet]="foln~")
   H2A_T=60; H2J_T=48; H3_EVALS=48; TSK=4; H2CK="hbad2_calib.ckpt_every=1"
 else
-  declare -A GDT=([bs]=6400 [hbad]=6400 [pnet]=4800); GDMU="mu=16"; GDMO="mu=16 weights=8 patience=15 rel_tol=0.005"
+  # bias family = the "gdigel mu 16, fast restarts" run of docs/cmaes_gdigel.md (gd_bs_div: patience 15, rel_tol 0.005); mo family = mogd_full.sh
+  declare -A GDT=([bs]=6400 [hbad]=6400 [pnet]=4800); GDMU="mu=16 patience=15 rel_tol=0.005"; GDMO="mu=16 weights=8 patience=15 rel_tol=0.005"
   declare -A SROOT=([bs]="S,ratio,bmax,S,ratio,bmax,ratio~,S~,bmax~,ratio~,S~,bmax~" [hbad]="gmult,gmult~,mmult~,gmult~,mmult~,gmult~" [pnet]="foln,foln~,foln~,foln~,foln~")
   declare -A SMIN=([bs]="ratio~,S~,bmax~,ratio~,S~,bmax~" [hbad]="gmult~,mmult~,gmult~,mmult~" [pnet]="foln~,foln~,foln~,foln~")
   H2A_T=40000; H2J_T=12000; H3_EVALS=6000; TSK=16; H2CK=""
@@ -79,7 +80,8 @@ cohort_model() {
   local C="$D/config.yml"
   export TOST_REAL_ONLY=1 CALIB_SIZE_THR=0 CALIB_SPLIT=train
   # family bias: gdigel (TOST-aligned bias objective) -> best solution -> root refinement
-  gd() { local out=$1; shift; local rs; rs=$(latest "$out" '^gd_state@[0-9]+\.jld2$'); $JL tools/gd_run.jl "$C" "$out" "$@" ${rs:+resume_from=$out/$rs}; }
+  # candidate-parallel evaluation (each candidate sites-serial on its own thread), as the Oct-14 production runs (mogd_full.sh: PAN_PARALLEL=candidate)
+  gd() { local out=$1; shift; local rs; rs=$(latest "$out" '^gd_state@[0-9]+\.jld2$'); PAN_PARALLEL=candidate $JL tools/gd_run.jl "$C" "$out" "$@" ${rs:+resume_from=$out/$rs}; }
   step $m/$r/gd_bias gd "$D/gd_bias" "${GDT[$m]}" $GDMU
   step checks/$m/$r/splits "$PY" -I tools/ncv/verify_splits.py "$R" "$m" "$r"
   step $m/$r/ref_bias bash -c "best=\$($PY -I -c \"import pandas as p; d=p.read_csv('$D/gd_bias/gd_solutions.csv'); print(d.loc[d.total.idxmin(), 'file'])\") && \
@@ -128,6 +130,7 @@ hbad3p() {
            HBAD2_SIGMA=0.15 HBAD2_EVALS=$H3_EVALS && ./julia_gdal.sh --project=. --threads=$THREADS_H3 "$@" ); }
   THREADS_H3=$TH
   step checks/hbad3p/$r/splits "$PY" -I tools/ncv/verify_splits.py "$R" hbad3p "$r"
+  step hbad3p/$r/vdata h3 tools/hbad3/verify3p.jl data
   step hbad3p/$r/fit h3 tools/hbad3/fit3p.jl "$r"
   step hbad3p/$r/recruit h3 tools/hbad3/recruit3p.jl "$r"
   step hbad3p/$r/freerun_val h3 tools/hbad3/freerun3p.jl "$r" val

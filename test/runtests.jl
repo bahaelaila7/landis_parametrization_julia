@@ -17,6 +17,7 @@ using Test, Pan
   @testset "unit_scenario_order" begin include("unit_scenario_order.jl") end
   @testset "unit_loader_errors" begin include("unit_loader_errors.jl") end
   @testset "unit_data_layer" begin include("unit_data_layer.jl") end
+  @testset "unit_split_csv" begin include("unit_split_csv.jl") end
   @testset "unit_search_sa" begin include("unit_search_sa.jl") end
   @testset "unit_hbad2" begin include("unit_hbad2.jl") end
   @testset "unit_hbad2_parity" begin include("unit_hbad2_parity.jl") end

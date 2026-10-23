@@ -12,8 +12,10 @@ import sys, os, re, glob, numpy as np, pandas as pd
 from scipy import stats
 R = sys.argv[1]; ROLES = sys.argv[2].split(',') if len(sys.argv) > 2 else [f'k{k}' for k in range(1, 6)]
 OUT = f'{R}/report'; os.makedirs(OUT, exist_ok=True)
-MARG = [0.05, 0.10, 0.20]; ALPHA = 0.05; B = 2000; MIN_PLOTS = 10   # plot-cluster TOST only for groups with >= MIN_PLOTS test plots
-md = ['# Nested-CV calibration — pooled out-of-fold results', '', f'Root `{R}`; folds {", ".join(ROLES)}. Headline TOST = plot-cluster bootstrap.', '']
+MARG = [0.05, 0.10, 0.20]; ALPHA = 0.05; B = 2000; MIN_PLOTS = 20   # plot-cluster TOST only for groups with >= MIN_PLOTS test plots (a percentile bootstrap is too narrow with few clusters)
+md = ['# Nested-CV calibration — pooled out-of-fold results', '', f'Root `{R}`; folds {", ".join(ROLES)}. Headline TOST = plot-cluster bootstrap.',
+      'Each test pair is predicted by the fold model that never saw it; the pooled numbers estimate the calibration PROCEDURE. The bootstrap resamples test plots',
+      '(pooled over folds); it does not re-fit, so the variability between fold fits is represented only through the folds the resampled plots come from.', '']
 def tost_t(d):
     n = len(d); m = d.mean(); se = d.std(ddof=1) / np.sqrt(n); q = stats.t.ppf(1 - ALPHA, n - 1)
     return m - q * se, m + q * se
@@ -27,7 +29,7 @@ for model in ('bs', 'hbad', 'pnet'):
     for r in ROLES:
         f = f'{R}/{model}/{r}/test_pairs/pairs_cand1.csv'
         if not os.path.exists(f): continue
-        p = pd.read_csv(f); p['fold'] = r; parts.append(p)
+        p = pd.read_csv(f, keep_default_na=False, dtype={'pgrp': str, 'species': str}); p['fold'] = r; parts.append(p)
         src = open(f'{R}/{model}/{r}/cands/selected_val/source.txt').read().strip()
         tv = pd.read_csv(f'{R}/{model}/{r}/cands/tost_select_val.csv').iloc[0]
         tt = pd.read_csv(f'{R}/{model}/{r}/cands/selected_val/tost_select_test.csv').iloc[0]

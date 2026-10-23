@@ -37,6 +37,7 @@ end
     @test d.filter_extent === nothing && d.shade_tier_csv === nothing && d.train_cap === nothing
     @test d.skip_disturbances === true && d.spinup === false && d.by_subplot === false
     @test d.val_frac === 0.0 && d.test_frac === 0.0 && d.split_seed === 42 && d.n_folds === 1 && d.fold_index === 1
+    @test d.split_csv == ""
     @test d.min_trees === 100 && d.min_agb_frac === 0.05
     @test d.stratify_eco_mixed === false && d.single_ecoregion === false && d.stratify_landuse === false && d.site_class_strata === false
     @test d.siteclass_hi_max === 4 && d.siteclass_scheme == "2way"
@@ -44,7 +45,7 @@ end
     @test d.train_cap_k === 1.5 && d.train_cap_min === 20
     # field set is exactly the parametrize data-prep kwargs
     @test Set(keys(d)) == Set([:cohorts_db_path, :filter_eco_field, :eco_field, :tablename, :filter_ecos, :filter_plots, :exclude_plots, :filter_species,
-      :skip_disturbances, :spinup, :by_subplot, :val_frac, :split_seed, :n_folds, :fold_index, :test_frac, :min_trees, :min_agb_frac, :stratify_eco_mixed,
+      :skip_disturbances, :spinup, :by_subplot, :val_frac, :split_seed, :n_folds, :fold_index, :test_frac, :split_csv, :min_trees, :min_agb_frac, :stratify_eco_mixed,
       :single_ecoregion, :stratify_landuse, :site_class_strata, :siteclass_hi_max, :siteclass_scheme, :shade_tier_csv, :filter_extent, :filter_states,
       :siteclass_l3s, :max_exact, :max_group, :drop_phantom, :train_cap, :train_cap_k, :train_cap_min])
   end

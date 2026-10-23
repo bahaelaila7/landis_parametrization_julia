@@ -22,7 +22,8 @@ GA+FL with nested CV, resumable, pipeline double-checked before the long run. Ca
   plots); the HBAD v1 translation STRUCTURE (`PAN_HBAD_FIX_SELECTION` = the deployed `results/hbad/translation_selection.csv`, chosen on the old random
   split's val: the model definition is kept, its coefficients are refit per fold — an automatic re-selection on fold k1 picked a structure the plugin
   does not implement); the stratum of a plot for the train cap (its rarest species, counted over all plots, as the drawn split); shade tolerance /
-  longevity trait tables.
+  longevity trait tables (HBAD v2: a pooled key's longevity is the median over the symbols present in any set, as the prototype); the species-key labels
+  of HBAD3P (keys of species big in TRAIN; a test-only rare species falls into the existing _S / _H key).
 
 ## 2. Calibration per fold
 ### BS, PnET, HBAD v1 (Sim A, cohort AGB): two candidate families, inner val picks
@@ -37,8 +38,10 @@ GA+FL with nested CV, resumable, pipeline double-checked before the long run. Ca
 ### HBAD v2 (tracked trees + free-run stand table)
 v2j recipe per fold: recruitment Poisson fit on train sapling ingrowth → Sim A fit with vigour (`objective: sim_a`, cold start from the data-based
 `init_theta`, i.e. no start fitted on other splits) → joint fit (`objective: joint`, `fb: margins`, λ 0.75, `recruitment: kappa`, mortality frozen at
-the Sim A optimum). The joint scalarisation's ideal/nadir: fA ideal = this fold's Sim A train optimum; the other three = the j15 values scaled by
-this fold's train size (cohorts for fA, Sim B sites for fB). No candidate family → inner val is reported, not used to choose.
+the Sim A optimum). The joint scalarisation's ideal/nadir (`tools/ncv/hbad2_refs.jl`): fA anchored at the start (this fold's Sim A optimum keeps j15's
+normalised start position −0.011, span scaled by the Sim A train cohorts); fB ideal and nadir scaled by the Sim B train sites (a sum of per-site terms; not
+anchored, so a poorer cold start does not move the target; the nadir is raised to the start if the start lies above it). Both rules return j15's ideal /
+nadir exactly on j15's own data (checked). No candidate family → inner val is reported, not used to choose.
 ### HBAD3P (process-grounded; tracked trees)
 Cold start (σ 0.15, 6000 evals, as `P3_APP`) `fit3p` → `recruit3p` → `freerun3p` (val and test).
 
