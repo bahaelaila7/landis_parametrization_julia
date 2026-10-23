@@ -29,13 +29,22 @@ for r in eachrow(st), k in keys_
   push!(rows, (iid=r.site, key=k, set=r.set, dt=r.dt, RD=r.SDI / 600, BAsp=s === nothing ? 0.0 : s.BAsp, nsap=s === nothing ? 0 : s.nsap, y=get(cnt, (r.site, k), 0)))
 end
 d = DataFrame(rows)
-function pois(X, y, off; it=40)
+function pois(X, y, off; it=40, ridge=0.0)
   b = zeros(size(X, 2)); b[1] = log(max(mean(y), 1e-3)) - mean(off)
+  R = ridge * Diagonal([0.0; ones(size(X, 2) - 1)])
   for _ in 1:it
     η = X * b .+ off; μ = exp.(η); z = (η .- off) .+ (y .- μ) ./ μ
-    b = (X' * (μ .* X) + 1e-6I) \ (X' * (μ .* z))
+    b = (X' * (μ .* X) + 1e-6I + R) \ (X' * (μ .* z))
   end
   b
+end
+# a key whose design is degenerate on this train set (e.g. no conspecific tree >= 12.7 cm on any site: constant seed column) makes the IRLS singular or
+# divergent; only then refit with a ridge on the slopes (keys that fit normally are unchanged; every fallback is logged)
+const RIDGE_FALLBACK = String[]
+function pois_safe(X, y, off, label)
+  b = try pois(X, y, off) catch e; e isa LinearAlgebra.SingularException || rethrow(); fill(NaN, size(X, 2)) end
+  (all(isfinite, b) && maximum(abs, b[2:end]; init=0.0) < 50) && return b
+  push!(RIDGE_FALLBACK, label); pois(X, y, off; ridge=1.0)
 end
 dev(X, b, y, off) = (μ = exp.(X * b .+ off); 2sum(@. ifelse(y > 0, y * log(y / μ), 0.0) - (y - μ)))
 specs = [("intercept", r -> [1.0]), ("+seed", r -> [1.0, log1p(r.BAsp)]), ("+light", r -> [1.0, r.RD]), ("+seed+light", r -> [1.0, log1p(r.BAsp), r.RD]),
@@ -48,9 +57,10 @@ for k in keys_
   devs = Float64[]; predv = 0.0
   for (nm, f) in specs
     XT = reduce(vcat, (f(r)' for r in eachrow(T))); XV = reduce(vcat, (f(r)' for r in eachrow(V)))
-    b = pois(XT, Float64.(T.y), offT); push!(devs, dev(XV, b, Float64.(V.y), offV))
+    b = pois_safe(XT, Float64.(T.y), offT, "$k $nm"); push!(devs, dev(XV, b, Float64.(V.y), offV))
     if nm == "+seed+light"; predv = sum(exp.(XV * b .+ offV)); push!(coefs, (key=k, rho0=b[1] + log(SITE_MULT), rhoS=b[2], rhoL=b[3])); end
   end
   @printf("%-8s %6d %8d %8.0f | %s\n", k, nrow(V), sum(V.y), predv, join((@sprintf("%.0f", x) for x in devs), " / "))
 end
+println("ridge fallback (degenerate design on train): ", isempty(RIDGE_FALLBACK) ? "none" : join(RIDGE_FALLBACK, ", "))
 c = DataFrame(coefs); CSV.write(joinpath(R2DIR, SITE_SUB ? "recruitment_coefs_subplot.csv" : "recruitment_coefs.csv"), c); println(c)
