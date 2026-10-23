@@ -58,8 +58,9 @@ function op_simulate(id, req)
    seconds=round(time() - t0; digits=1))
 end
 
-# plots: [{cn, acres, l4?, lon?, lat?}] — l4/lon/lat = AOI location of the plot's pixels (site from location, vegetation from the plot)
-_plots(req) = [(cn=String(p["cn"]), acres=Float64(get(p, "acres", 1.0)), l4=String(something(get(p, "l4", ""), "")),
+# plots: [{cn, acres, l4?, lon?, lat?, cohorts?}] — l4/lon/lat = AOI location of the plot's pixels (site from location, vegetation from the plot);
+# cohorts = [{sym, tph, qmd_cm, ht_m, cr, age}] makes the plot a TreeMap-independent stand (scenario_generative.jl; all plots of a request or none)
+_plots(req) = [(cn=String(p["cn"]), acres=Float64(get(p, "acres", 1.0)), l4=String(something(get(p, "l4", ""), "")), cohorts=get(p, "cohorts", nothing),
                 lon=Float64(something(get(p, "lon", NaN), NaN)), lat=Float64(something(get(p, "lat", NaN), NaN))) for p in req["plots"]]
 
 function handle(id, req)

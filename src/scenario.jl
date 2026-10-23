@@ -220,6 +220,10 @@ the cohorts of its TreeMap donor (same forest type, nearest in BA/QMD/height/TPA
 site class and the PnET soils come from that location instead of from where the FIA plot was measured.
 """
 function load_scenario_units(scen::ScenarioConfig, plots, warnings)
+  if _any_gen(plots)                                          # TreeMap-independent stands with their own cohort tables (scenario_generative.jl)
+    _is_gen(plots) || error("a scenario request cannot mix generative stands (with cohorts) and FIA / TreeMap plots")
+    return gen_units(scen, plots, warnings)
+  end
   info = load_scenario_plots(scen, String[String(x.cn) for x in plots])
   dm = _donor_map(scen)
   need = [r.cn for r in info if r.status == "no_data" && haskey(dm, r.cn)]
@@ -529,7 +533,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
     end
     isempty(msg) || push!(warnings, msg)
     pid = length(meta) + 1
-    push!(meta, (cn=r.cn, plot_id=pid, eco=e, measdate=r.measdate, l4=r.l4, l3=r.l3, lat=r.lat, lon=r.lon, key=r.key))
+    push!(meta, (cn=r.cn, plot_id=pid, eco=e, measdate=r.measdate, l4=r.l4, l3=r.l3, lat=r.lat, lon=r.lon, key=r.key, gen=(hasproperty(r, :gen) ? r.gen : nothing)))
     (hb2 || hb3) && continue          # HBAD2 / HBAD3P start from the trees of the visit (_hbad2_sites / _hbad3p_sites), not from the cohort table
     for c in eachrow(r.cohorts)
       ntot += c.agb
@@ -563,6 +567,7 @@ function run_scenario(ps::ParamSet, plots, plan; climate=nothing, seed::Integer=
     rng = RNGType(UInt64(seed))
     soa = make_sites(splots, [Int.(ids) for ids in p.ECO_SPECIES_IDS]; plugin=PluginConfig(pc), rng=rng, spinup=false,
                      no_establishment=!establishment, site_attrs=attrs)
+    SP === HBADPlugin.HBAD && all(m -> _gen_of(m) !== nothing, meta) && _gen_hbad1_state!(ps, soa, meta)   # HBAD v1: the table's trees/ha, QMD, height
   end
   eco_params = generate_eco_params(pc, p); ctx = make_ctx(pc, eco_params)
   # HBAD3P: the water index of every site for each simulated year, from the request's climate (nothing = W stays at the table's plot normal)
@@ -639,11 +644,16 @@ species_map (else the group key `_S` / `_H`). All sites of a plot carry its plot
 function _hbad2_sites(ps::ParamSet, meta, seed::Integer, no_establishment::Bool, cleanup::Float64, warnings)
   keys_ = String.(ps.params.SPECIES_LIST)
   pc = HBAD2Plugin.with(ps.h2; fixed=HBAD2Plugin.HBAD2Const(vigour=ps.h2.fixed.vigour, cleanup_tph=cleanup))
+  smap = ps.meta.species_map; dflt = Data.default_key_resolver(keys_)
+  resolve = (sym, grp) -> (k = get(smap, uppercase(strip(sym)), ""); isempty(k) ? dflt(sym, grp) : k)
+  if all(m -> _gen_of(m) !== nothing, meta)                        # generative stands: one site per stand from its cohort table
+    tc = Data.tree_cohorts_from_table(keys_, [_gen_of(m) for m in meta]; vigour=pc.fixed.vigour, resolve=resolve)
+    soa = make_sites_hbad2(PluginConfig(pc), tc; rng=RNGType(UInt64(seed)), no_establishment=no_establishment, eco_id=[m.eco for m in meta], mapcode=[m.plot_id for m in meta])
+    return pc, soa
+  end
   vk(m) = (k = parse.(Int, split(m.key, "_")); length(k) == 4 || error("scenario plot key '$(m.key)' is not STATE_UNIT_COUNTY_PLOT"); (k[1], k[2], k[3], k[4], Dates.Date(m.measdate)))
   vis = DataFrame(statecd=Int[], unitcd=Int[], countycd=Int[], plot=Int[], measdate=Dates.Date[])
   for m in meta; push!(vis, vk(m)); end
-  smap = ps.meta.species_map; dflt = Data.default_key_resolver(keys_)
-  resolve = (sym, grp) -> (k = get(smap, uppercase(strip(sym)), ""); isempty(k) ? dflt(sym, grp) : k)
   tc = Data.load_tree_cohorts(ps.scen.fia_db, vis, keys_; vigour=pc.fixed.vigour, resolve=resolve)
   vix = Dict((Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot), Dates.Date(r.measdate)) => v for (v, r) in enumerate(eachrow(tc.visits)))
   idx = Int[]; eco = Int[]; code = Int[]; nempty = 0
@@ -676,10 +686,17 @@ function _hbad3p_sites(ps::ParamSet, meta, seed::Integer, no_establishment::Bool
     error("_hbad3p_sites: every ecoregion cell of an hbad3p roster must list all $(nsp) keys in the global order (eco-local index = key index); this roster does not")
   pc = HBAD3PPlugin.with(ps.h3; fixed=HBAD3PPlugin.HBAD3PConst(vigour=ps.h3.fixed.vigour, cleanup_tph=cleanup))
   vk(m) = (k = parse.(Int, split(m.key, "_")); length(k) == 4 || error("scenario plot key '$(m.key)' is not STATE_UNIT_COUNTY_PLOT"); (k[1], k[2], k[3], k[4], Dates.Date(m.measdate)))
-  vis = DataFrame(statecd=Int[], unitcd=Int[], countycd=Int[], plot=Int[], measdate=Dates.Date[])
-  for m in meta; push!(vis, vk(m)); end
   smap = ps.meta.species_map; dflt = Data.default_key_resolver(keys_)
   resolve = (sym, grp) -> (k = get(smap, uppercase(strip(sym)), ""); isempty(k) ? dflt(sym, grp) : k)
+  if all(m -> _gen_of(m) !== nothing, meta)                        # generative stands: one site per stand from its cohort table (densities per forested ha, area 1)
+    tc = Data.tree_cohorts3p_from_table(keys_, [_gen_of(m) for m in meta]; vigour=pc.fixed.vigour, resolve=resolve)
+    W = fill(ps.h3.wn_median, length(meta))                      # replaced by the location's climate in run_scenario (_hbad3p_water!)
+    soa = make_sites_hbad3p(PluginConfig(pc), tc; rng=RNGType(UInt64(seed)), no_establishment=no_establishment, eco_id=[m.eco for m in meta],
+                            mapcode=[m.plot_id for m in meta], W=W, Wn=W)
+    return pc, soa
+  end
+  vis = DataFrame(statecd=Int[], unitcd=Int[], countycd=Int[], plot=Int[], measdate=Dates.Date[])
+  for m in meta; push!(vis, vk(m)); end
   tc = Data.load_tree_cohorts3p(ps.scen.fia_db, vis, keys_; vigour=pc.fixed.vigour, farea=pc.farea, resolve=resolve)
   pc.farea && !tc.forest_ok && push!(warnings, "HBAD3P: the forested fraction of the subplots could not be read from $(ps.scen.fia_db) (SUBP_COND x COND); stand densities use a = 1 (no forest-area scaling) and every subplot recruits")
   vix = Dict((Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot), Dates.Date(r.measdate)) => v for (v, r) in enumerate(eachrow(tc.visits)))

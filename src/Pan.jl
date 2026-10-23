@@ -90,6 +90,7 @@ include("landis_export.jl")
 include("species_composition.jl")
 include("climate_scenario.jl")
 include("scenario.jl")
+include("scenario_generative.jl")
 include("scenario_site.jl")
 include("scenario_volume.jl")
 end

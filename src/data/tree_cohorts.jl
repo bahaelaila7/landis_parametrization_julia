@@ -137,3 +137,30 @@ function subset_sites(tc::TreeCohorts, idx::AbstractVector{<:Integer})
   end
   return TreeCohorts(tc.keys, tc.visits, tc.site_visit[idx], tc.site_subp[idx], off, key, N, D, H, A, zq, tc.vigour, tc.n_trees)
 end
+
+"""
+    tree_cohorts_from_table(keys, stands; vigour=true, resolve=default_key_resolver(keys)) -> TreeCohorts
+
+TreeMap-independent HBAD2 state: one site per stand from a cohort table (columns sym, grp, tph = trees/ha, qmd_cm, ht_m, age), one cohort per row expanded
+to the 3 vigour sub-cohorts like `load_tree_cohorts` (A = max(age, 1)).
+"""
+function tree_cohorts_from_table(keys::AbstractVector{<:AbstractString}, stands::AbstractVector; vigour::Bool=true, resolve=default_key_resolver(keys))
+  keys_ = String.(keys); kix = Dict(k => Int32(i) for (i, k) in enumerate(keys_)); ns = length(stands)
+  nq = vigour ? length(TREE_VIG_Z) : 1
+  off = Int[1]; ckey = Int32[]; cN = Float64[]; cD = Float64[]; cH = Float64[]; cA = Float64[]; czq = Float64[]; nrows = 0
+  for t in stands
+    for r in eachrow(t)
+      (r.tph > 0 && r.qmd_cm > 0) || continue
+      k = resolve(String(r.sym), String(r.grp))
+      haskey(kix, k) || error("tree_cohorts_from_table: species $(r.sym) resolves to key $(repr(k)), which is not among the keys $(keys_)")
+      nrows += 1
+      for q in 1:nq
+        push!(ckey, kix[k]); push!(cN, Float64(r.tph) * (vigour ? TREE_VIG_W[q] : 1.0)); push!(cD, Float64(r.qmd_cm)); push!(cH, Float64(r.ht_m))
+        push!(cA, max(Float64(r.age), 1.0)); push!(czq, vigour ? TREE_VIG_Z[q] : 0.0)
+      end
+    end
+    push!(off, length(ckey) + 1)
+  end
+  vis = DataFrame(statecd=zeros(Int, ns), unitcd=zeros(Int, ns), countycd=zeros(Int, ns), plot=collect(1:ns), measdate=fill(Dates.Date(2025, 6, 15), ns))
+  return TreeCohorts(keys_, vis, collect(1:ns), ones(Int, ns), off, ckey, cN, cD, cH, cA, czq, vigour, nrows)
+end

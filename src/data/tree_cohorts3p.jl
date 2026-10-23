@@ -191,3 +191,34 @@ function subset_sites(tc::TreeCohorts3P, idx::AbstractVector{<:Integer})
   end
   return TreeCohorts3P(tc.keys, tc.visits, tc.site_visit[idx], tc.site_subp[idx], off, key, N, D, H, A, zq, CR, tc.area[idx], tc.rmult[idx], tc.f[idx], tc.seed[:, idx], tc.vigour, tc.farea, tc.forest_ok, tc.n_trees)
 end
+
+"""
+    tree_cohorts3p_from_table(keys, stands; vigour=true, resolve=default_key_resolver(keys)) -> TreeCohorts3P
+
+TreeMap-independent HBAD3P state: one site per stand from a cohort table (e.g. the generative-vegetation stand cohorts). `stands[i]` = DataFrame with
+columns sym (species symbol or group key `_H` / `_S`), grp ("H" / "S"), tph (trees per forested ha), qmd_cm, ht_m, cr (fraction), age (yr). Each row is one
+cohort (D = qmd_cm, H = max(ht_m, 1.37), A = age, CR = cr, else 0.4), expanded to the vigour nodes like `load_tree_cohorts3p`; area = 1 (densities are
+already per forested ha), recruitment multiplier 1, forested fraction 1; seed = a cohort of the key with QMD >= 12.7 cm in the stand.
+"""
+function tree_cohorts3p_from_table(keys::AbstractVector{<:AbstractString}, stands::AbstractVector; vigour::Bool=true, resolve=default_key_resolver(keys))
+  keys_ = String.(keys); kix = Dict(k => Int32(i) for (i, k) in enumerate(keys_)); nsp = length(keys_); ns = length(stands)
+  nq = vigour ? length(TREE3P_VIG_Z) : 1
+  off = Int[1]; ckey = Int32[]; cN = Float64[]; cD = Float64[]; cH = Float64[]; cA = Float64[]; czq = Float64[]; cCR = Float64[]
+  seed = falses(nsp, ns); nrows = 0
+  for (s, t) in enumerate(stands)
+    for r in eachrow(t)
+      (r.tph > 0 && r.qmd_cm > 0) || continue
+      k = resolve(String(r.sym), String(r.grp))
+      haskey(kix, k) || error("tree_cohorts3p_from_table: species $(r.sym) resolves to key $(repr(k)), which is not among the keys $(keys_)")
+      D = Float64(r.qmd_cm); D >= 12.7 && (seed[kix[k], s] = true); nrows += 1
+      cr = ismissing(r.cr) || !(r.cr > 0) ? 0.4 : Float64(r.cr)
+      for q in 1:nq
+        push!(ckey, kix[k]); push!(cN, Float64(r.tph) * (vigour ? TREE3P_VIG_W[q] : 1.0)); push!(cD, D); push!(cH, max(Float64(r.ht_m), 1.37))
+        push!(cA, max(Float64(r.age), 1.0)); push!(czq, vigour ? TREE3P_VIG_Z[q] : 0.0); push!(cCR, cr)
+      end
+    end
+    push!(off, length(ckey) + 1)
+  end
+  vis = DataFrame(statecd=zeros(Int, ns), unitcd=zeros(Int, ns), countycd=zeros(Int, ns), plot=collect(1:ns), measdate=fill(Dates.Date(2025, 6, 15), ns))
+  return TreeCohorts3P(keys_, vis, collect(1:ns), ones(Int, ns), off, ckey, cN, cD, cH, cA, czq, cCR, ones(ns), ones(ns), ones(ns), seed, vigour, false, false, nrows)
+end
