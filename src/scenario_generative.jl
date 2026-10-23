@@ -77,7 +77,9 @@ _is_gen(plots) = !isempty(plots) && all(x -> hasproperty(x, :cohorts) && x.cohor
 _any_gen(plots) = any(x -> hasproperty(x, :cohorts) && x.cohorts !== nothing, plots)
 
 """HBAD v1 on generative stands: its native state is (trees/ha, QMD, height) per cohort, so after the AGB-driven site build the cohorts take the table's
-values (rows of one eco species and age pooled: trees/ha summed, quadratic-mean QMD, density-weighted height); c_bio = the allometric AGB of that state."""
+values (rows of one eco species and age pooled: trees/ha summed, quadratic-mean QMD, density-weighted height); c_bio = the allometric AGB of that state.
+Symbols that share an eco species (e.g. a catch-all) can leave several site cohorts on one (species, age) key: the pooled trees/ha is shared among them
+by their site-build AGB, so the stand's trees/ha and basal area match the table."""
 function _gen_hbad1_state!(ps::ParamSet, soa, meta)
   pm = Dict(m.plot_id => m for m in meta); nset = 0
   for i in 1:soa.n
@@ -89,9 +91,15 @@ function _gen_hbad1_state!(ps::ParamSet, soa, meta)
       h = isfinite(r.ht_m) ? r.ht_m : 0.0
       acc[k] = (a[1] + r.tph, a[2] + r.tph * r.qmd_cm^2, a[3] + r.tph * h)
     end
+    ckey(c) = (Int(s.c_species[c]), round(Int, Float64(s.c_age[c])))
+    kb = Dict{Tuple{Int,Int},Tuple{Float64,Int}}()                 # key -> (site-build AGB, cohorts) over the site cohorts sharing it
     for c in 1:Int(s.live)
-      v = get(acc, (Int(s.c_species[c]), round(Int, Float64(s.c_age[c]))), nothing); v === nothing && continue
-      tph, dq = v[1], sqrt(v[2] / v[1]); h = v[3] / v[1]
+      b = get(kb, ckey(c), (0.0, 0)); kb[ckey(c)] = (b[1] + max(Float64(s.c_bio[c]), 0.0), b[2] + 1)
+    end
+    for c in 1:Int(s.live)
+      v = get(acc, ckey(c), nothing); v === nothing && continue
+      b = kb[ckey(c)]; f = b[1] > 0 ? max(Float64(s.c_bio[c]), 0.0) / b[1] : 1.0 / b[2]
+      tph, dq = f * v[1], sqrt(v[2] / v[1]); h = v[3] / v[1]
       pr = ps.hb.priors.sp[_gsp(ps, s.eco_id, s.c_species[c])]
       s.c_tph[c] = FloatType(tph); s.c_dq[c] = FloatType(dq); h > 1.3 && (s.c_h[c] = FloatType(h))
       s.c_bio[c] = FloatType(tph * HBADPlugin.mean_tree_lb(pr, dq) * 453.592 / 10000); nset += 1

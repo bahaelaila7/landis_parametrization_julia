@@ -11,7 +11,9 @@ if !isfile(SCEN.fia_db)
 else
   coh = [Dict("sym" => "PITA", "age" => 25.0, "tph" => 600.0, "qmd_cm" => 20.0, "ht_m" => 18.0, "cr" => 0.4),
          Dict("sym" => "QUNI", "age" => 15.0, "tph" => 300.0, "qmd_cm" => 12.0, "ht_m" => 11.0, "cr" => 0.5),
-         Dict("sym" => "_H", "age" => 35.0, "tph" => 100.0, "qmd_cm" => 25.0, "ht_m" => 19.0, "cr" => 0.35)]
+         Dict("sym" => "_H", "age" => 35.0, "tph" => 100.0, "qmd_cm" => 25.0, "ht_m" => 19.0, "cr" => 0.35),
+         Dict("sym" => "ACNI5", "age" => 35.0, "tph" => 40.0, "qmd_cm" => 30.0, "ht_m" => 21.0, "cr" => 0.35),   # unmapped: shares _H's catch-all (one key, two site cohorts)
+         Dict("sym" => "_S", "age" => 45.0, "tph" => 30.0, "qmd_cm" => 28.0, "ht_m" => 20.0, "cr" => 0.3)]
   # the worker's own record format (tools/pan_worker.jl _plots): Baker Co. FL, EPA L4 8.5.3.75e
   plots = [(cn="gen:1", acres=12.0, l4="8.5.3.75e", cohorts=coh, lon=-82.31, lat=30.34),
            (cn="gen:2", acres=5.0, l4="8.5.3.75e", cohorts=Any[], lon=-82.30, lat=30.35)]           # a bare stand: regeneration only
@@ -35,6 +37,10 @@ else
         @test 0.5 * ba_in < m0.ba < 1.5 * ba_in
       end
       @test any(occursin("generative stand cohorts", x) for x in w)
+      if plug in ("biomass", "pnet", "hbad")                                 # the softwood group key goes to a softwood catch-all, not the hardwood one
+        e = P.scenario_eco(ps, "8.5.3", 0)[1]
+        @test P.scenario_species(ps, e, "_S") != P.scenario_species(ps, e, "_H") && P.scenario_species(ps, e, "ACNI5") == P.scenario_species(ps, e, "_H")
+      end
       r2, _ = P.run_scenario(ps, plots, plan; seed=2)
       @test [m.ba for m in r2["gen:1"].metrics] == [m.ba for m in r["gen:1"].metrics]
       @test_throws ErrorException P.run_scenario(ps, [plots[1], (cn="20344681010478", acres=1.0, l4="", cohorts=nothing, lon=NaN, lat=NaN)], plan)

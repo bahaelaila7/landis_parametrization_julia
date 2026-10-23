@@ -286,8 +286,10 @@ function scenario_species(ps::ParamSet, eco::Int, sym::AbstractString)
   t = get(ps.meta.species_map, uppercase(String(sym)), "")
   g = get(ps.sp_index, t, 0)
   g > 0 && (j = get(ps.local_index[eco], g, 0); j > 0 && return j)
-  # the target is not present in this eco cell: fall back to a catch-all that is
-  for alt in ("_H_HST", "_H_LST", "_H_NA", "_H", "_S_LST", "_S_HST", "_S_NA", "_S")
+  # the target is not present in this eco cell: fall back to a catch-all that is (a softwood group key, e.g. the generative stands' `_S`, softwoods first)
+  alts = startswith(uppercase(String(sym)), "_S") ? ("_S_LST", "_S_HST", "_S_NA", "_S", "_H_HST", "_H_LST", "_H_NA", "_H") :
+                                                    ("_H_HST", "_H_LST", "_H_NA", "_H", "_S_LST", "_S_HST", "_S_NA", "_S")
+  for alt in alts
     g = get(ps.sp_index, alt, 0); g == 0 && continue
     j = get(ps.local_index[eco], g, 0); j > 0 && return j
   end
