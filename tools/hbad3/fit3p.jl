@@ -100,6 +100,10 @@ save(res.x)
 pt = obj(res.x, TRc); pv = obj(res.x, VAc)
 lg(@sprintf("FIT   train %.1f (mort %.1f D %.1f H %.1f) | VAL %.1f (mort %.1f D %.1f H %.1f σD %.4f σH %.4f) | evals %d", pt.total, pt.mort, pt.D, pt.H, pv.total, pv.mort, pv.D, pv.H, pv.sigD, pv.sigH, res.evals))
 lg(@sprintf("GAIN over null: train %.1f | val %.1f; val gain per tracked tree %.4f", NULLT - pt.total, NULLV - pv.total, (NULLV - pv.total) / pv.ntrees))
+if any(==("test"), tr.set)   # nested CV: the outer test fold, scored once after the fit (report only)
+  TEc = sima_sites(tr, "test", keys_, wp, IFOR); NULLE = null_parts(TEc, surv); pe = obj(res.x, TEc)
+  lg(@sprintf("TEST  %.1f (mort %.1f D %.1f H %.1f) | NULL %.1f | gain %.1f; test gain per tracked tree %.4f", pe.total, pe.mort, pe.D, pe.H, NULLE, NULLE - pe.total, (NULLE - pe.total) / pe.ntrees))
+end
 P, G = params(res.x); lg(string(G))
 atb = [String(GSPEC[j][1]) for j in gfree if (v = getfield(G, GSPEC[j][1]); isapprox(v, GSPEC[j][3]; atol=1e-9, rtol=1e-6) || isapprox(v, GSPEC[j][4]; atol=1e-9, rtol=1e-6))]
 append!(atb, [keys_[k] * ":ε" for k in 1:nsp if res.x[k] <= -7.999 || res.x[k] >= 5.999])   # ε clamp in params(): [−8, 6]

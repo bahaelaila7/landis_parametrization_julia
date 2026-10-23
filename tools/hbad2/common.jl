@@ -2,7 +2,7 @@
 using Arrow, DataFrames, CSV, Statistics, Printf, Dates, Random, LinearAlgebra
 using Distributions: Normal, cdf
 include(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD2", "HBAD2.jl")); using .HBAD2
-const R2DIR = joinpath(@__DIR__, "..", "..", "results", "hbad2")
+const R2DIR = get(ENV, "HBAD2_R2DIR", joinpath(@__DIR__, "..", "..", "results", "hbad2"))   # HBAD2_R2DIR: another product / output dir (nested CV)
 const BIRTH_W = parse(Int, get(ENV, "HBAD2_BIRTH_W", "10"))      # cohort = (plot, species key, birth-year class of this width)
 const MIN_SP_TREES = parse(Int, get(ENV, "HBAD2_MIN_SP_TREES", "3000"))
 # optional split of a birth-year class by initial diameter class (cm breaks), e.g. "5,12.7,25,40": sub-cohorts of one age class that
