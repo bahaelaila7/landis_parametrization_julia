@@ -59,6 +59,7 @@ const SCHEMA_LIST = KeySpec[
   KeySpec("val_frac", :float, 0.0, "validation fraction of the single split"),
   KeySpec("test_frac", :float, 0.0, "held-out test fraction (>0 gives a 3-way split; exclusive with n_folds>1)"),
   KeySpec("split_seed", :int, 42, "seed of the split shuffle (shared by all folds)"),
+  KeySpec("split_csv", :path, "", "split file (statecd, unitcd, countycd, plot, set = train | val | test) fixing every plot's set, e.g. one role of a nested CV (tools/ncv); exclusive with val_frac / test_frac / n_folds > 1; train_cap applies inside train, its surplus goes to val"),
   KeySpec("n_folds", :int, 1, "k-fold CV folds (each fold writes to output_dir/fold_<i>)"),
   KeySpec("fold_index", :int, 1, "which fold this run trains on"),
   KeySpec("stratify_eco_mixed", :bool, false, "stratify the split on mixed-ecoregion plots"),

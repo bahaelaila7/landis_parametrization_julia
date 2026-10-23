@@ -153,6 +153,16 @@ function main()
         sicoef_keep[tg] = m1 < 0.99 * m0
         @info "SI add-on" tg m_noSI=round(m0, digits=3) m_SI=round(m1, digits=3) keep=sicoef_keep[tg]
     end
+    # PAN_HBAD_FIX_SELECTION=<translation_selection.csv> (nested CV, tools/ncv): keep that model STRUCTURE (target variants, their SI add-ons as present
+    # in the translation_coefs.csv next to it, structure, mass relation, H models) and refit only the coefficients; the automatic choices are still
+    # logged for information. Without it the choices are made on val as below.
+    FIX = get(ENV, "PAN_HBAD_FIX_SELECTION", "")
+    if !isempty(FIX)
+        fsel = Dict(String(r.item) => String(r.choice) for r in eachrow(CSV.read(FIX, DataFrame)))
+        fmods = Set(String.(CSV.read(joinpath(dirname(FIX), "translation_coefs.csv"), DataFrame).model))
+        @info "automatic variant choices (information only; fixed from $(FIX))" choice sicoef_keep
+        for tg in ["tpa", "qmd", "ba", "h"]; choice[tg] = fsel["v_" * tg]; sicoef_keep[tg] = (tg * "_" * fsel["v_" * tg] * "si") in fmods; end
+    end
     # (2) structure + mass relation + H model, chosen on val with chosen variants
     for tg in ["tpa","qmd","ba","h"]; sel["v_" * tg] = choice[tg]; end; sel["hmodel"] = "dir"
     # drop SI variants of targets for which they did not help (so lib ignores them)
@@ -199,6 +209,10 @@ function main()
     else
         sel["hmodel_si"] = replace(bestsi, "+SI" => "")
     end
+    if !isempty(FIX)
+        @info "automatic structure / H choices (information only)" sel
+        for (k, v) in fsel; sel[k] = v; end
+    end
     # prune coefficient sets that the final selection does not use
     used = Set(["tree", "mq", "hcr", "hdom"])
     for tg in ["tpa", "qmd", "ba", "h"]
@@ -230,6 +244,7 @@ function main()
     ## ---------- final metrics (full val & test; with and without SI/planted info) ----------
     mrows = NamedTuple[]
     function add_metrics!(setname, df, p, grpname, variant)
+        nrow(df) == 0 && return          # e.g. no test plots (the final fit of a nested CV)
         for (v, (rr, md)) in metr(df, p)
             push!(mrows, (set=setname, subset=grpname, variant=variant, n=nrow(df), var=v, r2_log=rr, mdape_pct=md))
         end

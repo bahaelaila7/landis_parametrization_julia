@@ -2,8 +2,8 @@
 # Read-only: attaches slim_r4.duckdb READ_ONLY and reads the GA+FL train/val/test split.
 using DuckDB, DataFrames, CSV, Statistics, Arrow, LinearAlgebra, Random, Dates
 
-const HBAD_DB    = "/workspace/landis_region4/data_r4/slim_r4.duckdb"
-const HBAD_SPLIT = "/workspace/landis_region4/runs_local/gaflst_split/split_plots.csv"
+const HBAD_DB    = get(ENV, "PAN_HBAD_DB", "/workspace/landis_region4/data_r4/slim_r4.duckdb")
+const HBAD_SPLIT = get(ENV, "PAN_HBAD_SPLIT", "/workspace/landis_region4/runs_local/gaflst_split/split_plots.csv")   # PAN_HBAD_SPLIT=<split file>: e.g. a nested-CV role (tools/ncv)
 const HBAD_OUT   = get(ENV, "PAN_HBAD_OUT", joinpath(@__DIR__, "..", "results", "hbad"))   # PAN_HBAD_OUT=<dir>: write the outputs elsewhere (the tracked results/hbad is what the HBAD plugin reads)
 const LB   = 453.592 / 4046.86         # lb/acre -> g/m2 (Pan's unit factor)
 const ACRE2HA = 2.47105                # trees/acre -> trees/ha
@@ -19,7 +19,7 @@ function hbad_connect()
     app = DuckDB.Appender(con, "sp")
     for r in eachrow(sp)
         DuckDB.append(app, r.statecd); DuckDB.append(app, r.unitcd); DuckDB.append(app, r.countycd); DuckDB.append(app, r.plot)
-        DuckDB.append(app, String(r.eco)); DuckDB.append(app, String(r.set)); DuckDB.append(app, String(r.dom))
+        DuckDB.append(app, String(coalesce(get(r, :eco, ""), ""))); DuckDB.append(app, String(r.set)); DuckDB.append(app, String(coalesce(get(r, :dom, ""), "")))
         DuckDB.end_row(app)
     end
     DuckDB.close(app)

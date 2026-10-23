@@ -26,6 +26,7 @@ function _cfg_data_inputs(cfg0::AbstractDict)
     n_folds=cfg["n_folds"],
     fold_index=cfg["fold_index"],
     test_frac=cfg["test_frac"],
+    split_csv=cfg["split_csv"],
     min_trees=cfg["min_trees"],
     min_agb_frac=cfg["min_agb_frac"],
     stratify_eco_mixed=cfg["stratify_eco_mixed"],

@@ -93,6 +93,11 @@ function main()
     shr_g = combine(groupby(T[T.ge5, :], [:pv, :grp]), :ba_ha => sum => :ba)
     shr_g.share = shr_g.ba ./ pv_ba5[shr_g.pv]; shr_g.n5 = pv_n5[shr_g.pv]
     pv_set = combine(groupby(T, :pv), :set => first => :set).set
+    # PAN_HBAD_TRAIN_ONLY=1 (nested CV, tools/ncv): the "all" SDImax statistics (the plugin's SDIMAX default / range, the HBAD2 start) and everything built on
+    # them (the relative density of the mortality fit, the Reineke slope) use TRAIN plot-visits only, so no val / test stand enters a prior.
+    TRAIN_ONLY = get(ENV, "PAN_HBAD_TRAIN_ONLY", "0") == "1"
+    pv_use = TRAIN_ONLY ? (pv_set .== "train") : trues(npv)
+    TRAIN_ONLY && @info "PAN_HBAD_TRAIN_ONLY: SDImax statistics from $(count(pv_use)) train plot-visits of $(npv)"
     pv_plot = combine(groupby(T, :pv), :plot => first => :plot, :statecd => first => :statecd).plot
     P = Dict{String,Dict{String,Any}}()
     allkeys = vcat(top, ["_S", "_H", "_ALL"])
@@ -104,14 +109,14 @@ function main()
         P[k]["sdimax_nvisits_$setname"] = length(v)
     end
     for k in top
-        sub = shr[(shr.key .== k) .& (shr.share .>= 0.6) .& (shr.n5 .>= 5), :]
+        sub = shr[(shr.key .== k) .& (shr.share .>= 0.6) .& (shr.n5 .>= 5) .& pv_use[shr.pv], :]
         length(sub.pv) >= 20 && (sdistats!(k, sub.pv, "all"); sdistats!(k, sub.pv[pv_set[sub.pv] .== "train"], "train"))
     end
     for g in ["S", "H"]
-        sub = shr_g[(shr_g.grp .== g) .& (shr_g.share .>= 0.8) .& (shr_g.n5 .>= 5), :]
+        sub = shr_g[(shr_g.grp .== g) .& (shr_g.share .>= 0.8) .& (shr_g.n5 .>= 5) .& pv_use[shr_g.pv], :]
         sdistats!("_" * g, sub.pv, "all"); sdistats!("_" * g, sub.pv[pv_set[sub.pv] .== "train"], "train")
     end
-    ok = findall(pv_n5 .>= 5); sdistats!("_ALL", ok, "all"); sdistats!("_ALL", ok[pv_set[ok] .== "train"], "train")
+    ok = findall((pv_n5 .>= 5) .& pv_use); sdistats!("_ALL", ok, "all"); sdistats!("_ALL", ok[pv_set[ok] .== "train"], "train")
     for k in top
         haskey(P[k], "sdimax_p95_all") || (for c in ["p90","p95","p99","max"]; P[k]["sdimax_$(c)_all"] = P["_" * (grp_of[k] == "S" ? "S" : "H")]["sdimax_$(c)_all"]; end;
                                          P[k]["sdimax_nvisits_all"] = 0; P[k]["sdimax_fallback"] = "group")

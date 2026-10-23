@@ -222,6 +222,7 @@ Base.@kwdef struct DataConfig
   n_folds::Int = 1
   fold_index::Int = 1
   split_seed::Int = 42
+  split_csv::String = ""
   train_cap::Union{Nothing,Int,String} = nothing
   train_cap_k::Float64 = 1.5
   train_cap_min::Int = 20
@@ -244,7 +245,7 @@ with_data(dc::DataConfig; kw...) = DataConfig(; (k => getfield(dc, k) for k in f
 
 # The split RNG type (== Pan.RNGType, checked in test/unit_data_layer.jl); seeded from `split_seed` alone so all folds share the shuffle.
 const SPLIT_RNG = Random.Xoshiro
-split_active(dc::DataConfig) = dc.val_frac > 0.0 || dc.n_folds > 1 || dc.test_frac > 0.0
+split_active(dc::DataConfig) = dc.val_frac > 0.0 || dc.n_folds > 1 || dc.test_frac > 0.0 || !isempty(dc.split_csv)
 
 # The checks that used to be silent (or late, deep in the split code), done once up front.
 function validate_data_config(dc::DataConfig)
@@ -256,6 +257,11 @@ function validate_data_config(dc::DataConfig)
   1 <= dc.fold_index <= dc.n_folds || error("fold_index $(dc.fold_index) is outside 1..n_folds ($(dc.n_folds))")
   dc.test_frac > 0.0 && dc.n_folds > 1 && error("test_frac>0 (3-way train/val/test split) is incompatible with n_folds>1 (cross-validation) — pick one")
   dc.train_cap !== nothing && dc.n_folds > 1 && error("train_cap (species-balanced training set) is not supported with n_folds>1 cross-validation")
+  if !isempty(dc.split_csv)
+    isfile(dc.split_csv) || error("split_csv not found: $(dc.split_csv)")
+    (dc.val_frac == 0.0 && dc.test_frac == 0.0 && dc.n_folds == 1) || error("split_csv fixes the split: val_frac, test_frac must be 0 and n_folds 1 (got $(dc.val_frac), $(dc.test_frac), $(dc.n_folds))")
+    dc.by_subplot && error("split_csv assigns whole plots: by_subplot=true is not supported")
+  end
   dc.train_cap isa AbstractString && dc.train_cap != "auto" && error("train_cap must be an integer or \"auto\", got $(repr(dc.train_cap))")
   dc.max_exact >= 0 && dc.max_group >= 0 || error("max_exact / max_group must be >= 0")
   dc.min_trees >= 0 || error("min_trees must be >= 0")
@@ -456,6 +462,47 @@ function _stratified_split_df(df::DataFrame, id_cols::Vector{Symbol},
   return df_train, df_val, df_test, split_dom
 end
 
+"""
+    _split_from_csv(df, id_cols, path, rng; train_cap, train_cap_k, train_cap_min, on_missing) -> (df_train, df_val, df_test, split_dom)
+
+The split of `_stratified_split_df` with every plot's set read from `path` (`read_split_plots`: statecd, unitcd, countycd, plot, set) instead of drawn:
+one role of a nested CV (tools/ncv). Plots of the cohort table that the file does not list are dropped (`on_missing`). The species-balanced train cap
+(`train_cap`) ranks each (eco × rarest species) stratum's train plots by a seeded shuffle (`rng`, as the drawn split) and moves its surplus to VAL only, so the
+test plots stay exactly the file's. `df_test` is `nothing` when the file has no test plot (e.g. the final fit of a nested CV).
+"""
+function _split_from_csv(df::DataFrame, id_cols::Vector{Symbol}, path::AbstractString, rng::Random.AbstractRNG;
+  train_cap::Union{Nothing,Int,String}=nothing, train_cap_k::Float64=1.5, train_cap_min::Int=20, on_missing::Symbol=:warn)
+  id_cols == [:statecd, :unitcd, :countycd, :plot] || error("split_csv assigns whole plots (id_cols $(id_cols))")
+  sp = read_split_plots(path)
+  nrow(unique(sp[:, id_cols])) == nrow(sp) || error("split_csv $(path): a plot is listed more than once")
+  setof = Dict((r.statecd, r.unitcd, r.countycd, r.plot) => r.set for r in eachrow(sp))
+  pkey(r) = (Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot))
+  site_sp = unique(select(df, vcat(id_cols, [:eco_id, :effective_species])))
+  sp_count = Dict(r.effective_species => r.n_sites for r in eachrow(combine(groupby(site_sp, :effective_species), nrow => :n_sites)))
+  site_strata = combine(groupby(site_sp, id_cols)) do rows
+    idx = argmin(i -> (get(sp_count, rows.effective_species[i], typemax(Int)), rows.effective_species[i]), 1:nrow(rows))
+    (; stratum=(rows.eco_id[1], rows.effective_species[idx]))
+  end
+  sort!(site_strata, id_cols)
+  site_strata.set = [get(setof, pkey(r), "") for r in eachrow(site_strata)]
+  nmiss = count(isempty, site_strata.set)
+  nmiss > 0 && _note_missing(on_missing, "plots of the cohort table absent from split_csv $(basename(path)) (dropped)", ["$(nmiss) of $(nrow(site_strata)) plots"])
+  site_strata = site_strata[.!isempty.(site_strata.set), :]
+  three_way = any(==("test"), site_strata.set)
+  parts = [(g[g.set .== "val", id_cols], g[g.set .== "test", id_cols], (t = g[g.set .== "train", id_cols]; t[Random.shuffle(rng, 1:nrow(t)), :]))
+           for g in groupby(site_strata, :stratum)]
+  val_sites = vcat([p[1] for p in parts]...); test_sites = vcat([p[2] for p in parts]...); train_sites = vcat([p[3] for p in parts]...)
+  split_dom = nothing
+  if train_cap !== nothing
+    sv, _, split_dom = _cap_train_sites(df, id_cols, parts, false; train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min)
+    val_sites = vcat(val_sites, sv); train_sites = antijoin(train_sites, sv, on=id_cols)
+  end
+  @info "Split" mode = "split_csv" file = basename(path) n_train = nrow(train_sites) n_val = nrow(val_sites) n_test = nrow(test_sites) n_dropped = nmiss
+  df_train = semijoin(df, train_sites, on=id_cols); df_val = semijoin(df, val_sites, on=id_cols)
+  df_test = three_way ? semijoin(df, test_sites, on=id_cols) : nothing
+  return df_train, df_val, df_test, split_dom
+end
+
 # Tag each plot with :mixed_plot over its entire (loaded) history. true = mixed stand:
 # neither hardwood nor softwood makes up more than `threshold` of the plot's aggregate
 # biomass. false = one type dominates (≥ threshold). Returns df with the :mixed_plot column.
@@ -573,7 +620,9 @@ function make_splots(df::DataFrame, dc::DataConfig; split_rng::Union{Nothing,Ran
   do_split && isnothing(split_rng) && error("make_splots: a split is requested (val_frac/test_frac/n_folds) but no split RNG was given")   # used to skip the split silently
   train_cap !== nothing && !do_split &&
     @warn "train_cap=$(train_cap) is IGNORED: no train/val/test split is active (set val_frac/test_frac)"
-  df_train, df_val_raw, df_test_raw, split_dom = do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
+  df_train, df_val_raw, df_test_raw, split_dom = !isempty(dc.split_csv) ?
+                         _split_from_csv(df, id_cols, dc.split_csv, split_rng; train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min, on_missing=dc.on_missing) :
+                         do_split ? _stratified_split_df(df, id_cols, val_frac, split_rng; n_folds=n_folds, fold_index=fold_index, test_frac=test_frac,
                            train_cap=train_cap, train_cap_k=train_cap_k, train_cap_min=train_cap_min) :
                          (df, nothing, nothing, nothing)
 

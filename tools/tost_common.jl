@@ -145,14 +145,14 @@ function group_stats(pr, margins)
   if SIMB
     for (s, gp) in sort(unique([(r.sp, r.pgrp) for r in eachrow(pr)]))
       d = DF.subset(pr, [:sp, :pgrp] => DF.ByRow((a, b) -> a == s && b == gp)); length(unique(d.plot_id)) < 3 && continue
-      br = boot_ratio(d, margins); out[label(s, gp)] = (s=s, gp=gp, n=br.n, mean=br.mean, tests=br.tests)
+      br = boot_ratio(d, margins); out[label(s, gp)] = (s=s, gp=gp, n=br.n, mean=br.mean, mabs=NaN, tests=br.tests)
     end
     return out
   end
   for (s, gp) in sort(unique([(r.sp, r.pgrp) for r in eachrow(pr)]))
     d = DF.subset(pr, [:sp, :pgrp] => DF.ByRow((a, b) -> a == s && b == gp)); DF.nrow(d) < 3 && continue
     dd = log1p.(Float64.(d.sim_agb)) .- log1p.(Float64.(d.obs_agb))
-    out[label(s, gp)] = (s=s, gp=gp, n=length(dd), mean=Statistics.mean(dd), tests=[tost(dd, log1p(m)) for m in margins])
+    out[label(s, gp)] = (s=s, gp=gp, n=length(dd), mean=Statistics.mean(dd), mabs=Statistics.mean(abs.(dd)), tests=[tost(dd, log1p(m)) for m in margins])
   end
   out
 end
