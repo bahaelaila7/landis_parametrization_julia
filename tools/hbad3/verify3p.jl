@@ -167,7 +167,7 @@ if MODE == "model"; let
     X = (K=repeat(1:nsp, length(sites)), Y=zeros(nsp * length(sites)), fm=repeat(fm; inner=nsp), site=repeat(1:length(sites); inner=nsp), ex=ex, μ=zeros(nsp * length(sites)))
     μ = recr_mu!(zeros(length(X.K)), zr, X, M.ST)
     # the same sites through run_free! (real recruitment, merging into RCLASS slots, recruits' own competition)
-    nq = length(VQ_Z); off = [1]; for st in sites; push!(off, off[end] + length(st.coh.N) + nq * nsp * 4); end
+    nq = length(VQ_Z); off = [1]; for st in sites; push!(off, off[end] + length(st.coh.N) + nq * nsp * (ceil(Int, (st.nyr + st.frac) / HBAD3P.RCLASS) + 1)); end   # slots as freerun (lib3p): intervals > 20 yr need > 4 recruit classes
     n = off[end] - 1; spv = zeros(Int32, n); Nv = zeros(n); Dv = fill(2.54, n); Hv = fill(1.37, n); Av = zeros(n); zv = zeros(n); CRv = fill(0.4, n)
     for (s, st) in enumerate(sites); r = off[s]:off[s]+length(st.coh.N)-1; spv[r] .= st.coh.sp; Nv[r] .= st.coh.N; Dv[r] .= st.coh.D; Hv[r] .= st.coh.H; Av[r] .= st.coh.A; zv[r] .= st.coh.zq; CRv[r] .= st.coh.CR; end
     ns = length(sites); HBAD3P.set_quadrature!(VQ_Z, VQ_W)
