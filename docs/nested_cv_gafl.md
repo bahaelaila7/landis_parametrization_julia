@@ -66,3 +66,17 @@ runs from a snapshot copy, so editing `campaign.sh` during a campaign is safe (i
 2. Smoke campaign (`NCV_SMOKE=1`: tiny budgets) through EVERY step of all five models for role k1 and final, including an interrupted-and-resumed step.
 3. `tools/ncv/verify_splits.jl`: the train / val / test plots each model actually loaded (its `split_plots.csv` / interval sets) equal the role file.
 4. Independent review of the driver and code changes; findings verified before launch.
+
+## 6. Species-level MO experiment (BS, role k1; user request 2026-10-24)
+Tools: `tools/ncv/slmo_bs.sh` (21 sets: per-group minimize refinement at λ 0…1 from the role's three MO picks), `slmo_pool.sh` (mixed pool: + the 8
+production candidates), `slmo_assemble.jl`, `slmo_surface.py`, and the corrected selection `slmo_select.sh` (v2). The first selections (summary.md of
+`runs_local/ncv_slmo/bs_k1{,_pool}`) were flawed (review 2026-10-24): the assembled-vs-best-single decision used the same val as the per-group choices
+(circular, optimistic), and tiered species (PITA, PIEL) mixed candidates while D is species-level. v2 (`…/v2/summary.md`): per-group choices on val
+half A, decision on val half B (0.25° blocks, seeded), species-tied D.
+| k1 test, ±5/10/20 % of 46 | mean abs log ratio | v2 decision on half B |
+|---|---|---|
+| production selection (bias family): 3 / 18 / 32 | 0.462 | — |
+| mixed pool, per-species assembly: 1 / 17 / 30 | 0.447 | best single (= production set) chosen |
+| MO sweep only, per-species assembly: 1 / 15 / 26 | 0.455 | assembly chosen |
+Per-species selection does not add TOST-equivalent groups on held-out data; it trades bias for a little accuracy. The surface (surface.png) shows a
+real but weak per-species A–W trade-off: accuracy moves 10–50 %, W 2–5 %.

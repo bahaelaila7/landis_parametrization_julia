@@ -15,8 +15,9 @@ for k, nm in enumerate(names, start=1):
     rr = sorted(glob.glob(f'{X}/{nm}/round*_groups.csv'), key=lambda f: int(re.search(r'round(\d+)_', os.path.basename(f)).group(1)))
     g = pd.read_csv(rr[-1], keep_default_na=False, na_values=['NaN']); g['label'] = g.group.str.replace(r'@.*$', '', regex=True)
     g = g[g.n > 0]
-    agg = g.groupby('label').apply(lambda d: pd.Series(dict(n_train=d.n.sum(), a_train=np.average(d.a, weights=d.n),
-                                                            w_train=np.average(d.w.fillna(0), weights=d.n))), include_groups=False).reset_index()
+    def wavg(v, n):   # NaN-aware pair-weighted mean (a sub-group without pairs / without a W value does not count; review 2026-10-24)
+        ok = v.notna() & (n > 0); return np.average(v[ok], weights=n[ok]) if ok.any() else np.nan
+    agg = g.groupby('label').apply(lambda d: pd.Series(dict(n_train=d.n.sum(), a_train=wavg(d.a, d.n), w_train=wavg(d.w, d.n))), include_groups=False).reset_index()
     agg['cand'] = k; agg['set'] = nm; agg['start'] = start; agg['lam'] = lam; rows.append(agg)
 S = pd.concat(rows, ignore_index=True)
 V = pd.read_csv(f'{X}/cands/tost_select_val_groups.csv', keep_default_na=False)
@@ -42,8 +43,8 @@ for ax in list(axs.flat)[len(labs):]: ax.axis('off')
 fig.supxlabel('train accuracy a = mean |log ratio| (lower better)'); fig.supylabel('train age-structure W1 (lower better)')
 cb = fig.colorbar(sc, ax=axs, shrink=0.4, label='λ (1 = accuracy only)'); fig.suptitle(f'Species-level trade-off ({os.path.basename(X)}): o min_A, ■ knee, ▲ min_W start; red = chosen on val', fontsize=10)
 fig.savefig(f'{X}/surface.png', dpi=110, bbox_inches='tight')
-md = [f'# Species-level MO experiment — {os.path.basename(X)}', '', f'{len(names)} sweep sets (3 starts × λ grid), {len(labs)} groups; per-group choice on val assembled from '
-      f'{ch.file.nunique()} sets.', '']
+md = [f'# Species-level MO experiment — {os.path.basename(X)}', '', f'{len(names)} sweep sets (3 starts × λ grid), {V.label.nunique()} val groups ({len(labs)} with train values); per-group choice on val assembled from '
+      f'{ch.file.nunique()} sets. NOTE: this first-run val comparison is circular (choices made on the same val) and D was not species-tied — see v2/summary.md.', '']
 for split, f in (('val (decides: assembled vs best single)', f'{X}/final/val/tost_select_val.csv'), ('test (report; c = production selection, comparison only)', f'{X}/final/test/tost_select_test.csv')):
     if os.path.exists(f):
         t = pd.read_csv(f); nm = {1: 'a_assembled', 2: 'b_best_single', 3: 'c_production'}
