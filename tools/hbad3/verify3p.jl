@@ -98,7 +98,7 @@ if MODE == "model"; let
       for i in 1:n; SD[i] > 0 && (N[i] *= 1 - min(SD[i], ex * w[i] / ws) / SD[i]); end
     end
   end
-  rng = Xoshiro(7); maxd = 0.0; nst = 0
+  rng = Xoshiro(7); maxd = 0.0; maxdN = 0.0; nst = 0
   for trial in 1:300
     n = rand(rng, 1:9); sp = rand(rng, 1:nsp, n); D = 2.54 .+ 60rand(rng, n); H = [rand(rng) < 0.3 && i > 1 ? 0.0 : 1.4 + 35rand(rng) for i in 1:n]
     for i in 2:n; H[i] == 0.0 && (H[i] = H[i-1]); end                              # ties
@@ -109,11 +109,13 @@ if MODE == "model"; let
     HBAD3P.step_site!(S, P, Gt, 1, n, Δ, pl, Wv, Wn)
     Nr, Dr, Hr, Ar, CRr = copy(N), copy(D), copy(H), copy(A), copy(CR); ref_step!(Nr, Dr, Hr, Ar, CRr, z, sp, P, Gt, Δ, pl, Wv, Wn)
     nst += sum(N .* (D ./ 25.4) .^ 1.605) > G.sdimax
-    dN = maximum(abs.(S.N .- Nr) ./ max.(Nr, 1e-6));   # densities below 1e-6 trees/ha (extinct cohorts of perturbed globals) compared absolutely dD_ = maximum(abs.(S.D .- Dr) ./ max.(abs.(Dr), 1)); dH_ = maximum(abs.(S.H .- Hr) ./ max.(abs.(Hr), 1)); dC = maximum(abs.(S.CR .- CRr))   # relative: perturbed globals can drive D to 1e6+
+    dN = maximum(abs.(S.N .- Nr) ./ max.(Nr, 1e-12)); dD_ = maximum(abs.(S.D .- Dr) ./ max.(abs.(Dr), 1)); dH_ = maximum(abs.(S.H .- Hr) ./ max.(abs.(Hr), 1)); dC = maximum(abs.(S.CR .- CRr))   # relative: perturbed globals can drive D to 1e6+
     get(ENV, "K1_DIAG", "0") == "1" && max(dN, dD_, dH_, dC) > 1e-12 && println("      K1 trial $(trial): n $(n) dN $(dN) dD $(dD_) dH $(dH_) dCR $(dC) | N $(round.(S.N; sigdigits=4)) ref $(round.(Nr; sigdigits=4))")
-    maxd = max(maxd, dN, dD_, dH_, dC, maximum(abs.(S.A .- Ar)))
+    # N is defined only to the self-thinning stopping rule (both implementations stop at an excess <= 1e-6 sdimax, <= 6 passes): when rounding flips
+    # that branch, one implementation thins once more by <= ~1e-6 relative (nested-CV fold k3: 7e-7 and 3e-6 on extinct-level, D ~ 1e6 cohorts)
+    maxdN = max(maxdN, dN); maxd = max(maxd, dD_, dH_, dC, maximum(abs.(S.A .- Ar)))
   end
-  check("K1", maxd < 1e-9, "step_site! = independent reference step on 300 random sites (ties, planted, partial years, $(nst) over sdimax): max relative diff $(maxd)")
+  check("K1", maxd < 1e-9 && maxdN < 1e-5, "step_site! = independent reference step on 300 random sites (ties, planted, partial years, $(nst) over sdimax): max relative diff D/H/CR/A $(maxd), N $(maxdN) (N tolerance 1e-5: the self-thinning stopping rule)")
   # K2 invariants and determinism on the real VAL sites with the fitted parameters
   IFOR = FAREA ? interval_forest(T.iv, forest_table()) : nothing
   VA = sima_sites(tr, "val", keys_, wp, IFOR); S = VA.S
