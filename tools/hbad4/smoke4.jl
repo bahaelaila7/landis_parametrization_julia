@@ -1,5 +1,5 @@
-# HBAD4P smoke test: build (cached) the sets of a fold product, simulate from an HBAD3P warm start, score against the persistence null (both with their own fitted
-# observation parameters), print stand-level sanity numbers.
+# HBAD4P smoke test: build (cached) the sets of a fold product, simulate from an HBAD3P warm start, score against the train-estimated transition-matrix null (the
+# baseline HBAD4P must beat on val counts) and the persistence null (each with its own fitted observation parameters), print stand-level sanity numbers.
 #   HBAD2_DATA_DIR=<product> ./julia_gdal.sh --project=. --threads=2 tools/hbad4/smoke4.jl <hbad3p fit dir> [set=train]
 include(joinpath(@__DIR__, "data4.jl")); include(joinpath(@__DIR__, "params4.jl")); include(joinpath(@__DIR__, "..", "hbad2", "cmaes.jl"))
 t0 = time(); CS = cached_sets(["train", "val", "test"]); set = length(ARGS) > 1 ? ARGS[2] : "train"; D = CS.sets[set]
@@ -7,14 +7,11 @@ println("keys ", join(CS.keys, ","), " | sets ", join(["$s $(HBAD4P.nsites(CS.se
 show(CS.TR; allrows=true); println()
 println("sapling layer (classes 1–2, trees / forested ha, plot mean): observed $(round(D.sap.obs; digits=1)) -> empirical Bayes $(round(D.sap.eb; digits=1)); ",
         "within-cell sd log D by class ", round.(CS.sD; digits=3), " | log H ", round.(CS.sH; digits=3))
-println("missing climate ", D.nmiss, " | v2 tally trees $(D.ntrees) | cells without a height $(D.nohgt)")
-# warm start: HBAD3P's dropped crowding / crown factors, tree-weighted at the train v1 state (subplot RD, the trees' crown ratios)
+println("missing climate ", D.nmiss, " | v2 tally trees $(D.ntrees) | cells without a height $(D.nohgt) | intervals dropped (no forested subplot at v2) $(CS.ndrop)")
+# warm start: HBAD3P's dropped crowding / crown factors, the subplot vs plot light, the mortality stress (params4.jl warm_start4)
 S = D.S; ns = HBAD4P.nsites(S)
-gl3 = Dict(Symbol(r.name) => Float64(r.value) for r in eachrow(CSV.read(joinpath(ARGS[1], "globals.csv"), DataFrame)))
-fac = sum(CS.warm.w .* exp.(get(gl3, :gR, 0.0) .* CS.warm.rd) .* (CS.warm.cr ./ 0.4) .^ get(gl3, :φ, 0.0)) / sum(CS.warm.w)
-e3, f3, g3 = hbad3p_start(ARGS[1], CS.keys; eps_factor=fac)
-SP = space4(CS.keys, CS.TR, CS.sD, CS.sH; start_eps=e3, start_lnF=f3, start_glob=g3); P, G, Ob = SP.decode(SP.z0)
-println("coordinates $(length(SP.z0)) (2 × $(SP.nk) per key + $(length(SP.gfree)) global); fixed ", SP.fix, " | ε rescaled × $(round(fac; digits=3)) for HBAD3P's gR / φ")
+WS = warm_start4(CS, ARGS[1]); SP = WS.SP; P, G, Ob = WS.P, WS.G, WS.Ob
+println("coordinates $(length(SP.z0)) (2 × $(SP.nk) per key + $(length(SP.gfree)) global); fixed ", SP.fix)
 # observation parameters of a given state (CMA-ES on the 6 observation globals only)
 iob = [findfirst(==(String(nm)), SP.names) for nm in OBS4]
 function fit_obs(z)
@@ -22,9 +19,17 @@ function fit_obs(z)
   r = cmaes(f, z[iob], 0.3; λ=12, maxevals=600, logf=s -> nothing); zz = copy(z); zz[iob] = r.x; zz
 end
 null_state!(D); zn = fit_obs(SP.z0); pn = nll4(D, SP.decode(zn)[3])
+tm_state!(D, CS.TM); zt = fit_obs(SP.z0); pt = nll4(D, SP.decode(zt)[3])
 HBAD4P.simulate!(S, P, G); t2 = time(); HBAD4P.simulate!(S, P, G); ts = time() - t2
 zs = fit_obs(SP.z0); p = nll4(D, SP.decode(zs)[3])
-println(@sprintf("NLL warm start %.1f (count %.1f size %.1f height %.1f) | persistence null %.1f (count %.1f) | simulate %.2f s", p.total, p.count, p.size, p.height, pn.total, pn.count, ts))
+println(@sprintf("NLL (%s) warm start %.1f (count %.1f size %.1f height %.1f) | transition-matrix null %.1f (count %.1f) — the bar | persistence null %.1f (count %.1f) | simulate %.2f s",
+                 set, p.total, p.count, p.size, p.height, pt.total, pt.count, pn.total, pn.count, ts))
+if set == "train" && haskey(CS.sets, "val")                              # out of sample: val with the train-fitted observation parameters of each state
+  Dv = CS.sets["val"]; null_state!(Dv); vn = nll4(Dv, SP.decode(zn)[3]); tm_state!(Dv, CS.TM); vt = nll4(Dv, SP.decode(zt)[3])
+  HBAD4P.simulate!(Dv.S, P, G); vs = nll4(Dv, SP.decode(zs)[3])
+  println(@sprintf("NLL (val, train observation parameters) warm start %.1f (count %.1f) | transition-matrix null %.1f (count %.1f) | persistence null %.1f (count %.1f)",
+                   vs.total, vs.count, vt.total, vt.count, vn.total, vn.count))
+end
 println("observation parameters (warm start): ", Dict(OBS4[i] => round(SP.decode(zs)[3] |> o -> getfield(o, OBS4[i]); sigdigits=3) for i in 1:length(OBS4)))
 Ns = zeros(ns); N12s = zeros(ns); Bs = zeros(ns); No = zeros(ns); N12o = zeros(ns); Bo = zeros(ns); N1 = zeros(ns); B1 = zeros(ns)
 for s in 1:ns, k in 1:S.nk, j in 1:NCLS

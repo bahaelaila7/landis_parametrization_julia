@@ -1,13 +1,15 @@
-# Independent brute-force reference of one HBAD4P annual step (used by tools/hbad4/verify4p.jl), audit round 3 (cohorts-in-bins atoms). Written from
-# docs/hbad4p_design.md §2 and the kernel's documented rules (header of src/plugins/HBAD4/HBAD4P.jl), NOT from the kernel code: exact functions (no lookup
-# tables), O(n²) overtopping with the height ramp, per-cell atom LISTS (Vector of (n, D)) instead of fixed slots and scratch buffers, class membership by a
-# search over the class bounds, totals N / B always recomputed from the atoms.
-# The merge rule is the kernel's documented one (an atom arriving at a full inflow list merges into its nearest atom in D; a list longer than natom merges
-# its closest pair, repeatedly; N and N·D² conserved), with the same tie order (the first pair in list order; the last atom takes the freed place), so that
-# the reference can be compared atom by atom. Switches for the diffusion studies: natom / capb (Inf = no merging at all), ward = merge the pair with the
-# smallest increase of Σ N D² dispersion (n_p n_q / (n_p + n_q) (D_p − D_q)²) instead of the closest pair, peratom = growth and mortality of every atom
-# from its own diameter (instead of the cell's QMD).
+# Independent brute-force reference of one HBAD4P annual step (used by tools/hbad4/verify4p.jl), audit round 3 (cohorts-in-bins atoms; updated with the round-3
+# fixes). Written from docs/hbad4p_design.md §2 and the kernel's documented rules (header of src/plugins/HBAD4/HBAD4P.jl), NOT from the kernel code: exact
+# functions (no lookup tables), O(n²) overtopping with the height ramp, per-cell atom LISTS (Vector of (n, D)) instead of fixed slots and scratch buffers, class
+# membership by a search over the class bounds, totals N / B always recomputed from the atoms, the observation blur summed over ALL classes with the
+# Distributions normal cdf.
+# The merge rule is the kernel's documented one: an atom arriving at a full inflow list merges into its nearest atom in D (distance binned at 1e-6 cm, the first
+# in list order on ties); a list is sorted by D and its closest ADJACENT pair (binned distance, the first in D order on ties) merges while the list is longer
+# than natom or that distance bins to 0 (duplicates); N and N·D² conserved. Switches for the diffusion studies: natom / capb, ward = merge the adjacent pair
+# with the smallest increase of Σ N D² dispersion (n_p n_q / (n_p + n_q) (D_p − D_q)²) instead of the closest, peratom = false: growth and size-mortality of
+# every atom from the cell's QMD (the round-2 rule) instead of the atom's own diameter (the round-3 kernel, audit r3 I4).
 module Ref4
+import Distributions
 const NC = 16; const NLR = 3
 lo_(j) = 2.54 * (2j - 1); hi_(j) = j < NC ? 2.54 * (2j + 1) : Inf
 const TOLD = 5.08e-9                 # the kernel's class-index tolerance 1e-9 (exact class bounds of recorded 0.1-in diameters) in cm
@@ -25,48 +27,57 @@ totN(v) = sum(a -> a[1], v; init=0.0)
 totB(v) = sum(a -> ba1(a[1], a[2]), v; init=0.0)
 qm(v) = (n = totN(v); n > 0 ? sqrt(4e4 * totB(v) / (pi * n)) : 0.0)
 mergepair(a, b) = (m = a[1] + b[1]; (m, sqrt((a[1] * a[2]^2 + b[1] * b[2]^2) / m)))
-"Add an atom to a list of capacity cap (a full list merges it into its nearest atom in D, the first one on ties)."
-const TIE = Ref(false)                # set when a merge choice was a near tie (two candidates within 1e-9 relative): the choice is then decided by rounding
+"Add an atom to a list of capacity cap (a full list merges it into its nearest atom in D, binned at 1e-6 cm, the first one on ties)."
+const TIE = Ref(false)                # set when a merge choice was near a bin boundary of the 1e-6 cm distance bins (the choice may then be decided by rounding)
+const MB = 1e6
+binb(x) = floor(max(x, 0.0) * MB)     # (≥ 0, as the kernel: a merged diameter can sit an ulp outside its inputs)
+nearbound(x) = (u = x * MB; u > 0 && abs(u - round(u)) < 1e-6)
 function add!(v::Atoms, n, d, cap)
   n > 0 || return v
   length(v) < cap && (push!(v, (n, d)); return v)
-  q = 0; best = Inf; second = Inf
-  for t in eachindex(v); e = abs(v[t][2] - d); e < best ? (second = best; best = e; q = t) : (e < second && (second = e)); end
-  second - best <= 1e-9 * max(best, 1e-300) && (TIE[] = true)
+  q = 0; best = Inf
+  for t in eachindex(v); e = binb(abs(v[t][2] - d)); nearbound(abs(v[t][2] - d)) && (TIE[] = true); e < best && (best = e; q = t); end
   v[q] = mergepair(v[q], (n, d)); v
 end
-"""Merge until ≤ natom atoms: the closest pair in D (first in list order), or the Ward pair; the merged atom takes the first place, the last atom the second.
-sorted = true (diffusion studies with large natom; O(c) per merge): the list is sorted by D and the best ADJACENT pair is merged (in 1-D the closest pair is
-adjacent; ties may resolve differently)."""
-function compact!(v::Atoms, natom; ward=false, sorted=false)
-  if sorted
-    length(v) > natom || return v
-    sort!(v; by=last)
-    while length(v) > natom
-      p = 0; best = Inf
-      for u in 1:length(v)-1
-        e = ward ? v[u][1] * v[u+1][1] / (v[u][1] + v[u+1][1]) * (v[u+1][2] - v[u][2])^2 : v[u+1][2] - v[u][2]
-        e < best && (best = e; p = u)
-      end
-      v[p] = mergepair(v[p], v[p+1]); deleteat!(v, p + 1)
+"""Merge until ≤ natom atoms and no duplicates: the list sorted by D (stable), the closest ADJACENT pair by binned distance (the first in D order), or the Ward
+pair (smallest dispersion increase; not binned); the merged atom takes the pair's place. Duplicates (binned distance 0) always merge. (`sorted` is accepted
+for the callers of the round-3 verifier: the rule is always the sorted one now.)"""
+function compact!(v::Atoms, natom; ward=false, sorted=true)
+  sort!(v; by=last, alg=InsertionSort)
+  while length(v) >= 2
+    p = 0; best = Inf; bz = Inf; pz = 0
+    for u in 1:length(v)-1
+      gap = v[u+1][2] - v[u][2]; nearbound(gap) && (TIE[] = true); bg = binb(gap)
+      bg == 0 && pz == 0 && (pz = u)
+      e = ward ? v[u][1] * v[u+1][1] / (v[u][1] + v[u+1][1]) * gap^2 : bg
+      e < best && (best = e; p = u)
     end
-    return v
-  end
-  while length(v) > natom
-    p = 0; q = 0; best = Inf; second = Inf
-    for u in 1:length(v)-1, t in u+1:length(v)
-      e = ward ? v[u][1] * v[t][1] / (v[u][1] + v[t][1]) * (v[u][2] - v[t][2])^2 : abs(v[u][2] - v[t][2])
-      e < best ? (second = best; best = e; p = u; q = t) : (e < second && (second = e))
+    if pz > 0
+      p = pz                                                       # a duplicate pair (the first in D order) merges first, whatever natom
+    elseif length(v) <= natom
+      break
     end
-    best > 0 && second - best <= 1e-9 * best && (TIE[] = true)     # (exact zero distances: merging equal diameters in either order is the same atom)
-    v[p] = mergepair(v[p], v[q]); v[q] = v[end]; pop!(v)
+    v[p] = mergepair(v[p], v[p+1]); deleteat!(v, p + 1)
   end
   v
+end
+"""Observation-space prediction of a site from its atoms: per (key, class) Σ p N, Σ p N π/4 D², Σ p N H over the atoms of every cell (H = the cell's height),
+p = P(an atom of diameter D is tallied in class t) = Φ((ub_t − D)/sd) − Φ((lb_t − D)/sd) over ALL classes t (lb of class 1 = −∞, ub of class 16 = ∞)."""
+function obs(C, H, sp, cl, nk, sd)
+  PN = zeros(nk, NC); PB = zeros(nk, NC); PH = zeros(nk, NC); Φ(z) = Distributions.cdf(Distributions.Normal(), z)
+  for i in eachindex(C), (n, d) in C[i]
+    n > 0 || continue; k = sp[i]
+    for t in 1:NC
+      p = sd > 0 ? (t == NC ? 1.0 : Φ((hi_(t) - d) / sd)) - (t == 1 ? 0.0 : Φ((lo_(t) - d) / sd)) : (t == cl[i] ? 1.0 : 0.0)
+      PN[k, t] += p * n; PB[k, t] += p * ba1(n, d); PH[k, t] += p * n * H[i]
+    end
+  end
+  PN, PB, PH
 end
 
 """One step of one site from the documented equations. C[i] = atoms of cell i (HBAD4P layout: key-major, class, lane), H / A = cell mean height / age.
 seed0[k]: a key tree ≥ 12.7 cm on the plot at v1. Returns per-cell rates (O, dD, sv, g) and RD; C, H, A are updated in place."""
-function step!(C::Vector{Atoms}, H, A, sp, cl, ln, nk, P, G, W, Wn, T, Cppm, pl, Δ, lz, lw, seed0; natom=4, capb=16, ward=false, peratom=false, sorted=false,
+function step!(C::Vector{Atoms}, H, A, sp, cl, ln, nk, P, G, W, Wn, T, Cppm, pl, Δ, lz, lw, seed0; natom=8, capb=32, ward=false, peratom=true, sorted=true,
                CREF=390.1, RSCALE=185.2, DREC=2.54, AREC=4.5, SEEDMIN=1.0, δH=1.0)
   n = length(C); N = totN.(C); act = [i for i in 1:n if N[i] > 1e-9]
   Dq = qm.(C); SD = zeros(n); for i in act; SD[i] = N[i] * (Dq[i] / 25.4)^1.605; end
@@ -81,10 +92,16 @@ function step!(C::Vector{Atoms}, H, A, sp, cl, ln, nk, P, G, W, Wn, T, Cppm, pl,
     fT = isnan(T) ? 1.0 : exp(G.βT * (T - p.Tref))
     c = exp(G.gR * RD) * W^G.ω * fT * exp(G.σv * lz[ln[i]])          # no CO2: the FACE constraint is on growth (NPP) only
     gi = (G.f0 + (1 - G.f0) * exp(-G.a * O[i])) * c; g[i] = min(gi, 1.0); graw[i] = gi; gm[i] = exp(-G.am * O[i]) * c
-    dD[i] = grow(p, D, h, gi)
+    # the cell's QMD before and after growth (start-of-step N): Dq' drives the height; dD / sv per cell = the QMD increment and the N-weighted survival
+    if peratom
+      nt = totN(C[i]); inc = sum(a -> (g_ = grow(p, a[2], h, gi); a[1] * g_ * (2a[2] + g_)), C[i]); D2 = sqrt(D^2 + inc / nt)
+      sv[i] = sum(a -> a[1] * exp(-haz(p, a[2], i) * Δ), C[i]) / nt
+    else
+      inc = 0.0; nt = 1.0; D2 = D + grow(p, D, h, gi); sv[i] = exp(-haz(p, D, i) * Δ)
+    end
+    dD[i] = peratom ? inc / nt / (D2 + D) : D2 - D                  # (Dq' − Dq without cancellation)
     Lh = exp(-G.kh * O[i]); hs = hst(p, G, D)
-    dH[i] = max((hst(p, G, D + dD[i]) - hs) * (1 + G.η * (1 - Lh)) + G.λ * Δ * (hs * (1 + G.μ * (1 - Lh)) - h), 0.0) * fH
-    sv[i] = exp(-haz(p, D, i) * Δ)
+    dH[i] = max((hst(p, G, D2) - hs) * (1 + G.η * (1 - Lh)) + G.λ * Δ * (hs * (1 + G.μ * (1 - Lh)) - h), 0.0) * fH
   end
   # inflow lists: an inactive cell (0 < N ≤ 1e-9) keeps its atoms (no growth / mortality), with the self-thinning weight 1
   buf = [Atoms() for _ in 1:n]; inH = zeros(n); inA = zeros(n); inG = zeros(n); tie = falses(n)
@@ -97,9 +114,9 @@ function step!(C::Vector{Atoms}, H, A, sp, cl, ln, nk, P, G, W, Wn, T, Cppm, pl,
     p = P[sp[i]]; j = Int(cl[i]); Hn = H[i] + dH[i]
     tg = Int[]; gn = Float64[]; gb = Float64[]; nt = 0.0; b2 = 0.0
     for a in C[i]
-      if peratom                                                    # (study switch: the atom's own diameter in the growth and size-mortality terms)
+      if peratom                                                    # (the kernel: the atom's own diameter in the growth and size-mortality terms)
         nn = a[1] * exp(-haz(p, a[2], i) * Δ); d = a[2] + grow(p, a[2], H[i], graw[i])
-      else
+      else                                                          # (study switch: the cell's QMD for every atom — the round-2 rule)
         nn = a[1] * sv[i]; d = a[2] + dD[i]
       end
       nn > 0 || continue
@@ -132,16 +149,15 @@ function step!(C::Vector{Atoms}, H, A, sp, cl, ln, nk, P, G, W, Wn, T, Cppm, pl,
       C[i] = [(a[1] * f, a[2]) for a in C[i]]
     end
   end
-  # lane mixing: lane v keeps (1 − κΔ) of its atoms and receives κΔ w_v of the atoms of all three lanes of its (key, class)
+  # lane mixing: lane v keeps (1 − κΔ) of its atoms and receives κΔ w_v of the atoms of all three lanes of its (key, class) (its own atoms enter once)
   if G.κ > 0
     k_ = min(G.κ * Δ, 1.0)
     for i in 1:NLR:n
       Ns = [totN(C[i+v]) for v in 0:2]; tn = sum(Ns); tn > 0 || continue
       th = sum(Ns[v+1] * H[i+v] for v in 0:2); ta = sum(Ns[v+1] * A[i+v] for v in 0:2)
       new = [Atoms() for _ in 0:2]; TIE[] = false
-      for v in 0:2
-        for a in C[i+v]; add!(new[v+1], (1 - k_) * a[1], a[2], capb); end
-        for u in 0:2, a in C[i+u]; add!(new[v+1], k_ * lw[v+1] * a[1], a[2], capb); end
+      for v in 0:2                                                  # own atoms ONCE with weight 1 − κΔ + κΔ w_v, the other lanes' with κΔ w_v
+        for u in 0:2, a in C[i+u]; add!(new[v+1], (k_ * lw[v+1] + (u == v ? 1 - k_ : 0.0)) * a[1], a[2], capb); end
         compact!(new[v+1], natom; ward=ward, sorted=sorted)
       end
       TIE[] && (tie[i:i+2] .= true)
@@ -168,3 +184,4 @@ function step!(C::Vector{Atoms}, H, A, sp, cl, ln, nk, P, G, W, Wn, T, Cppm, pl,
   (O=O, dD=dD, sv=sv, g=g, RD=RD, tie=tie)
 end
 end # module Ref4
+import Distributions
