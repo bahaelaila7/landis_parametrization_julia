@@ -10,9 +10,11 @@ const GSPEC4 = [(:b, 1.75, 1.0, 3.0, false), (:a, 2.35, 0.1, 10.0, true), (:gR, 
                 (:pM, -0.06, -2.0, 2.0, false), (:σv, 0.36, 0.0, 1.2, false), (:sdimax, 1500.0, 500.0, 3000.0, true), (:am, 0.83, 0.1, 20.0, true),
                 (:ρ, 2.6e-4, 0.0, 0.01, false), (:f0, 0.0, 0.0, 0.5, false), (:wT, 8.0, 1.0, 100.0, true), (:βC, 0.58, 0.0, 2.0, false), (:κ, 0.1, 1e-3, 1.0, true),
                 (:λ0, 3.1, 0.01, 20.0, true), (:λ1, -0.07, -2.0, 2.0, false), (:ε0, 0.3, 1e-3, 1.0, true), (:ωR, 0.0, -3.0, 5.0, false),
-                (:rM, 1.0, 0.05, 100.0, true), (:rS, 2.0, 0.05, 100.0, true), (:σD, 0.05, 0.005, 0.5, true), (:σH, 0.15, 0.01, 1.0, true)]
+                (:rM, 1.0, 0.05, 100.0, true), (:rS, 2.0, 0.05, 100.0, true), (:bgM, 5.0, 1e-3, 500.0, true), (:bgS, 0.3, 1e-4, 50.0, true),
+                (:σD, 0.02, 1e-5, 0.5, true), (:σH, 0.05, 1e-5, 1.0, true)]
 const GN4 = [g[1] for g in GSPEC4]
-const OBS4 = (:rM, :rS, :σD, :σH)
+const EPS_MAX = 4.0                # ln ε bound (e^4 = 55; HBAD3P's fitted ε are 0.8–3.5): beyond it dD would reach tens of cm / yr
+const OBS4 = (:rM, :rS, :bgM, :bgS, :σD, :σH)
 const FIX_DEFAULT = Dict(:gR => 0.0, :mA => 10.0, :sdimax => 1500.0, :βC => parse(Float64, get(ENV, "HBAD4P_BETAC", "0.58")))
 function gfix4()
   f = copy(FIX_DEFAULT)
@@ -27,8 +29,8 @@ end
 genc4(j, v) = GSPEC4[j][5] ? log(v) : v
 function gdec4(j, z); lo, hi = GSPEC4[j][3], GSPEC4[j][4]; clamp(GSPEC4[j][5] ? exp(z) : (GSPEC4[j][1] == :σv ? abs(z) : z), lo, hi); end
 
-"Coordinate layout for keys_ and the fixed globals: names, start vector, decoder z → (P, G, Ob)."
-function space4(keys_, TR; start_eps=nothing, start_lnF=nothing, start_glob=Dict{Symbol,Float64}())
+"Coordinate layout for keys_ and the fixed globals: names, start vector, decoder z → (P, G, Ob). sD / sH: the TRAIN per-class within-cell spreads (data constants)."
+function space4(keys_, TR, sD, sH; start_eps=nothing, start_lnF=nothing, start_glob=Dict{Symbol,Float64}())
   nk = length(keys_); fix = gfix4()
   gfree = [j for j in eachindex(GSPEC4) if !haskey(fix, GSPEC4[j][1])]
   gval(j) = (nm = GSPEC4[j][1]; haskey(fix, nm) ? fix[nm] : get(start_glob, nm, GSPEC4[j][2]))
@@ -40,21 +42,23 @@ function space4(keys_, TR; start_eps=nothing, start_lnF=nothing, start_glob=Dict
   function decode(z)
     gv = copy(gv0); gv[gfree] = z[2nk+1:end]
     g = Dict(GSPEC4[j][1] => (isinf(gv[j]) ? gv[j] : gdec4(j, gv[j])) for j in eachindex(GSPEC4))
-    P = [HBAD4P.SpP4(clamp(z[k], -8.0, 6.0), clamp(z[nk+k], -15.0, 5.0), TR.Hmax[k], TR.ST[k], TR.longevity[k], TR.Topt[k]) for k in 1:nk]
+    P = [HBAD4P.SpP4(clamp(z[k], -8.0, EPS_MAX), clamp(z[nk+k], -15.0, 5.0), TR.Hmax[k], TR.ST[k], TR.longevity[k], TR.Topt[k], TR.Tref[k]) for k in 1:nk]
     G = HBAD4P.GlobP4(g[:b], g[:a], g[:gR], g[:θ], g[:ω], g[:s], g[:c], g[:η], g[:λ], g[:μ], g[:kh], g[:m0], g[:ms], g[:σST], g[:β], g[:ζ], g[:mW], g[:mA],
                       g[:pD], g[:pH], g[:pM], g[:σv], g[:sdimax], g[:am], g[:ρ], g[:f0], g[:wT], g[:βC], g[:κ], g[:λ0], g[:λ1], g[:ε0], g[:ωR])
-    Ob = ObsP(g[:rM], g[:rS], g[:σD], g[:σH])
+    Ob = ObsP(g[:rM], g[:rS], g[:bgM], g[:bgS], g[:σD], g[:σH], sD, sH)
     P, G, Ob
   end
   (z0=z0, names=names, decode=decode, gfree=gfree, fix=fix, nk=nk)
 end
-"Warm start from an HBAD3P fit directory (fit3p_<role>): ε per key, lnF per key (recruitment.csv), the shared globals by name."
-function hbad3p_start(dir, keys_)
+"""Warm start from an HBAD3P fit directory (fit3p_<role>): ε per key, lnF per key (recruitment.csv), the shared globals by name. HBAD4P drops HBAD3P's
+crowding gain e^{gR RD} (fixed 0) and its crown term (CR/0.4)^φ; `eps_factor` (the mean of those factors at the train v1 state, from the caller) rescales ε
+so that the start keeps HBAD3P's growth level."""
+function hbad3p_start(dir, keys_; eps_factor=1.0)
   sp = CSV.read(joinpath(dir, "species.csv"), DataFrame); gl = CSV.read(joinpath(dir, "globals.csv"), DataFrame)
   ed = Dict(String(r.key) => Float64(r.eps) for r in eachrow(sp))
   rc = isfile(joinpath(dir, "recruitment.csv")) ? CSV.read(joinpath(dir, "recruitment.csv"), DataFrame) : DataFrame(name=String[], value=Float64[])
   rd = Dict(String(r.name) => Float64(r.value) for r in eachrow(rc))
   g = Dict(Symbol(r.name) => Float64(r.value) for r in eachrow(gl))
   for nm in (:λ0, :λ1, :ε0); haskey(rd, String(nm)) && (g[nm] = rd[String(nm)]); end
-  ([get(ed, k, 2.0) for k in keys_], [get(rd, "lnF:" * k, -3.0) for k in keys_], g)
+  ([get(ed, k, 2.0) * eps_factor for k in keys_], [get(rd, "lnF:" * k, -3.0) for k in keys_], g)
 end
