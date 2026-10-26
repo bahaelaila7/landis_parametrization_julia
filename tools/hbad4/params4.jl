@@ -8,7 +8,7 @@ const GSPEC4 = [(:b, 1.75, 1.0, 3.0, false), (:a, 2.35, 0.1, 10.0, true), (:gR, 
                 (:kh, 5.1, 0.2, 30.0, true), (:m0, 1.11, 0.01, 10.0, true), (:ms, 0.082, 1e-4, 1.0, true), (:σST, 0.28, -2.0, 2.0, false), (:β, 2.95, 0.1, 20.0, true),
                 (:ζ, -0.62, -3.0, 2.0, false), (:mW, 0.12, -2.0, 3.0, false), (:mA, 10.0, 1.0, 50.0, true), (:pD, 0.11, -1.0, 1.0, false), (:pH, 0.26, -1.0, 1.0, false),
                 (:pM, -0.06, -2.0, 2.0, false), (:σv, 0.36, 0.0, 1.2, false), (:sdimax, 1500.0, 500.0, 3000.0, true), (:am, 0.83, 0.1, 20.0, true),
-                (:ρ, 2.6e-4, 0.0, 0.01, false), (:f0, 0.0, 0.0, 0.5, false), (:wT, 8.0, 1.0, 100.0, true), (:βC, 0.58, 0.0, 2.0, false), (:κ, 0.1, 1e-3, 1.0, true),
+                (:ρ, 2.6e-4, 0.0, 0.01, false), (:f0, 0.0, 0.0, 0.5, false), (:βT, 0.0, -0.5, 0.5, false), (:βC, 0.58, 0.0, 2.0, false), (:κ, 0.1, 1e-3, 1.0, true),
                 (:λ0, 3.1, 0.01, 20.0, true), (:λ1, -0.07, -2.0, 2.0, false), (:ε0, 0.3, 1e-3, 1.0, true), (:ωR, 0.0, -3.0, 5.0, false),
                 (:rM, 1.0, 0.05, 100.0, true), (:rS, 2.0, 0.05, 100.0, true), (:bgM, 5.0, 1e-3, 500.0, true), (:bgS, 0.3, 1e-4, 50.0, true),
                 (:σD, 0.02, 1e-5, 0.5, true), (:σH, 0.05, 1e-5, 1.0, true)]
@@ -35,16 +35,15 @@ function space4(keys_, TR, sD, sH; start_eps=nothing, start_lnF=nothing, start_g
   gfree = [j for j in eachindex(GSPEC4) if !haskey(fix, GSPEC4[j][1])]
   gval(j) = (nm = GSPEC4[j][1]; haskey(fix, nm) ? fix[nm] : get(start_glob, nm, GSPEC4[j][2]))
   gv0 = [genc4(j, clamp(gval(j), GSPEC4[j][3], GSPEC4[j][4])) for j in eachindex(GSPEC4)]
-  for (nm, v) in fix; j = findfirst(==(nm), GN4); isinf(v) && (gv0[j] = v); end        # (Inf: e.g. wT = Inf switches the temperature response off)
   le = start_eps === nothing ? fill(log(2.0), nk) : log.(start_eps); lf = start_lnF === nothing ? fill(-3.0, nk) : start_lnF
   z0 = vcat(le, lf, gv0[gfree])
   names = vcat(["ε:" * k for k in keys_], ["lnF:" * k for k in keys_], [String(GSPEC4[j][1]) for j in gfree])
   function decode(z)
     gv = copy(gv0); gv[gfree] = z[2nk+1:end]
-    g = Dict(GSPEC4[j][1] => (isinf(gv[j]) ? gv[j] : gdec4(j, gv[j])) for j in eachindex(GSPEC4))
-    P = [HBAD4P.SpP4(clamp(z[k], -8.0, EPS_MAX), clamp(z[nk+k], -15.0, 5.0), TR.Hmax[k], TR.ST[k], TR.longevity[k], TR.Topt[k], TR.Tref[k]) for k in 1:nk]
+    g = Dict(GSPEC4[j][1] => gdec4(j, gv[j]) for j in eachindex(GSPEC4))
+    P = [HBAD4P.SpP4(clamp(z[k], -8.0, EPS_MAX), clamp(z[nk+k], -15.0, 5.0), TR.Hmax[k], TR.ST[k], TR.longevity[k], TR.Tref[k]) for k in 1:nk]
     G = HBAD4P.GlobP4(g[:b], g[:a], g[:gR], g[:θ], g[:ω], g[:s], g[:c], g[:η], g[:λ], g[:μ], g[:kh], g[:m0], g[:ms], g[:σST], g[:β], g[:ζ], g[:mW], g[:mA],
-                      g[:pD], g[:pH], g[:pM], g[:σv], g[:sdimax], g[:am], g[:ρ], g[:f0], g[:wT], g[:βC], g[:κ], g[:λ0], g[:λ1], g[:ε0], g[:ωR])
+                      g[:pD], g[:pH], g[:pM], g[:σv], g[:sdimax], g[:am], g[:ρ], g[:f0], g[:βT], g[:βC], g[:κ], g[:λ0], g[:λ1], g[:ε0], g[:ωR])
     Ob = ObsP(g[:rM], g[:rS], g[:bgM], g[:bgS], g[:σD], g[:σH], sD, sH)
     P, G, Ob
   end

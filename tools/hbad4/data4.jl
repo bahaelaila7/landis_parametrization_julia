@@ -28,11 +28,19 @@ ismicro(w_ha) = w_ha > 50                                                 # tall
 inregion(st) = REGION == "GAFL" ? st in (12, 13) : REGION == "R4" ? true : error("HBAD4_REGION $REGION: GAFL | R4")
 plotf(v) = (x = [isnan(a) ? 1.0 : a for a in v]; m = isempty(x) ? 1.0 : mean(x); m <= 0 ? 1.0 : max(m, FMIN))   # forested fraction of a plot
 
-"Load the natural intervals of the region with their trees and ingrowth; species keys from the TRAIN trees (the HBAD3P rule)."
+"""Load the natural intervals of the region with their trees and ingrowth; species keys from the TRAIN trees (the HBAD3P rule). HBAD4_SPLIT_CSV (statecd,
+unitcd,countycd,plot,set): the sets by plot (the campaign's role split folds/split_<role>.csv: train = the role's 3 folds — the product's `set` moved the
+species-balanced train cap's surplus to val, audit r2 I5); plots absent from it get no set."""
+const SPLIT_CSV = get(ENV, "HBAD4_SPLIT_CSV", "")
 function load4(dir=DATA_DIR)
   iv = DataFrame(Arrow.Table(joinpath(dir, "intervals.arrow")))
   iv = iv[.!(iv.trt .| iv.dst .| iv.harv) .& (iv.dt .> 2) .& inregion.(iv.st), :]
-  iv.set = coalesce.(iv.set, ""); ok = Set(iv.iid)
+  iv.set = coalesce.(iv.set, "")
+  if !isempty(SPLIT_CSV)
+    sp = CSV.read(SPLIT_CSV, DataFrame); sd = Dict((Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)) => String(r.set) for r in eachrow(sp))
+    iv.set = [get(sd, (r.st, r.u, r.c, r.p), "") for r in eachrow(iv)]
+  end
+  ok = Set(iv.iid)
   tr = DataFrame(Arrow.Table(joinpath(dir, "interval_trees.arrow"))); tr = tr[in.(tr.iid, Ref(ok)) .& (tr.dia_cm .> 0), :]
   ig = DataFrame(Arrow.Table(joinpath(dir, "interval_ingrowth.arrow"))); ig = ig[in.(ig.iid, Ref(ok)) .& (ig.dia_cm .> 0), :]
   sset = Dict(r.iid => r.set for r in eachrow(iv)); tr.set = getindex.(Ref(sset), tr.iid)
@@ -44,25 +52,18 @@ function load4(dir=DATA_DIR)
   (iv=iv, tr=tr, ig=ig, keys=keys_, big=big)
 end
 
-"""Traits per key from the TRAIN trees: Hmax (99.5th pct height), shade class and LONGEVITY (tree-weighted over member species), Topt and Tref.
-Topt = the key's range temperature optimum: the tree-weighted mean annual temperature NORMAL of its intervals — a named species over the whole product
-(Region 4: every interval outside the region + the region's train intervals); a group key (_H / _S) over the region's train intervals only (its members
-elsewhere are other species). Tref = the tree-weighted mean PERIOD temperature of its train intervals (f_T = 1 there). Temperatures are EPA L4 means."""
-function traits4(L, clim)
+"""Traits per key from the TRAIN trees: Hmax (99.5th pct height), shade class and LONGEVITY (tree-weighted over member species), and Tref = the tree-weighted
+mean PERIOD temperature (the variable the kernel's T is) of its train intervals: f_T = exp(βT (T − Tref)) is 1 there. Temperatures are EPA L4 means."""
+function traits4(L, clim; dir=DATA_DIR)
   st = CSV.read(SHADETOL_CSV, DataFrame); std_ = Dict(String(r.sym) => Float64(r.shade_class) for r in eachrow(st))
   lon = CSV.read(LONGEVITY_CSV, DataFrame); lond = Dict(String(r.species_symbol) => Float64(r.longevity_yr) for r in eachrow(lon))
   trn = L.tr[L.tr.set .== "train", :]
-  tn = Dict(r.iid => r.tmean_n for r in eachrow(clim)); tiv = Dict(r.iid => r.tmean_iv for r in eachrow(clim))
-  ivall = DataFrame(Arrow.Table(joinpath(DATA_DIR, "intervals.arrow"))); okT = Set(ivall.iid[.!inregion.(ivall.st) .| (coalesce.(ivall.set, "") .== "train")])
-  tall = DataFrame(Arrow.Table(joinpath(DATA_DIR, "interval_trees.arrow")))
-  tall = tall[in.(tall.iid, Ref(okT)) .& haskey.(Ref(tn), tall.iid) .& in.(tall.sym, Ref(L.big)), :]
+  tiv = Dict(r.iid => r.tmean_iv for r in eachrow(clim))
   map(L.keys) do k
     t = trn[trn.key .== k, :]; c = combine(groupby(t, :sym), nrow => :n)
     wavg(d, dflt) = (v = [get(d, s, dflt) for s in c.sym]; sum(v .* c.n) / sum(c.n))
-    hs = t.ht_m[t.ht_m .> 0]; tt = t[haskey.(Ref(tn), t.iid), :]
-    topt = startswith(k, "_") ? mean(getindex.(Ref(tn), tt.iid)) : mean(getindex.(Ref(tn), tall.iid[tall.sym .== k]))
-    (key=k, Hmax=quantile(hs, 0.995), ST=wavg(std_, 3.0), longevity=median([get(lond, s, 300.0) for s in c.sym]), Topt=topt,
-     Tref=mean(getindex.(Ref(tiv), tt.iid)), ntrain=nrow(t))
+    hs = t.ht_m[t.ht_m .> 0]; tt = t[haskey.(Ref(tiv), t.iid), :]
+    (key=k, Hmax=quantile(hs, 0.995), ST=wavg(std_, 3.0), longevity=wavg(lond, 300.0), Tref=mean(getindex.(Ref(tiv), tt.iid)), ntrain=nrow(t))
   end |> DataFrame
 end
 
@@ -125,30 +126,40 @@ function build4(L, set::AbstractString, keys_, CL, FT, eb)
   ncell = nk * NCLS * NL; off = [1 + (s - 1) * ncell for s in 1:ns+1]; ntot = ns * ncell
   sp = Int32[k for _ in 1:ns for k in 1:nk for _ in 1:NCLS for _ in 1:NL]
   cl = Int8[j for _ in 1:ns for _ in 1:nk for j in 1:NCLS for _ in 1:NL]; ln = Int8[v for _ in 1:ns for _ in 1:nk for _ in 1:NCLS for v in 1:NL]
-  N0 = zeros(ntot); B0 = zeros(ntot); H0 = zeros(ntot); A0 = zeros(ntot)
+  NA_ = HBAD4P.NATOM; AN0 = zeros(ntot * NA_); AD0 = zeros(ntot * NA_); N0 = zeros(ntot); B0 = zeros(ntot); H0 = zeros(ntot); A0 = zeros(ntot)
   nyr = floor.(Int, iv.dt); frac = iv.dt .- nyr
   sidx = Dict(r.iid => s for (s, r) in enumerate(eachrow(iv)))
   trn = L.tr[L.tr.set .== "train", :]; medage = Dict(k => median(trn.age[(trn.key .== k) .& (trn.age .> 0)]) for k in keys_)
   f1, fm1, fs2, fm2 = fractions4(iv, FT)
   t1 = v1trees(L, keys(sidx))
   acc = Dict{Tuple{Int,Int,Int},NTuple{7,Float64}}()     # (s, k, j) → (Σw, ΣwB, ΣwH, Σw|H, ΣwA, Σw|A, n tally trees)
+  atoms = Dict{Tuple{Int,Int,Int},Vector{Tuple{Float64,Float64}}}()   # (s, k, j) → the cell's trees (w, D)
   seed0 = falses(nk, ns)
   for r in eachrow(t1)
     j = HBAD4P.dclass(r.dia_cm); j == 0 && continue
     s = sidx[r.iid]; k = kix[r.key]; r.dia_cm >= 12.7 && (seed0[k, s] = true)
     w = r.w_ha / (ismicro(r.w_ha) ? fm1[s] : f1[s]); a = get(acc, (s, k, j), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-    hok = r.ht_m > 0; aok = r.age > 0
+    hok = r.ht_m > 0; aok = r.age > 0; push!(get!(atoms, (s, k, j), Tuple{Float64,Float64}[]), (w, r.dia_cm))
     acc[(s, k, j)] = (a[1] + w, a[2] + w * π / 4 * (r.dia_cm / 100)^2, a[3] + (hok ? w * r.ht_m : 0.0), a[4] + (hok ? w : 0.0), a[5] + (aok ? w * r.age : 0.0),
                       a[6] + (aok ? w : 0.0), a[7] + 1)
   end
   nohgt = 0
-  setcell!(s, k, j, N, B, H, A) = for v in 1:NL
-    c = off[s] + ((k - 1) * NCLS + (j - 1)) * NL + (v - 1); N0[c] = N * lw[v]; B0[c] = B * lw[v]; H0[c] = H; A0[c] = A
+  # a cell's initial atoms: its trees (w, D) scaled by fN (the sapling layer's empirical-Bayes factor), merged down to NATOM (N, N·D² conserved), per lane × w_v
+  bn = zeros(1024); bd = zeros(1024)
+  function setcell!(s, k, j, trees, fN, H, A)
+    c0 = 0
+    for (w, d) in trees; c0 = HBAD4P.buf_add!(bn, bd, 0, c0, 1024, w * fN, d); end
+    c0 = HBAD4P.compact!(bn, bd, 0, c0)
+    for v in 1:NL
+      c = off[s] + ((k - 1) * NCLS + (j - 1)) * NL + (v - 1)
+      for m in 1:c0; AN0[(c - 1) * NA_ + m] = bn[m] * lw[v]; AD0[(c - 1) * NA_ + m] = bd[m]; end
+      n, b = HBAD4P.totals(AN0, AD0, c); N0[c] = n; B0[c] = b; H0[c] = H; A0[c] = A
+    end
   end
   for ((s, k, j), a) in acc
     j <= 2 && continue                                                     # (sapling classes: below)
     H = a[4] > 0 ? a[3] / a[4] : NaN; isnan(H) && (nohgt += 1; H = 1.37 + 0.5 * HBAD4P.CLS_LO[j])   # (no height in the cell: a crude placeholder, counted)
-    setcell!(s, k, j, a[1], a[2], H, a[6] > 0 ? a[5] / a[6] : medage[keys_[k]])
+    setcell!(s, k, j, atoms[(s, k, j)], 1.0, H, a[6] > 0 ? a[5] / a[6] : medage[keys_[k]])
   end
   neb = 0.0; nobs_sap = 0.0
   for s in 1:ns, k in 1:nk, j in 1:2                                       # sapling layer: empirical-Bayes density
@@ -156,9 +167,9 @@ function build4(L, set::AbstractString, keys_, CL, FT, eb)
     Nh = eb_density(n_, e, eb.m[k, j, seed0[k, s]+1], eb.α[k, j, seed0[k, s]+1]); Nh > 0 || continue
     neb += Nh; nobs_sap += a[1]
     if n_ > 0
-      setcell!(s, k, j, Nh, a[2] * Nh / a[1], a[4] > 0 ? a[3] / a[4] : eb.H[k, j], a[6] > 0 ? a[5] / a[6] : eb.A[k, j])
+      setcell!(s, k, j, atoms[(s, k, j)], Nh / a[1], a[4] > 0 ? a[3] / a[4] : eb.H[k, j], a[6] > 0 ? a[5] / a[6] : eb.A[k, j])
     else
-      setcell!(s, k, j, Nh, HBAD4P.ba(Nh, eb.D[k, j]), eb.H[k, j], eb.A[k, j])
+      setcell!(s, k, j, [(Nh, eb.D[k, j])], 1.0, eb.H[k, j], eb.A[k, j])
     end
   end
   # v2 observation: survivors (v2 diameter / height) + ingrowth, each in the class of its v2 diameter (its v2 tally: FIA re-tallies a tree that shrank below
@@ -177,14 +188,18 @@ function build4(L, set::AbstractString, keys_, CL, FT, eb)
   getw(d, i, dflt) = (v = get(d, i, dflt); isnan(v) ? dflt : v)
   Wv = [getw(CL.W, i, 1.0) for i in iv.iid]; Wnv = [getw(CL.Wn, i, 1.0) for i in iv.iid]; Tv = [getw(CL.T, i, NaN) for i in iv.iid]
   nmiss = (W=count(i -> isnan(get(CL.W, i, NaN)), iv.iid), Wn=count(i -> isnan(get(CL.Wn, i, NaN)), iv.iid), T=count(isnan, Tv))
-  S = HBAD4P.Sites4(off, nk, sp, cl, ln, N0, B0, H0, A0, copy(N0), copy(B0), copy(H0), copy(A0), nyr, frac, Vector{Bool}(iv.planted), Wv, Wnv, Tv, Cs, seed0, lz, lw)
+  S = HBAD4P.Sites4(off, nk, sp, cl, ln, AN0, AD0, H0, A0, copy(AN0), copy(AD0), copy(H0), copy(A0), N0, B0, copy(N0), copy(B0), nyr, frac, Vector{Bool}(iv.planted),
+                    Wv, Wnv, Tv, Cs, seed0, lz, lw)
   (S=S, iid=iv.iid, n=On, D2=OD2, lD=OlD, lD2=OlD2, Hs=OH, lH=OlH, lH2=OlH2, nH=OnH, fs2=fs2, fm2=fm2, f1=f1, fm1=fm1, nohgt=nohgt, nmiss=nmiss,
    ntrees=sum(On), iv=iv, sap=(eb=neb / ns, obs=nobs_sap / ns))
 end
 "Pooled within-cell sd of log D and log H per class (cells with ≥ 2 trees) of a built set — the sampling spread of a cell's mean (TRAIN values are used)."
 function within_sd(D)
-  sd(s1, s2, n) = (ss = 0.0; df = 0.0; for i in eachindex(n); n[i] >= 2 && (ss += s2[i] - s1[i]^2 / n[i]; df += n[i] - 1); end; df > 0 ? sqrt(ss / df) : 0.1)
-  [sd(view(D.lD, :, j, :), view(D.lD2, :, j, :), view(D.n, :, j, :)) for j in 1:NCLS], [sd(view(D.lH, :, j, :), view(D.lH2, :, j, :), view(D.nH, :, j, :)) for j in 1:NCLS]
+  # (< 30 degrees of freedom: the physical value of a uniform spread over the class, w / (√12 · class midpoint) in log D — the top classes hold few cells)
+  phys(j) = (c = j < NCLS ? (HBAD4P.CLS_LO[j] + HBAD4P.CLS_HI[j]) / 2 : HBAD4P.CLS_LO[NCLS] + 2.54; 5.08 / (sqrt(12) * c))
+  sd(s1, s2, n, dflt) = (ss = 0.0; df = 0.0; for i in eachindex(n); n[i] >= 2 && (ss += s2[i] - s1[i]^2 / n[i]; df += n[i] - 1); end; df >= 30 ? sqrt(ss / df) : dflt)
+  sDv = [sd(view(D.lD, :, j, :), view(D.lD2, :, j, :), view(D.n, :, j, :), phys(j)) for j in 1:NCLS]
+  sDv, [sd(view(D.lH, :, j, :), view(D.lH2, :, j, :), view(D.nH, :, j, :), 0.1) for j in 1:NCLS]
 end
 
 "Climate dictionaries by iid: W = period AET/PET, Wn = its normal, T = period mean annual temperature, the climate table (for Topt / Tref)."
@@ -232,7 +247,7 @@ function nll4(D, Ob::ObsP)
 end
 "Persistence null: the v1 table (with the same empirical-Bayes sapling layer) carried to v2 unchanged; the same observation model (its own fitted ObsP)."
 function null_state!(D)
-  S = D.S; copyto!(S.N, S.N0); copyto!(S.B, S.B0); copyto!(S.H, S.H0); copyto!(S.A, S.A0); D
+  S = D.S; copyto!(S.N, S.N0); copyto!(S.B, S.B0); copyto!(S.H, S.H0); copyto!(S.A, S.A0); copyto!(S.AN, S.AN0); copyto!(S.AD, S.AD0); D
 end
 
 # ---------------------------------------------------------------- cache (load + traits + build take minutes; the fit / eval tools reuse them)
@@ -240,7 +255,8 @@ using Serialization
 "Fingerprint of everything a build depends on: the builder and kernel code, the switches, and the input files (path, size, mtime)."
 function build_key(dir)
   h = hash(read(joinpath(@__DIR__, "data4.jl"))); h = hash(read(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD4", "HBAD4P.jl")), h)
-  h = hash((REGION, MIN_SP_TREES, LANEMODE, FMIN), h)
+  h = hash((REGION, MIN_SP_TREES, LANEMODE, FMIN, HBAD4P.NATOM), h)
+  isempty(SPLIT_CSV) || (st = stat(SPLIT_CSV); h = hash((abspath(SPLIT_CSV), st.size, st.mtime), h))
   for f in (joinpath(dir, "intervals.arrow"), joinpath(dir, "interval_trees.arrow"), joinpath(dir, "interval_ingrowth.arrow"), WATER_CSV, CLIM_CSV, FOREST_CSV,
             CO2_CSV, SHADETOL_CSV, LONGEVITY_CSV)
     st = stat(realpath(f)); h = hash((abspath(f), st.size, st.mtime), h)
@@ -252,11 +268,15 @@ function cached_sets(sets::Vector{String}; dir=DATA_DIR)
   cd_ = get(ENV, "HBAD4_CACHE", joinpath(@__DIR__, "..", "..", "results", "hbad4", "cache")); mkpath(cd_)
   f = joinpath(cd_, "sets_$(join(sets, "_"))_$(build_key(dir)).jls")
   isfile(f) && return deserialize(f)
-  L = load4(dir); CL = climate4(); FT = forest4(); TR = traits4(L, CL.clim); eb = sapling_prior(L, L.keys, FT)
+  L = load4(dir); CL = climate4(); FT = forest4(); TR = traits4(L, CL.clim; dir=dir); eb = sapling_prior(L, L.keys, FT)
   B = Dict(s => build4(L, s, L.keys, CL, FT, eb) for s in sets if any(==(s), L.iv.set))
   sD, sH = within_sd(B["train"])
-  trn = L.tr[(L.tr.set .== "train") .& .!ismissing.(L.tr.cr), :]; crt = Float64.(trn.cr[trn.cr .> 0]) ./ 100   # train v1 crown ratios (the HBAD3P warm-start rescaling)
-  out = (keys=L.keys, TR=TR, eb=eb, sD=sD, sH=sH, lanemode=LANEMODE, cr_train=crt, sets=B)
+  # the HBAD3P warm start's dropped terms, per train v1 tree: subplot relative density (HBAD3P's competition unit: subplot densities x 4, SDI / 1500) and crown ratio
+  trn = L.tr[(L.tr.set .== "train") .& .!in.(L.tr.out, Ref(("missing", "harvest"))), :]
+  sdi_sub = combine(groupby(DataFrame(iid=trn.iid, sb=trn.sb, x=4 .* trn.w_ha .* (trn.dia_cm ./ 25.4) .^ 1.605), [:iid, :sb]), :x => sum => :sdi)
+  rdd = Dict((r.iid, r.sb) => r.sdi / 1500 for r in eachrow(sdi_sub))
+  wst = DataFrame(w=trn.w_ha, rd=[rdd[(i, b)] for (i, b) in zip(trn.iid, trn.sb)], cr=[ismissing(c) || c <= 0 ? 0.4 : c / 100 for c in trn.cr])
+  out = (keys=L.keys, TR=TR, eb=eb, sD=sD, sH=sH, lanemode=LANEMODE, warm=wst, split=SPLIT_CSV, sets=B)
   serialize(f * ".part", out); mv(f * ".part", f; force=true)
   out
 end

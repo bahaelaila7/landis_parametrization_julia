@@ -1,35 +1,36 @@
-# HBAD4P — stand-level process cohort model (docs/hbad4p_design.md). Cohort = species key k × FIA 2-inch diameter class j × vigour lane v; state per
-# cohort: N [trees / forested ha], B [basal area m² / forested ha], H [mean height m, N-weighted], A [mean age yr]. Site = plot (the stand).
-# One annual step of a site (step_site!; Δ = 1 or the final fraction of a year), all rates from the START-of-step state (explicit Euler):
-#   Dq = 100 √(4B / (π N)) [cm];  SDI = N (Dq/25.4)^1.605;  RD = ΣSDI / sdimax
+# HBAD4P — stand-level process cohort model (docs/hbad4p_design.md). Cohort (cell) = species key k × FIA 2-inch diameter class j × vigour lane v; state per
+# cell: up to NATOM diameter ATOMS (N_m trees / forested ha at diameter D_m: the cell's N = Σ N_m, B = Σ N_m π/4 D_m² / 10⁴), a mean height H (N-weighted)
+# and a mean age A. Site = plot (the stand).
+# One annual step of a site (step_site!; Δ = 1 or the final fraction of a year), all rates from the START-of-step state (explicit Euler), per CELL:
+#   Dq = QMD of the cell;  SDI = N (Dq/25.4)^1.605;  RD = ΣSDI / sdimax
 #   overtopping O_i = Σ_j SDI_j r(H_j − H_i) / sdimax, r(Δ) = clamp(½ + Δ / (2 δH), 0, 1) (δH = 1 m: continuous in the heights; δH → 0 gives HBAD3P's
 #       rule: taller cohorts count fully, equal heights and the own cohort half)
-#   growth of the lane's mean tree (HBAD3P forms): L = f0 + (1 − f0) e^{−a O};  cw = e^{gR RD} W^ω f_T f_CO2 e^{z σv}
-#       f_T = exp(−[(T − Topt_k)² − (Tref_k − Topt_k)²] / wT²): T = period mean annual temperature, Topt the key's range optimum (trait), Tref the key's
-#       mean over its training intervals — f_T = 1 at the key's typical regional climate, so ε keeps its meaning and f_T carries only the deviations
-#       f_CO2 = 1 + βC ln(C / Cref) (βC fixed);  hyd = max(0, 1 − min(H / 1.1 Hmax, 1)^θ)
-#       dV = max(ε (Dq/20)^b · 122.98 · L cw hyd fD − ρ Dq² H, 0);  dD = dV Δ / (2 Dq max(H, 1.37))
-#   mortality (HBAD3P hazard): gm = e^{−am O} cw (the realised carbon balance: climate and CO2 act on it too);
+#   growth of the lane's mean tree (HBAD3P forms): L = f0 + (1 − f0) e^{−a O};  c = e^{gR RD} W^ω f_T e^{z σv};  g = L c (the realised relative growth)
+#       f_T = exp(βT (T − Tref_k)): T = period mean annual temperature, Tref_k = the key's mean period temperature over its training intervals (f_T = 1 at
+#       the key's typical regional climate; βT global, either sign — the data decide whether warmer sites grow faster or slower)
+#       hyd = max(0, 1 − min(H / 1.1 Hmax, 1)^θ);  dV = max(ε (Dq/20)^b · 122.98 · g f_CO2 hyd fD − ρ Dq² H, 0);  dD = dV Δ / (2 Dq max(H, 1.37))
+#       f_CO2 = 1 + βC ln(C / Cref) (βC fixed; the FACE constraint is on NPP, so CO2 acts on growth only — not on the stress of mortality or self-thinning)
+#   mortality (HBAD3P hazard): gm = e^{−am O} c (the carbon balance of the realised growth, climate included);
 #       h = fM [m0/LONGEVITY + ms e^{σST (ST − 3)} e^{−β gm} (Dq/20)^ζ] + e^{mA (A/LONGEVITY − 1)}, fM = (planted ? e^{pM} : 1) e^{mW (Wn − W)/0.1};
-#       survival e^{−h Δ} applies to N and B alike (size-neutral within a cohort)
+#       survival e^{−h Δ} applies to every atom of the cell (size-neutral within a cell)
 #   height (HBAD3P): dH = [H*(Dq + dD) − H*(Dq)](1 + η(1 − Lh)) + λΔ (H*(Dq)(1 + μ(1 − Lh)) − H),  Lh = e^{−kh O};  H += max(fH dH, 0)
-#   upgrowth (two moments, closure = TRUNCATED EXPONENTIAL density): within [L_j, U_j) the trees are distributed ∝ e^{a ξ}, ξ = (D − L_j)/w ∈ [0, 1), a
-#       from the cohort's mean square diameter (any QMD in (L_j, U_j) is representable: a → ∓∞ concentrates the trees at the class bounds); every tree
-#       grows by dD; the trees of each ξ segment that lands in class t ≥ j (any number of classes) move there with their N and their exact basal area;
-#       heights get the allometric offset H*(D_group) − H*(D_all), rescaled to conserve Σ N·H. The open last class has no upgrowth.
-#   self-thinning after the step (≤ 6 passes while ΣSDI > sdimax): the excess SDI removed in proportion to SDI (1 − min(1, g)) (+1e−9 SDI), N and B alike
+#   upgrowth (cohorts in bins): every atom of the cell grows by the cell's dD and lands in the class of its new diameter (any number of classes up); the
+#       transfer is EXACT for the atoms (no within-class density is assumed: a cell of 1–3 tallied trees does not diffuse). When a cell holds more than
+#       NATOM atoms, its two closest atoms merge (N and N·D² conserved: B is conserved). Moving groups get the allometric height offset
+#       H*(D_group) − H*(D_cell), rescaled to conserve Σ N·H; the inflow carries its source cell's realised growth (the self-thinning weight).
+#   self-thinning after the step (≤ 6 passes while ΣSDI > sdimax): the excess SDI removed in proportion to SDI (1 − min(1, g)) (+1e−9 SDI)
 #   lane mixing: a fraction κΔ of each (k, j) is re-split over the lanes with the lane weights
 #   recruitment into class 1 at D0 = 2.54 cm, at the end of the year (no growth in it): rate = RSCALE e^{lnF_k − λ0 e^{λ1 (ST_k − 3)} RD} W^ωR
 #       (seed ? 1 : ε0) Δ, RD of the start of the step, seed = a key tree ≥ 12.7 cm on the plot at v1, or ≥ SEED_MIN trees/ha of the key ≥ 12.7 cm now;  A += Δ.
 module HBAD4P
 
-export SpP4, GlobP4, Sites4, simulate!, lanes, NCLS, CLS_LO, CLS_HI
+export SpP4, GlobP4, Sites4, simulate!, lanes, NCLS, CLS_LO, CLS_HI, NATOM
 
-# ---------------------------------------------------------------- classes and lanes
+# ---------------------------------------------------------------- classes, lanes, atoms
 const NCLS = 16
 const CLS_LO = [2.54 * (2k - 1) for k in 1:NCLS]                 # [1, 3, 5, …, 31] in → cm
 const CLS_HI = [k < NCLS ? 2.54 * (2k + 1) : Inf for k in 1:NCLS]
-const CLS_W = 5.08
+const NATOM = 4                                                   # diameter atoms per cell
 "Class of a diameter [cm] (0 below 1 in); the 1e-9 absorbs the rounding of exact class bounds (78.74 cm = 31.0 in → class 16)."
 dclass(D) = D < CLS_LO[1] - 1e-9 ? 0 : min(NCLS, floor(Int, (D / 2.54 + 1) / 2 + 1e-9))
 """Lane nodes and weights (mean 0, variance 1 of z): :sym = 0.5 / 0.25 / 0.25 at z = 0, ∓√2; :fvs = FVS SN tripling 0.60 / 0.25 / 0.15 at −0.142, +1.271,
@@ -48,7 +49,6 @@ struct SpP4
   Hmax::Float64      # trait: maximum height [m]
   ST::Float64        # trait: shade-tolerance class 1-5
   longevity::Float64 # trait [yr]
-  Topt::Float64      # trait: the key's range temperature optimum (mean annual temperature normal over its plots) [°C]
   Tref::Float64      # the key's mean period temperature over its TRAINING intervals [°C] (f_T = 1 there)
 end
 struct GlobP4
@@ -56,8 +56,8 @@ struct GlobP4
   s::Float64; c::Float64; η::Float64; λ::Float64; μ::Float64; kh::Float64     # height
   m0::Float64; ms::Float64; σST::Float64; β::Float64; ζ::Float64; mW::Float64; mA::Float64   # mortality
   pD::Float64; pH::Float64; pM::Float64; σv::Float64; sdimax::Float64; am::Float64; ρ::Float64; f0::Float64
-  wT::Float64        # width of the temperature response [°C] (Inf = none)
-  βC::Float64        # CO2 fertilisation (fixed; 0 = none)
+  βT::Float64        # temperature response of growth [1/°C], log scale, either sign (0 = none)
+  βC::Float64        # CO2 fertilisation of growth (fixed; 0 = none)
   κ::Float64         # lane mixing rate [1/yr]
   λ0::Float64; λ1::Float64; ε0::Float64; ωR::Float64        # recruitment: light window, background seed rain, water
 end
@@ -70,72 +70,17 @@ const DH_OT = 1.0               # height ramp of the overtopping rule [m]
 @inline hstar(p::SpP4, G::GlobP4, D) = (h = p.Hmax - 1.37; 1.37 + h * (1 - exp(-G.s * D / h))^G.c)
 @inline qmd(N, B) = N > 0 ? 100 * sqrt(4 * B / (π * N)) : 0.0
 @inline ba(N, D) = N * π / 4 * (D / 100)^2
-@inline fT_rel(p::SpP4, G::GlobP4, T) = (isinf(G.wT) || isnan(T)) ? 1.0 : exp(-((T - p.Topt)^2 - (p.Tref - p.Topt)^2) / G.wT^2)
-
-# ---------------------------------------------------------------- truncated-exponential closure on ξ ∈ [0, 1): p(ξ) = a e^{aξ} / (e^a − 1)
-"(F, M1, M2) = ∫_0^ξ {1, s, s²} p_a(s) ds (closed forms; a < 0 by reflection s → 1 − s; |a| < 1e-2 by the second-order series)."
-function texp_cum(a::Float64, ξ::Float64)
-  ξ = clamp(ξ, 0.0, 1.0)
-  if abs(a) < 1e-2
-    F = ξ + a * (ξ^2 / 2 - ξ / 2) + a^2 * (ξ^3 / 6 - ξ^2 / 4 + ξ / 12)
-    M1 = ξ^2 / 2 + a * (ξ^3 / 3 - ξ^2 / 4) + a^2 * (ξ^4 / 8 - ξ^3 / 6 + ξ^2 / 24)
-    M2 = ξ^3 / 3 + a * (ξ^4 / 4 - ξ^3 / 6) + a^2 * (ξ^5 / 10 - ξ^4 / 8 + ξ^3 / 36)
-    return (F, M1, M2)
-  elseif a > 0
-    d = -expm1(-a); E = exp(a * (ξ - 1)); E0 = exp(-a)                       # p(s) = a e^{a(s−1)} / (1 − e^{−a})
-    I0 = (E - E0) / a; I1 = E * (ξ / a - 1 / a^2) + E0 / a^2; I2 = E * (ξ^2 / a - 2ξ / a^2 + 2 / a^3) - E0 * 2 / a^3
-    return (a * I0 / d, a * I1 / d, a * I2 / d)
-  else
-    F1, M11, M21 = texp_cum(-a, 1.0); Fx, M1x, M2x = texp_cum(-a, 1.0 - ξ)
-    dF = F1 - Fx; dM1 = M11 - M1x; dM2 = M21 - M2x
-    return (dF, dF - dM1, dF - 2dM1 + dM2)
-  end
-end
-"Position r = (√E[D²] − L)/w of a class's QMD for closure parameter a (ℓ = L / w)."
-@inline function texp_r(a, ℓ)
-  _, m1, m2 = texp_cum(a, 1.0); sqrt(ℓ^2 + 2ℓ * m1 + m2) - ℓ
-end
-const A_GRID = [200 * sinh(4t) / sinh(4.0) for t in range(-1, 1; length=4001)]     # a grid, dense near 0
-const R_TAB = [texp_r(a, (CLS_LO[j]) / CLS_W) for a in A_GRID, j in 1:NCLS-1]       # QMD position per class (monotone in a)
-"Closure parameter a of class j (< NCLS) for a cohort of mean square diameter q2 (inverse of R_TAB by bisection + linear interpolation; clamped to ±200)."
-function texp_a(j::Int, q2::Float64)
-  r = (sqrt(q2) - CLS_LO[j]) / CLS_W; col = view(R_TAB, :, j)
-  r <= col[1] && return A_GRID[1]; r >= col[end] && return A_GRID[end]
-  i = searchsortedlast(col, r); t = (r - col[i]) / (col[i+1] - col[i])
-  A_GRID[i] + t * (A_GRID[i+1] - A_GRID[i])
-end
-
-"""Distribute the survivors (n, b) of cohort class j < NCLS growing by dD over the classes they land in. Calls put(t, Nt, Bt, Dqt) for every target class t ≥ j
-(t = j: the stayers) with the trees' N and basal area after growth; the stayers absorb the closure's rounding so that Σ B = b + n π/4 (2 dD E[D] + dD²) / 10⁴
-(E[D] of the closure). Returns the basal area of all survivors after growth."""
-@inline function upgrowth!(put, j::Int, n::Float64, b::Float64, dD::Float64)
-  L = CLS_LO[j]; w = CLS_W; q2 = qmd(n, b)^2; a = texp_a(j, q2)
-  _, m1, _ = texp_cum(a, 1.0); ED = L + w * m1
-  Btot = b + ba(n, 1.0) * (2 * dD * ED + dD^2)
-  δ = dD / w; Bm = 0.0
-  for m in 1:(NCLS - j)                                   # movers into class j + m: ξ ∈ [m − δ, m + 1 − δ) (the last class: ξ ≥ NCLS − j − δ)
-    lo = m - δ; lo >= 1 && break
-    hi = j + m == NCLS ? 1.0 : min(m + 1 - δ, 1.0)
-    hi <= 0 && continue
-    F0, A1, A2 = texp_cum(a, max(lo, 0.0)); F1, B1_, B2 = texp_cum(a, hi)
-    P = F1 - F0; P > 0 || continue
-    c0 = L + w * δ; e2 = c0^2 * P + 2 * c0 * w * (B1_ - A1) + w^2 * (B2 - A2)     # Σ over the segment of (D + dD)², per tree of the cohort
-    Nt = n * P; Bt = min(ba(n, 1.0) * e2, Btot - Bm); Bm += Bt
-    put(j + m, Nt, Bt, qmd(Nt, Bt))
-    hi >= 1 && break
-  end
-  F0, _, _ = texp_cum(a, max(1 - δ, 0.0)); Ns = n * F0
-  Ns > 0 && put(j, Ns, Btot - Bm, qmd(Ns, Btot - Bm))
-  Btot
-end
+@inline fT_rel(p::SpP4, G::GlobP4, T) = isnan(T) ? 1.0 : exp(G.βT * (T - p.Tref))
 
 """SoA store. Per site s the cells off[s]:off[s+1]-1, ordered key-major, then class, then lane (cell of (k, j, v) = off[s] + ((k − 1)·NCLS + (j − 1))·NL + v − 1;
-every key × class × lane is allocated). Initial (…0) and working state; per site the climate (period means), the v1 seed presence per key, and the lanes."""
+every key × class × lane is allocated); atom m of cell i at (i − 1)·NATOM + m (N = 0: an empty slot). Initial (…0) and working state; the cell totals N / B are
+kept in sync with the atoms; per site the climate (period means), the v1 seed presence per key, and the lanes."""
 struct Sites4
   off::Vector{Int}; nk::Int
   sp::Vector{Int32}; cl::Vector{Int8}; ln::Vector{Int8}
-  N0::Vector{Float64}; B0::Vector{Float64}; H0::Vector{Float64}; A0::Vector{Float64}
-  N::Vector{Float64}; B::Vector{Float64}; H::Vector{Float64}; A::Vector{Float64}
+  AN0::Vector{Float64}; AD0::Vector{Float64}; H0::Vector{Float64}; A0::Vector{Float64}
+  AN::Vector{Float64}; AD::Vector{Float64}; H::Vector{Float64}; A::Vector{Float64}
+  N0::Vector{Float64}; B0::Vector{Float64}; N::Vector{Float64}; B::Vector{Float64}     # cell totals (derived from the atoms)
   nyr::Vector{Int}; frac::Vector{Float64}; planted::Vector{Bool}
   W::Vector{Float64}; Wn::Vector{Float64}; T::Vector{Float64}; C::Vector{Float64}   # water index, its normal, temperature, CO2
   seed0::BitMatrix                                        # nk × nsites: a tree of the key ≥ 12.7 cm on the plot at v1
@@ -143,6 +88,42 @@ struct Sites4
 end
 cell(S::Sites4, s, k, j, v) = S.off[s] + ((k - 1) * NCLS + (j - 1)) * NL + (v - 1)
 nsites(S::Sites4) = length(S.off) - 1
+"Cell totals (N, B) of atom arrays (an, ad) at cell i."
+@inline function totals(an, ad, i)
+  n = 0.0; b = 0.0
+  @inbounds for m in 1:NATOM; k = (i - 1) * NATOM + m; n += an[k]; b += ba(an[k], ad[k]); end
+  n, b
+end
+
+# ---------------------------------------------------------------- atom buffers
+"""Add an atom (n, d) to a buffer (bn, bd, count c, capacity cap): when full, it merges into its nearest atom in diameter (N, N·D² conserved). Returns the count."""
+@inline function buf_add!(bn, bd, base, c, cap, n, d)
+  n > 0 || return c
+  if c < cap
+    bn[base+c+1] = n; bd[base+c+1] = d; return c + 1
+  end
+  q = 1; best = Inf
+  @inbounds for t in 1:c; e = abs(bd[base+t] - d); e < best && (best = e; q = t); end
+  @inbounds begin m = bn[base+q] + n; bd[base+q] = sqrt((bn[base+q] * bd[base+q]^2 + n * d^2) / m); bn[base+q] = m; end
+  c
+end
+"Reduce a buffer of c atoms to ≤ NATOM by merging the closest pair in diameter, repeatedly (N, N·D² conserved). Returns the new count."
+@inline function compact!(bn, bd, base, c)
+  @inbounds while c > NATOM
+    p = 1; q = 2; best = Inf
+    for u in 1:c-1, t in u+1:c; e = abs(bd[base+u] - bd[base+t]); e < best && (best = e; p = u; q = t); end
+    m = bn[base+p] + bn[base+q]; bd[base+p] = sqrt((bn[base+p] * bd[base+p]^2 + bn[base+q] * bd[base+q]^2) / m); bn[base+p] = m
+    bn[base+q] = bn[base+c]; bd[base+q] = bd[base+c]; c -= 1
+  end
+  c
+end
+"Write a buffer of c (≤ NATOM) atoms into cell i of (an, ad) (unused slots emptied)."
+@inline function put_atoms!(an, ad, i, bn, bd, base, c)
+  @inbounds for m in 1:NATOM
+    k = (i - 1) * NATOM + m
+    if m <= c; an[k] = bn[base+m]; ad[k] = bd[base+m]; else; an[k] = 0.0; ad[k] = 0.0; end
+  end
+end
 
 """Lookup tables of the fractional powers of one parameter set (built once per simulate!; linear interpolation on a 0.02 cm diameter grid to 250 cm, and
 on [0, 1] in steps of 1e-4 for the hydraulic term; beyond the grid the exact function): H*(D) per key, (D/20)^b, (D/20)^ζ, (D/25.4)^1.605, x^θ."""
@@ -166,35 +147,43 @@ end
 @inline sdi_t(T::Tabs, N, D) = N * lut(T.ps, D, TD, TN, d -> (d / 25.4)^1.605)
 @inline hyd_t(T::Tabs, G::GlobP4, x) = lut(T.hy, x, TH, THN, y -> y^G.θ)
 
+const CAPB = 4 * NATOM          # inflow buffer per cell (own stayers + movers from lower classes + lanes), merged on overflow
 "Per-thread scratch of one site (sized for the largest site)."
 struct Scratch
   sd::Vector{Float64}; O::Vector{Float64}; g::Vector{Float64}; dD::Vector{Float64}; dH::Vector{Float64}; sv::Vector{Float64}; ord::Vector{Int}; act::Vector{Int}
-  inN::Vector{Float64}; inB::Vector{Float64}; inH::Vector{Float64}; inA::Vector{Float64}; ps::Vector{Float64}
+  inH::Vector{Float64}; inA::Vector{Float64}; inG::Vector{Float64}; ps::Vector{Float64}
+  bn::Vector{Float64}; bd::Vector{Float64}; bc::Vector{Int}                    # inflow atoms per cell: CAPB slots, count
+  gn::Vector{Float64}; gb::Vector{Float64}; gt::Vector{Int}                    # one cell's moving groups by target class (N, Σ N D², class)
 end
-Scratch(n) = Scratch(zeros(n), zeros(n), zeros(n), zeros(n), zeros(n), zeros(n), zeros(Int, n), zeros(Int, n), zeros(n), zeros(n), zeros(n), zeros(n), zeros(n + 1))
+Scratch(n) = Scratch(zeros(n), zeros(n), zeros(n), zeros(n), zeros(n), zeros(n), zeros(Int, n), zeros(Int, n), zeros(n), zeros(n), zeros(n), zeros(n + 1),
+                     zeros(n * CAPB), zeros(n * CAPB), zeros(Int, n), zeros(NCLS), zeros(NCLS), zeros(Int, NCLS))
 
-"Overtopping of the active cells (X.act[1:na]) with the height ramp DH_OT: O[li] for every active cell (sorted sweep with a prefix sum; O(n·window))."
+"Overtopping of the active cells (X.act[1:na]) with the height ramp DH_OT: O[li] for every active cell (insertion-sorted sweep with a prefix sum; no allocation)."
 @inline function overtopping!(X::Scratch, H, na::Int, lo::Int, sdimax::Float64)
-  ordv = view(X.ord, 1:na); @inbounds for q in 1:na; ordv[q] = X.act[q]; end
-  sort!(ordv; by=i -> H[i])
+  ord = X.ord
+  @inbounds for q in 1:na                                              # insertion sort by height (n ~ 10²; allocation-free)
+    i = X.act[q]; h = H[i]; t = q - 1
+    while t >= 1 && H[ord[t]] > h; ord[t+1] = ord[t]; t -= 1; end
+    ord[t+1] = i
+  end
   ps = X.ps; ps[1] = 0.0
-  @inbounds for q in 1:na; ps[q+1] = ps[q] + X.sd[ordv[q] - lo + 1]; end
+  @inbounds for q in 1:na; ps[q+1] = ps[q] + X.sd[ord[q] - lo + 1]; end
   tot = ps[na+1]; qa = 1; qb = 1
   @inbounds for q in 1:na
-    hq = H[ordv[q]]
-    while qa <= na && H[ordv[qa]] < hq - DH_OT; qa += 1; end          # first cell within the ramp below
-    while qb <= na && H[ordv[qb]] <= hq + DH_OT; qb += 1; end         # first cell fully above
+    hq = H[ord[q]]
+    while qa <= na && H[ord[qa]] < hq - DH_OT; qa += 1; end          # first cell within the ramp below
+    while qb <= na && H[ord[qb]] <= hq + DH_OT; qb += 1; end         # first cell fully above
     o = tot - ps[qb]                                                    # strictly above the ramp: full weight
     for t in qa:qb-1
-      j = ordv[t]; o += X.sd[j - lo + 1] * clamp(0.5 + (H[j] - hq) / (2 * DH_OT), 0.0, 1.0)
+      j = ord[t]; o += X.sd[j - lo + 1] * clamp(0.5 + (H[j] - hq) / (2 * DH_OT), 0.0, 1.0)
     end
-    X.O[ordv[q] - lo + 1] = o / sdimax
+    X.O[ord[q] - lo + 1] = o / sdimax
   end
   nothing
 end
 
 @inline function step_site!(S::Sites4, P::AbstractVector{SpP4}, G::GlobP4, X::Scratch, s::Int, Δ::Float64, T_::Tabs)
-  lo = S.off[s]; hi = S.off[s+1] - 1; N, B, H, A = S.N, S.B, S.H, S.A; lz, lw = S.lz, S.lw
+  lo = S.off[s]; hi = S.off[s+1] - 1; N, B, H, A, AN, AD = S.N, S.B, S.H, S.A, S.AN, S.AD; lz, lw = S.lz, S.lw
   na = 0; tot = 0.0
   @inbounds for i in lo:hi
     if N[i] > 1e-9
@@ -207,46 +196,59 @@ end
   fH = pl ? exp(G.pH) : 1.0; fD = pl ? exp(G.pD) : 1.0
   fM = (pl ? exp(G.pM) : 1.0) * exp(G.mW * (Wn - W) / 0.1)
   wω = W^G.ω; cr = exp(G.gR * RD); fC = 1 + G.βC * log(S.C[s] / CREF)
-  @inbounds for i in lo:hi; li = i - lo + 1; X.g[li] = 1.0; X.inN[li] = 0.0; X.inB[li] = 0.0; X.inH[li] = 0.0; X.inA[li] = 0.0; end   # (cells empty at the start: no stress)
+  # inflow buffers: an inactive cell (≤ 1e-9 trees) keeps its atoms (they are added to, not overwritten)
+  @inbounds for i in lo:hi
+    li = i - lo + 1; X.inH[li] = 0.0; X.inA[li] = 0.0; X.inG[li] = 0.0; X.g[li] = 1.0; c = 0; base = (li - 1) * CAPB
+    if N[i] <= 1e-9
+      for m in 1:NATOM; k = (i - 1) * NATOM + m; c = buf_add!(X.bn, X.bd, base, c, CAPB, AN[k], AD[k]); end
+      X.inH[li] = N[i] * H[i]; X.inA[li] = N[i] * A[i]; X.inG[li] = N[i]
+    end
+    X.bc[li] = c
+  end
   # rates from the start-of-step state
   @inbounds for q in 1:na
     i = X.act[q]; li = i - lo + 1; k = S.sp[i]; p = P[k]; Dq = qmd(N[i], B[i]); Hi = H[i]; O = X.O[li]
-    cw = cr * wω * fT_rel(p, G, T) * fC * exp(G.σv * lz[S.ln[i]])
-    g = (G.f0 + (1 - G.f0) * exp(-G.a * O)) * cw; X.g[li] = min(g, 1.0)
-    gm = exp(-G.am * O) * cw
+    c_ = cr * wω * fT_rel(p, G, T) * exp(G.σv * lz[S.ln[i]])
+    g = (G.f0 + (1 - G.f0) * exp(-G.a * O)) * c_; X.g[li] = min(g, 1.0)
+    gm = exp(-G.am * O) * c_
     hyd = max(0.0, 1 - hyd_t(T_, G, min(Hi / (1.1 * p.Hmax), 1.0)))
-    dV = max(exp(p.lnε) * pw_b(T_, G, Dq) * 122.98 * g * hyd * fD - G.ρ * Dq^2 * Hi, 0.0)
+    dV = max(exp(p.lnε) * pw_b(T_, G, Dq) * 122.98 * g * fC * hyd * fD - G.ρ * Dq^2 * Hi, 0.0)
     X.dD[li] = dV / (2 * Dq * max(Hi, 1.37)) * Δ
     Lh = exp(-G.kh * O); hs = ht(T_, p, G, k, Dq)
     X.dH[li] = max((ht(T_, p, G, k, Dq + X.dD[li]) - hs) * (1 + G.η * (1 - Lh)) + G.λ * Δ * (hs * (1 + G.μ * (1 - Lh)) - Hi), 0.0) * fH
     h = fM * (G.m0 / p.longevity + G.ms * exp(G.σST * (p.ST - 3)) * exp(-G.β * gm) * pw_z(T_, G, Dq)) + exp(G.mA * (A[i] / p.longevity - 1))
     X.sv[li] = exp(-h * Δ)
   end
-  # apply: survival, growth, upgrowth. Every cohort's survivors are written as inflows (stayers into their own cell, movers into the cells they reach) and
-  # merged afterwards, so that no cohort is grown or moved twice in one step.
+  # apply: survival, growth, upgrowth of the atoms into the inflow buffers (no cell is grown or moved twice in one step)
   @inbounds for q in 1:na
-    i = X.act[q]; li = i - lo + 1; k = S.sp[i]; p = P[k]; j = Int(S.cl[i])
-    n = N[i] * X.sv[li]; b = B[i] * X.sv[li]; dD = X.dD[li]; Hn = H[i] + X.dH[li]; Ai = A[i]
-    N[i] = 0.0; B[i] = 0.0
-    if j < NCLS && dD > 0
-      Dall = qmd(n, b + ba(n, 1.0) * (2 * dD * qmd(n, b) + dD^2)); hD = ht(T_, p, G, k, Dall)
-      # first pass: Σ N·H of the groups with their allometric offsets (to rescale), second pass: write
-      sh = Ref(0.0)
-      upgrowth!((t, Nt, Bt, Dt) -> (sh[] += Nt * (Hn + ht(T_, p, G, k, Dt) - hD)), j, n, b, dD)
-      f = sh[] > 0 ? n * Hn / sh[] : 1.0
-      upgrowth!(j, n, b, dD) do t, Nt, Bt, Dt
-        c = i + (t - j) * NL; lc = c - lo + 1
-        X.inN[lc] += Nt; X.inB[lc] += Bt; X.inH[lc] += Nt * (Hn + ht(T_, p, G, k, Dt) - hD) * f; X.inA[lc] += Nt * Ai
-      end
-    else
-      bn = j == NCLS ? b + ba(n, 1.0) * (2 * dD * qmd(n, b) + dD^2) : b                  # (open last class: E[D] ≈ QMD)
-      X.inN[li] += n; X.inB[li] += bn; X.inH[li] += n * Hn; X.inA[li] += n * Ai
+    i = X.act[q]; li = i - lo + 1; k = S.sp[i]; p = P[k]; j = Int(S.cl[i]); sv = X.sv[li]; dD = X.dD[li]; Hn = H[i] + X.dH[li]; Ai = A[i]; gi = X.g[li]
+    ng = 0; nt = 0.0; b2 = 0.0                                          # groups of this cell by target class
+    for m in 1:NATOM
+      kk = (i - 1) * NATOM + m; n = AN[kk] * sv; n > 0 || continue
+      d = AD[kk] + dD; t = j == NCLS ? NCLS : max(j, dclass(d))
+      g_ = 0; for u in 1:ng; X.gt[u] == t && (g_ = u; break); end
+      g_ == 0 && (ng += 1; g_ = ng; X.gt[g_] = t; X.gn[g_] = 0.0; X.gb[g_] = 0.0)
+      X.gn[g_] += n; X.gb[g_] += n * d^2; nt += n; b2 += n * d^2
+      c = i + (t - j) * NL; lc = c - lo + 1; X.bc[lc] = buf_add!(X.bn, X.bd, (lc - 1) * CAPB, X.bc[lc], CAPB, n, d)
+    end
+    nt > 0 || continue
+    hD = ht(T_, p, G, k, sqrt(b2 / nt)); sh = 0.0
+    for u in 1:ng; sh += X.gn[u] * (Hn + ht(T_, p, G, k, sqrt(X.gb[u] / X.gn[u])) - hD); end
+    f = sh > 0 ? nt * Hn / sh : 1.0                                     # conserve Σ N·H over the groups
+    for u in 1:ng
+      c = i + (X.gt[u] - j) * NL; lc = c - lo + 1; n = X.gn[u]
+      X.inH[lc] += n * (Hn + ht(T_, p, G, k, sqrt(X.gb[u] / n)) - hD) * f; X.inA[lc] += n * Ai; X.inG[lc] += n * gi
     end
   end
   @inbounds for i in lo:hi
-    li = i - lo + 1; m = X.inN[li]
-    m > 0 || continue
-    N[i] = m; B[i] = X.inB[li]; H[i] = X.inH[li] / m; A[i] = X.inA[li] / m
+    li = i - lo + 1; c = X.bc[li]; base = (li - 1) * CAPB
+    if c == 0
+      for m in 1:NATOM; kk = (i - 1) * NATOM + m; AN[kk] = 0.0; AD[kk] = 0.0; end; N[i] = 0.0; B[i] = 0.0; X.g[li] = 1.0
+      continue
+    end
+    c = compact!(X.bn, X.bd, base, c); put_atoms!(AN, AD, i, X.bn, X.bd, base, c)
+    n, b = totals(AN, AD, i); N[i] = n; B[i] = b
+    H[i] = X.inH[li] / n; A[i] = X.inA[li] / n; X.g[li] = X.inG[li] / n            # the self-thinning weight of the trees now in the cell
   end
   # self-thinning
   for _ in 1:6
@@ -259,21 +261,30 @@ end
     @inbounds for i in lo:hi
       li = i - lo + 1; sd_ = X.sd[li]
       sd_ > 0 || continue
-      r = min(sd_, ex * (sd_ * (1 - X.g[li]) + 1e-9 * sd_) / ws); f = 1 - r / sd_; N[i] *= f; B[i] *= f
+      r = min(sd_, ex * (sd_ * (1 - X.g[li]) + 1e-9 * sd_) / ws); f = 1 - r / sd_
+      for m in 1:NATOM; AN[(i - 1) * NATOM + m] *= f; end; N[i] *= f; B[i] *= f
     end
   end
-  # lane mixing within (k, j)
+  # lane mixing within (k, j): each lane keeps (1 − κΔ) of its atoms and receives κΔ · w_v of the pooled atoms of the three lanes
   if G.κ > 0
     k_ = min(G.κ * Δ, 1.0)
     @inbounds for i in lo:NL:hi
       tn = N[i] + N[i+1] + N[i+2]
       tn > 0 || continue
-      tb = B[i] + B[i+1] + B[i+2]; th = N[i] * H[i] + N[i+1] * H[i+1] + N[i+2] * H[i+2]; ta = N[i] * A[i] + N[i+1] * A[i+1] + N[i+2] * A[i+2]
+      th = N[i] * H[i] + N[i+1] * H[i+1] + N[i+2] * H[i+2]; ta = N[i] * A[i] + N[i+1] * A[i+1] + N[i+2] * A[i+2]
+      li0 = i - lo + 1
+      for v in 0:2                                                      # build the three new lane buffers (scratch slots of the three cells)
+        base = (li0 + v - 1) * CAPB; c = 0
+        for m in 1:NATOM; kk = (i + v - 1) * NATOM + m; c = buf_add!(X.bn, X.bd, base, c, CAPB, (1 - k_) * AN[kk], AD[kk]); end
+        for u in 0:2, m in 1:NATOM; kk = (i + u - 1) * NATOM + m; c = buf_add!(X.bn, X.bd, base, c, CAPB, k_ * lw[v+1] * AN[kk], AD[kk]); end
+        X.bc[li0+v] = c
+      end
+      Hs = (H[i], H[i+1], H[i+2]); As = (A[i], A[i+1], A[i+2]); Ns = (N[i], N[i+1], N[i+2])
       for v in 0:2
-        t = i + v; nn = (1 - k_) * N[t] + k_ * lw[v+1] * tn
-        nn > 0 || continue
-        H[t] = ((1 - k_) * N[t] * H[t] + k_ * lw[v+1] * th) / nn; A[t] = ((1 - k_) * N[t] * A[t] + k_ * lw[v+1] * ta) / nn
-        B[t] = (1 - k_) * B[t] + k_ * lw[v+1] * tb; N[t] = nn
+        t = i + v; base = (li0 + v - 1) * CAPB; c = compact!(X.bn, X.bd, base, X.bc[li0+v]); put_atoms!(AN, AD, t, X.bn, X.bd, base, c)
+        n, b = totals(AN, AD, t); N[t] = n; B[t] = b
+        n > 0 || continue
+        H[t] = ((1 - k_) * Ns[v+1] * Hs[v+1] + k_ * lw[v+1] * th) / n; A[t] = ((1 - k_) * Ns[v+1] * As[v+1] + k_ * lw[v+1] * ta) / n
       end
     end
   end
@@ -289,8 +300,10 @@ end
     rate > 0 || continue
     h0 = ht(T_, p, G, k, D_REC)
     for v in 1:NL
-      t = cell(S, s, k, 1, v); add = rate * lw[v]; n0 = N[t]; nt = n0 + add
-      H[t] = (n0 * H[t] + add * h0) / nt; A[t] = (n0 * A[t] + add * (A_REC - Δ)) / nt; N[t] = nt; B[t] += ba(add, D_REC)   # (A_REC − Δ: aged A_REC after the A += Δ below)
+      t = cell(S, s, k, 1, v); add = rate * lw[v]; n0 = N[t]; nt = n0 + add; base = (t - lo) * CAPB; c = 0
+      for m in 1:NATOM; kk = (t - 1) * NATOM + m; c = buf_add!(X.bn, X.bd, base, c, CAPB, AN[kk], AD[kk]); end
+      c = buf_add!(X.bn, X.bd, base, c, CAPB, add, D_REC); c = compact!(X.bn, X.bd, base, c); put_atoms!(AN, AD, t, X.bn, X.bd, base, c)
+      H[t] = (n0 * H[t] + add * h0) / nt; A[t] = (n0 * A[t] + add * (A_REC - Δ)) / nt; N[t] = nt; B[t] += ba(add, D_REC)   # (A_REC − Δ: aged A_REC after A += Δ)
     end
   end
   @inbounds for i in lo:hi; N[i] > 0 && (A[i] += Δ); end
@@ -304,7 +317,10 @@ function simulate!(S::Sites4, P::AbstractVector{SpP4}, G::GlobP4; exact::Bool=fa
   XS = [Scratch(nmax) for _ in 1:Threads.maxthreadid()]
   Threads.@threads :static for s in 1:nsites(S)
     X = XS[Threads.threadid()]; lo = S.off[s]; hi = S.off[s+1] - 1
-    @inbounds for i in lo:hi; S.N[i] = S.N0[i]; S.B[i] = S.B0[i]; S.H[i] = S.H0[i]; S.A[i] = S.A0[i]; end
+    @inbounds for i in lo:hi
+      S.N[i] = S.N0[i]; S.B[i] = S.B0[i]; S.H[i] = S.H0[i]; S.A[i] = S.A0[i]
+      for m in 1:NATOM; k = (i - 1) * NATOM + m; S.AN[k] = S.AN0[k]; S.AD[k] = S.AD0[k]; end
+    end
     for _ in 1:S.nyr[s]; step_site!(S, P, G, X, s, 1.0, T_); end
     S.frac[s] > 0 && step_site!(S, P, G, X, s, S.frac[s], T_)
   end

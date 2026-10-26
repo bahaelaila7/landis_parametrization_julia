@@ -8,11 +8,10 @@ show(CS.TR; allrows=true); println()
 println("sapling layer (classes 1–2, trees / forested ha, plot mean): observed $(round(D.sap.obs; digits=1)) -> empirical Bayes $(round(D.sap.eb; digits=1)); ",
         "within-cell sd log D by class ", round.(CS.sD; digits=3), " | log H ", round.(CS.sH; digits=3))
 println("missing climate ", D.nmiss, " | v2 tally trees $(D.ntrees) | cells without a height $(D.nohgt)")
-# warm start: HBAD3P's dropped crowding / crown factors, at the train v1 state
+# warm start: HBAD3P's dropped crowding / crown factors, tree-weighted at the train v1 state (subplot RD, the trees' crown ratios)
 S = D.S; ns = HBAD4P.nsites(S)
 gl3 = Dict(Symbol(r.name) => Float64(r.value) for r in eachrow(CSV.read(joinpath(ARGS[1], "globals.csv"), DataFrame)))
-RD = [sum(HBAD4P.sdi(S.N0[i], HBAD4P.qmd(S.N0[i], S.B0[i])) for i in S.off[s]:S.off[s+1]-1 if S.N0[i] > 0; init=0.0) / 1500 for s in 1:ns]
-fac = mean(exp.(get(gl3, :gR, 0.0) .* RD)) * mean((CS.cr_train ./ 0.4) .^ get(gl3, :φ, 0.0))
+fac = sum(CS.warm.w .* exp.(get(gl3, :gR, 0.0) .* CS.warm.rd) .* (CS.warm.cr ./ 0.4) .^ get(gl3, :φ, 0.0)) / sum(CS.warm.w)
 e3, f3, g3 = hbad3p_start(ARGS[1], CS.keys; eps_factor=fac)
 SP = space4(CS.keys, CS.TR, CS.sD, CS.sH; start_eps=e3, start_lnF=f3, start_glob=g3); P, G, Ob = SP.decode(SP.z0)
 println("coordinates $(length(SP.z0)) (2 × $(SP.nk) per key + $(length(SP.gfree)) global); fixed ", SP.fix, " | ε rescaled × $(round(fac; digits=3)) for HBAD3P's gR / φ")

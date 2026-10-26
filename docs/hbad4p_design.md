@@ -16,7 +16,7 @@ Per site, species key k (as HBAD3P: the region's top keys + `_H` / `_S`), diamet
 |---|---|
 | classes j = 1…16 | FIA 2-inch classes: [1, 3) in = [2.54, 7.62) cm, [3, 5), …, [29, 31) in, last ≥ 31 in (78.74 cm). 12.7 cm (5 in, the microplot / subplot tally boundary) is a class boundary |
 | lanes v | mid (weight 0.5, z = 0), damped (0.25, z = −√2), amplified (0.25, z = +√2): same mean and variance of the growth deviation z σv as N(0, σv²). Option `HBAD4P_TRIPLE=fvs`: FVS SN weights 0.60 / 0.25 / 0.15 at z = −0.142, +1.271, −1.549 (sn/dgdriv.f), standardised to variance 1 (raw 0.776) so σv means the same; the store records the lanes it was built with and simulate! uses them |
-| per (k, j, v) | N (trees / forested ha), B (basal area m² / forested ha; → class QMD Dq = √(B / (π/4 · N)) · 100), H (mean height m, N-weighted), A (mean age yr, carried for senescence and the BS / PnET translation) |
+| per (k, j, v) | up to NATOM = 4 diameter ATOMS (N_m trees / forested ha at D_m): N = Σ N_m, B = Σ N_m π/4 D_m² (→ class QMD Dq), H (mean height m, N-weighted), A (mean age yr, for senescence and the BS / PnET translation) |
 
 ## 2. Annual step (all rates from the start-of-year state; reuses HBAD3P's process forms at cohort level)
 1. **Competition**: SDI_c = N (Dq / 25.4)^1.605; RD = ΣSDI / sdimax; overtopping O_c = Σ SDI_c' r(H_c' − H_c) / sdimax with the height ramp
@@ -25,17 +25,17 @@ Per site, species key k (as HBAD3P: the region's top keys + `_H` / `_S`), diamet
 2. **Growth** of the cohort's mean tree (HBAD3P): light L = f0 + (1 − f0) e^{−a O}; climate/vigour cw = W^ω · f_T · f_CO2 · e^{z σv};
    hydraulic hyd = max(0, 1 − min(H / 1.1 Hmax, 1)^θ); dV = max(ε (Dq/20)^b · 122.98 · L cw hyd − ρ Dq² H, 0); dD = dV / (2 Dq max(H, 1.37)).
    * water W = period AET / PET (HBAD3 water balance).
-   * temperature f_T = exp(−[(T − Topt_k)² − (Tref_k − Topt_k)²] / wT²): T = the period mean ANNUAL temperature (EPA L4 mean, PRISM), Topt_k = the key's
-     range optimum (tree-weighted annual normal over its plots: a named species over the whole product, a group key over the region's train plots),
-     Tref_k = the key's mean period temperature over its train intervals. f_T = 1 at the key's typical regional climate, so ε keeps its meaning
-     (growth at that climate) and f_T carries only deviations — spatial within the region, temporal, and scenario warming.
+   * temperature f_T = exp(βT (T − Tref_k)): T = the period mean ANNUAL temperature (EPA L4 mean, PRISM), Tref_k = the key's tree-weighted mean of the
+     same variable over its train intervals; βT global, either sign (audit round 2 B2: a quadratic around a Region-4 "optimum" could only slow growth on
+     warmer sites). f_T = 1 at the key's typical regional climate, so ε keeps its meaning and f_T carries only deviations (spatial, temporal, scenarios).
    * CO2 f_CO2 = 1 + βC ln(C / C_ref), βC FIXED at 0.58 (FACE: +23 % NPP at 550 vs 370 ppm, Norby et al. 2005; not identifiable from 2000–2024 FIA),
      C_ref = 390.1 ppm (2010, the Mauna Loa series PnET reads).
-   * cw (incl. f_T, f_CO2) also enters the carbon-balance stress of mortality (gm), as W^ω does in HBAD3P: the realised carbon balance.
-3. **Upgrowth between classes (two moments, truncated-exponential closure)**: within [L_j, U_j) the trees are distributed ∝ e^{a ξ}, ξ = (D − L_j)/w,
-   with a matched to the cohort's mean square diameter (from N and B). Any QMD in (L_j, U_j) is representable (a linear density with a non-negative
-   slope bound spans only the central third of a class: 55 % of the real v1 cells needed more; audit round 1, B1). All trees of a lane grow by the same dD;
-   each ξ segment lands in the class t ≥ j it reaches — any number of classes — carrying its N and its exact basal area; N and B are conserved.
+   * f_CO2 multiplies the growth only (the FACE constraint is on NPP); the carbon-balance stress of mortality (gm) and the self-thinning weight use the
+     realised relative growth without it (light, water, temperature, vigour).
+3. **Upgrowth between classes (cohorts in bins)**: every atom of a cell grows by the cell's dD and lands in the class of its new diameter (any number of
+   classes); the transfer is EXACT for the atoms — no within-class density is assumed, so a cell of 1–3 tallied trees does not diffuse (audit round 2 B1: any
+   closure smeared sparse cells over the class, +19 % crossings into 12.7 cm over 5 yr). A cell with more than NATOM atoms merges its two closest (N and N·D²
+   conserved: N and B are conserved exactly). Growth and mortality rates stay per cell (from Dq).
 4. **Height** (HBAD3P): toward the H–D allometry H*(D) with the shade response (η, λ, μ, kh). Movers and stayers get the allometric offset
    H*(D_group) − H*(D_cohort), rescaled to conserve Σ N·H (the bigger trees of a cohort are the taller ones).
 5. **Mortality** (HBAD3P hazard): carbon-starvation stress of realised relative growth, size, age / LONGEVITY senescence, drought anomaly
@@ -92,3 +92,12 @@ from TPA, recruit age, :fvs lanes standardised + one lane switch recorded in the
 Known, not changed: 98 trees recorded dead at v1 but alive at v2 are in neither table (product); the open last class grows B with E[D] ≈ QMD; recruitment
 uses RD of the start of the step but the seed status after it; HBAD4P's val is the role's inner val + surplus train plots of the campaign split (clean of
 test, but spatially interleaved with train: best-val selection is optimistic — test is the report).
+
+## 8. Audit round 2 (2026-10-26, independent Opus review: 56 PASS / 9 FAIL; fixed)
+B1 closure diffusion on sparse real cells → cohorts in bins (atoms); B2 temperature sign → βT (T − Tref), Tref on the kernel's variable; I1 movers escaped
+self-thinning → inflows carry the source cell's realised growth; I2 warm start → tree-weighted gR / φ factor at the subplot RD (×1.18 at k1); I5 train = the role's
+3 folds (HBAD4_SPLIT_CSV = folds/split_<role>.csv; the product's `set` had moved the train cap's surplus to val): k1 train 10,475 intervals; I6 CO2 on growth
+only; minor: inactive cells keep their trees on inflow, allocation-free overtopping sort, physical within-class spread for classes with < 30 df, tree-weighted
+LONGEVITY of group keys, traits from the product dir. Open: I3 — report against a train-estimated transition-matrix null (verify4p `tm_state!`); I4 — 77 % of
+v2 tally trees are remeasured individuals, the NegBin / per-cell-mean observation model ignores it (kept: the user chose stand tables only); I7 — the curated
+tree table misses ~half the saplings in AL/GA/NC/SC/TN (RECONCILECD exclusion) — fixed upstream (FIA_DATA_PREP branch curation-fix), HBAD4P to be rebuilt on it.
