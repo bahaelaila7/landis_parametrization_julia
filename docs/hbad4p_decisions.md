@@ -39,3 +39,27 @@ recommendations, but document the decision point and the different options"). Th
 - **Options:** no blur; **normal with sd 0.2 cm, in the likelihood only**; a blur in the dynamics.
 - **Chosen:** blur in the likelihood only, with sd 0.2 cm.
 - **Open sub-decision:** the lower bound of class 1 is NOT blurred, so recruits entering at exactly 2.54 cm stay tallied. Round 4 audits this.
+
+## H7 — Scoring the size and height terms of trace cells (round 4 I1, agent)
+- **Evidence:** the hard gate Np > 1e-9 makes O(10)-nat jumps in the objective; the scored sets also differ between models.
+- **Options:**
+  - (a) keep the gate;
+  - (b) **a mixture of the model's Gaussian, weight Np / (Np + b), with a fixed data-derived background density, scored for every observed cell**;
+  - (c) drop the size and height terms of cells with low N.
+- **Chosen:** (b). It is the auditor's tested variant (3× less roughness) and keeps model and null totals comparable.
+
+## H8 — Fecundity of the keys split from the _H / _S groups (round 4 I2, agent)
+- **Options:**
+  - (a) the whole group lnF, as now (6–24× too many saplings);
+  - (b) **lnF_group + ln(the key's share of the group's train ingrowth)**;
+  - (c) refit lnF per key before calibration.
+- **Chosen:** (b). It is data-derived and cheap; calibration refits lnF anyway.
+
+## H9 — Lane-mixing κ in calibration (round 4 I3, agent)
+- **Evidence:** simulate! on full train takes 1.46 s at κ = 0 and 13.2 s at κ = 0.1, about 9×.
+- **Options:**
+  - (a) κ free throughout, about 5× the wall time;
+  - (b) κ free with 12 atoms when κ > 0;
+  - (c) **two stages: stage 1 with κ = 0, stage 2 a κ profile {0.025, 0.05, 0.1} warm-started from stage 1 and judged on val counts; κ > 0 is kept only if val count NLL improves by ≥ 20 nats**;
+  - (d) κ = 0 permanently.
+- **Chosen:** (c). It costs about the price of κ = 0 and keeps the tripling hypothesis testable.
