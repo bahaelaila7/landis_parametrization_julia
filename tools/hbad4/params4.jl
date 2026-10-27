@@ -189,11 +189,24 @@ end
 """Write a coordinate vector z of the space SP as CSV (name, z, decoded value) plus its space signature in `<path>.sig` (space_sig4): the format a stage of a
 fit hands to the next."""
 function save_z4(path, SP, z)
-  P, G, Ob = SP.decode(z); val(nm) = startswith(nm, "ε:") ? exp(z[findfirst(==(nm), SP.names)]) : startswith(nm, "lnF:") ? z[findfirst(==(nm), SP.names)] :
-                                                        (s = Symbol(nm); s in OBS4 ? getfield(Ob, s) : getfield(G, s))
-  CSV.write(path, DataFrame(name=SP.names, z=z, value=[val(nm) for nm in SP.names]))
+  CSV.write(path, DataFrame(name=SP.names, z=z, value=values4(SP, z)))
   sg = space_sig4(SP); open(path * ".sig", "w") do io; for f in (:names, :enc, :fix, :env); println(io, f, "\t", getfield(sg, f)); end; end
   path
+end
+"The decoded (natural-scale) value of every coordinate of z in the space SP, in SP.names order (ε: exp; lnF: as is; globals / observation: decoded)."
+function values4(SP, z)
+  P, G, Ob = SP.decode(z)
+  val(i, nm) = startswith(nm, "ε:") ? exp(z[i]) : startswith(nm, "lnF:") ? z[i] : (s = Symbol(nm); s in OBS4 ? getfield(Ob, s) : getfield(G, s))
+  [Float64(val(i, nm)) for (i, nm) in enumerate(SP.names)]
+end
+"A set restricted to its first n sites (dry runs of calib4.jl / kappa_profile4.jl); n ≤ 0 returns the set unchanged."
+function first_sites4(Dn, n)
+  n <= 0 && return Dn
+  S = Dn.S; idx = 1:min(n, HBAD4P.nsites(S)); nc = S.off[2] - S.off[1]; r = 1:last(idx)*nc
+  at = [i => HBAD4P.atoms0(S, i) for i in r if S.N0[i] > 0]
+  S2 = HBAD4P.make_sites4(S.off[1:last(idx)+1], S.nk, S.sp[r], S.cl[r], S.ln[r], at, S.H0[r], S.A0[r], S.nyr[idx], S.frac[idx], S.planted[idx], S.W[idx], S.Wn[idx],
+                          S.T[idx], S.C[idx], S.seed0[:, idx], S.lz, S.lw)
+  (S=S2, n=Dn.n[:, :, idx], D2=Dn.D2[:, :, idx], Hs=Dn.Hs[:, :, idx], nH=Dn.nH[:, :, idx], fs2=Dn.fs2[idx], fm2=Dn.fm2[idx])
 end
 """Start values (start_eps, start_lnF, start_glob) of a parameter set (P, G, Ob) for space4 — e.g. to re-encode a stage-1 optimum in a space with other fixed
 globals (the κ profile)."""

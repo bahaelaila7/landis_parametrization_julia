@@ -15,16 +15,7 @@ const EVALS = parse(Int, get(ENV, "HBAD4P_PROFILE_EVALS", "600")); const SIG = p
 const GAIN = parse(Float64, get(ENV, "HBAD4P_PROFILE_GAIN", "20")); const SUB = parse(Int, get(ENV, "HBAD4P_PROFILE_SUB", "0"))
 outdir = length(ARGS) >= 3 ? ARGS[3] : joinpath(@__DIR__, "..", "..", "results", "hbad4", "kappa_profile"); mkpath(outdir)
 CS = cached_sets(["train", "val", "test"]); WS = warm_start4(CS, ARGS[1]; quiet=true)
-"A set restricted to its first n sites (dry runs)."
-function first_sites(Dn, n)
-  n <= 0 && return Dn
-  S = Dn.S; idx = 1:min(n, HBAD4P.nsites(S)); nc = S.off[2] - S.off[1]; r = 1:last(idx)*nc
-  at = [i => HBAD4P.atoms0(S, i) for i in r if S.N0[i] > 0]
-  S2 = HBAD4P.make_sites4(S.off[1:last(idx)+1], S.nk, S.sp[r], S.cl[r], S.ln[r], at, S.H0[r], S.A0[r], S.nyr[idx], S.frac[idx], S.planted[idx], S.W[idx], S.Wn[idx],
-                          S.T[idx], S.C[idx], S.seed0[:, idx], S.lz, S.lw)
-  (S=S2, n=Dn.n[:, :, idx], D2=Dn.D2[:, :, idx], Hs=Dn.Hs[:, :, idx], nH=Dn.nH[:, :, idx], fs2=Dn.fs2[idx], fm2=Dn.fm2[idx])
-end
-Dt = first_sites(CS.sets["train"], SUB); Dv = first_sites(CS.sets["val"], SUB)
+Dt = first_sites4(CS.sets["train"], SUB); Dv = first_sites4(CS.sets["val"], SUB)
 SP1 = stage1_space4(CS, WS); z1 = ARGS[2] == "-" ? copy(SP1.z0) : load_z4(ARGS[2], SP1)     # (refuses a file of another space, H19)
 P1, G1, Ob1 = SP1.decode(z1); G1.κ == 0 || @warn "stage-1 κ = $(G1.κ) (expected 0)"
 st = starts4(P1, G1, Ob1)

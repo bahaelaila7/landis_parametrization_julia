@@ -40,8 +40,11 @@ want(k) = string(k) in SECTIONS
 
 # ---------------------------------------------------------------- reporting
 const RES = Tuple{String,String,String}[]
-function check(name, ok::Bool, detail="")
-  push!(RES, (ok ? "PASS" : "FAIL", name, detail)); println(ok ? "PASS  " : "FAIL  ", name, isempty(detail) ? "" : "  — " * detail); flush(stdout); ok
+function check(name, ok::Bool, detail=""; known="")
+  # known ≠ "": a FAIL recorded as known by a decision (H25). It stays a FAIL in RES and in the totals (exit 1); only the printed label says FAIL-KNOWN.
+  lab = ok ? "PASS  " : isempty(known) ? "FAIL  " : "FAIL-KNOWN ($(known))  "
+  push!(RES, (ok ? "PASS" : "FAIL", isempty(known) || ok ? name : "[FAIL-KNOWN ($(known))] " * name, detail)); println(lab, name, isempty(detail) ? "" : "  — " * detail)
+  flush(stdout); ok
 end
 info(name, detail) = (push!(RES, ("INFO", name, detail)); println("INFO  ", name, "  — ", detail); flush(stdout))
 section(s) = (println("\n==== ", s); flush(stdout))
@@ -623,6 +626,10 @@ let ksites = parse(Int, get(ENV, "HBAD4_VERIFY_KSITES", "5000")), kidx = sort(ra
   # the absolute bars of rounds 4–5 are REPORTED; the enforced bar is relative (H24): sd ≤ 1 % of the coordinate's |ΔNLL| at the calibration's initial step ±0.05
   # (as 8.7), on the same data subset. Absolute-bar exceedances recorded as KNOWN (k1, H24): b and βT
   KNOWN_ABS = Set(["b", "βT"]); nabs = String[]
+  # H25: 3.3 is FAIL-KNOWN for exactly the H24 failure table of this (role, cache key) — the relative-bar ratio at 1e-3 per coordinate, each allowed +20 %
+  # (the H20 slack). Any other failure (a coordinate not in the table, a ratio above its entry × 1.2, any 1e-4 ratio > 1, a jump failure) is a plain FAIL.
+  H25_KNOWN = Dict(("k1", "9e31afc324039360") => Dict("ε:MAVI2" => 3.169, "mW" => 4.634, "pM" => 2.861, "am" => 2.427, "ρ" => 1.626, "λ1" => 1.199, "βT" => 1.095))
+  kn25 = get(H25_KNOWN, (ROLE, ckey), Dict{String,Float64}()); unk25 = String[]; rat = String[]
   for nm in coords
     zi = findfirst(==(nm), SP.names); zb = copy(zo); haskey(base0, nm) && (zb[zi] = base0[nm]); obsonly = Symbol(nm) in OBS4
     res = Dict{Float64,Any}(); sens = Dict{Float64,Float64}()
@@ -650,6 +657,8 @@ let ksites = parse(Int, get(ENV, "HBAD4_VERIFY_KSITES", "5000")), kidx = sort(ra
       gj = true
     end
     okh &= gsd && gj
+    gsd || push!(rat, @sprintf("%s %.3f / %.3f", nm, q4, q3))
+    (gj && q4 <= 1 && (q3 <= 1 || (haskey(kn25, nm) && q3 <= 1.2 * kn25[nm]))) || push!(unk25, nm)
     push!(msh, @sprintf("%s: sd %.3f / %.3f (ratio to the relative bar %.3f / %.3f; |ΔNLL(±0.05)| %.0f / %.0f)%s, jump %.2f / %.2f%s%s", nm, s4.sh.sd, s3.sh.sd, q4, q3,
                         sens[1e-4], sens[1e-3], gsd ? "" : " ✗ relative bar", s4.sh.jump, s3.sh.jump, jt,
                         absx ? (nm in KNOWN_ABS ? " [absolute bars 0.93 / 2.7 exceeded: KNOWN, H24]" : " [absolute bars 0.93 / 2.7 exceeded: REPORTED]") : ""))
@@ -665,7 +674,9 @@ let ksites = parse(Int, get(ENV, "HBAD4_VERIFY_KSITES", "5000")), kidx = sort(ra
     println("      3.3 ", msh[end], " | count ", msc[end]); flush(stdout)
   end
   check("3.3 [stat, r4 I1, H14, H15, H20, H24] objective roughness of the SIZE + HEIGHT terms for $(length(coords)) coordinates: step sd at 1e-4 (full train) and 1e-3 ($(length(kidx)) sites) ≤ 1 % of the coordinate's |ΔNLL| at ±0.05 on the same sites (relative bar, H24); a 1e-4 jump > 2 nats only as a KNOWN entry within +20 % ($(ref === nothing ? "references: none for ($(ROLE), $(ckey)) → INFO" : "$(nknown) KNOWN in use")); the absolute bars 0.93 / 2.7 REPORTED (exceeded: $(isempty(nabs) ? "none" : join(nabs, ", ")))",
-        okh, "sd 1e-4 / 1e-3, jump 1e-4 / 1e-3: " * join(msh, " | "))
+        okh, (okh ? "" : "relative-bar ratio 1e-4 / 1e-3 of the failing coordinates: " * join(rat, ", ") *
+              (isempty(unk25) ? " — all within the H24 table (+20 %): FAIL-KNOWN, H25 || " : " — NOT in the H24 table (+20 %): $(join(unk25, ", ")) || ")) *
+              "sd 1e-4 / 1e-3, jump 1e-4 / 1e-3: " * join(msh, " | "); known=(!okh && isempty(unk25) && !isempty(kn25)) ? "H25" : "")
   ref === nothing ? info("3.3b [stat, M2, H20] count-term roughness (unreferenced role / cache key: INFO)", "count sd / jump at 1e-4 | 1e-3: " * join(msc, " | ")) :
                     check("3.3b [stat, M2, H14, H20] count-term roughness: no worse than the recorded values + 10 % (role $(ROLE), cache key $(ckey))", okc, join(msc, " | "))
   info("3.3c [stat, H14, H20] total objective roughness per coordinate (the noise CMA-ES sees): sd / jump at 1e-4 (full train) | 1e-3 ($(length(kidx)) sites)", join(mst, " | "))
@@ -1421,5 +1432,5 @@ end
 @isdefined(con) && DBInterface.close!(con)
 nf = count(r -> r[1] == "FAIL", RES); np = count(r -> r[1] == "PASS", RES)
 println("\n==== SUMMARY: $(np) PASS, $(nf) FAIL, $(count(r -> r[1] == "INFO", RES)) INFO | $(round(time() - t00; digits=0)) s")
-for r in RES; r[1] == "FAIL" && println("FAIL  ", r[2]); end
+for r in RES; r[1] == "FAIL" && println("FAIL  ", r[2]); end            # (a FAIL-KNOWN line is a FAIL: counted above, labelled in its name)
 exit(nf > 0 ? 1 : 0)

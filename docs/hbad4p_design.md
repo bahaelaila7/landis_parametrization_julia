@@ -257,6 +257,9 @@ unless stated.
     - With both changes, 31 of 38 coordinates pass.
     - 7 fail at 1e-3 only: mW, ε:MAVI2, pM, am, ρ, λ1, βT, with ratios 1.1–4.6. They are coordinates the objective barely sees (|ΔNLL| 0.2–311 nats).
     - Of the absolute bars, only βT exceeds them (1.15 / 3.40); b is within them (0.715 / 1.823). See decisions H24.
+  - **H25:** no further bar change. 3.3 prints `FAIL-KNOWN (H25)` with the per-coordinate ratios and still counts as a FAIL (the verifier exits 1). It is
+    FAIL-KNOWN only while the failures are exactly within the H24 table of k1 (+20 % on each ratio); anything else is a plain FAIL. Whether the roughness harms
+    calibration is answered by calib4.jl's 3-seed replication check (decisions H25, H25-impl).
   - (Round-5 text, before H24:) b and βT FAIL the sd bars. Both are global multipliers of every tree's growth (the size exponent, the temperature response), so a 1e-4 step moves every
     atom, and the one-height-per-cell crossings add up. I did not tune; this is reported as open (§9 lever: smooth cell membership).
   - The jumps > 2 nats are KNOWN entries of k1 (+20 %).

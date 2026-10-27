@@ -355,3 +355,38 @@ The 3.3 base-point fix (OBX observation parameters) is a correction, not a bar c
 - (e) smooth cell membership: deferred to the next model version (H24(c)).
 
 (a)–(c) are rejected because each is a second post-hoc adjustment of the same criterion.
+
+## H25-impl — Implementation of H25 (2026-10-27, agent)
+- **verify4p.jl 3.3.**
+  - `check(...; known="H25")` prints `FAIL-KNOWN (H25)`. The RES entry stays `FAIL`, prefixed `[FAIL-KNOWN (H25)]`, so it is counted in the FAIL total and the
+    verifier exits 1. It is never converted to PASS or INFO.
+  - The label applies only to the H24 table of (k1, 9e31afc324039360): ε:MAVI2 3.169, mW 4.634, pM 2.861, am 2.427, ρ 1.626, λ1 1.199, βT 1.095 (the 1e-3
+    ratios), each allowed +20 % (the H20 slack). Any other failure is a plain FAIL: a coordinate not in the table, a ratio above its entry × 1.2, any 1e-4
+    ratio > 1, or a jump failure. Another role or cache key has no table, so a failure there is a plain FAIL.
+  - The detail line starts with the relative-bar ratios (1e-4 / 1e-3) of the failing coordinates.
+- **calib4.jl, stage-1 replication (the pre-registered check).**
+  - 3 CMA-ES seeds from the same warm start by default (HBAD4P_CALIB_SEEDS = 1,2,3). The old single HBAD4P_CALIB_SEED is refused. Fewer than 3 seeds gives
+    the verdict NOT ASSESSED, which is not an acceptance.
+  - Each seed's best point is scored on val: the total NLL, with its own train-fitted observation parameters.
+  - **Decision point, the "pooled sd" in max(20, 2 · pooled sd).** Read literally as the sd of the same 3 val NLLs, the check can never fail: for 3 values
+    the range is at most 2 × their sample sd (between √3 and 2 times it). Options:
+    - (a) the between-seed sd: vacuous, rejected;
+    - (b) the 20-nat floor alone: drops the noise term the H21 form has;
+    - (c) chosen: the pooled WITHIN-seed sd, i.e. the val NLL sd over 8 points jittered around each seed's best (step 1e-3 in every coordinate, the 3.3
+      step; its own RNG stream), pooled over the seeds. This is the objective's own noise at the optimum, which is what H25 asks the check to bound.
+    - The between-seed sd is still reported. To reverse: `sd_pool` in calib4.jl. The H21 κ rule also has a merge-error term, 0.005 nats/site × n; H25 states
+      the form without it, so it is not added here.
+  - **Carried seed:** the seed with the lowest TRAIN NLL, so that val stays a check rather than a selection. It is written as z_stage1.csv only if ACCEPTED,
+    otherwise as z_stage1_REJECTED.csv, so kappa_profile4.jl cannot pick up a rejected stage 1.
+  - **calib4_stage1.json** holds the verdict, the rule and its numbers, and per seed the evals, train / val / val-count NLL, the jitter values and their sd,
+    and the file. It also lists the weakly identified mW, am, pM and ε:MAVI2 with their z and decoded values per seed, their ranges and the start value.
+  - Helpers moved to params4.jl: `first_sites4` (also used by kappa_profile4.jl now; it had a private copy) and `values4` (used by save_z4). params4.jl is
+    not part of the data cache key, so the 3.3 references stay valid.
+- **Dry runs (k1, 200 train / 200 val sites, 30 evaluations per seed = 17 used): a test of the tool, NOT a calibration.**
+  - Val NLL per seed 3180.5 / 3008.8 / 2970.7: range 209.8 vs margin max(20, 2 × 3.06) = 20, so REJECTED. With 17 evaluations from σ 0.1 the seeds are
+    still at random points, so this says nothing about the model. Between-seed sd 111.8.
+  - Weakly identified, cross-seed value range: mW 0.060, am 0.153, pM 0.093, ε:MAVI2 0.248.
+  - With HBAD4P_CALIB_GAIN = 1e6 the ACCEPTED path writes z_stage1.csv, and kappa_profile4.jl loads it (its own dry run passes). With one seed the verdict is
+    NOT ASSESSED and the between-seed sd is null. The seeds are reproducible: the same val NLLs on a re-run.
+- **Observed, k1 section 3 (7276 s): 4 PASS / 1 FAIL / 4 INFO, exit 1.** 3.3 prints `FAIL-KNOWN (H25)`, and its ratios are identical to the H24 table (the run
+  is deterministic). The summary lists it as `FAIL  [FAIL-KNOWN (H25)] 3.3 …`. 3.3b PASS.
