@@ -390,3 +390,5 @@ The 3.3 base-point fix (OBX observation parameters) is a correction, not a bar c
     NOT ASSESSED and the between-seed sd is null. The seeds are reproducible: the same val NLLs on a re-run.
 - **Observed, k1 section 3 (7276 s): 4 PASS / 1 FAIL / 4 INFO, exit 1.** 3.3 prints `FAIL-KNOWN (H25)`, and its ratios are identical to the H24 table (the run
   is deterministic). The summary lists it as `FAIL  [FAIL-KNOWN (H25)] 3.3 …`. 3.3b PASS.
+
+**H25-impl confirmation (coordinator, 2026-10-27).** The implementer's reading is confirmed. Taken literally, "range ≤ max(20, 2 · pooled sd)" with the sd computed from the same 3 values can never fail, because for n = 3 the range is at most 2 × the sample sd. The noise scale is therefore the pooled WITHIN-seed sd: the validation NLL sd over 8 jittered points (step 1e-3) around each seed's best point, pooled across seeds. The between-seed sd is reported only. This is a correction of a vacuous formula, made before any calibration run. It does not move the bar, and the 20-nat floor stays.
