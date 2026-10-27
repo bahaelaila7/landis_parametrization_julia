@@ -26,7 +26,9 @@ area_class(j) = j >= 3 ? AREA_SUB : AREA_MIC
 ismicro(w_ha) = w_ha > 50                                                 # tally of a tree from its weight (microplot 185.2 / ha, subplot 14.87 / ha)
 
 inregion(st) = REGION == "GAFL" ? st in (12, 13) : REGION == "R4" ? true : error("HBAD4_REGION $REGION: GAFL | R4")
-plotf(v) = (x = [isnan(a) ? 1.0 : a for a in v]; m = isempty(x) ? 1.0 : mean(x); m <= 0 ? 1.0 : max(m, FMIN))   # forested fraction of a plot
+"""Forested fraction of a plot's tally (4 subplots or 4 microplots; NaN = status unknown → counted as forested). 0 when every known one is non-forest (audit r4
+M1: was 1.0 — an unobserved tally scored as a full plot): zero exposure, no count term for that tally, the v1 sapling layer takes its prior mean. Otherwise ≥ FMIN."""
+plotf(v) = (x = [isnan(a) ? 1.0 : a for a in v]; m = isempty(x) ? 1.0 : mean(x); m <= 0 ? 0.0 : max(m, FMIN))
 
 """Load the natural intervals of the region with their trees and ingrowth; species keys from the TRAIN trees (the HBAD3P rule). HBAD4_SPLIT_CSV (statecd,
 unitcd,countycd,plot,set): the sets by plot (the campaign's role split folds/split_<role>.csv: train = the role's 3 folds — the product's `set` moved the
@@ -35,6 +37,7 @@ forested fraction known and 0: a land-use change inside a "natural" interval —
 scored against an empty tally on a full plot."""
 const SPLIT_CSV = get(ENV, "HBAD4_SPLIT_CSV", "")
 noforest_v2(r, FT) = all(sb -> get(FT, (r.st, r.u, r.c, r.p, r.d2, sb), (NaN, NaN))[1] == 0, 1:4)
+noforest_v1(r, FT) = all(sb -> get(FT, (r.st, r.u, r.c, r.p, r.d1, sb), (NaN, NaN))[1] == 0, 1:4)
 function load4(dir=DATA_DIR; FT=forest4(), quiet=false)
   iv = DataFrame(Arrow.Table(joinpath(dir, "intervals.arrow")))
   iv = iv[.!(iv.trt .| iv.dst .| iv.harv) .& (iv.dt .> 2) .& inregion.(iv.st), :]
@@ -46,7 +49,11 @@ function load4(dir=DATA_DIR; FT=forest4(), quiet=false)
   nf = [noforest_v2(r, FT) for r in eachrow(iv)]
   quiet || println("load4: dropped $(count(nf)) intervals whose v2 visit has no forested subplot (" *
                    join(["$(isempty(x) ? "no set" : x) $(count(nf .& (iv.set .== x)))" for x in sort(unique(iv.set[nf]))], ", ") * ")")
-  iv = iv[.!nf, :]
+  # audit r4 M1 (decision H10): an interval whose v1 visit has no forested subplot has no observed v1 stand (non-forest → forest): dropped likewise
+  nf1 = [!nf[i] && noforest_v1(r, FT) for (i, r) in enumerate(eachrow(iv))]
+  quiet || println("load4: dropped $(count(nf1)) intervals whose v1 visit has no forested subplot (" *
+                   join(["$(isempty(x) ? "no set" : x) $(count(nf1 .& (iv.set .== x)))" for x in sort(unique(iv.set[nf1]))], ", ") * ")")
+  iv = iv[.!(nf .| nf1), :]
   ok = Set(iv.iid)
   tr = DataFrame(Arrow.Table(joinpath(dir, "interval_trees.arrow"))); tr = tr[in.(tr.iid, Ref(ok)) .& (tr.dia_cm .> 0), :]
   ig = DataFrame(Arrow.Table(joinpath(dir, "interval_ingrowth.arrow"))); ig = ig[in.(ig.iid, Ref(ok)) .& (ig.dia_cm .> 0), :]
@@ -56,7 +63,7 @@ function load4(dir=DATA_DIR; FT=forest4(), quiet=false)
   keyof(s, g) = s in big ? String(s) : "_" * String(g)
   tr.key = keyof.(tr.sym, tr.grp); ig.key = keyof.(ig.sym, ig.grp)
   keys_ = sort(unique(vcat(tr.key, ig.key)))
-  (iv=iv, tr=tr, ig=ig, keys=keys_, big=big, ndrop=count(nf))
+  (iv=iv, tr=tr, ig=ig, keys=keys_, big=big, ndrop=count(nf), ndrop1=count(nf1))
 end
 
 """Traits per key from the TRAIN trees: Hmax (99.5th pct height), shade class and LONGEVITY (tree-weighted over member species), and Tref = the tree-weighted
@@ -107,7 +114,7 @@ function sapling_prior(L, keys_, FT)
   e = AREA_MIC .* fm1
   m = zeros(nk, 2, 2); α = fill(Inf, nk, 2, 2); llp = zeros(nk, 2, 2); llj = zeros(nk, 2, 2)
   for k in 1:nk, j in 1:2, a in (false, true)
-    idx = [s for s in 1:ns if adult[k, s] == a]; isempty(idx) && continue
+    idx = [s for s in 1:ns if adult[k, s] == a && e[s] > 0]; isempty(idx) && continue        # (unobserved microplots, fm1 = 0, are no zeros: r4 M1)
     y = n[k, j, idx]; x = e[idx]; mp = sum(y) / sum(x)
     mp > 0 || continue
     lα_, lm_, l_ = nb_joint(y, x); m[k, j, a+1] = exp(lm_); α[k, j, a+1] = exp(lα_); llj[k, j, a+1] = l_
@@ -165,11 +172,12 @@ function build4(L, set::AbstractString, keys_, CL, FT, eb)
   t1 = v1trees(L, keys(sidx))
   acc = Dict{Tuple{Int,Int,Int},NTuple{7,Float64}}()     # (s, k, j) → (Σw, ΣwB, ΣwH, Σw|H, ΣwA, Σw|A, n tally trees)
   atoms = Dict{Tuple{Int,Int,Int},Vector{Tuple{Float64,Float64}}}()   # (s, k, j) → the cell's trees (w, D)
-  seed0 = falses(nk, ns)
+  seed0 = falses(nk, ns); nzt = 0
   for r in eachrow(t1)
     j = HBAD4P.dclass(r.dia_cm); j == 0 && continue
-    s = sidx[r.iid]; k = kix[r.key]; r.dia_cm >= 12.7 && (seed0[k, s] = true)
-    w = r.w_ha / (ismicro(r.w_ha) ? fm1[s] : f1[s]); a = get(acc, (s, k, j), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    s = sidx[r.iid]; k = kix[r.key]; ft = ismicro(r.w_ha) ? fm1[s] : f1[s]; ft > 0 || (nzt += 1; continue)   # (a tree on a tally with no forested area: none expected)
+    r.dia_cm >= 12.7 && (seed0[k, s] = true)
+    w = r.w_ha / ft; a = get(acc, (s, k, j), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
     hok = r.ht_m > 0; aok = r.age > 0; push!(get!(atoms, (s, k, j), Tuple{Float64,Float64}[]), (w, r.dia_cm))
     acc[(s, k, j)] = (a[1] + w, a[2] + w * π / 4 * (r.dia_cm / 100)^2, a[3] + (hok ? w * r.ht_m : 0.0), a[4] + (hok ? w : 0.0), a[5] + (aok ? w * r.age : 0.0),
                       a[6] + (aok ? w : 0.0), a[7] + 1)
@@ -219,7 +227,7 @@ function build4(L, set::AbstractString, keys_, CL, FT, eb)
   Wv = [getw(CL.W, i, 1.0) for i in iv.iid]; Wnv = [getw(CL.Wn, i, 1.0) for i in iv.iid]; Tv = [getw(CL.T, i, NaN) for i in iv.iid]
   nmiss = (W=count(i -> isnan(get(CL.W, i, NaN)), iv.iid), Wn=count(i -> isnan(get(CL.Wn, i, NaN)), iv.iid), T=count(isnan, Tv))
   S = HBAD4P.make_sites4(off, nk, sp, cl, ln, at0, H0, A0, nyr, frac, Vector{Bool}(iv.planted), Wv, Wnv, Tv, Cs, seed0, lz, lw)
-  (S=S, iid=iv.iid, n=On, D2=OD2, lD=OlD, lD2=OlD2, Hs=OH, lH=OlH, lH2=OlH2, nH=OnH, fs2=fs2, fm2=fm2, f1=f1, fm1=fm1, nohgt=nohgt, nmiss=nmiss,
+  (S=S, iid=iv.iid, n=On, D2=OD2, lD=OlD, lD2=OlD2, Hs=OH, lH=OlH, lH2=OlH2, nH=OnH, fs2=fs2, fm2=fm2, f1=f1, fm1=fm1, nohgt=nohgt, nmiss=nmiss, nzt=nzt,
    ntrees=sum(On), iv=iv, sap=(eb=neb / ns, obs=nobs_sap / ns))
 end
 """Pooled within-cell sd of log D and log H per class (cells with ≥ 2 trees) of a built set — the sampling spread of a cell's mean (TRAIN values are used).
@@ -256,31 +264,68 @@ function forest4(path=FOREST_CSV)
 end
 
 # ---------------------------------------------------------------- likelihood
+"""Background densities of the size / height terms (audit r4 I1; data constants from the TRAIN v2 table, like sD / sH): what the observed mean of a cell looks
+like when its trees are not the model's (immigration, misidentification, recording error — the count model's background bg). Per class j: log QMD_obs ~
+N(mD_j, sDb_j²) over all train cells with ≥ 1 tree; per key × class: log mean H_obs ~ N(mH_kj, sHb_j²) (key mean over ≥ 10 train cells, else the class mean;
+sHb_j the pooled sd around the key means)."""
+struct ObsBG; mD::Vector{Float64}; sDb::Vector{Float64}; mH::Matrix{Float64}; sHb::Vector{Float64}; end
+function obs_background(D)
+  nk = size(D.n, 1); mD = zeros(NCLS); sDb = zeros(NCLS); mH = zeros(nk, NCLS); sHb = zeros(NCLS)
+  for j in 1:NCLS
+    x = [log(sqrt(D.D2[k, j, s] / D.n[k, j, s])) for k in 1:nk, s in axes(D.n, 3) if D.n[k, j, s] > 0]
+    mD[j] = mean(x); sDb[j] = length(x) >= 3 ? std(x) : 0.1
+    hk = [[log(D.Hs[k, j, s] / D.nH[k, j, s]) for s in axes(D.n, 3) if D.nH[k, j, s] > 0] for k in 1:nk]; allh = reduce(vcat, hk)
+    mc = isempty(allh) ? log(1.37 + 0.5 * HBAD4P.CLS_LO[j]) : mean(allh); ss = 0.0; df = 0
+    for k in 1:nk
+      mH[k, j] = length(hk[k]) >= 10 ? mean(hk[k]) : mc
+      for h in hk[k]; ss += (h - mH[k, j])^2; df += 1; end
+    end
+    sHb[j] = df >= 3 ? sqrt(ss / df) : 0.3
+  end
+  ObsBG(mD, sDb, mH, sHb)
+end
 """Observation parameters: negative-binomial size r for microplot (classes 1–2) and subplot (≥ 3) tallies; background densities bgM / bgS [trees / forested ha]
 (immigration, misidentification, recording error — the tally of a cell the model leaves empty; replaces an arbitrary floor); model-error spreads σD, σH of
-log QMD / log mean height; sD, sH the per-class within-cell sd of log D / log H (data constants, TRAIN)."""
-struct ObsP; rM::Float64; rS::Float64; bgM::Float64; bgS::Float64; σD::Float64; σH::Float64; sD::Vector{Float64}; sH::Vector{Float64}; end
+log QMD / log mean height; sD, sH the per-class within-cell sd of log D / log H (data constants, TRAIN); BG the background densities of the size / height
+terms (ObsBG, TRAIN). The 8-argument form takes BG from the last cached_sets (OBS_BG)."""
+struct ObsP; rM::Float64; rS::Float64; bgM::Float64; bgS::Float64; σD::Float64; σH::Float64; sD::Vector{Float64}; sH::Vector{Float64}; BG::ObsBG; end
+const OBS_BG = Ref{Union{Nothing,ObsBG}}(nothing)
+ObsP(rM, rS, bgM, bgS, σD, σH, sD, sH) = (OBS_BG[] === nothing && error("ObsP: no background densities (load cached_sets first or pass BG)");
+                                           ObsP(rM, rS, bgM, bgS, σD, σH, sD, sH, OBS_BG[]))
 @inline nb_logpmf(n, μ, r) = loggamma(n + r) - loggamma(r) - loggamma(n + 1.0) + r * log(r / (r + μ)) + (n > 0 ? n * log(μ / (r + μ)) : 0.0)
+"log(w e^{la} + (1 − w) e^{lb}) for log densities la, lb (w ∈ [0, 1])."
+@inline function logmix(w, la, lb)
+  w <= 0 && return lb; w >= 1 && return la
+  a = log(w) + la; b = log1p(-w) + lb; m = max(a, b); m + log(exp(a - m) + exp(b - m))
+end
+@inline lnorm(x, μ, v) = -0.5 * (x - μ)^2 / v - 0.5 * log(2π * v)
 """Stand-table NLL of a state's OBSERVATION-SPACE prediction (S.PN / PB / PH per (site, key, class): after simulate! the atoms blurred by the FIA DBH error,
-HBAD4P.finish_site!; for the nulls the cell totals, HBAD4P.obs_cells!) against the v2 tables: Σ over sites, keys, classes of − log NegBin(n | μ = (N + bg) f area, r)
-+ size and height terms for the occupied cells: log QMD_obs − log Dq ~ N(0, sD_j² / n + σD²), log mean H_obs − log H ~ N(0, sH_j² / n_H + σH²). Returns parts."""
+HBAD4P.finish_site!; for the nulls the cell totals, HBAD4P.obs_cells!) against the v2 tables. Per (site, key, class) of a tally with forested area (f > 0; an
+unobserved tally, f = 0, scores nothing — audit r4 M1):
+  count  − log NegBin(n | μ = (N + bg) f area, r);
+  size   (every cell with n ≥ 1 tree) − log[ w N(log QMD_obs; log Dq, sD_j²/n + σD²) + (1 − w) N(log QMD_obs; mD_j, sDb_j²) ];
+  height (every cell with n_H ≥ 1)     − log[ w N(log H_obs; log H, sH_j²/n_H + σH²) + (1 − w) N(log H_obs; mH_kj, sHb_j²) ];
+  w = N / (N + bg): under the count model a tallied tree of the cell is the model's with probability N / (N + bg) — the background density bg (the same
+  fitted bgM / bgS) is the pseudo-count of the background trees (audit r4 I1, decision H7: the hard gate N > 1e-9 switched −1.5 … +13-nat terms on and off
+  and gave each model / null its own scored set; now every model and null scores the same cells). Returns parts."""
 function nll4(D, Ob::ObsP)
-  S = D.S; nk = S.nk; ns = HBAD4P.nsites(S)
+  S = D.S; nk = S.nk; ns = HBAD4P.nsites(S); BG = Ob.BG
   pc = zeros(ns); pd = zeros(ns); ph = zeros(ns)
   Threads.@threads :static for s in 1:ns
     c_ = 0.0; d_ = 0.0; h_ = 0.0
     @inbounds for k in 1:nk, j in 1:NCLS
       x = ((s - 1) * nk + (k - 1)) * NCLS + j
-      Np = S.PN[x]; n = D.n[k, j, s]
-      μ = (Np + (j >= 3 ? Ob.bgS : Ob.bgM)) * (j >= 3 ? D.fs2[s] : D.fm2[s]) * area_class(j)
-      c_ -= nb_logpmf(Float64(n), μ, j >= 3 ? Ob.rS : Ob.rM)
-      if n > 0 && Np > 1e-9
-        dq = HBAD4P.qmd(Np, S.PB[x]); qo = sqrt(D.D2[k, j, s] / n)
-        v = Ob.sD[j]^2 / n + Ob.σD^2; d_ += 0.5 * (log(qo / dq))^2 / v + 0.5 * log(2π * v)
-        if D.nH[k, j, s] > 0
-          Hp = S.PH[x] / Np; ho = D.Hs[k, j, s] / D.nH[k, j, s]
-          vh = Ob.sH[j]^2 / D.nH[k, j, s] + Ob.σH^2; h_ += 0.5 * (log(ho / Hp))^2 / vh + 0.5 * log(2π * vh)
-        end
+      f = j >= 3 ? D.fs2[s] : D.fm2[s]; f > 0 || continue
+      Np = S.PN[x]; n = D.n[k, j, s]; bg = j >= 3 ? Ob.bgS : Ob.bgM
+      c_ -= nb_logpmf(Float64(n), (Np + bg) * f * area_class(j), j >= 3 ? Ob.rS : Ob.rM)
+      n > 0 || continue
+      w = Np / (Np + bg); qo = log(sqrt(D.D2[k, j, s] / n))
+      la = Np > 0 ? lnorm(qo, log(HBAD4P.qmd(Np, S.PB[x])), Ob.sD[j]^2 / n + Ob.σD^2) : -Inf
+      d_ -= logmix(w, la, lnorm(qo, BG.mD[j], BG.sDb[j]^2))
+      if D.nH[k, j, s] > 0
+        ho = log(D.Hs[k, j, s] / D.nH[k, j, s])
+        lh = Np > 0 ? lnorm(ho, log(S.PH[x] / Np), Ob.sH[j]^2 / D.nH[k, j, s] + Ob.σH^2) : -Inf
+        h_ -= logmix(w, lh, lnorm(ho, BG.mH[k, j], BG.sHb[j]^2))
       end
     end
     pc[s] = c_; pd[s] = d_; ph[s] = h_
@@ -302,7 +347,8 @@ function tm_null(L, Dtr, keys_)
   Tn = zeros(nk, NCLS, 3, NCLS); Tb = zeros(nk, NCLS, 3, NCLS); W0 = zeros(nk, NCLS, 3); Hs = zeros(nk, NCLS); Hc = zeros(nk, NCLS)
   bin(dt) = dt <= qs[1] ? 1 : dt <= qs[2] ? 2 : 3
   for r in eachrow(t1)
-    j1 = HBAD4P.dclass(r.dia_cm); j1 == 0 && continue; s = sidx[r.iid]; k = kix[r.key]; w = r.w_ha / (ismicro(r.w_ha) ? Dtr.fm1[s] : Dtr.f1[s]); b = bin(dtv[s])
+    j1 = HBAD4P.dclass(r.dia_cm); j1 == 0 && continue; s = sidx[r.iid]; k = kix[r.key]; ft = ismicro(r.w_ha) ? Dtr.fm1[s] : Dtr.f1[s]; ft > 0 || continue
+    w = r.w_ha / ft; b = bin(dtv[s])
     W0[k, j1, b] += w
     if r.out == "alive"
       j2 = HBAD4P.dclass(r.dia2_cm); j2 == 0 && continue; Tn[k, j1, b, j2] += w; Tb[k, j1, b, j2] += w * π / 4e4 * r.dia2_cm^2
@@ -312,7 +358,8 @@ function tm_null(L, Dtr, keys_)
   Ig = zeros(nk, NCLS, 2); Igb = zeros(nk, NCLS, 2); Dsum = zeros(2, nk); S = Dtr.S
   for s in 1:length(Dtr.iid), k in 1:nk; Dsum[S.seed0[k, s]+1, k] += dtv[s]; end
   for r in eachrow(L.ig[in.(L.ig.iid, Ref(keys(sidx))), :])
-    j = HBAD4P.dclass(r.dia_cm); j == 0 && continue; s = sidx[r.iid]; k = kix[r.key]; a = S.seed0[k, s] + 1; w = r.w_ha / (ismicro(r.w_ha) ? Dtr.fm2[s] : Dtr.fs2[s])
+    j = HBAD4P.dclass(r.dia_cm); j == 0 && continue; s = sidx[r.iid]; k = kix[r.key]; a = S.seed0[k, s] + 1; ft = ismicro(r.w_ha) ? Dtr.fm2[s] : Dtr.fs2[s]
+    ft > 0 || continue; w = r.w_ha / ft
     Ig[k, j, a] += w; Igb[k, j, a] += w * π / 4e4 * r.dia_cm^2; r.ht_m > 0 && (Hs[k, j] += r.ht_m; Hc[k, j] += 1)
   end
   (Tn=Tn, Tb=Tb, W0=W0, Ig=Ig, Igb=Igb, Dsum=Dsum, H=Hs ./ max.(Hc, 1), qs=qs)
@@ -341,7 +388,8 @@ end
 using Serialization
 "Fingerprint of everything a build depends on: the builder and kernel code, the switches, and the input files (path, size, mtime)."
 function build_key(dir)
-  h = hash(read(joinpath(@__DIR__, "data4.jl"))); h = hash(read(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD4", "HBAD4P.jl")), h)
+  # (the files are hashed as Strings: Base.hash of a byte VECTOR samples its elements — round 4 found 56 % of one-byte edits of data4.jl left that hash unchanged)
+  h = hash(read(joinpath(@__DIR__, "data4.jl"), String)); h = hash(read(joinpath(@__DIR__, "..", "..", "src", "plugins", "HBAD4", "HBAD4P.jl"), String), h)
   h = hash((REGION, MIN_SP_TREES, LANEMODE, FMIN, HBAD4P.NATOM), h)
   isempty(SPLIT_CSV) || (st = stat(SPLIT_CSV); h = hash((abspath(SPLIT_CSV), st.size, st.mtime), h))
   for f in (joinpath(dir, "intervals.arrow"), joinpath(dir, "interval_trees.arrow"), joinpath(dir, "interval_ingrowth.arrow"), WATER_CSV, CLIM_CSV, FOREST_CSV,
@@ -354,10 +402,10 @@ end
 function cached_sets(sets::Vector{String}; dir=DATA_DIR)
   cd_ = get(ENV, "HBAD4_CACHE", joinpath(@__DIR__, "..", "..", "results", "hbad4", "cache")); mkpath(cd_)
   f = joinpath(cd_, "sets_$(join(sets, "_"))_$(build_key(dir)).jls")
-  isfile(f) && return deserialize(f)
+  isfile(f) && (out = deserialize(f); OBS_BG[] = out.bgobs; return out)
   FT = forest4(); L = load4(dir; FT=FT); CL = climate4(); TR = traits4(L, CL.clim; dir=dir); eb = sapling_prior(L, L.keys, FT)
   B = Dict(s => build4(L, s, L.keys, CL, FT, eb) for s in sets if any(==(s), L.iv.set))
-  sD, sH = within_sd(B["train"])
+  sD, sH = within_sd(B["train"]); bgo = obs_background(B["train"])
   # the HBAD3P warm start (params4.jl warm_start4), per train v1 tree: its subplot, key, D, H, crown ratio, and HBAD3P's competition unit — subplot densities
   # × 4 per FORESTED subplot ha (÷ a = max(f_subplot(v1, else v2), FMIN), 1 if unknown / 0: HBAD3P's area_of; audit r3 I2e) — as relative density SDI / 1500
   ivd = Dict(r.iid => r for r in eachrow(L.iv))
@@ -371,7 +419,13 @@ function cached_sets(sets::Vector{String}; dir=DATA_DIR)
   sdi_sub = combine(groupby(DataFrame(iid=wst.iid, sb=wst.sb, x=4 .* wst.w .* (wst.dia ./ 25.4) .^ 1.605 ./ wst.a), [:iid, :sb]), :x => sum => :sdi)
   rdd = Dict((r.iid, r.sb) => r.sdi / 1500 for r in eachrow(sdi_sub)); wst.rd = [rdd[(i, b)] for (i, b) in zip(wst.iid, wst.sb)]
   TM = haskey(B, "train") ? tm_null(L, B["train"], L.keys) : nothing
-  out = (keys=L.keys, TR=TR, eb=eb, sD=sD, sH=sH, lanemode=LANEMODE, warm=wst, split=SPLIT_CSV, sets=B, TM=TM, ndrop=L.ndrop)
-  serialize(f * ".part", out); mv(f * ".part", f; force=true)
+  # the TRAIN sapling ingrowth density per key (v2 ingrowth D < 12.7 cm on the microplots, w / f_micr(v2)): a split key's share of its group's fecundity
+  # (params4.jl warm_start4, audit r4 I2)
+  Dtr = B["train"]; sx = Dict(iid => s for (s, iid) in enumerate(Dtr.iid)); kx = Dict(k => i for (i, k) in enumerate(L.keys)); igk = zeros(length(L.keys))
+  for r in eachrow(L.ig)
+    s = get(sx, r.iid, 0); (s > 0 && r.dia_cm < 12.7 && Dtr.fm2[s] > 0) || continue; igk[kx[r.key]] += r.w_ha / Dtr.fm2[s]
+  end
+  out = (keys=L.keys, TR=TR, eb=eb, sD=sD, sH=sH, bgobs=bgo, lanemode=LANEMODE, warm=wst, split=SPLIT_CSV, sets=B, TM=TM, ndrop=L.ndrop, ndrop1=L.ndrop1, igk=igk)
+  serialize(f * ".part", out); mv(f * ".part", f; force=true); OBS_BG[] = bgo
   out
 end

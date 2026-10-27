@@ -36,8 +36,8 @@ genc4(j, v) = GSPEC4[j][5] ? log(v) : v
 function gdec4(j, z); lo, hi = GSPEC4[j][3], GSPEC4[j][4]; clamp(GSPEC4[j][5] ? exp(z) : (GSPEC4[j][1] == :σv ? abs(z) : z), lo, hi); end
 
 "Coordinate layout for keys_ and the fixed globals: names, start vector, decoder z → (P, G, Ob). sD / sH: the TRAIN per-class within-cell spreads (data constants)."
-function space4(keys_, TR, sD, sH; start_eps=nothing, start_lnF=nothing, start_glob=Dict{Symbol,Float64}())
-  nk = length(keys_); fix = gfix4()
+function space4(keys_, TR, sD, sH; start_eps=nothing, start_lnF=nothing, start_glob=Dict{Symbol,Float64}(), fix_extra=Dict{Symbol,Float64}())
+  nk = length(keys_); fix = merge(gfix4(), fix_extra)        # fix_extra: globals fixed at a value by the caller (e.g. the κ profile, kappa_profile4.jl)
   gfree = [j for j in eachindex(GSPEC4) if !haskey(fix, GSPEC4[j][1])]
   gval(j) = (nm = GSPEC4[j][1]; haskey(fix, nm) ? fix[nm] : get(start_glob, nm, GSPEC4[j][2]))
   gv0 = [genc4(j, clamp(gval(j), GSPEC4[j][3], GSPEC4[j][4])) for j in eachindex(GSPEC4)]
@@ -93,8 +93,9 @@ function warm_start4(CS, fit3p; quiet=false)
   O4 = Dict{Tuple{Int,Int,Int},Float64}(); s1 = Ref(0.0); s0 = Ref(0.0)
   hz(gm, p, d) = exp(G0.σST * (p.ST - 3)) * exp(-G0.β * gm) * (d / 20)^G0.ζ
   Fm = Ref(NaN)
+  RD4 = zeros(H4.nsites(S))
   for s in 1:H4.nsites(S)
-    H4.load_site!(S, X, s); na, _ = H4.competition!(S, G0, X, s, T0)
+    H4.load_site!(S, X, s); na, RD4[s] = H4.competition!(S, G0, X, s, T0)
     for q in 1:na
       i = X.act[q]; li = i - S.off[s] + 1; S.ln[i] == 1 && (O4[(s, Int(S.sp[i]), Int(S.cl[i]))] = X.O[li])
     end
@@ -129,8 +130,51 @@ function warm_start4(CS, fit3p; quiet=false)
   r = s1[] / s0[]; fe = F * Lr
   g3 = copy(g3); g3[:ms] = get(g3, :ms, 0.082) * r; g3[:κ] = 0.0
   e3 = e3 .* fe
+  # fecundity of the keys split from a group (audit r4 I2, decision H8): a key HBAD3P did not have takes its group's lnF + ln(its share of the group's TRAIN
+  # sapling ingrowth); the group key keeps the remaining share (the group's total recruitment is kept)
+  f3 = copy(f3); share = ones(nk)
+  for g in unique(src[k] for k in 1:nk if src[k] != CS.keys[k])
+    mem = [k for k in 1:nk if src[k] == g]; tot = sum(CS.igk[mem])
+    for k in mem; share[k] = max(CS.igk[k] / tot, 1e-6); f3[k] += log(share[k]); end
+  end
+  # recruitment light: HBAD3P's e^{−λ RD} was evaluated per SUBPLOT (RD of the subplot, × 4 / a), HBAD4P's per plot; at the train v1 state the ratio
+  # Rk = Σ_sites (seed ? 1 : ε0) mean_sb e^{−λk RD_sb} / Σ_sites (seed ? 1 : ε0) e^{−λk RD_plot}, λk = λ0 e^{λ1 (ST_k − 3)} (Jensen: convexity, audit r4 I2).
+  # Applied to lnF (as the light ratio to ε) when some |Rk − 1| > 5 % (decision H8).
+  rdsb = Dict((r_.iid, r_.sb) => r_.rd for r_ in eachrow(W)); Rk = zeros(nk)
+  for k in 1:nk
+    lk = G0.λ0 * exp(G0.λ1 * (P0[k].ST - 3)); a = 0.0; b = 0.0
+    for s in 1:H4.nsites(S)
+      ws = S.seed0[k, s] ? 1.0 : G0.ε0; iid = D.iid[s]
+      a += ws * sum(exp(-lk * get(rdsb, (iid, sb), 0.0)) for sb in 1:4) / 4; b += ws * exp(-lk * RD4[s])
+    end
+    Rk[k] = a / b
+  end
+  rec = maximum(abs.(Rk .- 1)) > 0.05
+  rec && (f3 .+= log.(Rk))
   SP = space4(CS.keys, CS.TR, CS.sD, CS.sH; start_eps=e3, start_lnF=f3, start_glob=g3); P, G, Ob = SP.decode(SP.z0)
-  quiet || println(@sprintf("warm start from %s: ε × %.4f (crowding / crown F %.4f × subplot / plot light %.4f), ms × %.4f (stress gm × F × %.4f), κ = 0; keys from their HBAD3P group key: %s",
-                            fit3p, fe, F, Lr, r, Lmr, join(["$(k) ← $(s)" for (k, s) in zip(CS.keys, src) if k != s], ", ")))
-  (P=P, G=G, Ob=Ob, SP=SP, e3=e3, f3=f3, g3=g3, src=src, fac=(F=F, Lr=Lr, Lmr=Lmr, eps=fe, ms=r))
+  quiet || println(@sprintf("warm start from %s: ε × %.4f (crowding / crown F %.4f × subplot / plot light %.4f), ms × %.4f (stress gm × F × %.4f), κ = 0; keys from their HBAD3P group key: %s; recruitment subplot / plot light ratio %.3f–%.3f (%s)",
+                            fit3p, fe, F, Lr, r, Lmr, join(["$(k) ← $(s)" for (k, s) in zip(CS.keys, src) if k != s], ", "), minimum(Rk), maximum(Rk),
+                            rec ? "applied to lnF" : "within 5 %: not applied"))
+  quiet || println("  fecundity shares: ", join(["$(CS.keys[k]) $(round(share[k]; digits=3))" for k in 1:nk if share[k] < 1], ", "))
+  (P=P, G=G, Ob=Ob, SP=SP, e3=e3, f3=f3, g3=g3, src=src, fac=(F=F, Lr=Lr, Lmr=Lmr, eps=fe, ms=r, share=share, Rk=Rk, Rapplied=rec))
+end
+
+# ---------------------------------------------------------------- parameter files (stage results of a fit; read by kappa_profile4.jl)
+"Write a coordinate vector z of the space SP as CSV (name, z, decoded value): the format a stage of a fit hands to the next."
+function save_z4(path, SP, z)
+  P, G, Ob = SP.decode(z); val(nm) = startswith(nm, "ε:") ? exp(z[findfirst(==(nm), SP.names)]) : startswith(nm, "lnF:") ? z[findfirst(==(nm), SP.names)] :
+                                                        (s = Symbol(nm); s in OBS4 ? getfield(Ob, s) : getfield(G, s))
+  CSV.write(path, DataFrame(name=SP.names, z=z, value=[val(nm) for nm in SP.names]))
+end
+"""Start values (start_eps, start_lnF, start_glob) of a parameter set (P, G, Ob) for space4 — e.g. to re-encode a stage-1 optimum in a space with other fixed
+globals (the κ profile)."""
+function starts4(P, G, Ob)
+  g = Dict{Symbol,Float64}(f => getfield(G, f) for f in fieldnames(HBAD4P.GlobP4)); for f in OBS4; g[f] = getfield(Ob, f); end
+  (start_eps=[exp(p.lnε) for p in P], start_lnF=[p.lnF for p in P], start_glob=g)
+end
+"Read a save_z4 file into the space SP (coordinates by name; names absent from the file keep SP.z0)."
+function load_z4(path, SP)
+  t = CSV.read(path, DataFrame); d = Dict(String(r.name) => Float64(r.z) for r in eachrow(t)); z = copy(SP.z0)
+  for (i, nm) in enumerate(SP.names); haskey(d, nm) && (z[i] = d[nm]); end
+  z
 end

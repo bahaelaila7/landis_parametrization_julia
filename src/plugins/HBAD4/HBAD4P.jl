@@ -29,7 +29,7 @@
 #       (seed ? 1 : ε0) Δ, RD of the start of the step, seed = a key tree ≥ 12.7 cm on the plot at v1, or ≥ SEED_MIN trees/ha of the key ≥ 12.7 cm now;  A += Δ.
 # Observation space (finish_site!, the likelihood only — the dynamics are unchanged): every atom is "measured" with the FIA DBH error N(0, sdM²) (sdM fixed,
 #   tools/hbad4/params4.jl): it contributes to class t with probability Φ((ub_t − D)/sdM) − Φ((lb_t − D)/sdM) (lb of class 1 = −∞: the 1-in tally threshold is
-#   the model's entry definition — recruits enter AT 2.54 cm; ub of class 16 = ∞). PN / PB / PH per (site, key, class) = Σ p N, Σ p N π/4 D², Σ p N H.
+#   the model's entry definition — recruits enter AT 2.54 cm; ub of class 16 = ∞). PN / PB / PH per (site, key, class) = Σ p N, Σ p N π/4 D², Σ p N H_m (H_m = H + H*(D_m) − H*(Dq): the atom's allometric height, audit r4 I1).
 # Storage (audit r3 B1): the initial atoms are stored only for the cells occupied at v1 (CSR); the working atoms of a site live in the per-thread Scratch while
 #   the site is simulated (run_site!: load_site!, step_site! per year, finish_site!), and only the occupied cells are visited.
 module HBAD4P
@@ -463,24 +463,30 @@ end
   nothing
 end
 
-"""Observation-space prediction of site s (X loaded): PN / PB / PH per (key, class) = Σ over the key's atoms of p N, p N π/4 D², p N H, with p the probability
+"""Observation-space prediction of site s (X loaded): PN / PB / PH per (key, class) = Σ over the key's atoms of p N, p N π/4 D², p N H_m, with p the probability
 that the atom is tallied in that class under the DBH measurement error N(0, sdM²) (lb of class 1 = −∞, ub of class 16 = ∞; classes beyond the neighbours of
-the atom's own class are > 25 sd away and get nothing)."""
-function finish_site!(S::Sites4, G::GlobP4, X::Scratch, s::Int)
+the atom's own class are > 25 sd away and get nothing) and H_m = H + H*(D_m) − H*(Dq) the atom's allometric height around its cell's mean height (the rule
+the upgrowth gives movers, §2.4; audit r4 I1: with the cell mean, an atom crossing a class bound took its new cell's height into the blurred tail of its
+old class — a jump of the height term)."""
+function finish_site!(S::Sites4, P::AbstractVector{SpP4}, G::GlobP4, X::Scratch, s::Int, T_::Tabs)
   lo = S.off[s]; nk = S.nk; b0 = (s - 1) * nk * NCLS; sd = G.sdM
   @inbounds for x in b0+1:b0+nk*NCLS; S.PN[x] = 0.0; S.PB[x] = 0.0; S.PH[x] = 0.0; end
   @inbounds for q in 1:X.no
-    li = X.occ[q]; i = li + lo - 1; j = Int(S.cl[i]); kb = b0 + (S.sp[i] - 1) * NCLS; Hc = S.H[i]
+    li = X.occ[q]; i = li + lo - 1; j = Int(S.cl[i]); k = Int(S.sp[i]); kb = b0 + (k - 1) * NCLS; Hc = S.H[i]; p = P[k]
+    n_ = 0.0; d2 = 0.0
+    for m in 1:X.ac[li]; kk = (li - 1) * NATOM + m; n_ += X.an[kk]; d2 += X.an[kk] * X.ad[kk]^2; end
+    n_ > 0 || continue
+    hq = ht(T_, p, G, k, sqrt(d2 / n_))
     for m in 1:X.ac[li]
-      kk = (li - 1) * NATOM + m; n = X.an[kk]; d = X.ad[kk]; n > 0 || continue; bb = ba(n, d)
+      kk = (li - 1) * NATOM + m; n = X.an[kk]; d = X.ad[kk]; n > 0 || continue; bb = ba(n, d); Hm = max(Hc + ht(T_, p, G, k, d) - hq, 0.5)
       if sd > 0
         for t in max(1, j - 1):min(NCLS, j + 1)
-          p = (t == NCLS ? 1.0 : Φ((CLS_HI[t] - d) / sd)) - (t == 1 ? 0.0 : Φ((CLS_LO[t] - d) / sd))
-          p > 0 || continue
-          S.PN[kb+t] += p * n; S.PB[kb+t] += p * bb; S.PH[kb+t] += p * n * Hc
+          pr = (t == NCLS ? 1.0 : Φ((CLS_HI[t] - d) / sd)) - (t == 1 ? 0.0 : Φ((CLS_LO[t] - d) / sd))
+          pr > 0 || continue
+          S.PN[kb+t] += pr * n; S.PB[kb+t] += pr * bb; S.PH[kb+t] += pr * n * Hm
         end
       else
-        S.PN[kb+j] += n; S.PB[kb+j] += bb; S.PH[kb+j] += n * Hc
+        S.PN[kb+j] += n; S.PB[kb+j] += bb; S.PH[kb+j] += n * Hm
       end
     end
   end
@@ -500,7 +506,7 @@ function run_site!(S::Sites4, P::AbstractVector{SpP4}, G::GlobP4, X::Scratch, s:
   load_site!(S, X, s)
   for _ in 1:S.nyr[s]; step_site!(S, P, G, X, s, 1.0, T_); end
   S.frac[s] > 0 && step_site!(S, P, G, X, s, S.frac[s], T_)
-  finish_site!(S, G, X, s)
+  finish_site!(S, P, G, X, s, T_)
   nothing
 end
 "Run every site (threaded). The lanes are the store's (S.lz / S.lw); exact = true: no lookup tables (exact functions)."

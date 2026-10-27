@@ -87,7 +87,7 @@ function ref_run(S, s, P, G; kw...)
 end
 ba_(n, d) = n * π * d^2 / 4e4
 
-println("HBAD4P verification (round 3, atoms) | product $(DATA_DIR) | role $(ROLE) | split $(ROLE_SPLIT) | threads $(Threads.nthreads()) | region $(REGION) | NSUB $(NSUB) | sections $(sort(collect(SECTIONS)))")
+println("HBAD4P verification (round 4, atoms) | product $(DATA_DIR) | role $(ROLE) | split $(ROLE_SPLIT) | threads $(Threads.nthreads()) | region $(REGION) | NSUB $(NSUB) | sections $(sort(collect(SECTIONS)))")
 t00 = time()
 CS = cached_sets(["train", "val", "test"]); KEYS = CS.keys; TR = CS.TR; nk = length(KEYS)
 DT = CS.sets["train"]; ST = DT.S; ns = H4.nsites(ST)
@@ -95,7 +95,13 @@ DT = CS.sets["train"]; ST = DT.S; ns = H4.nsites(ST)
 gl3 = Dict(Symbol(r.name) => Float64(r.value) for r in eachrow(CSV.read(joinpath(FIT3P, "globals.csv"), DataFrame)))
 WS = warm_start4(CS, FIT3P); SP = WS.SP; P, G, Ob = WS.P, WS.G, WS.Ob; EPSFAC = WS.fac.eps
 lz, lw = ST.lz, ST.lw
-OBX = ObsP(0.835, 4.65, 0.131, 0.1, 0.019, 0.0866, CS.sD, CS.sH)        # (smoke4's fitted observation parameters at the warm start: fixed for the comparisons)
+# observation parameters fitted at runtime (audit r4 V: not hard-coded — they go stale with the data) at the warm start on the train set (CMA-ES on the
+# six observation coordinates, as smoke4); fixed for all comparisons below
+OBX = let z = copy(SP.z0), iob = [findfirst(==(String(nm)), SP.names) for nm in OBS4]
+  H4.simulate!(ST, P, G); f(x) = (zz = copy(z); zz[iob] = x; nll4(DT, SP.decode(zz)[3]).total)
+  r = cmaes(f, z[iob], 0.3; λ=12, maxevals=parse(Int, get(ENV, "HBAD4_VERIFY_OBS_EVALS", "500")), logf=s -> nothing); zz = copy(z); zz[iob] = r.x; SP.decode(zz)[3]
+end
+println("observation parameters (fitted at the warm start): rM $(round(OBX.rM; sigdigits=4)) rS $(round(OBX.rS; sigdigits=4)) bgM $(round(OBX.bgM; sigdigits=4)) bgS $(round(OBX.bgS; sigdigits=4)) σD $(round(OBX.σD; sigdigits=4)) σH $(round(OBX.σH; sigdigits=4))")
 rng = MersenneTwister(20261026); SUB = sort(randperm(rng, ns)[1:min(NSUB, ns)])
 println("sets loaded in $(round(time() - t00; digits=1)) s; train sites $(ns), keys $(join(KEYS, ",")); NATOM $(NA4); warm start ", WS.fac)
 
@@ -362,8 +368,8 @@ let S0 = subS(ST, SUB[1:min(80, length(SUB))])
   check("1.6 lane mixing conserves N, B (Σ N D²), Σ N·H, Σ N·A per (site, key, class) and keeps every atom in its class", mx < 1e-11 && nout == 0, "max rel diff $(fmt(mx)); atoms outside $(nout)")
 end
 function alloc_step(S, P, G, X, Δ, T_)                         # (function barrier: P, G are untyped globals here)
-  reset!(S, X, 1); H4.step_site!(S, P, G, X, 1, Δ, T_); H4.finish_site!(S, G, X, 1); reset!(S, X, 1)
-  @allocated begin H4.load_site!(S, X, 1); H4.step_site!(S, P, G, X, 1, Δ, T_); H4.finish_site!(S, G, X, 1) end
+  reset!(S, X, 1); H4.step_site!(S, P, G, X, 1, Δ, T_); H4.finish_site!(S, P, G, X, 1, T_); reset!(S, X, 1)
+  @allocated begin H4.load_site!(S, X, 1); H4.step_site!(S, P, G, X, 1, Δ, T_); H4.finish_site!(S, P, G, X, 1, T_) end
 end
 alloc_sim(S, P, G) = (H4.simulate!(S, P, G); @allocated H4.simulate!(S, P, G))
 let s = SUB[1], Sx = subS(ST, [s]), X = H4.Scratch(ST.off[2] - ST.off[1]), T_ = H4.Tabs(P, G)
@@ -547,7 +553,7 @@ let sub = SUB, res = Dict{String,Any}(), Dx = subD(SUB), LB = "NATOM $(NA4)", KT
         j = ST.cl[i]; n = Ref4.totN(C[q]); nkj[ST.sp[i], j] += n; j >= 3 && (n12 += n); ba += Ref4.totB(C[q])
         Sx.N[rx[q]] = n; Sx.B[rx[q]] = Ref4.totB(C[q]); Sx.H[rx[q]] = Hh[q]
       end
-      PN, PB, PH = Ref4.obs(C, Hh, ST.sp[r], ST.cl[r], nk, GG.sdM)
+      PN, PB, PH = Ref4.obs(C, Hh, ST.sp[r], ST.cl[r], nk, GG.sdM, P, GG)
       for k in 1:nk, j in 1:NCLS; x = H4.obsix(Sx, q0, k, j); Sx.PN[x] = PN[k, j]; Sx.PB[x] = PB[k, j]; Sx.PH[x] = PH[k, j]; end
       C0 = ref_run(nosap(s), 1, Pn, GG; kw...)[1]
       ing += sum(Ref4.totN(C[q]) - Ref4.totN(C0[q]) for (q, i) in enumerate(r) if ST.cl[i] >= 3)
@@ -569,23 +575,30 @@ let sub = SUB, res = Dict{String,Any}(), Dx = subD(SUB), LB = "NATOM $(NA4)", KT
   GK = withG(G; κ=KT); rk = metr((natom=NA4, capb=H4.CAPB); GG=GK); rk64 = metr((natom=64, capb=10^9); GG=GK)
   e0 = m4.dnll; e1 = (rk.nll.total - rk64.nll.total) / length(sub)
   tk = (rk64.nll.total - res["NATOM 64"].nll.total) / length(sub); ak = (rk.nll.total - res[LB].nll.total) / length(sub)
-  check("3.2c [stat, r3 B1] the merge error does not depend on κ (else κ is fitted to the numerics): $(LB) − 64 NLL per site within 0.02 nats at κ = 0 AND κ = $(KT), and the apparent κ effect within ±30 % of the 64-atom one",
-        G.κ == 0 && abs(e0) <= 0.02 && abs(e1) <= 0.02 && abs(ak / tk - 1) <= 0.3,
+  check("3.2c [stat, r3 B1] the merge error does not depend on κ (else κ is fitted to the numerics): $(LB) − 64 NLL per site within 0.02 nats at κ = 0 AND κ = $(KT), and the apparent κ effect within ±30 % (or 0.01 nats/site, H13) of the 64-atom one",
+        G.κ == 0 && abs(e0) <= 0.02 && abs(e1) <= 0.02 && abs(ak - tk) <= max(0.3 * abs(tk), 0.01),      # ([r4, H13] with an absolute floor of 0.01 nats/site: a ratio is meaningless when the true effect is ≈ 0)
         @sprintf("merge error %+.4f nats/site at κ = 0, %+.4f at κ = %.2f; κ effect (κ = %.2f vs 0): 64 atoms %+.4f nats/site, %s %+.4f (ratio %.3f)", e0, e1, KT, KT, tk, LB, ak, ak / tk))
 end
-# 3.3 objective roughness: atoms cross class bounds discretely (and merge choices flip), so the NLL is piecewise smooth with jumps; tiny steps of ln ε (PITA) and κ
-# (around κ = 0.1: κ = 0 is the lower bound of its linear encoding). Audit r3 I1: merge distances binned at 1e-6 cm + the observation blur of the DBH error.
-let idx = sort(randperm(Xoshiro(2), ns)[1:min(1500, ns)]), Ds = (S=subS(ST, idx), n=DT.n[:, :, idx], D2=DT.D2[:, :, idx], Hs=DT.Hs[:, :, idx], nH=DT.nH[:, :, idx], fs2=DT.fs2[idx], fm2=DT.fm2[idx])
-  Obx = OBX; kp = something(findfirst(==("PITA"), KEYS), 1); msg = String[]; r9 = 0.0; ik = findfirst(==("κ"), SP.names)
-  for (nm, zi) in (("ln ε PITA", kp), ("κ", ik)), sc in (1e-9, 1e-6, 1e-4)
+# 3.3 objective roughness (audit r4 V / I1): ±20 steps of 1e-4 and 1e-3 of ln ε (PITA) on the FULL train set and of κ around 0.1 on HBAD4_VERIFY_KSITES (5000)
+# train sites, NLL with the fixed observation parameters OBX. Per series: the step differences around the smooth slope (their linear trend = the derivative of a
+# quadratic): sd and the largest single deviation; the max residual of a quadratic. Bars (round-4 acceptance): sd ≤ 0.93 nats at 1e-4 and ≤ 2.7 at 1e-3
+# (1/3 of the gated objective's 2.79 / 8.15), no single jump > 2 nats at 1e-4. The count term keeps ≈ 1-nat jumps (exact transfer across class bounds, §9 M2).
+let ksites = parse(Int, get(ENV, "HBAD4_VERIFY_KSITES", "5000")), kidx = sort(randperm(Xoshiro(4), ns)[1:min(ksites, ns)]), msg = String[], ok = true
+  sdv(x) = sqrt(sum((x .- sum(x) / length(x)) .^ 2) / (length(x) - 1))
+  kp = something(findfirst(==("PITA"), KEYS), 1); ik = findfirst(==("κ"), SP.names)
+  Dk = (S=subS(ST, kidx), n=DT.n[:, :, kidx], D2=DT.D2[:, :, kidx], Hs=DT.Hs[:, :, kidx], nH=DT.nH[:, :, kidx], fs2=DT.fs2[kidx], fm2=DT.fm2[kidx])
+  for (nm, zi, base, Dx) in (("ln ε PITA", kp, nothing, DT), ("κ", ik, 0.1, Dk)), sc in (1e-4, 1e-3)
     zi === nothing && continue
-    δs = collect(-5:5) .* sc; zb = copy(SP.z0); nm == "κ" && (zb[zi] = 0.1)
-    v = map(δs) do δ; z = copy(zb); z[zi] += δ; P_, G_, _ = SP.decode(z); H4.simulate!(Ds.S, P_, G_); nll4(Ds, Obx).total; end
-    X = hcat(ones(11), δs, δs .^ 2); b = X \ v; res = maximum(abs.(v .- X * b)); sc == 1e-9 && (r9 = max(r9, maximum(v) - minimum(v)))
-    push!(msg, @sprintf("%s ±5×%.0e: range %.3g nats, slope %.4g, max |residual of a quadratic| %.3g nats", nm, sc, maximum(v) - minimum(v), b[2], res))
+    zb = copy(SP.z0); base === nothing || (zb[zi] = base)
+    v = map(-20:20) do i; z = copy(zb); z[zi] += i * sc; P_, G_, _ = SP.decode(z); H4.simulate!(Dx.S, P_, G_); nll4(Dx, OBX).total; end
+    dv = diff(v); Xd = hcat(ones(40), collect(1.0:40)); rd = dv .- Xd * (Xd \ dv); x = collect(-20:20) .* sc; X = hcat(ones(41), x, x .^ 2)
+    sdr = sdv(rd); mj = maximum(abs.(rd)); rq = maximum(abs.(v .- X * (X \ v)))
+    bar = sc == 1e-4 ? 0.93 : 2.7; good = sdr <= bar && (sc != 1e-4 || mj <= 2.0); ok &= good
+    push!(msg, @sprintf("%s ±20×%.0e (%s): step sd %.3f (bar %.2f), max jump %.2f, max |residual of a quadratic| %.2f nats, mean step %.2f%s", nm, sc,
+                        Dx === DT ? "full train" : "$(length(kidx)) sites", sdr, bar, mj, rq, sum(dv) / 40, good ? "" : " ✗"))
   end
-  check("3.3 [stat, r3 I1] objective roughness on $(length(idx)) train sites (NLL with fixed observation parameters): range over ±5 steps of 1e-9 < 0.01 nats (ln ε PITA and κ)", r9 < 0.01,
-        join(msg, " | ") * " (round-2 kernel: ln ε 1e-9 range 0.317, 1e-4 range 14.7 nats on 2000 sites)")
+  check("3.3 [stat, r4 I1] objective roughness: the step differences around the smooth slope at 1e-4 / 1e-3 steps of ln ε (PITA, full train) and κ (around 0.1): sd ≤ 0.93 / 2.7 nats, no jump > 2 nats at 1e-4",
+        ok, join(msg, " | ") * " (round-3 objective with the gate: sd 2.79 / 8.15, jumps to 12.4 nats)")
 end
 end # section 3
 
@@ -668,7 +681,7 @@ FQ = let fsql = q("""
   Dict((Int(r.st), Int(r.u), Int(r.c), Int(r.p), Date(r.md), Int(r.sb)) => (r.ncn == 1 && abs(coalesce(r.ts, 0.0) - 1) <= 1e-6 ? clamp(coalesce(r.fs, 0.0), 0, 1) : NaN,
                                                                          r.ncn == 1 && abs(coalesce(r.tm, 0.0) - 1) <= 1e-6 ? clamp(coalesce(r.fm, 0.0), 0, 1) : NaN) for r in eachrow(fsql))
 end
-pf(v) = (x = [isnan(a) ? 1.0 : a for a in v]; m = mean(x); m <= 0 ? 1.0 : max(m, 0.25))
+pf(v) = (x = [isnan(a) ? 1.0 : a for a in v]; m = mean(x); m <= 0 ? 0.0 : max(m, 0.25))     # [r4 M1] all known non-forest: 0 (no exposure)
 FF = Dict{String,Matrix{Float64}}()
 for nm in ("train", "val", "test")
   Dn = CS.sets[nm]; f = zeros(length(Dn.iid), 4)
@@ -690,7 +703,10 @@ let ivsql = q("""
   rs = CSV.read(ROLE_SPLIT, DataFrame); setof = Dict((Int(r.statecd), Int(r.unitcd), Int(r.countycd), Int(r.plot)) => String(r.set) for r in eachrow(rs))
   nat = ivsql[.!(coalesce.(ivsql.trt2, false) .| coalesce.(ivsql.dst2, false) .| coalesce.(ivsql.harv2, false)), :]
   # [r3 I6] minus the intervals whose v2 visit has no forested subplot (every subplot's forested fraction known and 0 in FIADB SUBP_COND × COND)
-  nf = [all(sb -> get(FQ, (Int(r.st), Int(r.u), Int(r.c), Int(r.p), Date(r.d2), sb), (NaN, NaN))[1] == 0, 1:4) for r in eachrow(nat)]; nat = nat[.!nf, :]
+  nf = [all(sb -> get(FQ, (Int(r.st), Int(r.u), Int(r.c), Int(r.p), Date(r.d2), sb), (NaN, NaN))[1] == 0, 1:4) for r in eachrow(nat)]
+  # [r4 M1, H10] and those whose v1 visit has no forested subplot (no observed v1 stand)
+  nf1 = [!nf[i] && all(sb -> get(FQ, (Int(r.st), Int(r.u), Int(r.c), Int(r.p), Date(r.d1), sb), (NaN, NaN))[1] == 0, 1:4) for (i, r) in enumerate(eachrow(nat))]
+  nat = nat[.!(nf .| nf1), :]
   a0 = Set((Int(r.st), Int(r.u), Int(r.c), Int(r.p), Date(r.d1), Date(r.d2), get(setof, (r.st, r.u, r.c, r.p), "")) for r in eachrow(nat))
   ivb0 = DataFrame(Arrow.Table(joinpath(DATA_DIR, "intervals.arrow"))); pplots = Set(zip(ivb0.st, ivb0.u, ivb0.c, ivb0.p))
   a1 = Set(x for x in a0 if x[7] != ""); nnoset = length(a0) - length(a1)
@@ -698,7 +714,7 @@ let ivsql = q("""
   b = Set((r.st, r.u, r.c, r.p, Date(r.d1), Date(r.d2), String(r.set)) for r in eachrow(ivall))
   oa = setdiff(a, b); ob = setdiff(b, a)
   check("5.1 natural GA+FL intervals (plot, d1, d2, set), dt > 2: SQL on curated_trees (no TRTCD1 / DSTRBCD1 / harvest fate at v2; [r3 I6] a forested subplot at v2) with the ROLE split, on the product's plots = the builder's three sets", isempty(oa) && isempty(ob),
-        "SQL $(length(a)), builder $(length(b)); only SQL $(length(oa)), only builder $(length(ob)) | (+ $(nnoset) on plots outside the role split; $(count(nf)) natural intervals without a forested subplot at v2 excluded by SQL, builder logged $(CS.ndrop))")
+        "SQL $(length(a)), builder $(length(b)); only SQL $(length(oa)), only builder $(length(ob)) | (+ $(nnoset) on plots outside the role split; $(count(nf)) natural intervals without a forested subplot at v2 excluded by SQL, builder logged $(CS.ndrop); without one at v1: $(count(nf1)) / $(CS.ndrop1))")
   dset = Dict{String,Int}(); for x in setdiff(a1, a); dset[x[7]] = get(dset, x[7], 0) + 1; end
   rsp = Set(keys(setof)); nrp = count(k -> !(k in pplots), rsp)
   info("5.1b [data] role-split plots absent from the interval product (the product's own split dropped them)", "$(nrp) of $(length(rsp)) role-split plots have no product interval; their natural intervals by SQL: $(length(a1) - length(a)) (" *
@@ -742,7 +758,7 @@ let mx = Dict(:N => 0.0, :B => 0.0, :H => 0.0, :A => 0.0), nbad = 0, ncell = 0, 
     for r in eachrow(v1[v1.set .== nm, :])
       ismissing(r.s2) && (nmiss += 1; continue); startswith(coalesce(r.fate2, ""), "harvest") && (nharv += 1; continue)
       DIA = coalesce(r.dia, 0.0); DIA >= 5.0 || continue
-      j = min(NCLS, floor(Int, (DIA + 1) / 2)); s = sid[r.iid]; k = kix[r.key]; w = r.tpa * 2.4710538 / FF[nm][s, 1]
+      j = min(NCLS, floor(Int, (DIA + 1) / 2)); s = sid[r.iid]; k = kix[r.key]; FF[nm][s, 1] > 0 || continue; w = r.tpa * 2.4710538 / FF[nm][s, 1]
       a = get!(acc, (s, k, j), zeros(6)); a[1] += w; a[2] += w * π / 4e4 * (DIA * 2.54)^2
       h = coalesce(r.ht, 0.0); h > 0 && (a[3] += w * h * 0.3048; a[4] += w); ag = coalesce(r.age, 0.0); ag > 0 ? (a[5] += w * ag; a[6] += w) : (nnoage += 1)
     end
@@ -871,12 +887,15 @@ let t = v1[(v1.set .== "train"), :], st_ = CSV.read(SHADETOL_CSV, DataFrame), lo
   check("5.10 traits from the SQL tree list (TRAIN only) = TR: Hmax (99.5 % height), ST and LONGEVITY tree-weighted over member species, T_ref (tree-weighted train period mean)",
         mx[:Hmax] < 1e-9 && mx[:ST] < 1e-9 && mx[:longevity] < 1e-9 && mx[:Tref] < 1e-3, join(["$k $(fmt(v))" for (k, v) in mx], ", ") * " (T_ref: SQL live v1 trees vs the product's tree list)")
 end
-let f = joinpath(@__DIR__, "data4.jl"), src = read(f), h = hash(src), s2 = copy(src)
-  s2[div(length(s2), 3)] = s2[div(length(s2), 3)] == UInt8('1') ? UInt8('2') : UInt8('1')
-  srcd = read(f, String); blk = srcd[findfirst("function build_key", srcd)[1]:findfirst("function cached_sets", srcd)[1]]
+let f = joinpath(@__DIR__, "data4.jl"), srcd = read(f, String), h0 = build_key(DATA_DIR)
+  # [r4] every one-byte edit of the builder at 300 positions must change the hash build_key takes of it (Base.hash of a byte vector samples its elements)
+  v = Vector{UInt8}(srcd); hs = hash(srcd); P_ = round.(Int, range(1, length(v); length=300))
+  nmiss = count(p -> (w = copy(v); w[p] = w[p] == UInt8('1') ? UInt8('2') : UInt8('1'); hash(String(w)) == hs), P_)
+  bk = srcd[findfirst("function build_key", srcd)[1]:findfirst("function cached_sets", srcd)[1]]; strh = occursin("read(joinpath(@__DIR__, \"data4.jl\"), String)", bk) && occursin("HBAD4P.jl\"), String)", bk)
+  blk = bk
   deps = all(occursin(x, blk) for x in ("HBAD4P.jl", "REGION", "MIN_SP_TREES", "LANEMODE", "FMIN", "NATOM", "SPLIT_CSV", "WATER_CSV", "CLIM_CSV", "FOREST_CSV", "CO2_CSV", "SHADETOL_CSV", "LONGEVITY_CSV"))
-  check("5.11 cache key covers builder + kernel code (a one-byte edit changes it), the switches, the role split and every input file", hash(s2) != h && deps,
-        "one-byte edit changes hash: $(hash(s2) != h) (Julia $(VERSION); Base.hash is not stable across Julia versions: a new Julia rebuilds the cache); inputs and switches listed: $(deps)")
+  check("5.11 [r4] cache key covers builder + kernel code (every one-byte edit changes it: the files are hashed as Strings), the switches, the role split and every input file", nmiss == 0 && strh && deps,
+        "one-byte edits at 300 positions left the hash unchanged: $(nmiss); code hashed as Strings: $(strh) (Julia $(VERSION); Base.hash is not stable across Julia versions: a new Julia rebuilds the cache); inputs and switches listed: $(deps)")
 end
 end # section 5
 
@@ -899,7 +918,7 @@ EBR = let trn = ivall[ivall.set .== "train", :], sidx = Dict(iid => s for (s, ii
     (lo + hi) / 2
   end
   for k in 1:nk, j in 1:2, a in (false, true)
-    idx = findall(==(a), adult[k, :]); isempty(idx) && continue; y = n[k, j, idx]; x = e[idx]; ng[k, j, a+1] = length(idx)
+    idx = findall(i -> adult[k, i] == a && e[i] > 0, 1:nst); isempty(idx) && continue; y = n[k, j, idx]; x = e[idx]; ng[k, j, a+1] = length(idx)   # ([r4 M1] unobserved microplots excluded)
     mg = sum(y) / sum(x); mg > 0 || continue
     U = Dict{Tuple{Int,Float64},Int}(); for (yi, xi) in zip(y, x); U[(yi, xi)] = get(U, (yi, xi), 0) + 1; end; U = collect(U)
     # [r3] joint maximum likelihood of (m, α): golden section on ln α over [−8, 8] of the profile max over ln m (golden on ln m ± 3 around the Poisson m)
@@ -927,7 +946,7 @@ let mx = 0.0, nbad = 0, worst = ""
     end
     for s in 1:nsn, k in 1:nk, j in 1:2
       e = AREA_MIC * FF[nm][s, 2]; mg = EBR.m[k, j, adult[k, s]+1]; α = EBR.α[k, j, adult[k, s]+1]
-      Nh = mg > 0 ? (n[k, j, s] + α) / (e + α / mg) : n[k, j, s] / e
+      Nh = mg > 0 ? (n[k, j, s] + α) / (e + α / mg) : (e > 0 ? n[k, j, s] / e : 0.0)
       i = cellix(S, s, k, j, 1); Nb = S.N0[i] + S.N0[i+1] + S.N0[i+2]; d = reld(Nb, Nh; floor=1e-9)
       d > mx && (mx = d; worst = "$nm site $s $(KEYS[k]) class $j n $(n[k, j, s]): builder $(Nb), refit $(Nh)")
       d > 1e-4 && (nbad += 1)
@@ -981,36 +1000,54 @@ let mx = 0.0
   end
   check("7.1 nb_logpmf = Distributions.NegativeBinomial(r, r/(r+μ)) (mean μ, variance μ + μ²/r)", mx < 1e-8, "max rel diff $(fmt(mx))")
 end
-"""Independent NLL: the final atoms of every site (serial kernel run, read from the scratch), the DBH-error blur recomputed over ALL classes with the Distributions
-normal cdf (Ref4.obs), then Distributions NB with background + Normal size / height terms."""
-function nll_ref(D, Ob, P, G)
+"""Background densities of the size / height terms recomputed from their definition (docs §3): per class j the mean / sd of log QMD over the TRAIN v2 cells with
+≥ 1 tree; per key × class the mean log mean height (≥ 10 cells, else the class mean of all such cells) with the per-class sd around the key means."""
+function bg_ref(D)
+  nk = size(D.n, 1); mD = zeros(NCLS); sDb = zeros(NCLS); mH = zeros(nk, NCLS); sHb = zeros(NCLS)
+  for j in 1:NCLS
+    q = Float64[]; hs = [Float64[] for _ in 1:nk]
+    for s in axes(D.n, 3), k in 1:nk
+      D.n[k, j, s] > 0 && push!(q, 0.5 * log(D.D2[k, j, s] / D.n[k, j, s])); D.nH[k, j, s] > 0 && push!(hs[k], log(D.Hs[k, j, s] / D.nH[k, j, s]))
+    end
+    mD[j] = mean(q); sDb[j] = std(q); allh = reduce(vcat, hs); mc = mean(allh)
+    for k in 1:nk; mH[k, j] = length(hs[k]) >= 10 ? mean(hs[k]) : mc; end
+    sHb[j] = sqrt(sum(sum(abs2, hs[k] .- mH[k, j]; init=0.0) for k in 1:nk) / length(allh))
+  end
+  (mD=mD, sDb=sDb, mH=mH, sHb=sHb)
+end
+"""Independent NLL (docs §3): the final atoms of every site (serial kernel run, read from the scratch), the DBH-error blur and the atoms' allometric heights
+recomputed over ALL classes (Ref4.obs, Distributions normal cdf); Distributions NB with background for the count; the size / height terms of EVERY observed
+cell of a tallied area as the two-component mixture w · model Gaussian + (1 − w) · background Gaussian, w = N / (N + bg), with the background densities
+recomputed (bg_ref). Unobserved tallies (f = 0) score nothing."""
+function nll_ref(D, Ob, P, G, BGr; exact=true)
   S = D.S; c = 0.0; dsz = 0.0; hh = 0.0; cempty = 0.0; nempty = 0; bgexp = 0.0
-  serial_run!(S, P, G; each=(s, X) -> begin
-    r = S.off[s]:S.off[s+1]-1; PN, PB, PH = Ref4.obs([atoms_x(X, S, i; s=s) for i in r], S.H[r], S.sp[r], S.cl[r], S.nk, G.sdM)
+  lmix(w, la, lb) = (w == 0 ? lb : (A = log(w) + la; B = log(1 - w) + lb; M = max(A, B); M + log(exp(A - M) + exp(B - M))))
+  serial_run!(S, P, G; exact=exact, each=(s, X) -> begin
+    r = S.off[s]:S.off[s+1]-1; PN, PB, PH = Ref4.obs([atoms_x(X, S, i; s=s) for i in r], S.H[r], S.sp[r], S.cl[r], S.nk, G.sdM, P, G)
     for k in 1:S.nk, j in 1:NCLS
+      f = j >= 3 ? D.fs2[s] : D.fm2[s]; f > 0 || continue
       Np = PN[k, j]; n = D.n[k, j, s]
       area = j >= 3 ? 1 / (6.018046 * 2.4710538) : 1 / (74.965282 * 2.4710538)
-      f = j >= 3 ? D.fs2[s] : D.fm2[s]; bg = j >= 3 ? Ob.bgS : Ob.bgM; μ = (Np + bg) * f * area; rr = j >= 3 ? Ob.rS : Ob.rM
+      bg = j >= 3 ? Ob.bgS : Ob.bgM; μ = (Np + bg) * f * area; rr = j >= 3 ? Ob.rS : Ob.rM
       l = -Distributions.logpdf(Distributions.NegativeBinomial(rr, rr / (rr + μ)), n); c += l; bgexp += bg * f * area
       (Np < 1e-3 && n > 0) && (cempty += l; nempty += n)
-      if n > 0 && Np > 1e-9
-        dq = sqrt(PB[k, j] / (π / 4e4 * Np)); qo = sqrt(D.D2[k, j, s] / n)
-        dsz -= Distributions.logpdf(Distributions.Normal(log(dq), sqrt(Ob.sD[j]^2 / n + Ob.σD^2)), log(qo))
-        if D.nH[k, j, s] > 0
-          Hp = PH[k, j] / Np
-          hh -= Distributions.logpdf(Distributions.Normal(log(Hp), sqrt(Ob.sH[j]^2 / D.nH[k, j, s] + Ob.σH^2)), log(D.Hs[k, j, s] / D.nH[k, j, s]))
-        end
+      n > 0 || continue
+      w = Np / (Np + bg); lq = log(sqrt(D.D2[k, j, s] / n))
+      lm = Np > 0 && PB[k, j] > 0 ? Distributions.logpdf(Distributions.Normal(log(sqrt(PB[k, j] / (π / 4e4 * Np))), sqrt(Ob.sD[j]^2 / n + Ob.σD^2)), lq) : -Inf   # (a 1e-300 tail: PB underflows)
+      dsz -= lmix(w, lm, Distributions.logpdf(Distributions.Normal(BGr.mD[j], BGr.sDb[j]), lq))
+      if D.nH[k, j, s] > 0
+        lh = log(D.Hs[k, j, s] / D.nH[k, j, s])
+        lm = Np > 0 && PH[k, j] > 0 ? Distributions.logpdf(Distributions.Normal(log(PH[k, j] / Np), sqrt(Ob.sH[j]^2 / D.nH[k, j, s] + Ob.σH^2)), lh) : -Inf
+        hh -= lmix(w, lm, Distributions.logpdf(Distributions.Normal(BGr.mH[k, j], BGr.sHb[j]), lh))
       end
     end
   end)
   (total=c + dsz + hh, count=c, size=dsz, height=hh, cempty=cempty, nempty=nempty, bgexp=bgexp)
 end
-OBW = let z = copy(SP.z0), iob = [findfirst(==(String(nm)), SP.names) for nm in OBS4]
-  f(x) = (zz = copy(z); zz[iob] = x; nll4(DT, SP.decode(zz)[3]).total)
-  r = cmaes(f, z[iob], 0.3; λ=12, maxevals=600, logf=s -> nothing); zz = copy(z); zz[iob] = r.x; SP.decode(zz)[3]
-end
-let a = nll4(DT, OBW), b = nll_ref(DT, OBW, P, G)
-  check("7.2 nll4 (threaded) = independent recomputation (the final atoms blurred by the DBH error over all classes with the Distributions normal cdf; Distributions NB with background + Normal size / height terms) on all $(ns) train sites after a warm-start run (observation parameters fitted)",
+OBW = OBX                                                             # (fitted at the top, at the warm start)
+BGR = bg_ref(DT)
+let _ = H4.simulate!(DT.S, P, G; exact=true), a = nll4(DT, OBW), b = nll_ref(DT, OBW, P, G, BGR)
+  check("7.2 [r4 I1] nll4 (threaded) = independent recomputation (the final atoms blurred by the DBH error over all classes with the Distributions normal cdf, allometric atom heights; Distributions NB with background; the size / height terms of EVERY observed cell as the mixture w N(model) + (1 − w) N(background), w = N / (N + bg), background recomputed) on all $(ns) train sites after a warm-start run (exact functions)",
         reld(a.total, b.total) < 1e-7 && reld(a.count, b.count) < 1e-7 && reld(a.size, b.size) < 1e-9 && reld(a.height, b.height) < 1e-9,
         @sprintf("nll4 %.3f (count %.1f size %.1f height %.1f) | ref %.3f", a.total, a.count, a.size, a.height, b.total))
   ntr = sum(DT.n)
@@ -1021,6 +1058,9 @@ let a = nll4(DT, OBW), b = nll_ref(DT, OBW, P, G)
 end
 let wsd = within_sd(DT), sD = wsd[1], sH = wsd[2]
   check("7.4 within-cell spreads sD, sH = recomputation from the TRAIN v2 cells (cells ≥ 2 trees)", maximum(abs.(sD .- CS.sD)) < 1e-12 && maximum(abs.(sH .- CS.sH)) < 1e-12)
+  B = CS.bgobs; dmx = maximum(maximum(abs.(getfield(B, f) .- getfield(BGR, f))) for f in (:mD, :sDb, :mH, :sHb))
+  check("7.4c [r4 I1] background densities of the size / height mixture (TRAIN, data constants) = recomputation from their definition", dmx < 1e-12,
+        @sprintf("max abs diff %.2g | log QMD class 3: mean %.3f sd %.3f; log H sd by class %s", dmx, B.mD[3], B.sDb[3], join(round.(B.sHb; digits=3), " ")))
   df = [sum(max(n - 1, 0) for n in view(DT.n, :, j, :) if n >= 2; init=0) for j in 1:NCLS]
   # exact sd of log D for D uniform on a class [L, U) (the physical fallback of classes with < 30 df): ∫ log² − (∫ log)²
   usd(L, U) = (m1 = (U * log(U) - U - L * log(L) + L) / (U - L); m2 = (U * (log(U)^2 - 2log(U) + 2) - L * (log(L)^2 - 2log(L) + 2)) / (U - L); sqrt(m2 - m1^2))
@@ -1087,21 +1127,27 @@ let X = H4.Scratch(ST.off[2] - ST.off[1]), T0 = emptytabs(nk), FT = forest4(), i
         abs(WS.fac.Lr * num4 / num3 - 1) < 0.05, @sprintf("subplot (HBAD3P) %.4f, plot (HBAD4P) %.4f: ratio %.4f; ε light factor applied %.4f (all train sites) → growth level ratio %.4f | mortality light e^{−am O}: %.4f vs %.4f (ratio %.4f; warm start %.4f)",
         num3 / den, num4 / den, num4 / num3, WS.fac.Lr, WS.fac.Lr * num4 / num3, m3 / den, m4 / den, m3 / m4, WS.fac.Lmr))
 end
-let k3 = String.(CSV.read(joinpath(FIT3P, "species.csv"), DataFrame).key), miss = [k for k in KEYS if !(k in k3)], sp3 = CSV.read(joinpath(FIT3P, "species.csv"), DataFrame)
-  ed = Dict(String(r.key) => Float64(r.eps) for r in eachrow(sp3)); rc = CSV.read(joinpath(FIT3P, "recruitment.csv"), DataFrame); rd = Dict(String(r.name) => Float64(r.value) for r in eachrow(rc))
-  grp(k) = (g = unique(String.(L.tr.grp[L.tr.sym .== k])); length(g) == 1 ? g[1] : "?")
-  ok = all(begin kk = findfirst(==(k), KEYS); g = "_" * grp(k); isapprox(P[kk].lnε, log(ed[g] * WS.fac.eps); rtol=1e-12) && P[kk].lnF == rd["lnF:" * g] end for k in miss)
-  ok2 = all(isapprox(P[kk].lnε, log(ed[k] * WS.fac.eps); rtol=1e-12) && P[kk].lnF == rd["lnF:" * k] for (kk, k) in enumerate(KEYS) if k in k3)
-  check("8.3 [r3 I2a] every HBAD4P key has an HBAD3P warm-start value (ε, lnF): keys HBAD3P does not have (species that became their own key) take their HBAD3P GROUP key's (_S / _H; the rest their own)", ok && ok2,
-        "keys without an own HBAD3P value: " * join(["$k ← _$(grp(k))" for k in miss], ", ") * " (ε × the warm-start factor $(round(WS.fac.eps; digits=4)))")
+# 8.3 [r4 I2] warm-start fecundity: the predicted v2 sapling tally (classes 1–2, the model's expected microplot count Σ N f_micr area, background excluded) / the
+# observed one per key on the train set (replaces the circular round-3 check "every key has an HBAD3P value")
+let _ = H4.simulate!(ST, P, G), pr = zeros(nk), ob = zeros(nk)
+  for s in 1:ns, k in 1:nk, j in 1:2
+    DT.fm2[s] > 0 || continue; pr[k] += ST.PN[H4.obsix(ST, s, k, j)] * DT.fm2[s] * AREA_MIC; ob[k] += DT.n[k, j, s]
+  end
+  rt = pr ./ ob
+  check("8.3 [r4 I2] warm-start fecundity: predicted / observed v2 sapling tally (train, classes 1–2) within 0.8–1.25 for every key (split keys: lnF of the group + ln of their share of its train sapling ingrowth; recruitment light at the subplot scale)",
+        all(0.8 .<= rt .<= 1.25), join(["$(KEYS[k]) $(round(rt[k]; digits=3))" for k in 1:nk], ", ") * " | shares " *
+        join(["$(KEYS[k]) $(round(WS.fac.share[k]; digits=3))" for k in 1:nk if WS.fac.share[k] < 1], ", ") * @sprintf(" | subplot / plot recruitment light %.3f–%.3f (%s)", minimum(WS.fac.Rk), maximum(WS.fac.Rk), WS.fac.Rapplied ? "applied" : "not applied"))
 end
-let X = H4.Scratch(ST.off[2] - ST.off[1]), T0 = emptytabs(nk), num = 0.0, num3 = 0.0, den = 0.0
+let num = 0.0, num3 = 0.0, den = 0.0
   # HBAD3P's mortality stress gm = e^{−am O3} cw included the dropped factors (cw = e^{gR RD} … (CR/0.4)^φ) and its subplot light: gm_HBAD3P ≈ gm_HBAD4P × F × LMR (8.2 / 8.2b,
-  # independent); the HBAD3P hazard with HBAD3P's own ms vs HBAD4P's with its (rescaled) ms; N-weighted one-year hazard at the v1 state, size term per atom
+  # independent); the HBAD3P hazard with HBAD3P's own ms vs HBAD4P's with its (rescaled) ms; N-weighted one-year hazard at the v1 state, size term per atom.
+  # [r4 V] everything recomputed here from the documented equations: the v1 cells' SDI from their atoms' QMD, the overtopping O(n²) with the 1 m height ramp
   for s in SUB
-    Sx = subS(ST, [s]); H4.load_site!(Sx, X, 1); H4.step_site!(Sx, P, G, X, 1, 1.0, T0)
-    for (q, i) in enumerate(Sx.off[1]:Sx.off[2]-1)
-      Sx.N0[i] > 1e-9 || continue; p = P[Sx.sp[i]]; O = X.O[q]
+    Sx = subS(ST, [s]); r_ = Sx.off[1]:Sx.off[2]-1; act = [i for i in r_ if Sx.N0[i] > 1e-9]
+    sdq = Dict(i => (at = atoms_of(Sx, i); nn = sum(first, at); nn * (sqrt(sum(x -> x[1] * x[2]^2, at) / nn) / 25.4)^1.605) for i in act)
+    Ov = Dict(i => sum(sdq[j] * clamp(0.5 + (Sx.H0[j] - Sx.H0[i]) / 2, 0.0, 1.0) for j in act) / G.sdimax for i in act)
+    for (q, i) in enumerate(r_)
+      Sx.N0[i] > 1e-9 || continue; p = P[Sx.sp[i]]; O = Ov[i]
       c_ = Sx.W[1]^G.ω * exp(G.σv * lz[Sx.ln[i]]) * H4.fT_rel(p, G, Sx.T[1]); fM = (Sx.planted[1] ? exp(G.pM) : 1.0) * exp(G.mW * (Sx.Wn[1] - Sx.W[1]) / 0.1)
       h(gm, ms, D) = fM * (G.m0 / p.longevity + ms * exp(G.σST * (p.ST - 3)) * exp(-G.β * gm) * (D / 20)^G.ζ) + exp(G.mA * (Sx.A0[i] / p.longevity - 1))
       gm = exp(-G.am * O) * c_
@@ -1137,7 +1183,8 @@ function standv(S, D, which)
   for s in 1:ns_, k in 1:S.nk, j in 1:NCLS
     r = cellix(S, s, k, j, 1):cellix(S, s, k, j, 3)
     if which == :obs
-      a = (j >= 3 ? D.fs2[s] : D.fm2[s]) * area_class(j); n = D.n[k, j, s] / a; b = D.D2[k, j, s] * π / 4e4 / a; h = D.nH[k, j, s] > 0 ? D.Hs[k, j, s] / D.nH[k, j, s] : 0.0
+      a = (j >= 3 ? D.fs2[s] : D.fm2[s]) * area_class(j); a > 0 || continue          # ([r4 M1] an unobserved tally)
+      n = D.n[k, j, s] / a; b = D.D2[k, j, s] * π / 4e4 / a; h = D.nH[k, j, s] > 0 ? D.Hs[k, j, s] / D.nH[k, j, s] : 0.0
     else
       Nv = which == :sim ? S.N[r] : S.N0[r]; Bv = which == :sim ? S.B[r] : S.B0[r]; Hv = which == :sim ? S.H[r] : S.H0[r]; n = sum(Nv); b = sum(Bv); h = n > 0 ? sum(Nv .* Hv) / n : 0.0
     end
@@ -1158,44 +1205,50 @@ let o = standv(ST, DT, :obs), m = standv(ST, DT, :sim), z = standv(ST, DT, :v1)
   Sb = nothing; GC.gc()
 end
 # 9.2b [r3 I6] intervals whose v2 visit has NO forested subplot: FIA tallies no tree there; they must be excluded (plotf would return 1.0: scored against an empty tally)
-let nzs = [s for (s, r) in enumerate(eachrow(DT.iv)) if all(sb -> get(FQ, (r.st, r.u, r.c, r.p, Date(r.d2), sb), (NaN, NaN))[1] == 0, 1:4)]
-  check("9.2b [data, r3 I6] no train interval whose v2 visit has no forested subplot (land-use change inside a 'natural' interval) is scored", isempty(nzs),
-        "$(length(nzs)) such train sites left (the builder dropped $(CS.ndrop) over all sets)")
+let nzs = [s for (s, r) in enumerate(eachrow(DT.iv)) if all(sb -> get(FQ, (r.st, r.u, r.c, r.p, Date(r.d2), sb), (NaN, NaN))[1] == 0, 1:4)],
+    nz1 = [s for (s, r) in enumerate(eachrow(DT.iv)) if all(sb -> get(FQ, (r.st, r.u, r.c, r.p, Date(r.d1), sb), (NaN, NaN))[1] == 0, 1:4)],
+    mz2 = [s for (s, r) in enumerate(eachrow(DT.iv)) if all(sb -> get(FQ, (r.st, r.u, r.c, r.p, Date(r.d2), sb), (NaN, NaN))[2] == 0, 1:4)],
+    mz1 = [s for (s, r) in enumerate(eachrow(DT.iv)) if all(sb -> get(FQ, (r.st, r.u, r.c, r.p, Date(r.d1), sb), (NaN, NaN))[2] == 0, 1:4)]
+  check("9.2b [data, r3 I6, r4 M1] no train interval whose v2 or v1 visit has no forested subplot is scored; a tally with no forested area (all four microplots non-forest) has f = 0 (no exposure, no count term)",
+        isempty(nzs) && isempty(nz1) && all(DT.fm2[s] == 0 for s in mz2) && all(DT.fm1[s] == 0 for s in mz1) && sum(DT.n[:, 1:2, mz2]; init=0) == 0,
+        "$(length(nzs)) / $(length(nz1)) such train sites left (the builder dropped $(CS.ndrop) / $(CS.ndrop1) over all sets) | all microplots non-forest: v2 $(length(mz2)), v1 $(length(mz1)) train intervals (fm = $(unique(DT.fm2[mz2])) / $(unique(DT.fm1[mz1]))); their v2 sapling tally $(sum(DT.n[:, 1:2, mz2]; init=0))")
 end
-TM = let t1 = v1trees(L, Set(DT.iid)), sidx = Dict(iid => s for (s, iid) in enumerate(DT.iid)), kix = Dict(k => i for (i, k) in enumerate(KEYS)), dtv = DT.iv.dt
-  qs = quantile(dtv, [1 / 3, 2 / 3]); bin(dt) = dt <= qs[1] ? 1 : dt <= qs[2] ? 2 : 3
-  Tn = zeros(nk, NCLS, 3, NCLS); Tb = zeros(nk, NCLS, 3, NCLS); W0 = zeros(nk, NCLS, 3); Hs = zeros(nk, NCLS); Hc = zeros(nk, NCLS)
-  for r in eachrow(t1)
-    j1 = H4.dclass(r.dia_cm); j1 == 0 && continue; s = sidx[r.iid]; k = kix[r.key]; w = r.w_ha / (ismicro(r.w_ha) ? DT.fm1[s] : DT.f1[s]); b = bin(dtv[s])
-    W0[k, j1, b] += w
-    if r.out == "alive"; j2 = H4.dclass(r.dia2_cm); j2 == 0 && continue; Tn[k, j1, b, j2] += w; Tb[k, j1, b, j2] += w * π / 4e4 * r.dia2_cm^2; r.ht2_m > 0 && (Hs[k, j2] += r.ht2_m; Hc[k, j2] += 1); end
-  end
-  Ig = zeros(nk, NCLS, 2); Igb = zeros(nk, NCLS, 2); Dsum = zeros(2, nk)
-  for s in 1:ns, k in 1:nk; Dsum[ST.seed0[k, s]+1, k] += dtv[s]; end
-  for r in eachrow(L.ig[in.(L.ig.iid, Ref(keys(sidx))), :])
-    j = H4.dclass(r.dia_cm); j == 0 && continue; s = sidx[r.iid]; k = kix[r.key]; a = ST.seed0[k, s] + 1; w = r.w_ha / (ismicro(r.w_ha) ? DT.fm2[s] : DT.fs2[s])
-    Ig[k, j, a] += w; Igb[k, j, a] += w * π / 4e4 * r.dia_cm^2; r.ht_m > 0 && (Hs[k, j] += r.ht_m; Hc[k, j] += 1)
-  end
-  (Tn=Tn, Tb=Tb, W0=W0, Ig=Ig, Igb=Igb, Dsum=Dsum, H=Hs ./ max.(Hc, 1), bin=bin)
+# [r4 V] the transition-matrix null re-implemented from its definition (docs §3) with table aggregations (not a copy of data4.jl tm_null): train v1 trees
+# (density w / f of their tally) by key × v1 class × dt tercile → fraction alive at v2 per v2 class (and its basal area); train ingrowth density per key × class
+# × v1 seed presence, per year of the summed interval lengths of the train sites in that key × seed group; heights = the mean v2 height per key × class.
+TMV = let sidx = Dict(iid => s for (s, iid) in enumerate(DT.iid)), dtv = DT.iv.dt, qs = quantile(dtv, [1 / 3, 2 / 3])
+  terc(dt) = dt <= qs[1] ? 1 : dt <= qs[2] ? 2 : 3
+  t = v1trees(L, Set(DT.iid)); t = DataFrame(key=t.key, s=[sidx[i] for i in t.iid], j1=H4.dclass.(t.dia_cm), alive=t.out .== "alive",
+                                             j2=[o == "alive" && d > 0 ? H4.dclass(d) : 0 for (o, d) in zip(t.out, t.dia2_cm)],
+                                             d2=t.dia2_cm, h2=t.ht2_m, mic=ismicro.(t.w_ha), w0=t.w_ha)
+  t.f = [r.mic ? DT.fm1[r.s] : DT.f1[r.s] for r in eachrow(t)]; t = t[(t.j1 .> 0) .& (t.f .> 0), :]; t.w = t.w0 ./ t.f; t.b = terc.(dtv[t.s])
+  W0 = Dict((r.key, r.j1, r.b) => r.W for r in eachrow(combine(groupby(t, [:key, :j1, :b]), :w => sum => :W)))
+  ta = t[t.alive .& (t.j2 .> 0), :]
+  TR_ = Dict((r.key, r.j1, r.b, r.j2) => (r.n, r.ba) for r in eachrow(combine(groupby(ta, [:key, :j1, :b, :j2]), :w => sum => :n, [:w, :d2] => ((w, d) -> sum(w .* π ./ 4e4 .* d .^ 2)) => :ba)))
+  g = L.ig[in.(L.ig.iid, Ref(keys(sidx))), :]; g = DataFrame(key=g.key, s=[sidx[i] for i in g.iid], j=H4.dclass.(g.dia_cm), d=g.dia_cm, h=g.ht_m, mic=ismicro.(g.w_ha), w0=g.w_ha)
+  g.f = [r.mic ? DT.fm2[r.s] : DT.fs2[r.s] for r in eachrow(g)]; g = g[(g.j .> 0) .& (g.f .> 0), :]; g.w = g.w0 ./ g.f
+  kx = Dict(k => i for (i, k) in enumerate(KEYS)); g.seed = [ST.seed0[kx[r.key], r.s] for r in eachrow(g)]
+  IG = Dict((r.key, r.j, r.seed) => (r.n, r.ba) for r in eachrow(combine(groupby(g, [:key, :j, :seed]), :w => sum => :n, [:w, :d] => ((w, d) -> sum(w .* π ./ 4e4 .* d .^ 2)) => :ba)))
+  DS = Dict((k, sd) => sum(dtv[s] for s in 1:ns if ST.seed0[kx[k], s] == sd; init=0.0) for k in KEYS, sd in (false, true))
+  hh = vcat(DataFrame(key=ta.key, j=ta.j2, h=ta.h2), DataFrame(key=g.key, j=g.j, h=g.h)); hh = hh[hh.h .> 0, :]
+  HM = Dict((r.key, r.j) => r.h for r in eachrow(combine(groupby(hh, [:key, :j]), :h => mean => :h)))
+  (W0=W0, TR=TR_, IG=IG, DS=DS, HM=HM, terc=terc)
 end
-"Write the transition-matrix null's v2 state of set D into D.S.N / B / H (lane 1) and its observation-space table."
+"The verifier's transition-matrix null of set D into D.S (lane 1) and its observation-space table."
 function tm_state_v!(D)
   S = D.S; fill!(S.N, 0.0); fill!(S.B, 0.0); fill!(S.H, 0.0)
-  for s in 1:H4.nsites(S)
-    b = TM.bin(D.iv.dt[s])
-    for k in 1:S.nk
-      n2 = zeros(NCLS); b2 = zeros(NCLS)
-      for j1 in 1:NCLS
-        i = cellix(S, s, k, j1, 1); N0 = S.N0[i] + S.N0[i+1] + S.N0[i+2]; (N0 > 0 && TM.W0[k, j1, b] > 0) || continue
-        for j2 in 1:NCLS; n2[j2] += N0 * TM.Tn[k, j1, b, j2] / TM.W0[k, j1, b]; b2[j2] += N0 * TM.Tb[k, j1, b, j2] / TM.W0[k, j1, b]; end
-      end
-      a = S.seed0[k, s] + 1; rate = TM.Dsum[a, k] > 0 ? D.iv.dt[s] / TM.Dsum[a, k] : 0.0
-      for j in 1:NCLS; n2[j] += TM.Ig[k, j, a] * rate; b2[j] += TM.Igb[k, j, a] * rate; end
-      for j in 1:NCLS; i = cellix(S, s, k, j, 1); S.N[i] = n2[j]; S.B[i] = b2[j]; S.H[i] = TM.H[k, j] > 0 ? TM.H[k, j] : 1.37 + 0.5 * H4.CLS_LO[j]; end
+  for s in 1:H4.nsites(S), (k, key) in enumerate(KEYS)
+    b = TMV.terc(D.iv.dt[s]); n2 = zeros(NCLS); b2 = zeros(NCLS)
+    for j1 in 1:NCLS
+      i = cellix(S, s, k, j1, 1); N0 = S.N0[i] + S.N0[i+1] + S.N0[i+2]; W = get(TMV.W0, (key, j1, b), 0.0); (N0 > 0 && W > 0) || continue
+      for j2 in 1:NCLS; x = get(TMV.TR, (key, j1, b, j2), (0.0, 0.0)); n2[j2] += N0 * x[1] / W; b2[j2] += N0 * x[2] / W; end
     end
-  end
-  for s in 1:H4.nsites(S), k in 1:S.nk, j in 1:NCLS                  # (the likelihood reads the observation-space table: a table needs no blur)
-    x = H4.obsix(S, s, k, j); i = cellix(S, s, k, j, 1); S.PN[x] = S.N[i]; S.PB[x] = S.B[i]; S.PH[x] = S.N[i] * S.H[i]
+    sd = S.seed0[k, s]; ds = TMV.DS[(key, sd)]; rate = ds > 0 ? D.iv.dt[s] / ds : 0.0
+    for j in 1:NCLS; x = get(TMV.IG, (key, j, sd), (0.0, 0.0)); n2[j] += x[1] * rate; b2[j] += x[2] * rate; end
+    for j in 1:NCLS
+      i = cellix(S, s, k, j, 1); S.N[i] = n2[j]; S.B[i] = b2[j]; S.H[i] = get(TMV.HM, (key, j), 1.37 + 0.5 * H4.CLS_LO[j])
+      x = H4.obsix(S, s, k, j); S.PN[x] = S.N[i]; S.PB[x] = S.B[i]; S.PH[x] = S.N[i] * S.H[i]
+    end
   end
   D
 end
@@ -1203,7 +1256,7 @@ let res = Dict{String,Any}(), Dv = CS.sets["val"], iob = [findfirst(==(String(nm
   # [r3 I3] the tools' transition-matrix null (data4.jl tm_null / tm_state!, built into the cache) = this independent one
   tm_state_v!(DT); a = (copy(DT.S.N), copy(DT.S.B), copy(DT.S.PN), copy(DT.S.PB), copy(DT.S.PH)); tm_state!(DT, CS.TM)
   dtm = maximum(maximum(abs.(x .- y)) / max(maximum(abs.(y)), 1e-12) for (x, y) in zip(a, (DT.S.N, DT.S.B, DT.S.PN, DT.S.PB, DT.S.PH)))
-  check("9.3 [r3 I3] the evaluation tools' transition-matrix null (data4.jl tm_null / tm_state!, reported by smoke4 as the bar) = the verifier's independent one", dtm < 1e-12, "max rel diff $(fmt(dtm))")
+  check("9.3 [r3 I3, r4 V] the evaluation tools' transition-matrix null (data4.jl tm_null / tm_state!, reported by smoke4 as the bar) = the verifier's re-implementation from the definition (table aggregations)", dtm < 1e-9, "max rel diff $(fmt(dtm))")
   fitob(D) = (z = copy(SP.z0); f(x) = (zz = copy(z); zz[iob] = x; nll4(D, SP.decode(zz)[3]).total); r = cmaes(f, z[iob], 0.3; λ=12, maxevals=600, logf=s -> nothing); zz = copy(z); zz[iob] = r.x; SP.decode(zz)[3])
   for (lab, prep!) in (("persistence", D -> null_state!(D)), ("transition matrix", D -> tm_state_v!(D)), ("HBAD4P warm start", D -> (H4.simulate!(D.S, P, G); D)))
     prep!(DT); ob = fitob(DT); a = nll4(DT, ob); prep!(Dv); b = nll4(Dv, ob); res[lab] = (a, b)
