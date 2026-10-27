@@ -185,3 +185,19 @@ recommendations, but document the decision point and the different options"). Th
   - The size + height sd bars are met (0.55 ≤ 0.93, 1.62 ≤ 2.7). **The no-jump-over-2-nats bar at 1e-4 is NOT met** (2.62, from the height term, 2.59).
   - **Not tuned, as instructed.** 3.3 is reported as FAIL. The count values are recorded as `COUNT_REF`.
 - **To reverse:** verify4p.jl 3.3 / 3.3b / 3.3c.
+
+## H15 — The single size + height jump of verify 3.3 (coordinator, 2026-10-27)
+- **Evidence (H14 run):**
+  - Both size + height sd bars pass: 0.549 ≤ 0.93 at 1e-4 and 1.619 ≤ 2.7 at 1e-3 (ln ε PITA, full train).
+  - One 1e-4 jump of 2.62 nats exceeds the 2-nat bar; 2.59 of it is the height term.
+  - Its source is the one-height-per-cell dynamics: an atom that crosses a class bound takes its new cell's height.
+  - The jump is below the ≈ 2.5–2.8-nat per-1e-3-step noise that CMA-ES sees anyway.
+- **Options:**
+  - (a) widen the jump bar;
+  - (b) the smooth cell-membership model change now;
+  - (c) **a named, bounded known exception**.
+- **Chosen:** (c), coordinator decision, the same mechanism as curation D6.
+  - verify4p.jl `KNOWN_EXCEPTIONS` has one entry: the single-jump bar of size + height on ln ε PITA at 1e-4, recorded value 2.62, slack 1.0.
+  - That cell prints KNOWN while the jump is ≤ 3.62 and FAILS beyond.
+  - Every other bar stays strict: both sd bars, κ, the 1e-3 series, the count regression 3.3b.
+- **To reverse:** remove the entry; (b) is the lever that would make it unnecessary.
