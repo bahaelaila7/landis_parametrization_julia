@@ -62,7 +62,8 @@ Per site, species key k (as HBAD3P: the region's top keys + `_H` / `_S`), diamet
 
 ## 3. Objective: stand tables only (user)
 Per natural interval (FIA remeasurement pair, harvested intervals excluded; trees MISSING at v2 removed from v1 and v2; intervals whose v2 visit has NO forested
-subplot — a land-use change inside a "natural" interval, FIA tallies no tree there — excluded, audit round 3 I6: 102 intervals, 67 of them train at k1) the v1 plot stand table
+subplot — a land-use change inside a "natural" interval, FIA tallies no tree there — excluded, audit round 3 I6: 102 intervals, 67 of them train at k1; likewise those whose v1 visit has no forested subplot — no observed v1 stand, audit round 4
+M1 / decision H10: 24 intervals, 18 train) the v1 plot stand table
 initialises the site and the model runs to v2 (fractional final year); the v2 stand table is scored per (k, j).
 * **v1 state**: each tree → its class; N per forested ha of its tally (subplot fraction for subplot trees, microplot fraction for saplings, by the
   tree's expansion weight); B, H, A from the trees; split over the lanes. **Sapling layer (classes 1–2)**: the microplots sample 8 % of the subplot area,
@@ -70,21 +71,32 @@ initialises the site and the model runs to v2 (fractional final year); the v2 st
   sapling; audit B3). The state takes the empirical-Bayes posterior mean density N̂ = (n + α) / (e + α / m), e = microplot area × forested fraction,
   with a negative-binomial prior per (key, class, adult of the key on the plot) fitted on the TRAIN plots ((m, α) by maximum likelihood, α by profile
   likelihood over (α, m); round 2 had m = Σn/Σe, the Poisson MLE); an
-  unobserved cell gets the key's train mean QMD / height / age of saplings.
+  unobserved cell gets the key's train mean QMD / height / age of saplings. A plot whose four microplots are all non-forest has no sapling tally: e = 0, its
+  sapling cells take the prior mean m, and it is not a zero count in the prior's fit (audit round 4 M1: f was set to 1.0, i.e. an unobserved microplot was
+  scored as an empty full one).
 * **counts**: v2 tally trees n_kj (classes 1–2 on the microplots, ≥ 3 on the subplots; each tree in the class of its v2 diameter, as FIA re-tallies a tree
   that shrank below 5 in as a sapling) ~ NegBin(μ_kj = (N_kj + bg_j) · area_j · f, r_j). area_j from FIA's expansion factors (TPA_UNADJ 6.018046 /
-  74.965282 per ac); f = the forested fraction of that tally at v2. **bg_j** = background densities (microplot / subplot tallies; fitted): immigration,
-  misidentification, recording error — what the model leaves empty — instead of an arbitrary floor.
+  74.965282 per ac); f = the forested fraction of that tally at v2 (0 when every known microplot / subplot is non-forest: that tally is unobserved and
+  scores nothing, round 4 M1). **bg_j** = background densities (microplot / subplot tallies; fitted): immigration, misidentification, recording error — what
+  the model leaves empty — instead of an arbitrary floor.
 * **observation space** (audit round 3 I1b; the LIKELIHOOD only, the dynamics are unchanged): every atom is measured with the FIA DBH error N(0, sdM²),
   sdM = 0.2 cm fixed (`SD_DBH`, params4.jl): it contributes to class t with probability Φ((ub_t − D)/sdM) − Φ((lb_t − D)/sdM) (lb of class 1 = −∞: the 1-in
   tally threshold is the model's entry definition — recruits enter AT 2.54 cm and would otherwise be half untallied; ub of class 16 = ∞). The predicted
-  table per (k, j) is N_kj = Σ p N, B_kj = Σ p N π/4 D², H_kj = Σ p N H / N_kj over the key's atoms (all lanes): an atom approaching a class bound moves into
-  the next class's prediction smoothly instead of in one jump. The nulls are tables in observation space already and are scored unblurred.
-* **size**: log QMD of the cell's observed trees vs the predicted (blurred) QMD, Gaussian, variance sD_j² / n + σD² (sD_j = the TRAIN within-cell sd of log D
-  of class j: 0.29 in class 1 to 0.02 in class 13 — a single σ was off by a factor of 12 across classes; classes with < 30 df the uniform-spread value; σD =
-  model error, fitted).
-* **height**: log mean measured height vs H, variance sH_j² / n_H + σH² (sH_j likewise; classes with < 30 df pool the neighbouring classes, audit round 3 —
-  was a flat 0.1).
+  table per (k, j) is N_kj = Σ p N, B_kj = Σ p N π/4 D², H_kj = Σ p N H_m / N_kj over the key's atoms (all lanes), H_m = H + H*(D_m) − H*(Dq) the atom's
+  allometric height around its cell's height (round 4 I1: with the cell mean an atom crossing a class bound carried its new cell's height into the blurred
+  tail of its old class); an atom approaching a class bound moves into the next class's prediction smoothly instead of in one jump. The nulls are tables in
+  observation space already and are scored unblurred.
+* **size** (every observed cell, n ≥ 1, of a tallied area): log QMD of the cell's observed trees ~ the MIXTURE w · N(log of the predicted (blurred) QMD,
+  sD_j² / n + σD²) + (1 − w) · N(mD_j, sDb_j²), w = N_kj / (N_kj + bg_j) (sD_j = the TRAIN within-cell sd of log D of class j: 0.29 in class 1 to 0.02 in
+  class 13 — a single σ was off by a factor of 12 across classes; classes with < 30 df the uniform-spread value; σD = model error, fitted).
+* **height** (every observed cell with a measured height): log mean measured height ~ w · N(log H_kj, sH_j² / n_H + σH²) + (1 − w) · N(mH_kj, sHb_j²) (sH_j
+  likewise; classes with < 30 df pool the neighbouring classes, audit round 3 — was a flat 0.1).
+* **the mixture** (audit round 4 I1, decision H7): under the count model a tallied tree of the cell is the model's with probability N / (N + bg), so the
+  fitted count background bg is the pseudo-count of background trees and w = N / (N + bg) the model's share; the background density is a fixed TRAIN data
+  constant (`obs_background`, ObsBG: per class the mean / sd of log QMD over all train cells; per key × class the mean log height, its per-class sd). Before,
+  only cells with N > 1e-9 were scored: a cell's first trace prediction (a blur tail at a class bound) switched a −1.5 … +13-nat term on, and every model or
+  null scored its own set of cells (val: 1,477 observed cells unscored for the warm start, 72 for the TM null), so totals were not comparable between them.
+  Now every model and null scores the same cells, and its totals are comparable.
 The objective is the summed negative log-likelihood over the train intervals (CMA-ES, `tools/hbad2/cmaes.jl`); val selects; test is reported once per fold.
 Baselines, each with its own fitted observation parameters: the **transition-matrix null** (audit round 3 I3; data4.jl `tm_null` / `tm_state!`: the TRAIN
 fates per key × v1 class × dt tercile — the fraction of the v1 density alive at v2 in each v2 class and its basal area — plus the train ingrowth density per
@@ -150,8 +162,9 @@ unless stated.
   finds the minimum by a vectorised pass (bitwise identical to a full rescan, which in turn ends at the first zero distance); the lane mixing builds each
   lane's buffer by a 3-way merge of the sorted lanes; every loop visits the occupied cells only. simulate! of the k1 train set (serial / 2 threads, wall, a
   shared 8-core box): round-2 kernel at its warm start (κ = 0.1) 23.0 s / 6.6–11.7 s; now at the warm start (κ = 0) 4.0–4.7 s / 1.5–2.8 s. At κ = 0.1 the new
-  kernel takes 33 s / 15–18 s, 1.4–1.6× the round-2 kernel at the same κ: with lane mixing 1.43 M of 1.51 M live cells hold 16 atoms and the 48 → 16 merges
-  of every lane every year dominate (NATOM 12 would cost ~0.6× of that at +0.017 nats/site of merge error at κ = 0.1).
+  kernel takes 33 s / 15–18 s — **8–9× its own κ = 0 cost** (round-4 correction: the "1.4–1.6×" is relative to the round-2 kernel at the same κ, not to
+  κ = 0): with lane mixing 1.43 M of 1.51 M live cells hold 16 atoms and the 48 → 16 merges of every lane every year dominate (NATOM 12 would cost ~0.6× of
+  that at +0.017 nats/site of merge error at κ = 0.1). Calibration therefore runs in two stages (decisions H9).
 * **I2 warm start (params4.jl `warm_start4`).** (a) OXAR, PIEC2, PIPA2 (← _S / _H) and QUPR2 take their HBAD3P group key's ε / lnF; (e) the crowding / crown factor
   F uses HBAD3P's RD per FORESTED subplot ha: 1.1847 (was 1.1815); (c) ε × the subplot / plot light ratio 0.9389 (tree-weighted e^{−aO}, all train sites) →
   ε × 1.1124 in all; (b) ms × 0.768 so that the N-weighted v1 hazard equals HBAD3P's (gm × F × the mortality-light ratio 0.969; it was 1.29×); (d) κ linear on
@@ -164,3 +177,48 @@ unless stated.
 * Minor: prof4.jl uses warm_start4 (the space4 MethodError is gone); sH of classes with < 30 df pools the neighbouring classes (classes 13–16: 0.088 / 0.074 /
   0.079 / 0.079, was 0.1); the sapling prior's (m, α) are fitted jointly (profile likelihood over (α, m), `nb_joint`; +1.6 nats over the Poisson-m rule);
   equal-diameter atoms merge; stale §2.7 / §5 / §7 text corrected; planted factors documented (§2.9); the warm start's selection on the product's val (§7).
+
+## 10. Audit round 4 (2026-10-26, independent Opus review of 0217126 on k1; fixed — decisions H7–H13 in hbad4p_decisions.md)
+* **I1 the size / height terms were gated at N > 1e-9** (data4.jl). A cell's first trace prediction (a blur tail) switched on a term of −1.5 to +13 nats, and the
+  scored set differed between models and nulls (val: 1,477 unscored observed cells for the warm start, 72 for the TM null).
+  - Now every observed cell of a tallied area is scored as the mixture w · model + (1 − w) · background, w = N / (N + bg), with bg the count background as
+    pseudo-count (§3, H7).
+  - The predicted class height uses each atom's allometric height H + H*(D_m) − H*(Dq).
+  - Step tests, full train, ±20 steps of ln ε (PITA), the acceptance scripts' observation parameters, step sd around the smooth slope (H12):
+
+    | | sd at 1e-4 | max jump at 1e-4 | sd at 1e-3 |
+    |---|---|---|---|
+    | Gate (before) | 2.79 | 12.4 | 8.15 |
+    | Now | 0.47 | 1.82 | 2.66 |
+
+  - κ (±20 steps around 0.1): 0.11 / 0.70 at 1e-4 / 1e-3.
+  - With the observation parameters fitted at the warm start (sharper σD 0.010, σH 0.066), the sd at 1e-3 is 2.78 and the largest jump at 1e-4 is 2.71:
+    just over the bars (H7).
+  - Totals of the model and of the nulls are now computed over the SAME scored cells. Before this fix they were not comparable.
+* **M2 the count term keeps jumps of about 1 nat at 1e-4** (sd 0.16; 2.5 at 1e-3 steps): exact transfer across class bounds, and one height and age per cell in
+  the dynamics. Accepted; it is most of what remains at 1e-3.
+* **I2 split keys took their group's whole fecundity** (predicted / observed v2 sapling tally 6.1 / 6.6 / 2.1 / 23.9 for OXAR / PIEC2 / PIPA2 / QUPR2).
+  - Now lnF = the group's + ln(the key's share of the group's train sapling ingrowth); the group keeps its own share (H8).
+  - HBAD3P's recruitment light was evaluated per subplot. The subplot / plot ratio of e^{−λ RD} is 1.12–1.18 at the train v1 state, so it is applied to lnF.
+  - Every key is now at 0.87–1.14 (verify 8.3).
+* **I3 κ > 0 costs 8–9× κ = 0** (corrects §9 I5's "1.4–1.6×", which was relative to the old kernel). Calibration is in two stages (H9): `HBAD4P_FIX="κ:0"` /
+  `space4(fix_extra=…)`, and `tools/hbad4/kappa_profile4.jl` for the κ profile on val counts. Only a dry run was made; no calibration.
+* **M1 unobserved tallies.**
+  - Plots whose four microplots are non-forest have f = 0: no exposure, no count term, the v1 sapling layer at its prior mean, and they are out of the
+    prior's fit (H11).
+  - Before, they were scored as empty full microplots: 68.7 / 59.3 / 26.0 nats on train / val / test, from 26 / 22 / 10 intervals at v2. At v1 the 34 / 23 /
+    10 intervals had sapling layers of ≈ 100 instead of ≈ 400 /ha.
+  - Intervals whose v1 visit has no forested subplot are dropped (24; 18 train; H10).
+* **V verifier.**
+  - 3.3 is the step test above, with jump detection.
+  - 7.2 recomputes the mixture independently (Distributions, the background recomputed — 7.4c).
+  - 8.3 is the per-key sapling-tally check (it replaces the circular group check).
+  - 8.4 computes the overtopping and hazard independently.
+  - 9.3 checks the tools' transition-matrix null against a re-implementation written from its definition.
+  - The observation parameters are fitted at runtime.
+  - 3.2c gets an absolute floor (H13): the κ effect is now ≈ −0.015 nats/site.
+  - Found on the way: the cache key hashed the code as byte vectors, and Base.hash SAMPLES a vector. 56 % of one-byte edits of data4.jl kept the old key,
+    i.e. a stale cache. It now hashes Strings (5.11 tests 300 edits).
+* **Noted (one height per cell):** recruits enter class 1 at H*(2.54 cm) and pull the cell's mean height down. The existing saplings of the cell then grow
+  slightly faster: dD ∝ 1 / max(H, 1.37), a higher hydraulic factor, and they are overtopped less. This is a consequence of a single height per cell; it is
+  small but systematic in class 1.

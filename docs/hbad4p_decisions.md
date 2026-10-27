@@ -22,7 +22,7 @@ recommendations, but document the decision point and the different options"). Th
   | 4 (old) | — | +0.27 | — |
   | 8 | −0.002 | +0.029 | — |
   | 12 | — | +0.017 | about 0.6× that of 16 |
-  | 16 | 0.000 | +0.004 | at κ = 0.1, 1.4–1.6× slower than the old kernel |
+  | 16 | 0.000 | +0.004 | κ = 0.1 costs 8–9× κ = 0 (round 4 correction; it is 1.4–1.6× the round-2 kernel at the same κ) |
 
 - **Chosen:** **16**. Accuracy of the κ effect matters for calibration: with 4 atoms the apparent effect was 17× the true one. At the warm start (κ = 0) the new kernel is faster than before.
 - **To reverse:** set `NATOM = 12` in HBAD4P.jl if run time dominates.
@@ -47,6 +47,40 @@ recommendations, but document the decision point and the different options"). Th
   - (b) **a mixture of the model's Gaussian, weight Np / (Np + b), with a fixed data-derived background density, scored for every observed cell**;
   - (c) drop the size and height terms of cells with low N.
 - **Chosen:** (b). It is the auditor's tested variant (3× less roughness) and keeps model and null totals comparable.
+- **Implementation (2026-10-26, agent).**
+  - **Pseudo-count b = bg**, the fitted count background density (bgM / bgS). Under the count model, μ = (N + bg) f a, a tallied tree of the cell is the
+    model's with probability N / (N + bg). The weight is therefore that model's own posterior share, not a new parameter.
+    - Alternatives: a fixed number of pseudo-trees (b · f · a = 1 tree), which halves the size information of every 1-tree cell; a fixed 1e-3 /ha, which
+      gives almost no smoothing.
+  - **Background densities:** TRAIN data constants (`obs_background`).
+    - log QMD: per class, the mean / sd over all train cells.
+    - log H: per key × class, the mean (≥ 10 cells, else the class mean), with the per-class sd around the key means.
+    - Alternative: the auditor's uniform log QMD over the class and sd 0.3 for log H.
+  - **Added (evidence below):** the predicted height of a class uses each atom's allometric height H_m = H + H*(D_m) − H*(Dq), not the cell mean. With the
+    cell mean, an atom crossing a class bound carried its new cell's height into the blurred tail of its old class. The height term's step sd at 1e-3 fell
+    from 1.96 to 0.94.
+- **Evidence (full train, ±20 steps of ln ε PITA, auditor OBX):**
+
+  | | step sd at 1e-4 | max jump at 1e-4 | step sd at 1e-3 |
+  |---|---|---|---|
+  | Gate (round 3) | 2.79 | 12.4 | 8.15 |
+  | Mixture with the cell-mean heights | 0.58 | 1.82 | 3.22 |
+  | Mixture + atom heights | 0.48 | 1.82 | 2.67 (2.66 detrended) |
+
+  - κ ±20 steps around 0.1: 0.12 / 0.70 at 1e-4 / 1e-3 (max jump 0.55 / 2.42).
+  - The count term keeps 0.16 / 2.58 (M2: exact transfer across class bounds, accepted).
+- **Variants tested and NOT taken** (full train, observation parameters fitted at the warm start — σD 0.010, σH 0.066, sharper than the acceptance scripts'
+  0.019 / 0.087; detrended step sd at 1e-4 / 1e-3, max jump at 1e-4):
+  - **The atom's allometric height in the dynamics too** (dD_m = dV / (2 D_m H_m), hydraulics at H_m): 1.24 / 3.45, jump 6.5. Worse: the count term rose to
+    0.98 at 1e-4.
+  - **The height residual interpolated in D between the key-lane's cells** (continuous in D whichever cell holds the atom): 0.58 / 2.81, jump 2.32. The
+    kernel with atom heights gives 0.60 / 2.78, jump 2.71: the residual interpolation lowers the jump but leaves the 1e-3 sd as it is, at more complexity.
+- **Not met with the fitted observation parameters:** the step sd at 1e-3 is 2.78 (bar 2.7) and the largest jump at 1e-4 is 2.71 (bar 2). With the acceptance
+  scripts' fixed observation parameters both bars are met (2.67, 1.82).
+  - What remains at 1e-3 is mainly the count term: sd 2.46–2.51 alone. That is the M2 roughness of exact transfer across class bounds plus one height and
+    age per cell in the dynamics, accepted in round 4.
+  - Making cell membership smooth in the dynamics is the lever left; it is a model change for a later round.
+- **To reverse:** `nll4` in data4.jl (the mixture) and `finish_site!` in HBAD4P.jl (H_m → the cell's H).
 
 ## H8 — Fecundity of the keys split from the _H / _S groups (round 4 I2, agent)
 - **Options:**
@@ -54,6 +88,17 @@ recommendations, but document the decision point and the different options"). Th
   - (b) **lnF_group + ln(the key's share of the group's train ingrowth)**;
   - (c) refit lnF per key before calibration.
 - **Chosen:** (b). It is data-derived and cheap; calibration refits lnF anyway.
+- **Implementation (2026-10-26, agent).** The shares are each key's TRAIN v2 sapling ingrowth density (D < 12.7 cm, w / f_micr), as a fraction of its HBAD3P
+  group's. The remaining group key keeps its own share, so the group's total recruitment is kept.
+  - Shares: OXAR 0.022 and QUPR2 0.003 of _H (_H keeps 0.975); PIEC2 0.037 and PIPA2 0.206 of _S (_S keeps 0.757).
+- **Recruitment light at the subplot vs plot scale (the auditor's suspected convexity).** Rk = Σ (seed ? 1 : ε0) mean over subplots of e^{−λk RD_subplot} /
+  Σ (seed ? 1 : ε0) e^{−λk RD_plot}, at the train v1 state, = **1.116–1.183** across the keys. It is more than 5 % away from 1, so lnF += ln Rk, as ε was
+  rescaled for light.
+- **Result:** predicted / observed v2 sapling tally on train at the warm start (verify 8.3; it was 6.1 / 6.6 / 2.1 / 23.9 for the four keys):
+  - with Rk: 0.872 (OXAR) to 1.141 (LITU) for every key;
+  - without Rk: 0.858–1.104.
+  - Both are inside the 0.8–1.25 bar.
+- **To reverse:** in params4.jl `warm_start4`, the share loop, and `rec && (f3 .+= log.(Rk))`.
 
 ## H9 — Lane-mixing κ in calibration (round 4 I3, agent)
 - **Evidence:** simulate! on full train takes 1.46 s at κ = 0 and 13.2 s at κ = 0.1, about 9×.
@@ -63,3 +108,51 @@ recommendations, but document the decision point and the different options"). Th
   - (c) **two stages: stage 1 with κ = 0, stage 2 a κ profile {0.025, 0.05, 0.1} warm-started from stage 1 and judged on val counts; κ > 0 is kept only if val count NLL improves by ≥ 20 nats**;
   - (d) κ = 0 permanently.
 - **Chosen:** (c). It costs about the price of κ = 0 and keeps the tripling hypothesis testable.
+- **Implementation (2026-10-26, agent).**
+  - Fixing κ, or any global, at a value: `HBAD4P_FIX="κ:0"` (env, as before), or `space4(…; fix_extra=Dict(:κ => v))`. κ starts at 0 anyway (H4).
+  - **Stage 2 is `tools/hbad4/kappa_profile4.jl`.** It reads the stage-1 optimum (`save_z4` CSV). For **κ = 0 and each κ** of {0.025, 0.05, 0.1}, it runs the
+    same short CMA-ES on all other free coordinates plus a short refit of the observation coordinates, then scores val counts. κ > 0 is kept only if it
+    gains ≥ 20 nats.
+  - κ = 0 is re-run with the same budget; scoring the stage-1 point as it stands would hand κ > 0 a free extra optimisation.
+  - Tested only in a dry run (`HBAD4P_PROFILE_SUB=200`, 24 evaluations); no profile has been run.
+  - Cost measured on the full train set: simulate! 1.5–2.8 s at κ = 0 vs 15–18 s at κ = 0.1 with 2 threads (4.0 s vs 33 s serial), about 8–9×.
+- **To reverse:** run a single-stage fit with κ free (unset `HBAD4P_FIX`).
+
+## H10 — Intervals whose v1 visit has no forested subplot (round 4 M1, agent, 2026-10-26)
+- **Evidence:** 24 intervals (18 train / 3 val / 3 test at k1) have every subplot known and non-forest at v1. FIA tallies no tree there, so the v1 stand is
+  unobserved: a non-forest → forest transition. `plotf` gave them f = 1.0, an empty stand scored as observed.
+- **Options:**
+  - (a) keep f = 1.0, i.e. an "observed" empty stand;
+  - (b) keep them with zero exposure: an empty subplot layer, the sapling prior mean;
+  - (c) **drop them, as round 3 I6 dropped the 102 intervals with no forested subplot at v2**.
+- **Chosen:** (c). The model has no observed initial state to start from. The intervals are land-use changes, which HBAD4P's natural-dynamics scope excludes.
+- **To reverse:** data4.jl `load4`, the `nf1` filter.
+
+## H11 — Unobserved tallies (round 4 M1, agent, 2026-10-26)
+- **Evidence:** in the intervals kept, every microplot was non-forest for 26 / 22 / 10 train / val / test intervals at v2, and for 34 / 23 / 10 at v1.
+  - `plotf` set f = 1.0 for them.
+  - At v2 they were scored as 4 empty microplots: 68.7 / 59.3 / 26.0 nats of count NLL at the warm start.
+  - At v1 their sapling layer was the posterior of a zero count on a full microplot (≈ 100–108 /ha) instead of the prior mean (≈ 380–414 /ha). The sapling
+    prior's fit counted them as zeros.
+- **Options:** (a) f = 1.0 (old); (b) the FMIN floor 0.25; (c) **zero exposure, f = 0**.
+- **Chosen:** (c).
+  - At v2: no count term and no size / height term for that tally.
+  - At v1: e = 0, so the sapling cells take the prior mean m.
+  - The prior's NB fit excludes those plots.
+  - A tree on a tally with f = 0 would be skipped (counted, `nzt`); there are none.
+- **To reverse:** data4.jl `plotf` (`m <= 0 ? 0.0`).
+
+## H12 — The roughness metric of verify 3.3 (round 4 V, agent, 2026-10-26)
+- **Options:** the sd of the step differences around their mean (the auditor's exp2 / exp8), or **around their linear trend**, i.e. the slope of a quadratic.
+- **Chosen:** the linear trend, which is "around the smooth slope". The curvature of a smooth objective is not roughness. The mean-centred value is reported
+  alongside and also passes: 2.67 vs the 2.7 bar on full train at 1e-3.
+- **To reverse:** verify4p.jl 3.3 (`rd`).
+
+## H13 — The κ-effect criterion of verify 3.2c (round 4, agent, 2026-10-26)
+- **Evidence:** with the round-4 likelihood and warm start, the 64-atom κ effect (κ = 0.1 vs 0) at the warm start is −0.0145 nats/site; in round 3 it was
+  +0.170. NATOM 16 gives −0.0093.
+  - The ratio 0.64 fails ±30 %, but the absolute difference (0.005 nats/site) is the merge error itself, already within 0.02.
+- **Options:** the ratio only; **the ratio or an absolute floor of 0.01 nats/site**; the absolute difference only.
+- **Chosen:** ±30 % or 0.01 nats/site, whichever is larger. A relative criterion is ill-conditioned for an effect near 0. The floor is half the 0.02
+  nats/site merge-error bar.
+- **To reverse:** verify4p.jl 3.2c.
