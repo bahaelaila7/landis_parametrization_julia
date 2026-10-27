@@ -214,3 +214,10 @@ recommendations, but document the decision point and the different options"). Th
   - Option rejected: k1 numbers applied everywhere.
 - **H21, κ decision:** 3 seeds per κ; keep κ > 0 only if min(κ > 0) beats max(κ = 0) by ≥ max(20, 2 × (replicate sd + merge error)).
   - Options rejected: a single run with a 20-nat margin; no stage 2.
+
+## H22 — Generalisation beyond Region 4 (2026-10-27, agent; recorded for the expansion phase)
+- **Generic:** the kernel, the likelihood, the encodings and the κ plan.
+- **Must be re-derived per region:**
+  - the tallies assume a subplot / microplot design; PNW / CA need a macroplot tier (16.6 % of live trees at TPA 0.999);
+  - the HBAD3P warm start exists for GA+FL only;
+  - Tref and climate ranges would be extrapolated.
