@@ -287,3 +287,49 @@ recommendations, but document the decision point and the different options"). Th
   - Their pull on the densities is about halved: the NLL change for densities × 0.8 / × 1.25 goes from −327 / +317 to −178 / +171 nats.
   - Kept: for a cell mean it is the right "all-background" event. It remains an approximation for mixed cells (a mixed mean is neither component).
 - **M-2.** kappa_profile4.jl simulates the state once per κ before the observation-only refit.
+
+## H24 — The roughness bar after round 5 (coordinator, 2026-10-27)
+- **Evidence (round-5 k1 run):** b and βT exceed the absolute size + height sd bars of verify 3.3: b 1.12 at 1e-4 and 2.39 at 1e-3; βT 1.51 and 4.01 (bars
+  0.93 / 2.7).
+- **Options:**
+  - (a) **a sensitivity-relative bar, pre-registered now:** a coordinate's roughness sd at step h ≤ 1 % of its |ΔNLL| at the calibration's initial step ±0.05
+    (as in 8.7), on the same data subset;
+  - (b) KNOWN entries only;
+  - (c) smooth cell membership, the root-cause model change.
+- **Chosen:** (a), coordinator decision.
+  - All 38 coordinates must pass it.
+  - The absolute bars stay in the output as REPORTED values.
+  - b and βT are listed as KNOWN absolute-bar exceedances, with their numbers; nothing is hidden.
+- **Why:**
+  - The absolute bars ignore scale. b moves the train NLL by about 1.2 % (≈ 1.3k nats on full train) at ±0.05, so a roughness of 1–4 nats is ≈ 0.1 % of the
+    step signal a derivative-free optimiser sees.
+  - **The bar was changed AFTER the failure was observed.** It is recorded as such.
+  - The relative bar is STRICTER than the absolute one for low-sensitivity coordinates, whose |ΔNLL| at ±0.05 is small.
+- **Rejected:**
+  - (b) leaves no criterion.
+  - (c) is deferred to a later version: it would reopen the verification of the whole atom layer.
+- **κ profile:** the H21 margin (≥ 35 nats at k1) is where roughness and seed noise matter. It already includes the pooled seed sd, i.e. the replicate
+  spread of the val count NLL across CMA-ES seeds, which contains the objective's roughness as it acts on the optimiser. The roughness is absorbed there, not
+  added to it.
+- **Fixed alongside (found while implementing):** the round-5 3.3 series used the DEFAULT observation parameters at the base point, not the fitted OBX that
+  its header states (the coordinate vector was the warm start's z0). The base point now carries the fitted ones, as 8.7 does. The k1 references were
+  re-recorded (`HBAD4_VERIFY_RECORD=1`) and then observed.
+- **Result (k1, base point with the fitted OBX; ratio = size + height step sd / (1 % of |ΔNLL(±0.05)|), at 1e-4 on full train | 1e-3 on 5000 sites):**
+  - **7 of 38 coordinates FAIL the relative bar, all at 1e-3:**
+    - mW 4.63 (|ΔNLL| ≈ 0.3 nats);
+    - ε:MAVI2 3.17 (6 nats);
+    - pM 2.86 (9 nats);
+    - am 2.43 (≈ 0.2 nats);
+    - ρ 1.63 (5 nats);
+    - λ1 1.20 (15 nats);
+    - βT 1.10 (311 nats).
+  - Every 1e-4 ratio is ≤ 0.59.
+  - The sensitive coordinates pass comfortably: b 0.055 / 0.222, σv 0.009 / 0.071, ε:PITA 0.027 / 0.173.
+  - **The failures are coordinates the objective barely sees.** There the 1 % bar is 0.003–0.15 nats, below the dynamics' roughness floor of
+    ≈ 0.007–0.25 nats at 1e-3 on 5000 sites. This is the "stricter for low-sensitivity coordinates" side of the bar, observed.
+  - **Not tuned: reported for the coordinator.** The options: a floor on the relative bar (e.g. max(1 % |ΔNLL|, the roughness of a null coordinate)); the
+    relative bar at 1e-4 only (where all pass); or accepting the seven as KNOWN.
+  - Absolute bars (REPORTED): with the corrected base, only βT exceeds them (1.15 / 3.40). b is now within them (0.715 / 1.823): its round-5 exceedance
+    came partly from the default-observation-parameter slip.
+  - Count references (3.3b) were re-recorded with the corrected base; KNOWN jumps: f0 2.23, βT 2.44.
+- **To reverse:** verify4p.jl 3.3 (`q4` / `q3`).

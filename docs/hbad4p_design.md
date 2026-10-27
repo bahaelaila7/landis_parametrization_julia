@@ -252,7 +252,12 @@ unless stated.
   | f0 (at 0.05) | 0.56 | 1.72 | 1.75 | yes |
   | every other coordinate | ≤ 0.39 | ≤ 0.97 | | yes |
 
-  - b and βT FAIL the sd bars. Both are global multipliers of every tree's growth (the size exponent, the temperature response), so a 1e-4 step moves every
+  - **H24 (after this run):** the bar became relative, sd ≤ 1 % of the coordinate's |ΔNLL| at ±0.05. The base point now carries the fitted observation
+    parameters: the table above used the default ones by a slip.
+    - With both changes, 31 of 38 coordinates pass.
+    - 7 fail at 1e-3 only: mW, ε:MAVI2, pM, am, ρ, λ1, βT, with ratios 1.1–4.6. They are coordinates the objective barely sees (|ΔNLL| 0.2–311 nats).
+    - Of the absolute bars, only βT exceeds them (1.15 / 3.40); b is within them (0.715 / 1.823). See decisions H24.
+  - (Round-5 text, before H24:) b and βT FAIL the sd bars. Both are global multipliers of every tree's growth (the size exponent, the temperature response), so a 1e-4 step moves every
     atom, and the one-height-per-cell crossings add up. I did not tune; this is reported as open (§9 lever: smooth cell membership).
   - The jumps > 2 nats are KNOWN entries of k1 (+20 %).
   - The count term is held to its k1 values + 10 % (3.3b); the references are keyed by (role, cache key).
