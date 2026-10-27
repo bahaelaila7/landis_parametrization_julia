@@ -222,7 +222,7 @@ recommendations, but document the decision point and the different options"). Th
   - the HBAD3P warm start exists for GA+FL only;
   - Tref and climate ranges would be extrapolated.
 
-## H16–H22 — Implementation of the round-5 fixes (2026-10-27, agent)
+## H16–H21, H23 — Implementation of the round-5 fixes (2026-10-27, agent)
 - **H16 encodings (params4.jl GSPEC4; verify 8.7).**
   - ρ is log on [1e-7, 0.05].
   - The 8.7 audit at the warm start (z ± 0.05, ± 0.5) found two more coordinates that clamp, now widened:
@@ -236,7 +236,7 @@ recommendations, but document the decision point and the different options"). Th
 - **H17 centred atom heights (HBAD4P.jl finish_site!; verify 0.14, 1.9).** H_m = H + H*(D_m) − mean_N H*(D), so Σ N H_m = Σ N H exactly (1.9: max rel
   9e-16). If an offset falls below 0.5 m, the cell is clamped at 0.5 and rescaled.
 - **H18 recruitment light (params4.jl warm_start4).** Rk weights the subplots by their v1 forested fraction: 1.046–1.079 now (1.116–1.183 before).
-- **H22 (new) recruits moment-matched on train.**
+- **H23 (new) recruits moment-matched on train.**
   - **Evidence:** 8.3 made discriminating (predicted vs observed RECRUITS = class-1 v2 ingrowth) showed that the HBAD3P mapping with shares and Rk predicts
     obs / pred of 0.73–2.31 by key on train: PITA 1.82, PIEL 1.72, OXAR 2.00, QUPR2 2.31, TAAS 0.73. HBAD3P's lnF was fitted through its own sapling
     survival to v2.

@@ -227,7 +227,7 @@ unless stated.
   slightly faster: dD ∝ 1 / max(H, 1.37), a higher hydraulic factor, and they are overtopped less. This is a consequence of a single height per cell; it is
   small but systematic in class 1.
 
-## 11. Audit round 5 (2026-10-27, independent Opus review of 3e4f6a7 on k1; fixed — decisions H16–H22 in hbad4p_decisions.md)
+## 11. Audit round 5 (2026-10-27, independent Opus review of 3e4f6a7 on k1; fixed — decisions H16–H21, H23 in hbad4p_decisions.md)
 * **I-1 encodings (H16).**
   - ρ is log on [1e-7, 0.05]: linear on [0, 0.01], a CMA-ES step hit the clamp (+17,510 nats).
   - Verify 8.7 audits every coordinate (z ± 0.05 / ± 0.5 at the warm start), which also widened c (log [0.3, 3]) and βT (linear [−1, 1]).
@@ -237,7 +237,7 @@ unless stated.
 * **I-3 recruitment.**
   - Rk weighted by the subplots' forested fraction: 1.05–1.08 (H18).
   - The discriminating check (predicted vs observed RECRUITS) showed the HBAD3P mapping off by 0.73–2.31 (obs / pred) per key. lnF is now moment-matched on
-    train (H22): train 1.000; val 0.64–1.43, 2.8 for PIEC2 on 3 recruits, and 6 of 17 keys beyond 2 sd of the NB noise (8.3b, INFO).
+    train (H23): train 1.000; val 0.64–1.43, 2.8 for PIEC2 on 3 recruits, and 6 of 17 keys beyond 2 sd of the NB noise (8.3b, INFO).
 * **I-4 stage 1 (H19):** `tools/hbad4/calib4.jl` (dry run only). `save_z4` writes the space signature (`.sig`), and `load_z4` refuses a mismatch (verify 8.8).
 * **I-5 κ decision (H21):** 3 seeds per κ; κ > 0 must beat κ = 0 by ≥ max(20, 2 (pooled sd + 0.005 n_val)) nats.
 * **I-6 roughness on every coordinate (H20).** Verify 3.3 covers 38 coordinates: 1e-4 steps on full train, 1e-3 on 5000 sites. Size + height step sd / jump:

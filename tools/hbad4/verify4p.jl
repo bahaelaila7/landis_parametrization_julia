@@ -1187,9 +1187,9 @@ let X = H4.Scratch(ST.off[2] - ST.off[1]), T0 = emptytabs(nk), FT = forest4(), i
         abs(WS.fac.Lr * num4 / num3 - 1) < 0.05, @sprintf("subplot (HBAD3P) %.4f, plot (HBAD4P) %.4f: ratio %.4f; ε light factor applied %.4f (all train sites) → growth level ratio %.4f | mortality light e^{−am O}: %.4f vs %.4f (ratio %.4f; warm start %.4f)",
         num3 / den, num4 / den, num4 / num3, WS.fac.Lr, WS.fac.Lr * num4 / num3, m3 / den, m4 / den, m3 / m4, WS.fac.Lmr))
 end
-# 8.3 [r4 I2, r5 I-3] warm-start fecundity, discriminating (H18 / H22): the predicted RECRUITS (the class-1 v2 microplot tally of the warm-start run minus that of the
+# 8.3 [r4 I2, r5 I-3] warm-start fecundity, discriminating (H18 / H23): the predicted RECRUITS (the class-1 v2 microplot tally of the warm-start run minus that of the
 # same run without recruitment: the model's expected count of trees entering at 1 in during the interval and still in class 1) vs the observed recruits (v2
-# ingrowth trees in class 1: trees absent at v1) per key. The warm start moment-matches them on TRAIN (H22): 8.3 checks the train ratio (an independent
+# ingrowth trees in class 1: trees absent at v1) per key. The warm start moment-matches them on TRAIN (H23): 8.3 checks the train ratio (an independent
 # recomputation) and reports the HBAD3P mapping's own ratio; 8.3b reports VAL (out of sample) with z under the NB count noise (INFO)
 function recruits_v(Dn)
   Sx = Dn.S; nsx = H4.nsites(Sx); pr = zeros(nk); ob = zeros(nk); pa = zeros(nk); oa = zeros(nk); sidx = Dict(iid => s for (s, iid) in enumerate(Dn.iid))
@@ -1208,13 +1208,13 @@ function recruits_v(Dn)
 end
 let rt = recruits_v(DT), rv = recruits_v(CS.sets["val"])
   okt = [0.8 <= rt.pr[k] / rt.ob[k] <= 1.25 for k in 1:nk]
-  check("8.3 [r4 I2, r5 I-3, H18, H22] warm-start fecundity: predicted / observed RECRUITS (v2 class-1 ingrowth, trees absent at v1; recomputed here from the runs and the ingrowth table) on TRAIN within 0.8–1.25 for every key; the HBAD3P mapping alone (shares, light ratio) is reported — it is what H22's moment match corrects",
+  check("8.3 [r4 I2, r5 I-3, H18, H23] warm-start fecundity: predicted / observed RECRUITS (v2 class-1 ingrowth, trees absent at v1; recomputed here from the runs and the ingrowth table) on TRAIN within 0.8–1.25 for every key; the HBAD3P mapping alone (shares, light ratio) is reported — it is what H23's moment match corrects",
         all(okt), "train " * join(["$(KEYS[k]) $(round(rt.pr[k] / rt.ob[k]; digits=3)) ($(round(Int, rt.pr[k])) / $(round(Int, rt.ob[k])))$(okt[k] ? "" : " ✗")" for k in 1:nk], ", ") *
         " | the HBAD3P mapping before the match (obs / pred) " * join(["$(KEYS[k]) $(round(WS.fac.recmatch[k]; digits=3))" for k in 1:nk], ", ") *
         " | whole v2 sapling tally pred / obs (train) " * join(["$(KEYS[k]) $(round(rt.pa[k] / rt.oa[k]; digits=3))" for k in 1:nk], ", ") *
         @sprintf(" | subplot / plot recruitment light %.3f–%.3f (%s)", minimum(WS.fac.Rk), maximum(WS.fac.Rk), WS.fac.Rapplied ? "applied" : "not applied"))
   zz = [(rv.ob[k] - rv.pr[k]) / sqrt(rv.vr[k]) for k in 1:nk]
-  info("8.3b [stat, H22] warm-start recruits out of sample (VAL; pred / obs, z under the observation model's NB noise Σ μ + μ²/rM)",
+  info("8.3b [stat, H23] warm-start recruits out of sample (VAL; pred / obs, z under the observation model's NB noise Σ μ + μ²/rM)",
        join(["$(KEYS[k]) $(round(rv.pr[k] / rv.ob[k]; digits=3)) ($(round(Int, rv.pr[k])) / $(round(Int, rv.ob[k])), z $(round(zz[k]; digits=1)))" for k in 1:nk], ", ") *
        @sprintf(" — %d of %d keys beyond 2 sd: recruitment varies between folds more than the count noise (spatial clustering); calibration fits lnF", count(>(2), abs.(zz)), nk))
   H4.simulate!(ST, P, G)

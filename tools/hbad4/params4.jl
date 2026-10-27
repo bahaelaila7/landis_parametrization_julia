@@ -155,7 +155,7 @@ function warm_start4(CS, fit3p; quiet=false)
   end
   rec = maximum(abs.(Rk .- 1)) > 0.05
   rec && (f3 .+= log.(Rk))
-  # recruits moment-matched on TRAIN (audit r5 I-3 follow-up, decision H22): the HBAD3P mapping (+ shares, + Rk) left the predicted / observed train recruits
+  # recruits moment-matched on TRAIN (audit r5 I-3 follow-up, decision H23): the HBAD3P mapping (+ shares, + Rk) left the predicted / observed train recruits
   # (class-1 v2 ingrowth) at 0.43–1.38 by key (HBAD3P's lnF was fitted through ITS sapling survival to v2); one multiplicative step per key, lnF += ln(obs / pred),
   # pred = the class-1 microplot tally of the warm-start run minus that of the run without recruitment (recruitment is ∝ e^{lnF}; two passes absorb the small
   # density feedback). Verify 8.3 tests the result on VAL (out of sample).
