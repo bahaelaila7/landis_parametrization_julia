@@ -197,6 +197,10 @@ unless stated.
   - Totals of the model and of the nulls are now computed over the SAME scored cells. Before this fix they were not comparable.
 * **M2 the count term keeps jumps of about 1 nat at 1e-4** (sd 0.16; 2.5 at 1e-3 steps): exact transfer across class bounds, and one height and age per cell in
   the dynamics. Accepted; it is most of what remains at 1e-3.
+  - The verifier therefore splits the roughness check by term (H14): 3.3 enforces the I1 bar on size + height, 3.3b holds the count term to its 2026-10-27
+    values + 10 %, and 3.3c reports the total as INFO.
+  - The residual noise CMA-ES will see is about 2.5–2.8 nats per 1e-3 step of a coordinate on full train.
+  - The open lever is smooth cell membership in the dynamics (an atom's rates and height continuous across a class bound), a model change for a later round.
 * **I2 split keys took their group's whole fecundity** (predicted / observed v2 sapling tally 6.1 / 6.6 / 2.1 / 23.9 for OXAR / PIEC2 / PIPA2 / QUPR2).
   - Now lnF = the group's + ln(the key's share of the group's train sapling ingrowth); the group keeps its own share (H8).
   - HBAD3P's recruitment light was evaluated per subplot. The subplot / plot ratio of e^{−λ RD} is 1.12–1.18 at the train v1 state, so it is applied to lnF.

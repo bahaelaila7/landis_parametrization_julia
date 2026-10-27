@@ -579,26 +579,37 @@ let sub = SUB, res = Dict{String,Any}(), Dx = subD(SUB), LB = "NATOM $(NA4)", KT
         G.κ == 0 && abs(e0) <= 0.02 && abs(e1) <= 0.02 && abs(ak - tk) <= max(0.3 * abs(tk), 0.01),      # ([r4, H13] with an absolute floor of 0.01 nats/site: a ratio is meaningless when the true effect is ≈ 0)
         @sprintf("merge error %+.4f nats/site at κ = 0, %+.4f at κ = %.2f; κ effect (κ = %.2f vs 0): 64 atoms %+.4f nats/site, %s %+.4f (ratio %.3f)", e0, e1, KT, KT, tk, LB, ak, ak / tk))
 end
-# 3.3 objective roughness (audit r4 V / I1): ±20 steps of 1e-4 and 1e-3 of ln ε (PITA) on the FULL train set and of κ around 0.1 on HBAD4_VERIFY_KSITES (5000)
-# train sites, NLL with the fixed observation parameters OBX. Per series: the step differences around the smooth slope (their linear trend = the derivative of a
-# quadratic): sd and the largest single deviation; the max residual of a quadratic. Bars (round-4 acceptance): sd ≤ 0.93 nats at 1e-4 and ≤ 2.7 at 1e-3
-# (1/3 of the gated objective's 2.79 / 8.15), no single jump > 2 nats at 1e-4. The count term keeps ≈ 1-nat jumps (exact transfer across class bounds, §9 M2).
-let ksites = parse(Int, get(ENV, "HBAD4_VERIFY_KSITES", "5000")), kidx = sort(randperm(Xoshiro(4), ns)[1:min(ksites, ns)]), msg = String[], ok = true
+# 3.3 objective roughness (audit r4 V / I1; split by likelihood term, decision H14): ±20 steps of 1e-4 and 1e-3 of ln ε (PITA) on the FULL train set and of κ
+# around 0.1 on HBAD4_VERIFY_KSITES (5000) train sites, NLL with the observation parameters OBX fitted at the warm start. Per series and term: the step
+# differences around the smooth slope (their linear trend = the derivative of a quadratic, H12): sd and the largest single deviation (jump).
+#   3.3  size + height (the I1 bar, the defect round 4 fixed): sd ≤ 0.93 at 1e-4, ≤ 2.7 at 1e-3, no jump > 2 nats at 1e-4;
+#   3.3b count (M2, accepted roughness of exact transfer across class bounds): a REGRESSION bar — no worse than the values measured on 2026-10-27 (COUNT_REF,
+#        k1, commit c25ac19 + H14) + 10 %;
+#   3.3c the total: INFO (the noise CMA-ES sees: ≈ 2.5–2.8 nats per 1e-3 step of a coordinate on full train).
+const COUNT_REF = Dict(("ln ε PITA", 1e-4) => (sd=0.159, jump=0.55), ("ln ε PITA", 1e-3) => (sd=2.509, jump=8.37),    # (measured 2026-10-27, k1, runtime OBX;
+                       ("κ", 1e-4) => (sd=0.048, jump=0.14), ("κ", 1e-3) => (sd=0.355, jump=1.69))                    #  κ on the 5000-site subset)
+let ksites = parse(Int, get(ENV, "HBAD4_VERIFY_KSITES", "5000")), kidx = sort(randperm(Xoshiro(4), ns)[1:min(ksites, ns)]), msh = String[], msc = String[], mst = String[], okh = true, okc = true
   sdv(x) = sqrt(sum((x .- sum(x) / length(x)) .^ 2) / (length(x) - 1))
+  rough(v) = (dv = diff(v); Xd = hcat(ones(length(dv)), collect(1.0:length(dv))); rd = dv .- Xd * (Xd \ dv); (sd=sdv(rd), jump=maximum(abs.(rd)), mean=sum(dv) / length(dv)))
   kp = something(findfirst(==("PITA"), KEYS), 1); ik = findfirst(==("κ"), SP.names)
   Dk = (S=subS(ST, kidx), n=DT.n[:, :, kidx], D2=DT.D2[:, :, kidx], Hs=DT.Hs[:, :, kidx], nH=DT.nH[:, :, kidx], fs2=DT.fs2[kidx], fm2=DT.fm2[kidx])
   for (nm, zi, base, Dx) in (("ln ε PITA", kp, nothing, DT), ("κ", ik, 0.1, Dk)), sc in (1e-4, 1e-3)
     zi === nothing && continue
     zb = copy(SP.z0); base === nothing || (zb[zi] = base)
-    v = map(-20:20) do i; z = copy(zb); z[zi] += i * sc; P_, G_, _ = SP.decode(z); H4.simulate!(Dx.S, P_, G_); nll4(Dx, OBX).total; end
-    dv = diff(v); Xd = hcat(ones(40), collect(1.0:40)); rd = dv .- Xd * (Xd \ dv); x = collect(-20:20) .* sc; X = hcat(ones(41), x, x .^ 2)
-    sdr = sdv(rd); mj = maximum(abs.(rd)); rq = maximum(abs.(v .- X * (X \ v)))
-    bar = sc == 1e-4 ? 0.93 : 2.7; good = sdr <= bar && (sc != 1e-4 || mj <= 2.0); ok &= good
-    push!(msg, @sprintf("%s ±20×%.0e (%s): step sd %.3f (bar %.2f), max jump %.2f, max |residual of a quadratic| %.2f nats, mean step %.2f%s", nm, sc,
-                        Dx === DT ? "full train" : "$(length(kidx)) sites", sdr, bar, mj, rq, sum(dv) / 40, good ? "" : " ✗"))
+    r = map(-20:20) do i; z = copy(zb); z[zi] += i * sc; P_, G_, _ = SP.decode(z); H4.simulate!(Dx.S, P_, G_); nll4(Dx, OBX); end
+    where_ = Dx === DT ? "full train" : "$(length(kidx)) sites"
+    sh = rough([x.size + x.height for x in r]); sz = rough([x.size for x in r]); hg = rough([x.height for x in r]); ct = rough([x.count for x in r]); tt = rough([x.total for x in r])
+    bar = sc == 1e-4 ? 0.93 : 2.7; gh = sh.sd <= bar && (sc != 1e-4 || sh.jump <= 2.0); okh &= gh
+    push!(msh, @sprintf("%s ±20×%.0e (%s): size+height sd %.3f (bar %.2f) jump %.2f%s [size %.3f / %.2f, height %.3f / %.2f]", nm, sc, where_, sh.sd, bar, sh.jump, gh ? "" : " ✗",
+                        sz.sd, sz.jump, hg.sd, hg.jump))
+    rf = COUNT_REF[(nm, sc)]; gc = ct.sd <= 1.1 * rf.sd && ct.jump <= 1.1 * rf.jump; okc &= gc
+    push!(msc, @sprintf("%s ±20×%.0e: count sd %.3f jump %.2f (reference %.3f / %.2f, bar +10 %%)%s", nm, sc, ct.sd, ct.jump, rf.sd, rf.jump, gc ? "" : " ✗"))
+    push!(mst, @sprintf("%s ±20×%.0e: total sd %.3f jump %.2f, mean step %.2f", nm, sc, tt.sd, tt.jump, tt.mean))
   end
-  check("3.3 [stat, r4 I1] objective roughness: the step differences around the smooth slope at 1e-4 / 1e-3 steps of ln ε (PITA, full train) and κ (around 0.1): sd ≤ 0.93 / 2.7 nats, no jump > 2 nats at 1e-4",
-        ok, join(msg, " | ") * " (round-3 objective with the gate: sd 2.79 / 8.15, jumps to 12.4 nats)")
+  check("3.3 [stat, r4 I1, H14] objective roughness of the SIZE + HEIGHT terms (the I1 defect): step sd around the smooth slope ≤ 0.93 / 2.7 nats at 1e-4 / 1e-3 steps of ln ε (PITA, full train) and κ (around 0.1), no jump > 2 nats at 1e-4",
+        okh, join(msh, " | ") * " (round-3 gated objective, total: sd 2.79 / 8.15, jumps to 12.4 nats)")
+  check("3.3b [stat, M2, H14] count-term roughness (exact transfer across class bounds, accepted): no worse than the 2026-10-27 reference + 10 %", okc, join(msc, " | "))
+  info("3.3c [stat, H14] total objective roughness (the noise CMA-ES sees per coordinate step)", join(mst, " | "))
 end
 end # section 3
 

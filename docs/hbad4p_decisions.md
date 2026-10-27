@@ -80,6 +80,7 @@ recommendations, but document the decision point and the different options"). Th
   - What remains at 1e-3 is mainly the count term: sd 2.46–2.51 alone. That is the M2 roughness of exact transfer across class bounds plus one height and
     age per cell in the dynamics, accepted in round 4.
   - Making cell membership smooth in the dynamics is the lever left; it is a model change for a later round.
+  - The residual noise CMA-ES will see is about 2.5–2.8 nats per 1e-3 step of a coordinate on full train. Check 3.3 was split by term (H14).
 - **To reverse:** `nll4` in data4.jl (the mixture) and `finish_site!` in HBAD4P.jl (H_m → the cell's H).
 
 ## H8 — Fecundity of the keys split from the _H / _S groups (round 4 I2, agent)
@@ -156,3 +157,31 @@ recommendations, but document the decision point and the different options"). Th
 - **Chosen:** ±30 % or 0.01 nats/site, whichever is larger. A relative criterion is ill-conditioned for an effect near 0. The floor is half the 0.02
   nats/site merge-error bar.
 - **To reverse:** verify4p.jl 3.2c.
+
+## H14 — The roughness check after round 4 (coordinator, 2026-10-27)
+- **Evidence:** with the observation parameters fitted at the warm start, the total objective's step sd at 1e-3 is 2.78 (bar 2.7) and its largest 1e-4 jump
+  is 2.71 (bar 2). Of that, the count term alone has sd 2.46–2.51 at 1e-3. That is the M2 roughness, accepted. The I1 bar was written for the size / height
+  scoring defect.
+- **Options:**
+  - (a) amend the bar on the total;
+  - (b) a smooth cell-membership model change now;
+  - (c) **split check 3.3 by likelihood term**.
+- **Chosen:** (c), coordinator decision.
+  - verify 3.3 enforces the I1 bar on size + height combined: sd ≤ 0.93 / 2.7 at 1e-4 / 1e-3, no jump > 2 nats at 1e-4.
+  - 3.3b enforces a regression bar on the count term: no worse than the values measured on 2026-10-27 + 10 %, recorded in `COUNT_REF`.
+  - 3.3c reports the total as INFO.
+- **Open lever:** smooth cell membership in the dynamics (an atom's rates and height continuous across a class bound) is the remaining way to lower the
+  count-term roughness. It is a model change, for a later round.
+- **Residual noise scale CMA-ES will see:** about 2.5–2.8 nats per 1e-3 step of a coordinate on full train, mostly the count term.
+- **Result (2026-10-27, k1, runtime-fitted observation parameters; step sd / largest jump):**
+
+  | Series | size + height | size | height | count | total |
+  |---|---|---|---|---|---|
+  | ln ε PITA at 1e-4 (full train) | 0.549 / **2.62** | 0.219 / 0.83 | 0.494 / 2.59 | 0.159 / 0.55 | 0.603 / 2.71 |
+  | ln ε PITA at 1e-3 (full train) | 1.619 / 4.87 | 1.616 / 4.35 | 1.162 / 4.16 | 2.509 / 8.37 | 2.780 / 10.24 |
+  | κ at 1e-4 (5000 sites) | 0.045 / 0.13 | — | — | 0.048 / 0.14 | 0.064 / 0.17 |
+  | κ at 1e-3 (5000 sites) | 0.421 / 1.94 | — | — | 0.355 / 1.69 | 0.553 / 2.32 |
+
+  - The size + height sd bars are met (0.55 ≤ 0.93, 1.62 ≤ 2.7). **The no-jump-over-2-nats bar at 1e-4 is NOT met** (2.62, from the height term, 2.59).
+  - **Not tuned, as instructed.** 3.3 is reported as FAIL. The count values are recorded as `COUNT_REF`.
+- **To reverse:** verify4p.jl 3.3 / 3.3b / 3.3c.
