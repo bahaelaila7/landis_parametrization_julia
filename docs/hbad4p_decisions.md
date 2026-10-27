@@ -333,3 +333,25 @@ recommendations, but document the decision point and the different options"). Th
     came partly from the default-observation-parameter slip.
   - Count references (3.3b) were re-recorded with the corrected base; KNOWN jumps: f0 2.23, βT 2.44.
 - **To reverse:** verify4p.jl 3.3 (`q4` / `q3`).
+
+## H25 — No further roughness-bar changes; roughness judged by its effect on calibration (coordinator, 2026-10-27)
+**Outcome of H24.** Under the sensitivity-relative bar (fd3d549), check 3.3 still FAILs:
+- 7 of 38 coordinates fail at the 1e-3 step on 5000 sites: ε:MAVI2 3.17, mW 4.63, pM 2.86, am 2.43, ρ 1.63, λ1 1.20, βT 1.10.
+- Every coordinate passes at the 1e-4 step on full train (all ratios ≤ 0.59).
+
+The 3.3 base-point fix (OBX observation parameters) is a correction, not a bar change. After it, b is within the absolute bars, and βT still exceeds them.
+
+**Decision.** The bar is NOT changed a second time. Changing it again after seeing a second failure would make the criterion meaningless.
+- 3.3 is recorded as **FAIL-KNOWN**, with the table above, and stays a FAIL line in the verifier output (not converted to a PASS).
+- The question it stood for — does roughness harm calibration? — is answered by an outcome check, pre-registered now, before any calibration run:
+  1. **Stage-1 calibration replication (calib4.jl).** Run 3 seeds from the same start. Accept only if the validation NLL range across seeds is ≤ max(20, 2 · pooled sd) nats, the H21 margin form. Otherwise the calibration is not accepted, and the roughness is the first suspect.
+  2. **Weakly identified coordinates.** mW, am, pM and ε:MAVI2 move the NLL by ≈ 0–2 nats at ±0.05. They are reported as weakly identified, with their cross-seed spread. Their fitted values are not interpreted or used in comparisons. They are NOT fixed at priors, since that would be another post-hoc change; that option is left for the next model version.
+
+**Options considered:**
+- (a) an absolute floor on the relative bar;
+- (b) apply the bar at 1e-4 only;
+- (c) KNOWN entries per coordinate;
+- (d) chosen: no bar change; FAIL-KNOWN plus a pre-registered calibration-outcome check;
+- (e) smooth cell membership: deferred to the next model version (H24(c)).
+
+(a)–(c) are rejected because each is a second post-hoc adjustment of the same criterion.
