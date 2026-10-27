@@ -289,6 +289,17 @@ let Pz = withP(Ph; lnε=-Inf), res = Bool[], msg = String[]
   end
   check("0.8 overtopping O_i = Σ SDI_j r(H_j − H_i)/sdimax, r(Δ) = clamp(½ + Δ/2δH, 0, 1), δH = 1 m (own ½)", all(res), join(msg, "; "))
 end
+# 0.14 [r5 I-2, H17] the observation's atom heights: a class-3 cell of two atoms (10 at 13.0 cm, 5 at 17.0 cm), H = 14 m, no blur (sdM = 0): the class-3 PH =
+# Σ n (H + H*(D_m) − Σ n H*(D) / Σ n) = 15 H exactly; with the blur, the classes' PH still sum to 15 H
+let cells = [(1, 3, 1, [(10.0, 13.0), (5.0, 17.0)], 14.0, 40.0)], Pz = withP(Ph; lnε=-Inf)
+  S0 = onesite(cells); X = H4.Scratch(length(S0.N)); H4.load_site!(S0, X, 1); H4.finish_site!(S0, [Pz], withG(Gh; sdM=0.0), X, 1, emptytabs(1))
+  hb = (10 * hs_(13.0) + 5 * hs_(17.0)) / 15; h1 = 14 + hs_(13.0) - hb; h2 = 14 + hs_(17.0) - hb; x3 = H4.obsix(S0, 1, 1, 3)
+  ok0 = isapprox(S0.PH[x3], 10h1 + 5h2; rtol=1e-13) && isapprox(S0.PH[x3], 15 * 14; rtol=1e-13) && h2 > h1
+  S1 = onesite(cells); H4.load_site!(S1, X, 1); H4.finish_site!(S1, [Pz], Gh, X, 1, emptytabs(1))
+  ok1 = isapprox(sum(S1.PH[H4.obsix(S1, 1, 1, j)] for j in 1:NCLS), 15 * 14; rtol=1e-12)
+  check("0.14 [r5 I-2, H17] observation heights of the atoms: H_m = H + H*(D_m) − Σ N H*(D) / Σ N (hand), centred (Σ N H_m = Σ N H) without and with the DBH blur",
+        ok0 && ok1, @sprintf("PH class 3 %.10f vs hand %.10f (= 15 H %.1f); H_m %.4f / %.4f; blurred Σ PH %.10f", S0.PH[x3], 10h1 + 5h2, 15 * 14.0, h1, h2, sum(S1.PH[H4.obsix(S1, 1, 1, j)] for j in 1:NCLS)))
+end
 end # section 0
 
 # ================================================================ 1. kernel unit checks
@@ -390,7 +401,7 @@ let MA = 8, cells = [(1, j, 1, [(1.0 + m, H4.CLS_LO[j] + 0.6 * m) for m in 1:MA]
         isapprox(sum(x -> x[1] * x[2]^2, a), grown; rtol=1e-12) && all(x -> H4.dclass(x[2]) == 16, a) && sum(S.N[1:end-NL]) == 0, "atoms $(a)")
 end
 # 1.9 state invariants after a warm-start run of ALL train sites (serial: the final atoms of each site are inspected in the scratch that ran it)
-let nsync = 0, nover = 0, nout = 0, nneg = 0, nfin = 0, mx = 0.0, nobs = 0
+let nsync = 0, nover = 0, nout = 0, nneg = 0, nfin = 0, mx = 0.0, nobs = 0, nhm = 0, mxh = 0.0
   serial_run!(ST, P, G; each=(s, X) -> begin
     for i in ST.off[s]:ST.off[s+1]-1
       at = atoms_x(X, ST, i; s=s); n = sum(first, at; init=0.0); b = sum(x -> ba_(x[1], x[2]), at; init=0.0)
@@ -403,10 +414,13 @@ let nsync = 0, nover = 0, nout = 0, nneg = 0, nfin = 0, mx = 0.0, nobs = 0
     end
     for k in 1:nk                                                     # the blur moves trees between classes but conserves them per key
       a = sum(ST.PN[H4.obsix(ST, s, k, j)] for j in 1:NCLS); b = sum(ST.N[cellix(ST, s, k, j, v)] for j in 1:NCLS for v in 1:NL); reld(a, b; floor=1e-9) > 1e-12 && (nobs += 1)
+      # [r5 I-2, H17] the atoms' heights in the observation are centred: Σ_classes PH = Σ_cells N·H (the blur's p sum to 1 per atom)
+      ah = sum(ST.PH[H4.obsix(ST, s, k, j)] for j in 1:NCLS); bh = sum(ST.N[cellix(ST, s, k, j, v)] * ST.H[cellix(ST, s, k, j, v)] for j in 1:NCLS for v in 1:NL if ST.N[cellix(ST, s, k, j, v)] > 0; init=0.0)
+      dh = reld(ah, bh; floor=1e-9); mxh = max(mxh, dh); dh > 1e-9 && (nhm += 1)
     end
   end)
-  check("1.9 state invariants after a warm-start run (all $(ns) train sites): cell N / B = Σ atoms, ≤ NATOM atoms, every atom in its cell's class, no negative / non-finite value; the observation blur conserves N per (site, key)",
-        nsync == 0 && nover == 0 && nout == 0 && nneg == 0 && nfin == 0 && nobs == 0, "N/B out of sync $(nsync) (max rel $(fmt(mx))); > NATOM $(nover); atoms outside their class $(nout); negative $(nneg); non-finite $(nfin); blur not conserving N $(nobs)")
+  check("1.9 state invariants after a warm-start run (all $(ns) train sites): cell N / B = Σ atoms, ≤ NATOM atoms, every atom in its cell's class, no negative / non-finite value; the observation blur conserves N per (site, key); [r5 I-2] the centred atom heights conserve Σ N·H",
+        nsync == 0 && nover == 0 && nout == 0 && nneg == 0 && nfin == 0 && nobs == 0 && nhm == 0, "N/B out of sync $(nsync) (max rel $(fmt(mx))); > NATOM $(nover); atoms outside their class $(nout); negative $(nneg); non-finite $(nfin); blur not conserving N $(nobs); [r5 I-2] Σ N·H_m ≠ Σ N·H (1e-9) in $(nhm) (site, key) (max rel $(fmt(mxh)))")
 end
 end # section 1
 
@@ -579,52 +593,72 @@ let sub = SUB, res = Dict{String,Any}(), Dx = subD(SUB), LB = "NATOM $(NA4)", KT
         G.κ == 0 && abs(e0) <= 0.02 && abs(e1) <= 0.02 && abs(ak - tk) <= max(0.3 * abs(tk), 0.01),      # ([r4, H13] with an absolute floor of 0.01 nats/site: a ratio is meaningless when the true effect is ≈ 0)
         @sprintf("merge error %+.4f nats/site at κ = 0, %+.4f at κ = %.2f; κ effect (κ = %.2f vs 0): 64 atoms %+.4f nats/site, %s %+.4f (ratio %.3f)", e0, e1, KT, KT, tk, LB, ak, ak / tk))
 end
-# 3.3 objective roughness (audit r4 V / I1; split by likelihood term, decision H14): ±20 steps of 1e-4 and 1e-3 of ln ε (PITA) on the FULL train set and of κ
-# around 0.1 on HBAD4_VERIFY_KSITES (5000) train sites, NLL with the observation parameters OBX fitted at the warm start. Per series and term: the step
-# differences around the smooth slope (their linear trend = the derivative of a quadratic, H12): sd and the largest single deviation (jump).
-#   3.3  size + height (the I1 bar, the defect round 4 fixed): sd ≤ 0.93 at 1e-4, ≤ 2.7 at 1e-3, no jump > 2 nats at 1e-4;
-#   3.3b count (M2, accepted roughness of exact transfer across class bounds): a REGRESSION bar — no worse than the values measured on 2026-10-27 (COUNT_REF,
-#        k1, commit c25ac19 + H14) + 10 %;
-#   3.3c the total: INFO (the noise CMA-ES sees: ≈ 2.5–2.8 nats per 1e-3 step of a coordinate on full train).
-const COUNT_REF = Dict(("ln ε PITA", 1e-4) => (sd=0.159, jump=0.55), ("ln ε PITA", 1e-3) => (sd=2.509, jump=8.37),    # (measured 2026-10-27, k1, runtime OBX;
-                       ("κ", 1e-4) => (sd=0.048, jump=0.14), ("κ", 1e-3) => (sd=0.355, jump=1.69))                    #  κ on the 5000-site subset)
-# Named, bounded known exceptions (decision H15): (series, step, bar) => (value when recorded, slack, reason). Such a cell prints KNOWN while the measured value
-# is ≤ recorded + slack and FAILS beyond; every other bar stays strict.
-const KNOWN_EXCEPTIONS = Dict(("ln ε PITA", 1e-4, :sizeheight_jump) => (value=2.62, slack=1.0,
-    reason="H15: one 1e-4 jump of the size + height terms (height 2.59) from the one-height-per-cell dynamics (an atom crossing a class bound takes its new cell's height); below the ≈ 2.5–2.8-nat per-1e-3-step noise CMA-ES sees; open lever: smooth cell membership"))
-let ksites = parse(Int, get(ENV, "HBAD4_VERIFY_KSITES", "5000")), kidx = sort(randperm(Xoshiro(4), ns)[1:min(ksites, ns)]), msh = String[], msc = String[], mst = String[], okh = true, okc = true, nknown = 0
+# 3.3 objective roughness (audit r4 V / I1; split by likelihood term, H14; every coordinate, H20). Series: ±20 steps of 1e-4 on the FULL train set and of 1e-3 on
+# HBAD4_VERIFY_KSITES (5000) train sites, for EVERY global coordinate and three key coordinates (ε of a common key PITA, of the rarest own key, of the split key
+# with the smallest share), NLL with the observation parameters OBX fitted at the warm start; κ and f0 start at their lower bound by design (0 = none) and are
+# stepped around 0.1 / 0.05. Per series and term: the step differences around the smooth slope (H12): sd and the largest single deviation (jump).
+#   3.3  size + height (the I1 defect): sd ≤ 0.93 at 1e-4 and ≤ 2.7 at 1e-3 for EVERY coordinate (absolute bars); a jump > 2 nats at 1e-4 must be a KNOWN entry
+#        of this (role, cache key) and stay ≤ its recorded value + 20 % (H15 / H20), else FAIL;
+#   3.3b count (M2, accepted): a regression bar, sd and jump ≤ the recorded values + 10 % + 0.01 nats (ROUGH_REF of this (role, cache key));
+#   3.3c the total: INFO (the noise CMA-ES sees per coordinate step).
+# References are keyed by (role, cache key) (H20): for an unreferenced combination (another fold, a rebuilt table) the KNOWN / regression parts report INFO with
+# their values (and the literal to record), the sd bars still apply. HBAD4_VERIFY_ROUGH_COORDS="b,σv,…" restricts the coordinates (a partial run).
+const ROUGH_REF = Dict{Tuple{String,String},Dict{String,Any}}()          # (role, cache key) => Dict(coord => (c4sd, c4j, c3sd, c3j, sh4j))
+# k1, recorded 2026-10-27 (round 5, full verifier run): count sd / jump at 1e-4 (full train), at 1e-3 (5000 sites), and the size + height 1e-4 jump. The entries
+# with a size + height jump > 2 nats are the KNOWN entries of 3.3 (+20 % slack, H15 / H20): ε:PITA 3.61, b 4.03, pD 3.54, σv 3.01, βT 4.73 — the
+# one-height-per-cell dynamics (an atom crossing a class bound takes its new cell's height), on the most sensitive coordinates (8.7 flags).
+ROUGH_REF[("k1", "9e31afc324039360")] = Dict("ε:PITA" => (0.1766, 0.6500, 1.0687, 3.7552, 3.6100), "ε:MAVI2" => (0.0046, 0.0227, 0.0145, 0.0650, 0.2991), "ε:QUPR2" => (0.0032, 0.0154, 0.0105, 0.0631, 0.3594), "b" => (0.2433, 0.8644, 2.6134, 9.8467, 4.0267), "a" => (0.1407, 0.5323, 0.7714, 3.7272, 1.4930), "θ" => (0.0025, 0.0083, 0.0208, 0.0917, 0.0803), "ω" => (0.1105, 0.4742, 0.1931, 0.7582, 0.7493), "s" => (0.1607, 0.6644, 0.5054, 1.4920, 1.2798), "c" => (0.1708, 0.7211, 0.5900, 2.1076, 1.2887), "η" => (0.0979, 0.4328, 0.0322, 0.0846, 0.7510), "λ" => (0.0005, 0.0029, 0.0129, 0.0779, 0.0153), "μ" => (0.0005, 0.0029, 0.0129, 0.0776, 0.0152), "kh" => (0.0827, 0.4181, 0.0208, 0.0767, 0.1788), "m0" => (0.0020, 0.0109, 0.0139, 0.0771, 0.0592), "ms" => (0.0021, 0.0116, 0.0147, 0.0755, 0.0635), "σST" => (0.0020, 0.0113, 0.0136, 0.0746, 0.0652), "β" => (0.0717, 0.4343, 0.0786, 0.4618, 0.1334), "ζ" => (0.0021, 0.0114, 0.0134, 0.0768, 0.0604), "mW" => (0.0003, 0.0014, 0.0027, 0.0149, 0.0007), "pD" => (0.1993, 0.9220, 2.3873, 12.5951, 3.5351), "pH" => (0.0651, 0.3360, 0.4389, 1.4431, 1.0718), "pM" => (0.0007, 0.0036, 0.0524, 0.2092, 0.0325), "σv" => (0.6839, 3.1778, 2.9837, 14.4957, 3.0137), "am" => (0.0000, 0.0000, 0.0005, 0.0020, 0.0001), "ρ" => (0.0126, 0.0753, 0.0142, 0.0844, 0.0159), "f0" => (0.1406, 0.3953, 0.7366, 3.0027, 1.7527), "βT" => (0.6817, 2.5938, 3.2966, 11.8390, 4.7285), "κ" => (0.2592, 1.5871, 0.3564, 1.6604, 0.9163), "λ0" => (0.0737, 0.4513, 0.0191, 0.0674, 0.2607), "λ1" => (0.0764, 0.4669, 0.0333, 0.1233, 0.2574), "ε0" => (0.0766, 0.4651, 0.1586, 0.9179, 0.2647), "ωR" => (0.0021, 0.0115, 0.0077, 0.0433, 0.2531), "rM" => (0.0000, 0.0000, 0.0000, 0.0001, 0.0000), "rS" => (0.0000, 0.0000, 0.0002, 0.0004, 0.0000), "bgM" => (0.0000, 0.0000, 0.0002, 0.0004, 0.0565), "bgS" => (0.0000, 0.0000, 0.0012, 0.0024, 0.0712), "σD" => (0.0000, 0.0000, 0.0000, 0.0000, 0.0000), "σH" => (0.0000, 0.0000, 0.0000, 0.0000, 0.0000))
+let ksites = parse(Int, get(ENV, "HBAD4_VERIFY_KSITES", "5000")), kidx = sort(randperm(Xoshiro(4), ns)[1:min(ksites, ns)]), ckey = build_key(DATA_DIR)
   sdv(x) = sqrt(sum((x .- sum(x) / length(x)) .^ 2) / (length(x) - 1))
   rough(v) = (dv = diff(v); Xd = hcat(ones(length(dv)), collect(1.0:length(dv))); rd = dv .- Xd * (Xd \ dv); (sd=sdv(rd), jump=maximum(abs.(rd)), mean=sum(dv) / length(dv)))
-  kp = something(findfirst(==("PITA"), KEYS), 1); ik = findfirst(==("κ"), SP.names)
   Dk = (S=subS(ST, kidx), n=DT.n[:, :, kidx], D2=DT.D2[:, :, kidx], Hs=DT.Hs[:, :, kidx], nH=DT.nH[:, :, kidx], fs2=DT.fs2[kidx], fm2=DT.fm2[kidx])
-  for (nm, zi, base, Dx) in (("ln ε PITA", kp, nothing, DT), ("κ", ik, 0.1, Dk)), sc in (1e-4, 1e-3)
-    zi === nothing && continue
-    zb = copy(SP.z0); base === nothing || (zb[zi] = base)
-    r = map(-20:20) do i; z = copy(zb); z[zi] += i * sc; P_, G_, _ = SP.decode(z); H4.simulate!(Dx.S, P_, G_); nll4(Dx, OBX); end
-    where_ = Dx === DT ? "full train" : "$(length(kidx)) sites"
-    sh = rough([x.size + x.height for x in r]); sz = rough([x.size for x in r]); hg = rough([x.height for x in r]); ct = rough([x.count for x in r]); tt = rough([x.total for x in r])
-    bar = sc == 1e-4 ? 0.93 : 2.7; gsd = sh.sd <= bar; jtag = ""
-    if sc == 1e-4 && sh.jump > 2.0
-      ke = get(KNOWN_EXCEPTIONS, (nm, sc, :sizeheight_jump), nothing)
-      if ke !== nothing && sh.jump <= ke.value + ke.slack
-        jtag = @sprintf(" KNOWN (≤ %.2f + %.1f: %s)", ke.value, ke.slack, ke.reason); gj = true; nknown += 1
+  own = [k for k in 1:nk if WS.src[k] == KEYS[k] && WS.fac.share[k] == 1 && KEYS[k][1] != '_']; rare = own[argmin(TR.ntrain[own])]
+  spl = [k for k in 1:nk if WS.src[k] != KEYS[k]]; splk = spl[argmin(WS.fac.share[spl])]
+  coords = vcat(["ε:PITA", "ε:" * KEYS[rare], "ε:" * KEYS[splk]], [nm for nm in SP.names if !startswith(nm, "ε:") && !startswith(nm, "lnF:")])
+  only = filter(!isempty, strip.(split(get(ENV, "HBAD4_VERIFY_ROUGH_COORDS", ""), ","))); isempty(only) || (coords = [c for c in coords if c in only])
+  ref = get(ROUGH_REF, (ROLE, ckey), nothing); okh = true; okc = true; msh = String[]; msc = String[]; mst = String[]; lit = String[]; nknown = 0
+  base0 = Dict("κ" => 0.1, "f0" => 0.05)
+  for nm in coords
+    zi = findfirst(==(nm), SP.names); zb = copy(SP.z0); haskey(base0, nm) && (zb[zi] = base0[nm]); obsonly = Symbol(nm) in OBS4
+    res = Dict{Float64,Any}()
+    for (sc, Dx) in ((1e-4, DT), (1e-3, Dk))
+      if obsonly; Pb, Gb, _ = SP.decode(zb); H4.simulate!(Dx.S, Pb, Gb); end          # (the dynamics do not see an observation coordinate: one run)
+      r = map(-20:20) do i; z = copy(zb); z[zi] += i * sc; P_, G_, O_ = SP.decode(z); obsonly || H4.simulate!(Dx.S, P_, G_); nll4(Dx, O_); end
+      res[sc] = (sh=rough([x.size + x.height for x in r]), ct=rough([x.count for x in r]), tt=rough([x.total for x in r]))
+    end
+    s4 = res[1e-4]; s3 = res[1e-3]
+    gsd = s4.sh.sd <= 0.93 && s3.sh.sd <= 2.7; jt = ""
+    if s4.sh.jump > 2.0
+      rr = ref === nothing ? nothing : get(ref, nm, nothing)
+      if ref === nothing
+        jt = " (jump > 2: INFO, unreferenced)"; gj = true
+      elseif rr !== nothing && rr[5] > 2.0 && s4.sh.jump <= 1.2 * rr[5]
+        jt = @sprintf(" KNOWN (≤ %.2f × 1.2)", rr[5]); gj = true; nknown += 1
       else
-        jtag = " ✗"; gj = false
+        jt = " ✗ (jump > 2, not a KNOWN entry within +20 %)"; gj = false
       end
     else
       gj = true
     end
-    gh = gsd && gj; okh &= gh
-    push!(msh, @sprintf("%s ±20×%.0e (%s): size+height sd %.3f (bar %.2f)%s jump %.2f (bar 2.00 at 1e-4)%s [size %.3f / %.2f, height %.3f / %.2f]", nm, sc, where_, sh.sd, bar,
-                        gsd ? "" : " ✗", sh.jump, jtag, sz.sd, sz.jump, hg.sd, hg.jump))
-    rf = COUNT_REF[(nm, sc)]; gc = ct.sd <= 1.1 * rf.sd && ct.jump <= 1.1 * rf.jump; okc &= gc
-    push!(msc, @sprintf("%s ±20×%.0e: count sd %.3f jump %.2f (reference %.3f / %.2f, bar +10 %%)%s", nm, sc, ct.sd, ct.jump, rf.sd, rf.jump, gc ? "" : " ✗"))
-    push!(mst, @sprintf("%s ±20×%.0e: total sd %.3f jump %.2f, mean step %.2f", nm, sc, tt.sd, tt.jump, tt.mean))
+    okh &= gsd && gj
+    push!(msh, @sprintf("%s: sd %.3f / %.3f, jump %.2f / %.2f%s%s", nm, s4.sh.sd, s3.sh.sd, s4.sh.jump, s3.sh.jump, gsd ? "" : " ✗ sd", jt))
+    if ref !== nothing && haskey(ref, nm)
+      rr = ref[nm]; tol(v, r_) = v <= 1.1r_ + 0.01                 # (+10 %, with a 0.01-nat floor: the references are recorded to 4 decimals)
+      gc = tol(s4.ct.sd, rr[1]) && tol(s4.ct.jump, rr[2]) && tol(s3.ct.sd, rr[3]) && tol(s3.ct.jump, rr[4]); okc &= gc
+      push!(msc, @sprintf("%s: %.3f / %.2f | %.3f / %.2f (ref %.3f / %.2f | %.3f / %.2f)%s", nm, s4.ct.sd, s4.ct.jump, s3.ct.sd, s3.ct.jump, rr[1], rr[2], rr[3], rr[4], gc ? "" : " ✗"))
+    else
+      push!(msc, @sprintf("%s: %.3f / %.2f | %.3f / %.2f (unreferenced)", nm, s4.ct.sd, s4.ct.jump, s3.ct.sd, s3.ct.jump))
+    end
+    push!(mst, @sprintf("%s: %.3f / %.2f | %.3f / %.2f", nm, s4.tt.sd, s4.tt.jump, s3.tt.sd, s3.tt.jump))
+    push!(lit, @sprintf("\"%s\" => (%.4f, %.4f, %.4f, %.4f, %.4f)", nm, s4.ct.sd, s4.ct.jump, s3.ct.sd, s3.ct.jump, s4.sh.jump))
+    println("      3.3 ", msh[end], " | count ", msc[end]); flush(stdout)
   end
-  check("3.3 [stat, r4 I1, H14, H15] objective roughness of the SIZE + HEIGHT terms (the I1 defect): step sd around the smooth slope ≤ 0.93 / 2.7 nats at 1e-4 / 1e-3 steps of ln ε (PITA, full train) and κ (around 0.1), no jump > 2 nats at 1e-4 (KNOWN_EXCEPTIONS: $(length(KNOWN_EXCEPTIONS)) bounded, $(nknown) in use)",
-        okh, join(msh, " | ") * " (round-3 gated objective, total: sd 2.79 / 8.15, jumps to 12.4 nats)")
-  check("3.3b [stat, M2, H14] count-term roughness (exact transfer across class bounds, accepted): no worse than the 2026-10-27 reference + 10 %", okc, join(msc, " | "))
-  info("3.3c [stat, H14] total objective roughness (the noise CMA-ES sees per coordinate step)", join(mst, " | "))
+  check("3.3 [stat, r4 I1, H14, H15, H20] objective roughness of the SIZE + HEIGHT terms for $(length(coords)) coordinates: step sd ≤ 0.93 (1e-4, full train) / 2.7 (1e-3, $(length(kidx)) sites) for every coordinate; a 1e-4 jump > 2 nats only as a KNOWN entry within +20 % ($(ref === nothing ? "references: none for ($(ROLE), $(ckey)) → INFO" : "$(nknown) KNOWN in use"))",
+        okh, "sd 1e-4 / 1e-3, jump 1e-4 / 1e-3: " * join(msh, " | "))
+  ref === nothing ? info("3.3b [stat, M2, H20] count-term roughness (unreferenced role / cache key: INFO)", "count sd / jump at 1e-4 | 1e-3: " * join(msc, " | ")) :
+                    check("3.3b [stat, M2, H14, H20] count-term roughness: no worse than the recorded values + 10 % (role $(ROLE), cache key $(ckey))", okc, join(msc, " | "))
+  info("3.3c [stat, H14, H20] total objective roughness per coordinate (the noise CMA-ES sees): sd / jump at 1e-4 (full train) | 1e-3 ($(length(kidx)) sites)", join(mst, " | "))
+  ref === nothing && println("      ROUGH_REF literal for (\"$(ROLE)\", \"$(ckey)\"): Dict(" * join(lit, ", ") * ")")
 end
 end # section 3
 
@@ -1058,13 +1092,13 @@ function nll_ref(D, Ob, P, G, BGr; exact=true)
       l = -Distributions.logpdf(Distributions.NegativeBinomial(rr, rr / (rr + μ)), n); c += l; bgexp += bg * f * area
       (Np < 1e-3 && n > 0) && (cempty += l; nempty += n)
       n > 0 || continue
-      w = Np / (Np + bg); lq = log(sqrt(D.D2[k, j, s] / n))
+      w = Np / (Np + bg); lq = log(sqrt(D.D2[k, j, s] / n)); wn(m) = 1 - (1 - w)^m      # (the model component's weight of a mean of m trees, r5 M-1)
       lm = Np > 0 && PB[k, j] > 0 ? Distributions.logpdf(Distributions.Normal(log(sqrt(PB[k, j] / (π / 4e4 * Np))), sqrt(Ob.sD[j]^2 / n + Ob.σD^2)), lq) : -Inf   # (a 1e-300 tail: PB underflows)
-      dsz -= lmix(w, lm, Distributions.logpdf(Distributions.Normal(BGr.mD[j], BGr.sDb[j]), lq))
+      dsz -= lmix(wn(n), lm, Distributions.logpdf(Distributions.Normal(BGr.mD[j], BGr.sDb[j]), lq))
       if D.nH[k, j, s] > 0
         lh = log(D.Hs[k, j, s] / D.nH[k, j, s])
         lm = Np > 0 && PH[k, j] > 0 ? Distributions.logpdf(Distributions.Normal(log(PH[k, j] / Np), sqrt(Ob.sH[j]^2 / D.nH[k, j, s] + Ob.σH^2)), lh) : -Inf
-        hh -= lmix(w, lm, Distributions.logpdf(Distributions.Normal(BGr.mH[k, j], BGr.sHb[j]), lh))
+        hh -= lmix(wn(D.nH[k, j, s]), lm, Distributions.logpdf(Distributions.Normal(BGr.mH[k, j], BGr.sHb[j]), lh))
       end
     end
   end)
@@ -1153,16 +1187,37 @@ let X = H4.Scratch(ST.off[2] - ST.off[1]), T0 = emptytabs(nk), FT = forest4(), i
         abs(WS.fac.Lr * num4 / num3 - 1) < 0.05, @sprintf("subplot (HBAD3P) %.4f, plot (HBAD4P) %.4f: ratio %.4f; ε light factor applied %.4f (all train sites) → growth level ratio %.4f | mortality light e^{−am O}: %.4f vs %.4f (ratio %.4f; warm start %.4f)",
         num3 / den, num4 / den, num4 / num3, WS.fac.Lr, WS.fac.Lr * num4 / num3, m3 / den, m4 / den, m3 / m4, WS.fac.Lmr))
 end
-# 8.3 [r4 I2] warm-start fecundity: the predicted v2 sapling tally (classes 1–2, the model's expected microplot count Σ N f_micr area, background excluded) / the
-# observed one per key on the train set (replaces the circular round-3 check "every key has an HBAD3P value")
-let _ = H4.simulate!(ST, P, G), pr = zeros(nk), ob = zeros(nk)
-  for s in 1:ns, k in 1:nk, j in 1:2
-    DT.fm2[s] > 0 || continue; pr[k] += ST.PN[H4.obsix(ST, s, k, j)] * DT.fm2[s] * AREA_MIC; ob[k] += DT.n[k, j, s]
+# 8.3 [r4 I2, r5 I-3] warm-start fecundity, discriminating (H18 / H22): the predicted RECRUITS (the class-1 v2 microplot tally of the warm-start run minus that of the
+# same run without recruitment: the model's expected count of trees entering at 1 in during the interval and still in class 1) vs the observed recruits (v2
+# ingrowth trees in class 1: trees absent at v1) per key. The warm start moment-matches them on TRAIN (H22): 8.3 checks the train ratio (an independent
+# recomputation) and reports the HBAD3P mapping's own ratio; 8.3b reports VAL (out of sample) with z under the NB count noise (INFO)
+function recruits_v(Dn)
+  Sx = Dn.S; nsx = H4.nsites(Sx); pr = zeros(nk); ob = zeros(nk); pa = zeros(nk); oa = zeros(nk); sidx = Dict(iid => s for (s, iid) in enumerate(Dn.iid))
+  ps = zeros(nk, nsx)
+  H4.simulate!(Sx, P, G)
+  for s in 1:nsx, k in 1:nk, j in 1:2
+    Dn.fm2[s] > 0 || continue; μ = Sx.PN[H4.obsix(Sx, s, k, j)] * Dn.fm2[s] * AREA_MIC; pa[k] += μ; oa[k] += Dn.n[k, j, s]; j == 1 && (pr[k] += μ; ps[k, s] += μ)
   end
-  rt = pr ./ ob
-  check("8.3 [r4 I2] warm-start fecundity: predicted / observed v2 sapling tally (train, classes 1–2) within 0.8–1.25 for every key (split keys: lnF of the group + ln of their share of its train sapling ingrowth; recruitment light at the subplot scale)",
-        all(0.8 .<= rt .<= 1.25), join(["$(KEYS[k]) $(round(rt[k]; digits=3))" for k in 1:nk], ", ") * " | shares " *
-        join(["$(KEYS[k]) $(round(WS.fac.share[k]; digits=3))" for k in 1:nk if WS.fac.share[k] < 1], ", ") * @sprintf(" | subplot / plot recruitment light %.3f–%.3f (%s)", minimum(WS.fac.Rk), maximum(WS.fac.Rk), WS.fac.Rapplied ? "applied" : "not applied"))
+  H4.simulate!(Sx, [withP(p; lnF=-Inf) for p in P], G)
+  for s in 1:nsx, k in 1:nk; Dn.fm2[s] > 0 && (μ0 = Sx.PN[H4.obsix(Sx, s, k, 1)] * Dn.fm2[s] * AREA_MIC; pr[k] -= μ0; ps[k, s] -= μ0); end
+  # the variance of a key's total under the observation model's own overdispersion (NB, size rM of the microplot tally): Σ_s μ_s + μ_s² / rM
+  vr = [sum(max(ps[k, s], 0.0) + max(ps[k, s], 0.0)^2 / OBX.rM for s in 1:nsx) for k in 1:nk]
+  kx = Dict(k => i for (i, k) in enumerate(KEYS))
+  for r in eachrow(L.ig); s = get(sidx, r.iid, 0); (s > 0 && Dn.fm2[s] > 0 && H4.dclass(r.dia_cm) == 1 && ismicro(r.w_ha)) && (ob[kx[r.key]] += 1); end
+  (pr=pr, ob=ob, pa=pa, oa=oa, vr=vr)
+end
+let rt = recruits_v(DT), rv = recruits_v(CS.sets["val"])
+  okt = [0.8 <= rt.pr[k] / rt.ob[k] <= 1.25 for k in 1:nk]
+  check("8.3 [r4 I2, r5 I-3, H18, H22] warm-start fecundity: predicted / observed RECRUITS (v2 class-1 ingrowth, trees absent at v1; recomputed here from the runs and the ingrowth table) on TRAIN within 0.8–1.25 for every key; the HBAD3P mapping alone (shares, light ratio) is reported — it is what H22's moment match corrects",
+        all(okt), "train " * join(["$(KEYS[k]) $(round(rt.pr[k] / rt.ob[k]; digits=3)) ($(round(Int, rt.pr[k])) / $(round(Int, rt.ob[k])))$(okt[k] ? "" : " ✗")" for k in 1:nk], ", ") *
+        " | the HBAD3P mapping before the match (obs / pred) " * join(["$(KEYS[k]) $(round(WS.fac.recmatch[k]; digits=3))" for k in 1:nk], ", ") *
+        " | whole v2 sapling tally pred / obs (train) " * join(["$(KEYS[k]) $(round(rt.pa[k] / rt.oa[k]; digits=3))" for k in 1:nk], ", ") *
+        @sprintf(" | subplot / plot recruitment light %.3f–%.3f (%s)", minimum(WS.fac.Rk), maximum(WS.fac.Rk), WS.fac.Rapplied ? "applied" : "not applied"))
+  zz = [(rv.ob[k] - rv.pr[k]) / sqrt(rv.vr[k]) for k in 1:nk]
+  info("8.3b [stat, H22] warm-start recruits out of sample (VAL; pred / obs, z under the observation model's NB noise Σ μ + μ²/rM)",
+       join(["$(KEYS[k]) $(round(rv.pr[k] / rv.ob[k]; digits=3)) ($(round(Int, rv.pr[k])) / $(round(Int, rv.ob[k])), z $(round(zz[k]; digits=1)))" for k in 1:nk], ", ") *
+       @sprintf(" — %d of %d keys beyond 2 sd: recruitment varies between folds more than the count noise (spatial clustering); calibration fits lnF", count(>(2), abs.(zz)), nk))
+  H4.simulate!(ST, P, G)
 end
 let num = 0.0, num3 = 0.0, den = 0.0
   # HBAD3P's mortality stress gm = e^{−am O3} cw included the dropped factors (cw = e^{gR RD} … (CR/0.4)^φ) and its subplot light: gm_HBAD3P ≈ gm_HBAD4P × F × LMR (8.2 / 8.2b,
@@ -1198,6 +1253,47 @@ let ok = true, msg = String[]
   ks = i === nothing ? Float64[] : [(z = copy(SP.z0); z[i] = v; SP.decode(z)[2].κ) for v in (-0.3, 0.0, 0.05, 2.0)]
   check("8.6 [spec §2.6, r3 I2d] κ = 0 (fully persistent lanes: the FVS triple, HBAD3P's persistent vigour nodes) is reachable — linear on [0, 1] — and is the warm start",
         G.κ == 0 && ks == [0.0, 0.0, 0.05, 1.0], "decode κ(z = −0.3, 0, 0.05, 2) = $(ks); warm start κ = $(G.κ)")
+end
+# 8.7 [r5 I-1, H16] encoding audit of every coordinate at the warm start: z ± 0.05 (the profile σ) and z ± 0.5 must not clamp, and ± 0.05 must change the train
+# NLL (OBX) by < 1 % of |NLL|; a coordinate that starts at a bound by design (0 = "none": κ, f0) is flagged, not failed
+let rows = String[], bad = String[], flagged = String[], byd = ("κ", "f0"), z0 = copy(SP.z0)
+  for f in OBS4; z0[findfirst(==(String(f)), SP.names)] = log(getfield(OBX, f)); end       # (the warm start with the fitted observation parameters)
+  H4.simulate!(ST, P, G); ref = nll4(DT, SP.decode(z0)[3]).total
+  function val(z, nm)
+    P_, G_, O_ = SP.decode(z)
+    startswith(nm, "ε:") && return P_[findfirst(==(chopprefix(nm, "ε:")), KEYS)].lnε
+    startswith(nm, "lnF:") && return P_[findfirst(==(chopprefix(nm, "lnF:")), KEYS)].lnF
+    sy = Symbol(nm); sy in OBS4 ? getfield(O_, sy) : getfield(G_, sy)
+  end
+  function dnll(i, dz)
+    z = copy(z0); z[i] += dz; P_, G_, O_ = SP.decode(z); H4.simulate!(ST, P_, G_); nll4(DT, O_).total - ref
+  end
+  for (i, nm) in enumerate(SP.names)
+    cl = String[]
+    for dz in (-0.5, -0.05, 0.05, 0.5)
+      z = copy(z0); z[i] += dz; zz = copy(z0); zz[i] += dz * (1 + 1e-6)
+      val(z, nm) == val(zz, nm) && push!(cl, @sprintf("%+.2f", dz))                  # (the decoded value does not move: a clamp)
+    end
+    dn = maximum(abs, [dnll(i, dz) for dz in (-0.05, 0.05)])
+    tag = nm in byd ? "FLAG (at a bound by design)" : !isempty(cl) ? "BAD (clamps)" : dn >= 0.01 * abs(ref) ? "FLAG (sensitive: ±0.05 moves the NLL ≥ 1 %)" : "ok"
+    startswith(tag, "BAD") && push!(bad, nm); startswith(tag, "FLAG") && push!(flagged, nm)
+    push!(rows, @sprintf("%s: start %.4g, clamps %s, |ΔNLL| at ±0.05 %.1f (%.3f %%) %s", nm, val(z0, nm), isempty(cl) ? "none" : join(cl, " "), dn, 100dn / abs(ref), tag))
+  end
+  H4.simulate!(ST, P, G)
+  println("      8.7 encoding table:"); for r in rows; println("        ", r); end
+  check("8.7 [r5 I-1, H16] every coordinate's encoding: no clamp at z ± 0.05 / ± 0.5 from the warm start (ρ log on [1e-7, 0.05]); |ΔNLL(±0.05)| ≥ 1 % of |NLL| and a start at a bound by design are FLAGGED",
+        isempty(bad), "$(length(SP.names)) coordinates; clamping: $(isempty(bad) ? "none" : join(bad, ", ")); flagged: $(join(flagged, ", ")) (table above)")
+end
+# 8.8 [r5 I-4, H19] load_z4 refuses a parameter file of another space (here: written with HBAD4P_FREE=gR) and loads it only with allow_mismatch; a file of the
+# same space round-trips exactly
+let tmp = mktempdir(), SPf = withenv("HBAD4P_FREE" => "gR") do; space4(KEYS, TR, CS.sD, CS.sH; starts4(P, G, OBX)..., ); end
+  f1 = save_z4(joinpath(tmp, "same.csv"), SP, SP.z0); okrt = load_z4(f1, SP) == SP.z0
+  f2 = save_z4(joinpath(tmp, "other.csv"), SPf, SPf.z0)
+  refused = try load_z4(f2, SP); false catch e; occursin("differs", sprint(showerror, e)) end
+  forced = try z = load_z4(f2, SP; allow_mismatch=true); length(z) == length(SP.z0) catch; false end
+  rm(f1 * ".sig"); nosig = try load_z4(f1, SP); false catch; true end
+  check("8.8 [r5 I-4, H19] save_z4 records the space signature (names, encodings, fixed globals, HBAD4P_FIX / FREE); load_z4 refuses a mismatch (or a missing signature) unless allow_mismatch",
+        okrt && refused && forced && nosig, "round trip $(okrt); other space refused $(refused); loaded with allow_mismatch $(forced); missing .sig refused $(nosig)")
 end
 end # section 8
 

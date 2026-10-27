@@ -29,7 +29,7 @@
 #       (seed ? 1 : ε0) Δ, RD of the start of the step, seed = a key tree ≥ 12.7 cm on the plot at v1, or ≥ SEED_MIN trees/ha of the key ≥ 12.7 cm now;  A += Δ.
 # Observation space (finish_site!, the likelihood only — the dynamics are unchanged): every atom is "measured" with the FIA DBH error N(0, sdM²) (sdM fixed,
 #   tools/hbad4/params4.jl): it contributes to class t with probability Φ((ub_t − D)/sdM) − Φ((lb_t − D)/sdM) (lb of class 1 = −∞: the 1-in tally threshold is
-#   the model's entry definition — recruits enter AT 2.54 cm; ub of class 16 = ∞). PN / PB / PH per (site, key, class) = Σ p N, Σ p N π/4 D², Σ p N H_m (H_m = H + H*(D_m) − H*(Dq): the atom's allometric height, audit r4 I1).
+#   the model's entry definition — recruits enter AT 2.54 cm; ub of class 16 = ∞). PN / PB / PH per (site, key, class) = Σ p N, Σ p N π/4 D², Σ p N H_m (H_m = H + H*(D_m) − mean_N H*(D): the atom's allometric height, centred, audit r4 I1 / r5 I-2).
 # Storage (audit r3 B1): the initial atoms are stored only for the cells occupied at v1 (CSR); the working atoms of a site live in the per-thread Scratch while
 #   the site is simulated (run_site!: load_site!, step_site! per year, finish_site!), and only the occupied cells are visited.
 module HBAD4P
@@ -465,20 +465,28 @@ end
 
 """Observation-space prediction of site s (X loaded): PN / PB / PH per (key, class) = Σ over the key's atoms of p N, p N π/4 D², p N H_m, with p the probability
 that the atom is tallied in that class under the DBH measurement error N(0, sdM²) (lb of class 1 = −∞, ub of class 16 = ∞; classes beyond the neighbours of
-the atom's own class are > 25 sd away and get nothing) and H_m = H + H*(D_m) − H*(Dq) the atom's allometric height around its cell's mean height (the rule
-the upgrowth gives movers, §2.4; audit r4 I1: with the cell mean, an atom crossing a class bound took its new cell's height into the blurred tail of its
-old class — a jump of the height term)."""
+the atom's own class are > 25 sd away and get nothing) and H_m = H + H*(D_m) − mean_N H*(D) the atom's allometric height around its cell's mean height,
+CENTRED so that Σ N H_m = Σ N H (audit r5 I-2, H17: the offset H*(Dq) at the QMD biased class 1 by −2.2 %; the upgrowth conserves Σ N·H the same way, §2.4).
+If an offset would put an atom below 0.5 m, the cell's H_m are clamped at 0.5 and rescaled to keep Σ N H_m = Σ N H. (audit r4 I1: with the cell mean, an
+atom crossing a class bound took its new cell's height into the blurred tail of its old class.) X.adD is used as scratch for H*(D_m)."""
 function finish_site!(S::Sites4, P::AbstractVector{SpP4}, G::GlobP4, X::Scratch, s::Int, T_::Tabs)
   lo = S.off[s]; nk = S.nk; b0 = (s - 1) * nk * NCLS; sd = G.sdM
   @inbounds for x in b0+1:b0+nk*NCLS; S.PN[x] = 0.0; S.PB[x] = 0.0; S.PH[x] = 0.0; end
   @inbounds for q in 1:X.no
     li = X.occ[q]; i = li + lo - 1; j = Int(S.cl[i]); k = Int(S.sp[i]); kb = b0 + (k - 1) * NCLS; Hc = S.H[i]; p = P[k]
-    n_ = 0.0; d2 = 0.0
-    for m in 1:X.ac[li]; kk = (li - 1) * NATOM + m; n_ += X.an[kk]; d2 += X.an[kk] * X.ad[kk]^2; end
+    n_ = 0.0; hs_ = 0.0
+    for m in 1:X.ac[li]; kk = (li - 1) * NATOM + m; X.adD[kk] = ht(T_, p, G, k, X.ad[kk]); n_ += X.an[kk]; hs_ += X.an[kk] * X.adD[kk]; end
     n_ > 0 || continue
-    hq = ht(T_, p, G, k, sqrt(d2 / n_))
+    hbar = hs_ / n_; lowest = Inf
+    for m in 1:X.ac[li]; kk = (li - 1) * NATOM + m; X.an[kk] > 0 && (lowest = min(lowest, Hc + X.adD[kk] - hbar)); end
+    fsc = 1.0
+    if lowest < 0.5                                                     # (rare: clamp and rescale, Σ N H_m = Σ N H kept)
+      sh = 0.0; for m in 1:X.ac[li]; kk = (li - 1) * NATOM + m; sh += X.an[kk] * max(Hc + X.adD[kk] - hbar, 0.5); end
+      fsc = n_ * Hc / sh
+    end
     for m in 1:X.ac[li]
-      kk = (li - 1) * NATOM + m; n = X.an[kk]; d = X.ad[kk]; n > 0 || continue; bb = ba(n, d); Hm = max(Hc + ht(T_, p, G, k, d) - hq, 0.5)
+      kk = (li - 1) * NATOM + m; n = X.an[kk]; d = X.ad[kk]; n > 0 || continue; bb = ba(n, d)
+      Hm = lowest < 0.5 ? max(Hc + X.adD[kk] - hbar, 0.5) * fsc : Hc + X.adD[kk] - hbar
       if sd > 0
         for t in max(1, j - 1):min(NCLS, j + 1)
           pr = (t == NCLS ? 1.0 : Φ((CLS_HI[t] - d) / sd)) - (t == 1 ? 0.0 : Φ((CLS_LO[t] - d) / sd))

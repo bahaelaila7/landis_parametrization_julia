@@ -307,7 +307,8 @@ unobserved tally, f = 0, scores nothing — audit r4 M1):
   height (every cell with n_H ≥ 1)     − log[ w N(log H_obs; log H, sH_j²/n_H + σH²) + (1 − w) N(log H_obs; mH_kj, sHb_j²) ];
   w = N / (N + bg): under the count model a tallied tree of the cell is the model's with probability N / (N + bg) — the background density bg (the same
   fitted bgM / bgS) is the pseudo-count of the background trees (audit r4 I1, decision H7: the hard gate N > 1e-9 switched −1.5 … +13-nat terms on and off
-  and gave each model / null its own scored set; now every model and null scores the same cells). Returns parts."""
+  and gave each model / null its own scored set; now every model and null scores the same cells). A cell's mean of n trees (n_H for the height) is the
+  background's only if ALL its trees are: the model component's weight is w_n = 1 − (1 − w)^n (audit r5 M-1). Returns parts."""
 function nll4(D, Ob::ObsP)
   S = D.S; nk = S.nk; ns = HBAD4P.nsites(S); BG = Ob.BG
   pc = zeros(ns); pd = zeros(ns); ph = zeros(ns)
@@ -319,13 +320,13 @@ function nll4(D, Ob::ObsP)
       Np = S.PN[x]; n = D.n[k, j, s]; bg = j >= 3 ? Ob.bgS : Ob.bgM
       c_ -= nb_logpmf(Float64(n), (Np + bg) * f * area_class(j), j >= 3 ? Ob.rS : Ob.rM)
       n > 0 || continue
-      w = Np / (Np + bg); qo = log(sqrt(D.D2[k, j, s] / n))
+      w = Np / (Np + bg); qo = log(sqrt(D.D2[k, j, s] / n)); w1 = 1 - w
       la = Np > 0 ? lnorm(qo, log(HBAD4P.qmd(Np, S.PB[x])), Ob.sD[j]^2 / n + Ob.σD^2) : -Inf
-      d_ -= logmix(w, la, lnorm(qo, BG.mD[j], BG.sDb[j]^2))
+      d_ -= logmix(1 - w1^n, la, lnorm(qo, BG.mD[j], BG.sDb[j]^2))
       if D.nH[k, j, s] > 0
-        ho = log(D.Hs[k, j, s] / D.nH[k, j, s])
-        lh = Np > 0 ? lnorm(ho, log(S.PH[x] / Np), Ob.sH[j]^2 / D.nH[k, j, s] + Ob.σH^2) : -Inf
-        h_ -= logmix(w, lh, lnorm(ho, BG.mH[k, j], BG.sHb[j]^2))
+        ho = log(D.Hs[k, j, s] / D.nH[k, j, s]); nh = D.nH[k, j, s]
+        lh = Np > 0 ? lnorm(ho, log(S.PH[x] / Np), Ob.sH[j]^2 / nh + Ob.σH^2) : -Inf
+        h_ -= logmix(1 - w1^nh, lh, lnorm(ho, BG.mH[k, j], BG.sHb[j]^2))
       end
     end
     pc[s] = c_; pd[s] = d_; ph[s] = h_
@@ -419,13 +420,20 @@ function cached_sets(sets::Vector{String}; dir=DATA_DIR)
   sdi_sub = combine(groupby(DataFrame(iid=wst.iid, sb=wst.sb, x=4 .* wst.w .* (wst.dia ./ 25.4) .^ 1.605 ./ wst.a), [:iid, :sb]), :x => sum => :sdi)
   rdd = Dict((r.iid, r.sb) => r.sdi / 1500 for r in eachrow(sdi_sub)); wst.rd = [rdd[(i, b)] for (i, b) in zip(wst.iid, wst.sb)]
   TM = haskey(B, "train") ? tm_null(L, B["train"], L.keys) : nothing
+  # the train sites' v1 subplot forested fractions (unknown → 1): the weights of the recruitment-light ratio of the warm start (params4.jl, audit r5 I-3)
+  fsub1 = let Dt = B["train"]
+    fsb(s, sb) = (rr = Dt.iv[s, :]; fv = get(FT, (rr.st, rr.u, rr.c, rr.p, rr.d1, sb), (NaN, NaN))[1]; isnan(fv) ? 1.0 : fv)   # (no `f` / `r`: cached_sets' own locals)
+    [fsb(s, sb) for s in 1:length(Dt.iid), sb in 1:4]
+  end
   # the TRAIN sapling ingrowth density per key (v2 ingrowth D < 12.7 cm on the microplots, w / f_micr(v2)): a split key's share of its group's fecundity
   # (params4.jl warm_start4, audit r4 I2)
   Dtr = B["train"]; sx = Dict(iid => s for (s, iid) in enumerate(Dtr.iid)); kx = Dict(k => i for (i, k) in enumerate(L.keys)); igk = zeros(length(L.keys))
+  rec1 = zeros(length(L.keys))                                       # observed RECRUITS per key: train v2 ingrowth in class 1 on the microplots (trees absent at v1)
   for r in eachrow(L.ig)
     s = get(sx, r.iid, 0); (s > 0 && r.dia_cm < 12.7 && Dtr.fm2[s] > 0) || continue; igk[kx[r.key]] += r.w_ha / Dtr.fm2[s]
+    (HBAD4P.dclass(r.dia_cm) == 1 && ismicro(r.w_ha)) && (rec1[kx[r.key]] += 1)
   end
-  out = (keys=L.keys, TR=TR, eb=eb, sD=sD, sH=sH, bgobs=bgo, lanemode=LANEMODE, warm=wst, split=SPLIT_CSV, sets=B, TM=TM, ndrop=L.ndrop, ndrop1=L.ndrop1, igk=igk)
+  out = (keys=L.keys, TR=TR, eb=eb, sD=sD, sH=sH, bgobs=bgo, lanemode=LANEMODE, warm=wst, split=SPLIT_CSV, sets=B, TM=TM, ndrop=L.ndrop, ndrop1=L.ndrop1, igk=igk, fsub1=fsub1, rec1=rec1)
   serialize(f * ".part", out); mv(f * ".part", f; force=true); OBS_BG[] = bgo
   out
 end

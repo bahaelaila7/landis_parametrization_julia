@@ -6,14 +6,16 @@
 #   audit fix, of the order of FIA's measurement-quality tolerance for DBH (±0.1 in per 20 in of diameter, i.e. ±0.1–0.25 cm for 20–50 cm trees). Fixed, not
 #   fitted (the dynamics do not see it; it smooths the class-boundary jumps of the predicted table).
 # κ (lane mixing) is LINEAR on [0, 1] (clamped), so κ = 0 — fully persistent lanes, the FVS triple and HBAD3P's persistent vigour nodes — is reachable
-# (audit r3 I2d; was log-encoded with a 1e-3 floor).
+# (audit r3 I2d; was log-encoded with a 1e-3 floor). ρ (respiration) is LOG-encoded on [1e-7, 0.05] as in HBAD3P (audit r5 I-1, H16: linear on [0, 0.01] from
+# 2.6e-4, a CMA-ES step of 0.05 hit the upper clamp, +17,510 nats). Every coordinate's encoding is audited by verify 8.7. Two coordinates START at a bound by
+# design (their 0 means "none"): κ (H4) and f0 (the diffuse-light floor, HBAD3P's fitted 0); they are flagged, not changed.
 using CSV, DataFrames
 const GSPEC4 = [(:b, 1.75, 1.0, 3.0, false), (:a, 2.35, 0.1, 10.0, true), (:gR, 0.0, -2.0, 1.0, false), (:θ, 8.7, 1.0, 40.0, true), (:ω, 0.96, 0.0, 5.0, false),
-                (:s, 1.16, 0.2, 3.0, true), (:c, 1.25, 0.3, 2.0, true), (:η, 0.69, -1.0, 2.0, false), (:λ, 0.0023, 1e-4, 0.3, true), (:μ, 1.22, -0.5, 2.0, false),
+                (:s, 1.16, 0.2, 3.0, true), (:c, 1.25, 0.3, 3.0, true), (:η, 0.69, -1.0, 2.0, false), (:λ, 0.0023, 1e-4, 0.3, true), (:μ, 1.22, -0.5, 2.0, false),
                 (:kh, 5.1, 0.2, 30.0, true), (:m0, 1.11, 0.01, 10.0, true), (:ms, 0.082, 1e-4, 1.0, true), (:σST, 0.28, -2.0, 2.0, false), (:β, 2.95, 0.1, 20.0, true),
                 (:ζ, -0.62, -3.0, 2.0, false), (:mW, 0.12, -2.0, 3.0, false), (:mA, 10.0, 1.0, 50.0, true), (:pD, 0.11, -1.0, 1.0, false), (:pH, 0.26, -1.0, 1.0, false),
                 (:pM, -0.06, -2.0, 2.0, false), (:σv, 0.36, 0.0, 1.2, false), (:sdimax, 1500.0, 500.0, 3000.0, true), (:am, 0.83, 0.1, 20.0, true),
-                (:ρ, 2.6e-4, 0.0, 0.01, false), (:f0, 0.0, 0.0, 0.5, false), (:βT, 0.0, -0.5, 0.5, false), (:βC, 0.58, 0.0, 2.0, false), (:κ, 0.0, 0.0, 1.0, false),
+                (:ρ, 2.6e-4, 1e-7, 0.05, true), (:f0, 0.0, 0.0, 0.5, false), (:βT, 0.0, -1.0, 1.0, false), (:βC, 0.58, 0.0, 2.0, false), (:κ, 0.0, 0.0, 1.0, false),
                 (:λ0, 3.1, 0.01, 20.0, true), (:λ1, -0.07, -2.0, 2.0, false), (:ε0, 0.3, 1e-3, 1.0, true), (:ωR, 0.0, -3.0, 5.0, false),
                 (:rM, 1.0, 0.05, 100.0, true), (:rS, 2.0, 0.05, 100.0, true), (:bgM, 5.0, 1e-3, 500.0, true), (:bgS, 0.3, 1e-4, 50.0, true),
                 (:σD, 0.02, 1e-5, 0.5, true), (:σH, 0.05, 1e-5, 1.0, true), (:sdM, 0.2, 0.0, 1.0, false)]
@@ -138,33 +140,60 @@ function warm_start4(CS, fit3p; quiet=false)
     for k in mem; share[k] = max(CS.igk[k] / tot, 1e-6); f3[k] += log(share[k]); end
   end
   # recruitment light: HBAD3P's e^{−λ RD} was evaluated per SUBPLOT (RD of the subplot, × 4 / a), HBAD4P's per plot; at the train v1 state the ratio
-  # Rk = Σ_sites (seed ? 1 : ε0) mean_sb e^{−λk RD_sb} / Σ_sites (seed ? 1 : ε0) e^{−λk RD_plot}, λk = λ0 e^{λ1 (ST_k − 3)} (Jensen: convexity, audit r4 I2).
+  # Rk = Σ_sites (seed ? 1 : ε0) Σ_sb f_sb e^{−λk RD_sb} / Σ_sb f_sb / Σ_sites (seed ? 1 : ε0) e^{−λk RD_plot}, λk = λ0 e^{λ1 (ST_k − 3)} (Jensen: convexity, audit
+  # r4 I2), the subplots weighted by their forested fraction f_sb at v1 (unknown → 1) as HBAD3P recruits per forested area (audit r5 I-3, H18: a non-forest
+  # subplot counted at full light).
   # Applied to lnF (as the light ratio to ε) when some |Rk − 1| > 5 % (decision H8).
   rdsb = Dict((r_.iid, r_.sb) => r_.rd for r_ in eachrow(W)); Rk = zeros(nk)
   for k in 1:nk
     lk = G0.λ0 * exp(G0.λ1 * (P0[k].ST - 3)); a = 0.0; b = 0.0
     for s in 1:H4.nsites(S)
-      ws = S.seed0[k, s] ? 1.0 : G0.ε0; iid = D.iid[s]
-      a += ws * sum(exp(-lk * get(rdsb, (iid, sb), 0.0)) for sb in 1:4) / 4; b += ws * exp(-lk * RD4[s])
+      ws = S.seed0[k, s] ? 1.0 : G0.ε0; iid = D.iid[s]; fr = view(CS.fsub1, s, :)        # (HBAD3P recruits per FORESTED subplot area: a non-forest subplot none, r5 I-3)
+      a += ws * sum(fr[sb] * exp(-lk * get(rdsb, (iid, sb), 0.0)) for sb in 1:4) / sum(fr); b += ws * exp(-lk * RD4[s])
     end
     Rk[k] = a / b
   end
   rec = maximum(abs.(Rk .- 1)) > 0.05
   rec && (f3 .+= log.(Rk))
+  # recruits moment-matched on TRAIN (audit r5 I-3 follow-up, decision H22): the HBAD3P mapping (+ shares, + Rk) left the predicted / observed train recruits
+  # (class-1 v2 ingrowth) at 0.43–1.38 by key (HBAD3P's lnF was fitted through ITS sapling survival to v2); one multiplicative step per key, lnF += ln(obs / pred),
+  # pred = the class-1 microplot tally of the warm-start run minus that of the run without recruitment (recruitment is ∝ e^{lnF}; two passes absorb the small
+  # density feedback). Verify 8.3 tests the result on VAL (out of sample).
+  recratio = ones(nk)
+  for pass in 1:2
+    SPx = space4(CS.keys, CS.TR, CS.sD, CS.sH; start_eps=e3, start_lnF=f3, start_glob=g3); Px, Gx, _ = SPx.decode(SPx.z0)
+    pr = zeros(nk)
+    H4.simulate!(S, Px, Gx); for s in 1:H4.nsites(S), k in 1:nk; D.fm2[s] > 0 && (pr[k] += S.PN[H4.obsix(S, s, k, 1)] * D.fm2[s] * AREA_MIC); end
+    H4.simulate!(S, [H4.SpP4(p.lnε, -Inf, p.Hmax, p.ST, p.longevity, p.Tref) for p in Px], Gx)
+    for s in 1:H4.nsites(S), k in 1:nk; D.fm2[s] > 0 && (pr[k] -= S.PN[H4.obsix(S, s, k, 1)] * D.fm2[s] * AREA_MIC); end
+    for k in 1:nk; (CS.rec1[k] > 0 && pr[k] > 0) || continue; c = CS.rec1[k] / pr[k]; pass == 1 && (recratio[k] = c); f3[k] += log(c); end
+  end
   SP = space4(CS.keys, CS.TR, CS.sD, CS.sH; start_eps=e3, start_lnF=f3, start_glob=g3); P, G, Ob = SP.decode(SP.z0)
+  quiet || println("  recruits moment-matched on train (obs / pred before): ", join(["$(CS.keys[k]) $(round(recratio[k]; digits=3))" for k in 1:nk], ", "))
   quiet || println(@sprintf("warm start from %s: ε × %.4f (crowding / crown F %.4f × subplot / plot light %.4f), ms × %.4f (stress gm × F × %.4f), κ = 0; keys from their HBAD3P group key: %s; recruitment subplot / plot light ratio %.3f–%.3f (%s)",
                             fit3p, fe, F, Lr, r, Lmr, join(["$(k) ← $(s)" for (k, s) in zip(CS.keys, src) if k != s], ", "), minimum(Rk), maximum(Rk),
                             rec ? "applied to lnF" : "within 5 %: not applied"))
   quiet || println("  fecundity shares: ", join(["$(CS.keys[k]) $(round(share[k]; digits=3))" for k in 1:nk if share[k] < 1], ", "))
-  (P=P, G=G, Ob=Ob, SP=SP, e3=e3, f3=f3, g3=g3, src=src, fac=(F=F, Lr=Lr, Lmr=Lmr, eps=fe, ms=r, share=share, Rk=Rk, Rapplied=rec))
+  (P=P, G=G, Ob=Ob, SP=SP, e3=e3, f3=f3, g3=g3, src=src, fac=(F=F, Lr=Lr, Lmr=Lmr, eps=fe, ms=r, share=share, Rk=Rk, Rapplied=rec, recmatch=recratio))
 end
 
-# ---------------------------------------------------------------- parameter files (stage results of a fit; read by kappa_profile4.jl)
-"Write a coordinate vector z of the space SP as CSV (name, z, decoded value): the format a stage of a fit hands to the next."
+# ---------------------------------------------------------------- parameter files (stage results of a fit; read by kappa_profile4.jl / calib4.jl)
+"""The signature of a parameter space (audit r5 I-4, H19): the coordinate names in order with their encodings (key coordinates: `ε` log, `lnF` linear;
+globals: their GSPEC4 log flag and bounds), the fixed globals with their values, and HBAD4P_FIX / HBAD4P_FREE as set when the space was built."""
+function space_sig4(SP)
+  enc(nm) = startswith(nm, "ε:") ? "log[-8,$(EPS_MAX)]" : startswith(nm, "lnF:") ? "lin[-15,5]" :
+            (j = findfirst(g -> String(g[1]) == nm, GSPEC4); g = GSPEC4[j]; "$(g[5] ? "log" : "lin")[$(g[3]),$(g[4])]")
+  fx = join(["$(k)=$(v)" for (k, v) in sort(collect(SP.fix); by=x -> String(x[1]))], ";")
+  (names=join(SP.names, ";"), enc=join(enc.(SP.names), ";"), fix=fx, env="FIX=$(get(ENV, "HBAD4P_FIX", ""))|FREE=$(get(ENV, "HBAD4P_FREE", ""))")
+end
+"""Write a coordinate vector z of the space SP as CSV (name, z, decoded value) plus its space signature in `<path>.sig` (space_sig4): the format a stage of a
+fit hands to the next."""
 function save_z4(path, SP, z)
   P, G, Ob = SP.decode(z); val(nm) = startswith(nm, "ε:") ? exp(z[findfirst(==(nm), SP.names)]) : startswith(nm, "lnF:") ? z[findfirst(==(nm), SP.names)] :
                                                         (s = Symbol(nm); s in OBS4 ? getfield(Ob, s) : getfield(G, s))
   CSV.write(path, DataFrame(name=SP.names, z=z, value=[val(nm) for nm in SP.names]))
+  sg = space_sig4(SP); open(path * ".sig", "w") do io; for f in (:names, :enc, :fix, :env); println(io, f, "\t", getfield(sg, f)); end; end
+  path
 end
 """Start values (start_eps, start_lnF, start_glob) of a parameter set (P, G, Ob) for space4 — e.g. to re-encode a stage-1 optimum in a space with other fixed
 globals (the κ profile)."""
@@ -172,9 +201,25 @@ function starts4(P, G, Ob)
   g = Dict{Symbol,Float64}(f => getfield(G, f) for f in fieldnames(HBAD4P.GlobP4)); for f in OBS4; g[f] = getfield(Ob, f); end
   (start_eps=[exp(p.lnε) for p in P], start_lnF=[p.lnF for p in P], start_glob=g)
 end
-"Read a save_z4 file into the space SP (coordinates by name; names absent from the file keep SP.z0)."
-function load_z4(path, SP)
+"""Read a save_z4 file into the space SP. REFUSES (error) a file whose space signature (`<path>.sig`: names, encodings, fixed globals) differs from SP's or is
+missing, unless `allow_mismatch=true` (or HBAD4P_Z4_ALLOW_MISMATCH=1): then coordinates are matched by name, the rest keep SP.z0, and the differences are
+warned about (audit r5 I-4, H19: a stage-1 file of another space was read silently). The HBAD4P_FIX / FREE line is informational (the fixed set is compared)."""
+function load_z4(path, SP; allow_mismatch=get(ENV, "HBAD4P_Z4_ALLOW_MISMATCH", "") == "1")
+  sg = space_sig4(SP); diffs = String[]
+  if isfile(path * ".sig")
+    fsg = Dict(String(split(l, "\t"; limit=2)[1]) => (length(split(l, "\t"; limit=2)) > 1 ? String(split(l, "\t"; limit=2)[2]) : "") for l in readlines(path * ".sig"))
+    for f in (:names, :enc, :fix); get(fsg, String(f), "?") == getfield(sg, f) || push!(diffs, "$(f): file '$(get(fsg, String(f), "?"))' vs space '$(getfield(sg, f))'"); end
+  else
+    push!(diffs, "no signature file $(path).sig")
+  end
+  if !isempty(diffs)
+    allow_mismatch || error("load_z4: the parameter space of $(path) differs from the current one (" * join(diffs, " | ") * "); pass allow_mismatch=true to load by name")
+    @warn "load_z4: loading $(path) into a different parameter space by name" diffs
+  end
   t = CSV.read(path, DataFrame); d = Dict(String(r.name) => Float64(r.z) for r in eachrow(t)); z = copy(SP.z0)
   for (i, nm) in enumerate(SP.names); haskey(d, nm) && (z[i] = d[nm]); end
   z
 end
+"""The stage-1 space of the two-stage calibration (decisions H9 / H19): the warm start's space with κ fixed at 0 (fix_extra). calib4.jl writes its optimum in
+this space and kappa_profile4.jl reads it in this space (load_z4 refuses any other)."""
+stage1_space4(CS, WS) = space4(CS.keys, CS.TR, CS.sD, CS.sH; starts4(WS.P, WS.G, WS.Ob)..., fix_extra=Dict(:κ => 0.0))

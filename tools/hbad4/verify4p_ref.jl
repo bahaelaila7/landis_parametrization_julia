@@ -61,19 +61,24 @@ function compact!(v::Atoms, natom; ward=false, sorted=true)
   end
   v
 end
-"""Observation-space prediction of a site from its atoms: per (key, class) Σ p N, Σ p N π/4 D², Σ p N H_m over the atoms of every cell, H_m = H + H*(D_m) − H*(Dq)
-(the cell's height H, its QMD Dq; ≥ 0.5 m) — the atom's allometric height (audit r4 I1); p = P(an atom of diameter D is tallied in class t) =
-Φ((ub_t − D)/sd) − Φ((lb_t − D)/sd) over ALL classes t (lb of class 1 = −∞, ub of class 16 = ∞). P, G: the parameters (for H*)."""
+"""Observation-space prediction of a site from its atoms: per (key, class) Σ p N, Σ p N π/4 D², Σ p N H_m over the atoms of every cell, H_m = H + H*(D_m) −
+Σ N H*(D) / Σ N (the cell's height H; centred: Σ N H_m = Σ N H — audit r5 I-2; if one would be below 0.5 m, all are clamped at 0.5 and rescaled to that sum)
+— the atom's allometric height; p = P(an atom of diameter D is tallied in class t) = Φ((ub_t − D)/sd) − Φ((lb_t − D)/sd) over ALL classes t (lb of class 1 =
+−∞, ub of class 16 = ∞). P, G: the parameters (for H*)."""
 function obs(C, H, sp, cl, nk, sd, P, G)
   PN = zeros(nk, NC); PB = zeros(nk, NC); PH = zeros(nk, NC); Φ(z) = Distributions.cdf(Distributions.Normal(), z)
   for i in eachindex(C)
     isempty(C[i]) && continue; k = sp[i]; nt = totN(C[i]); nt > 0 || continue
-    hq = hst(P[k], G, sqrt(sum(a -> a[1] * a[2]^2, C[i]) / nt))
-    for (n, d) in C[i]
-      n > 0 || continue; Hm = max(H[i] + hst(P[k], G, d) - hq, 0.5)
+    hb = sum(a -> a[1] * hst(P[k], G, a[2]), C[i]) / nt
+    Hm = [H[i] + hst(P[k], G, d) - hb for (n, d) in C[i]]
+    if any(<(0.5), Hm[[a[1] > 0 for a in C[i]]])
+      Hm = max.(Hm, 0.5); Hm .*= nt * H[i] / sum(a[1] * h for (a, h) in zip(C[i], Hm))
+    end
+    for ((n, d), hm) in zip(C[i], Hm)
+      n > 0 || continue
       for t in 1:NC
         p = sd > 0 ? (t == NC ? 1.0 : Φ((hi_(t) - d) / sd)) - (t == 1 ? 0.0 : Φ((lo_(t) - d) / sd)) : (t == cl[i] ? 1.0 : 0.0)
-        PN[k, t] += p * n; PB[k, t] += p * ba1(n, d); PH[k, t] += p * n * Hm
+        PN[k, t] += p * n; PB[k, t] += p * ba1(n, d); PH[k, t] += p * n * hm
       end
     end
   end
