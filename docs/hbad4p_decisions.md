@@ -201,3 +201,16 @@ recommendations, but document the decision point and the different options"). Th
   - That cell prints KNOWN while the jump is ≤ 3.62 and FAILS beyond.
   - Every other bar stays strict: both sd bars, κ, the 1e-3 series, the count regression 3.3b.
 - **To reverse:** remove the entry; (b) is the lever that would make it unnecessary.
+
+## H16–H21 — Round-5 audit fixes (2026-10-27, agent; the implementer records the details)
+- **H16, ρ encoding:** log-encoded on [1e-7, 0.05], as in HBAD3P, plus check 8.7 auditing every coordinate's encoding.
+  - Option rejected: a linear encoding with a smaller σ for ρ only.
+- **H17, atom heights in the observation:** centred so that ΣNH_m = ΣNH, the same invariant the upgrowth rule keeps.
+  - Option rejected: leave the bias for calibration to absorb into η / λ / μ.
+- **H18, recruitment convexity:** Rk weighted by the forested fraction, as HBAD3P recruits per forested subplot; 8.3 tests recruits rather than the whole sapling tally.
+- **H19, stage-1 tool:** calib4.jl, and save / load refuse a mismatched parameter space.
+  - Option rejected: rely on matching environment variables.
+- **H20, roughness on every coordinate:** every global coordinate plus 3 per-key ones; per-coordinate KNOWN entries with +20 % slack; references keyed by (role, cache key), and an unreferenced combination is INFO.
+  - Option rejected: k1 numbers applied everywhere.
+- **H21, κ decision:** 3 seeds per κ; keep κ > 0 only if min(κ > 0) beats max(κ = 0) by ≥ max(20, 2 × (replicate sd + merge error)).
+  - Options rejected: a single run with a 20-nat margin; no stage 2.
