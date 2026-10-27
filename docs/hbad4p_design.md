@@ -199,7 +199,7 @@ unless stated.
   the dynamics. Accepted; it is most of what remains at 1e-3.
   - The verifier therefore splits the roughness check by term (H14): 3.3 enforces the I1 bar on size + height, 3.3b holds the count term to its 2026-10-27
     values + 10 %, and 3.3c reports the total as INFO.
-  - The residual noise CMA-ES will see is about 2.5–2.8 nats per 1e-3 step of a coordinate on full train.
+  - The residual noise CMA-ES will see is about 2.5–2.8 nats per 1e-3 step of ln ε (PITA) on full train (corrected in round 5, H20: per coordinate, see §11 — 0.0–1.5 nats per 1e-4 step, and on 5000 sites 0.01–5.2 per 1e-3 step; ε:PITA was not representative).
   - The open lever is smooth cell membership in the dynamics (an atom's rates and height continuous across a class bound), a model change for a later round.
 * **I2 split keys took their group's whole fecundity** (predicted / observed v2 sapling tally 6.1 / 6.6 / 2.1 / 23.9 for OXAR / PIEC2 / PIPA2 / QUPR2).
   - Now lnF = the group's + ln(the key's share of the group's train sapling ingrowth); the group keeps its own share (H8).
@@ -226,3 +226,38 @@ unless stated.
 * **Noted (one height per cell):** recruits enter class 1 at H*(2.54 cm) and pull the cell's mean height down. The existing saplings of the cell then grow
   slightly faster: dD ∝ 1 / max(H, 1.37), a higher hydraulic factor, and they are overtopped less. This is a consequence of a single height per cell; it is
   small but systematic in class 1.
+
+## 11. Audit round 5 (2026-10-27, independent Opus review of 3e4f6a7 on k1; fixed — decisions H16–H22 in hbad4p_decisions.md)
+* **I-1 encodings (H16).**
+  - ρ is log on [1e-7, 0.05]: linear on [0, 0.01], a CMA-ES step hit the clamp (+17,510 nats).
+  - Verify 8.7 audits every coordinate (z ± 0.05 / ± 0.5 at the warm start), which also widened c (log [0.3, 3]) and βT (linear [−1, 1]).
+  - Flagged: κ and f0, at a bound by design; ε:PITA, b, s, pD and σv, sensitive (± 0.05 moves the train NLL by 1.1–6.1 %).
+* **I-2 observation heights (H17):** H_m = H + H*(D_m) − mean_N H*(D), so Σ N H_m = Σ N H (class 1 was −2.2 %). Verify 0.14 is the hand check, 1.9 the
+  invariant (9e-16).
+* **I-3 recruitment.**
+  - Rk weighted by the subplots' forested fraction: 1.05–1.08 (H18).
+  - The discriminating check (predicted vs observed RECRUITS) showed the HBAD3P mapping off by 0.73–2.31 (obs / pred) per key. lnF is now moment-matched on
+    train (H22): train 1.000; val 0.64–1.43, 2.8 for PIEC2 on 3 recruits, and 6 of 17 keys beyond 2 sd of the NB noise (8.3b, INFO).
+* **I-4 stage 1 (H19):** `tools/hbad4/calib4.jl` (dry run only). `save_z4` writes the space signature (`.sig`), and `load_z4` refuses a mismatch (verify 8.8).
+* **I-5 κ decision (H21):** 3 seeds per κ; κ > 0 must beat κ = 0 by ≥ max(20, 2 (pooled sd + 0.005 n_val)) nats.
+* **I-6 roughness on every coordinate (H20).** Verify 3.3 covers 38 coordinates: 1e-4 steps on full train, 1e-3 on 5000 sites. Size + height step sd / jump:
+
+  | Coordinate | sd at 1e-4 | sd at 1e-3 | jump at 1e-4 | Within the sd bars (0.93 / 2.7)? |
+  |---|---|---|---|---|
+  | b | **1.12** | 2.39 | 4.03 | **no** |
+  | βT | **1.51** | **4.01** | 4.73 | **no** |
+  | σv | 0.88 | 2.37 | 3.01 | yes |
+  | pD | 0.83 | 2.20 | 3.54 | yes |
+  | ε:PITA | 0.77 | 1.34 | 3.61 | yes |
+  | f0 (at 0.05) | 0.56 | 1.72 | 1.75 | yes |
+  | every other coordinate | ≤ 0.39 | ≤ 0.97 | | yes |
+
+  - b and βT FAIL the sd bars. Both are global multipliers of every tree's growth (the size exponent, the temperature response), so a 1e-4 step moves every
+    atom, and the one-height-per-cell crossings add up. I did not tune; this is reported as open (§9 lever: smooth cell membership).
+  - The jumps > 2 nats are KNOWN entries of k1 (+20 %).
+  - The count term is held to its k1 values + 10 % (3.3b); the references are keyed by (role, cache key).
+  - **The noise CMA-ES sees** (total sd per step, 3.3c): up to 1.5 nats per 1e-4 step on full train (βT 1.47, b 1.18, σv 1.04, pD 0.91, ε:PITA 0.79) and
+    up to 5.2 per 1e-3 step on 5000 sites (βT 5.18, σv 3.33, b 3.12, pD 2.72). Most coordinates are below 0.3 / 1.0.
+* **M-1:** the size / height mixture weight of a cell mean of n trees is w_n = 1 − (1 − w)^n. The size + height NLL changes by +1.6 %, and their pull on the
+  densities is about halved.
+* **M-2:** the κ profile's observation refit uses the cached state.

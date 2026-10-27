@@ -80,7 +80,7 @@ recommendations, but document the decision point and the different options"). Th
   - What remains at 1e-3 is mainly the count term: sd 2.46–2.51 alone. That is the M2 roughness of exact transfer across class bounds plus one height and
     age per cell in the dynamics, accepted in round 4.
   - Making cell membership smooth in the dynamics is the lever left; it is a model change for a later round.
-  - The residual noise CMA-ES will see is about 2.5–2.8 nats per 1e-3 step of a coordinate on full train. Check 3.3 was split by term (H14).
+  - The residual noise CMA-ES will see is about 2.5–2.8 nats per 1e-3 step of ln ε (PITA) on full train (corrected in round 5, H20: per coordinate, see §11 — 0.0–1.5 nats per 1e-4 step, and on 5000 sites 0.01–5.2 per 1e-3 step; ε:PITA was not representative). Check 3.3 was split by term (H14).
 - **To reverse:** `nll4` in data4.jl (the mixture) and `finish_site!` in HBAD4P.jl (H_m → the cell's H).
 
 ## H8 — Fecundity of the keys split from the _H / _S groups (round 4 I2, agent)
@@ -172,7 +172,7 @@ recommendations, but document the decision point and the different options"). Th
   - 3.3c reports the total as INFO.
 - **Open lever:** smooth cell membership in the dynamics (an atom's rates and height continuous across a class bound) is the remaining way to lower the
   count-term roughness. It is a model change, for a later round.
-- **Residual noise scale CMA-ES will see:** about 2.5–2.8 nats per 1e-3 step of a coordinate on full train, mostly the count term.
+- **Residual noise scale CMA-ES will see:** about 2.5–2.8 nats per 1e-3 step of ln ε (PITA) on full train, mostly the count term (corrected in round 5, H20: per coordinate, see §11 — 0.0–1.5 nats per 1e-4 step, and on 5000 sites 0.01–5.2 per 1e-3 step; ε:PITA was not representative).
 - **Result (2026-10-27, k1, runtime-fitted observation parameters; step sd / largest jump):**
 
   | Series | size + height | size | height | count | total |
@@ -221,3 +221,69 @@ recommendations, but document the decision point and the different options"). Th
   - the tallies assume a subplot / microplot design; PNW / CA need a macroplot tier (16.6 % of live trees at TPA 0.999);
   - the HBAD3P warm start exists for GA+FL only;
   - Tref and climate ranges would be extrapolated.
+
+## H16–H22 — Implementation of the round-5 fixes (2026-10-27, agent)
+- **H16 encodings (params4.jl GSPEC4; verify 8.7).**
+  - ρ is log on [1e-7, 0.05].
+  - The 8.7 audit at the warm start (z ± 0.05, ± 0.5) found two more coordinates that clamp, now widened:
+    - c, the H–D shape, log on [0.3, 2] → [0.3, 3]: +0.5 hit 2.0.
+    - βT, linear on [−0.5, 0.5] → [−1, 1]: ±0.5 hit the bounds.
+  - κ and f0 start at their lower bound by design (0 = none) and are flagged.
+  - Coordinates whose ±0.05 step moves the train NLL by ≥ 1 % are FLAGGED, not changed (the table is printed by 8.7):
+    - ε:PITA 1.31 %, b 1.20 %, s 1.15 %, pD 1.56 %, σv 6.1 %.
+    - Recommendation for calibration: a smaller initial σ for these coordinates, or a per-coordinate scaling. calib4.jl does not do this yet.
+    - Option rejected: re-encoding σv in log, which is still > 1 % at ±0.05.
+- **H17 centred atom heights (HBAD4P.jl finish_site!; verify 0.14, 1.9).** H_m = H + H*(D_m) − mean_N H*(D), so Σ N H_m = Σ N H exactly (1.9: max rel
+  9e-16). If an offset falls below 0.5 m, the cell is clamped at 0.5 and rescaled.
+- **H18 recruitment light (params4.jl warm_start4).** Rk weights the subplots by their v1 forested fraction: 1.046–1.079 now (1.116–1.183 before).
+- **H22 (new) recruits moment-matched on train.**
+  - **Evidence:** 8.3 made discriminating (predicted vs observed RECRUITS = class-1 v2 ingrowth) showed that the HBAD3P mapping with shares and Rk predicts
+    obs / pred of 0.73–2.31 by key on train: PITA 1.82, PIEL 1.72, OXAR 2.00, QUPR2 2.31, TAAS 0.73. HBAD3P's lnF was fitted through its own sapling
+    survival to v2.
+  - **Options:**
+    - (a) keep the mapping: 8.3 fails, and calibration starts far off for these keys;
+    - (b) **moment-match lnF per key on train**: lnF += ln(obs / pred), two passes;
+    - (c) fit lnF by maximum likelihood now, which is calibration and not allowed.
+  - **Chosen:** (b). It is data-derived, one multiplicative step, like the ε rescalings.
+    - 8.3 checks the train ratio, recomputed independently (all 1.000).
+    - 8.3b reports VAL: 0.64 (LITU) … 1.43 (TAAS); 2.84 for PIEC2 on 3 recruits. Several keys are beyond 2 sd of the NB count noise: recruitment differs
+      between folds more than the count model's noise (spatial clustering). It is INFO, since calibration fits lnF.
+  - **To reverse:** params4.jl warm_start4, the `recratio` loop.
+- **H19 stage-1 tool and strict files.**
+  - `tools/hbad4/calib4.jl`: CMA-ES on the train NLL in `stage1_space4` (κ = 0), with a budget, seed, running best and log.
+    - Dry run only: 200 sites, 60 evaluations, NLL 3104.8 → 2922.0.
+  - `save_z4` writes `<file>.sig`: the names, encodings, fixed globals and HBAD4P_FIX / FREE.
+  - `load_z4` refuses a different space or a missing signature unless `allow_mismatch=true` / HBAD4P_Z4_ALLOW_MISMATCH=1.
+    - verify 8.8: a file written with HBAD4P_FREE=gR is refused, loads with the override, and a missing .sig is refused.
+  - kappa_profile4.jl reads stage 1 in `stage1_space4`.
+- **H20 roughness on every coordinate (verify 3.3 / 3.3b / 3.3c).**
+  - The coordinates: every global coordinate, plus ε of PITA (common), of the rarest own key, and of the split key with the smallest share (QUPR2).
+  - The steps: 1e-4 on full train and 1e-3 on 5000 sites.
+  - The bars:
+    - the size + height sd bars are enforced everywhere;
+    - jumps > 2 nats need a KNOWN entry within +20 %;
+    - the count term is held to its reference + 10 % + 0.01 nats. The floor is needed because the references are recorded to 4 decimals: the six
+      observation coordinates and am have count roughness ≈ 0, and a rounded 0.0000 cannot be met by 1e-5;
+    - references are keyed by (role, cache key), and an unreferenced combination reports INFO plus the literal to record.
+  - **k1 result (full run):** two coordinates FAIL the size + height sd bars:
+    - b: 1.12 at 1e-4 and 2.39 at 1e-3;
+    - βT: 1.51 and 4.01.
+    - Both are global multipliers of every atom's growth.
+  - Jumps > 2 nats recorded as KNOWN: ε:PITA 3.61 (2.62 in round 4, before the centred heights, w_n and the recruit match), b 4.03, pD 3.54, σv 3.01, βT 4.73.
+  - The k1 references are in `ROUGH_REF[("k1", "9e31afc324039360")]`.
+  - **Not tuned and not re-barred: open for the coordinator.** The options:
+    - per-coordinate bars scaled by the 8.7 sensitivity;
+    - KNOWN entries for the sd bar too;
+    - the smooth cell-membership change.
+  - This supersedes H14 / H15's single ε:PITA entry.
+- **H21 κ decision rule (kappa_profile4.jl).**
+  - 3 CMA-ES seeds per κ, κ = 0 included.
+  - κ > 0 is kept only if min over its seeds of the val count NLL ≤ max over κ = 0's seeds − max(20, 2 × (pooled replicate sd + 0.005 nats/site × n_val)).
+  - Note: as specified, this compares the best κ > 0 run with the worst κ = 0 run. The margin, 35 nats or more at n_val = 3511, is what protects it.
+  - The dry run (200 sites, 24 evaluations) gave a pooled sd of 45 nats and a margin of 91 nats.
+- **M-1 the mixture weight of a cell mean.**
+  - w_n = 1 − (1 − w)^n (n_H for the height): the cell's mean is the background's only if all its trees are.
+  - Effect at the warm start (train, fitted observation parameters): the size + height NLL changes from −227,675 to −224,035 nats (+1.6 %).
+  - Their pull on the densities is about halved: the NLL change for densities × 0.8 / × 1.25 goes from −327 / +317 to −178 / +171 nats.
+  - Kept: for a cell mean it is the right "all-background" event. It remains an approximation for mixed cells (a mixed mean is neither component).
+- **M-2.** kappa_profile4.jl simulates the state once per κ before the observation-only refit.
