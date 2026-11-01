@@ -778,7 +778,7 @@ if want(5)
 section("5. data pipeline vs SQL on the raw databases")
 let ivsql = q("""
     WITH vis AS (SELECT STATECD st, UNITCD u, COUNTYCD c, PLOT p, MEASDATE md, bool_or(coalesce(TRTCD1, 0) > 0) trt, bool_or(coalesce(DSTRBCD1, 0) > 0) dst,
-                        bool_or(coalesce(tree_fate, '') LIKE 'harvest%') harv
+                        bool_or(coalesce(tree_fate, '') IN ('silvicultural_death', 'harvest_inferred')) harv
                  FROM s.curated_trees WHERE STATECD IN (12, 13) GROUP BY ALL),
          pr AS (SELECT *, lead(md) OVER w md2, lead(trt) OVER w trt2, lead(dst) OVER w dst2, lead(harv) OVER w harv2 FROM vis WINDOW w AS (PARTITION BY st, u, c, p ORDER BY md))
     SELECT st, u, c, p, md d1, md2 d2, trt2, dst2, harv2 FROM pr WHERE md2 IS NOT NULL AND date_diff('day', md, md2) / 365.25 > 2""")
