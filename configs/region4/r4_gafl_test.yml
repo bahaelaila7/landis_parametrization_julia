@@ -3,10 +3,10 @@
 # Reduced search budget (igel_mu 30, n_reps 2) — a shake-down of the region pipeline, not a production fit.
 # Species-balanced training (train_cap), L3→L2→region pooling of growth params, per-L3 CMA-ES blocks.
 # TWO-PASS: (1) run with `split_only: true` (override) → output_dir gets split_plots.csv/species_map.csv/pool_map.csv;
-#           (2) tools/build_floors_region.jl --run <that dir> --db ${PAN_DATA}/slim_r4.duckdb --out ${PAN_DATA}/floor_r4
+#           (2) tools/build_floors_region.jl --run <that dir> --db ${PAN_DATA}/fia_truth_r4.duckdb --out ${PAN_DATA}/floor_r4
 #               → floor_r4_bmax.csv / floor_r4_anpp.csv (from TRAIN plots only); (3) run this config normally.
 seed: 1337
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
 tablename: "curated_cohorts_landis_stdorg"
 output_dir: "${PAN_OUT}/r4_gafl_test_outputs"
 filter_eco_field: "epa_l3"

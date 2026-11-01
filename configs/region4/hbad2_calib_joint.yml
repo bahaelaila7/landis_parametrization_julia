@@ -4,11 +4,11 @@
 # minimised as the augmented Chebyshev scalarisation max(l fA', (1-l) fB') + rho (l fA' + (1-l) fB'), f' = (f - ideal) / (nadir - ideal), by the prototype's CMA-ES
 # (search_mode cmaes: Search.PlainCMA, lambda 24 / sigma0 0.03 as in the prototype). j15 setup: recruitment fixed at the data fit x one fitted level kappa (0.503 in j15),
 # mortality (mbg mD msup, G:mD2 G:mSD G:pM) frozen at the Sim A optimum fitted WITH vigour (v2fv), sigma_v <= 0.7, l = 0.75.
-# Needs PAN_DATA (slim_r4.duckdb with curated_trees + REF_SPECIES) and PAN_OUT. The split is the one of the prototype (a Pan run's split_plots.csv).
+# Needs PAN_DATA (fia_truth_r4.duckdb with curated_trees + REF_SPECIES) and PAN_OUT. The split is the one of the prototype (a Pan run's split_plots.csv).
 seed: 1337
 succession_plugin: "hbad2"
 search_mode: "cmaes"
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"
 output_dir: "${PAN_OUT}/hbad2_calib_joint"
 trials: 12000              # evaluations (the CMA-ES stops earlier on stagnation, as j15 did)
 cmaes_lambda: 24

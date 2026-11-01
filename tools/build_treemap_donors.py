@@ -1,3 +1,4 @@
+import os
 """Build donor table for TreeMap 2022 plots lacking curated cohort data.
 Run: /workspace/standmap/.venv/bin/python -I tools/build_treemap_donors.py
 """
@@ -6,7 +7,7 @@ from dbfread import DBF
 from sklearn.neighbors import NearestNeighbors
 
 TM = '/workspace/FVSclaude/treemap/Data/'
-DB = '/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb'
+DB = os.environ.get('PAN_FIA_DB', os.path.join(os.environ.get('WORKSPACE', '/workspace'), 'FIA/truth/fia_truth_r4.duckdb'))
 OUT = '/workspace/landis_scen/data/treemap_donors.csv'
 GEO_W = 0.5
 MIN_FT = 20

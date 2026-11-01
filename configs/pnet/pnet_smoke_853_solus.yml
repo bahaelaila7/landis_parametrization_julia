@@ -8,7 +8,7 @@ pnet_co2_csv: "${PAN_DATA}/co2_annual.csv"
 pnet_soil_csv: "${PAN_DATA}/plot_soil_r4.csv"   # per-plot SOLUS soil (tools/build_plot_soil.jl)
 # pnet_generic: {precip_events: 11}          # optional PnETConst overrides
 # pnet_soil_texture: {"8.5.3": "SALO"}       # optional {L3: Saxton-Rawls texture}; default LOAM
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"
 tablename: "curated_cohorts_landis_stdorg"
 output_dir: "${PAN_OUT}/pnet_smoke_853_solus_outputs"
 filter_eco_field: "epa_l3"

@@ -8,7 +8,7 @@ constants (SUBPLOT_ID, COHORT_ID, SEVERITY_FRAC, GF_FLOOR/GF_CEIL, DISTURB_FATES
 `compute()` (source lines 62-173) cannot be reused because it drops full-cohort removals (n_survivors == 0) internally
 (source lines 160-165); `compute_all()` below is a COPY of that function with exactly one change: the full removals are
 kept, plus two extra columns (`n_alive_cur`, `full_removal`). The partial rows (n_survivors > 0) are therefore identical
-to the source's output (validated against the `cohort_disturbance` table in slim_r4.duckdb, see --validate).
+to the source's output (validated against the `cohort_disturbance` table in fia_truth_r4.duckdb, see --validate).
 
 Definitions
   full_removal    : no tree of the cohort is alive at T (n_alive_cur == 0): the cohort is GONE from the inventory at T
@@ -125,9 +125,9 @@ def compute_all(df):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb")
+    ap.add_argument("--db", default="/workspace/FIA/truth/fia_truth_r4.duckdb")
     ap.add_argument("--out", default="/workspace/landis_mogd/data/cohort_disturbance_full.parquet")
-    ap.add_argument("--validate", default="/workspace/landis_region4/data_r4/slim_r4.duckdb")
+    ap.add_argument("--validate", default="/workspace/landis_region4/data_r4/fia_truth_r4.duckdb")
     ap.add_argument("states", nargs="*", type=int)
     a = ap.parse_args()
     states = a.states or [12, 13]

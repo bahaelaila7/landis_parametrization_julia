@@ -9,7 +9,7 @@
 #   categories pool the L3's cells. A group with < --min-n values falls back to the L2 pool, then the region pool.
 # Writes <out>_bmax.csv (category,l3,lu,n,p99_biom,p99_incr,bmax_floor,level) and <out>_anpp.csv
 # (category,l3,lu,n,anpp_floor,anpp_floor_max,level), one row per (category, L3, cell present in train).
-#   ./julia_gdal.sh --project=. tools/build_floors_region.jl --run <split_only output dir> --db data_r4/slim_r4.duckdb \
+#   ./julia_gdal.sh --project=. tools/build_floors_region.jl --run <split_only output dir> --db data_r4/fia_truth_r4.duckdb \
 #       --out data_r4/floor_r4 [--cell-split PITA,PIEL] [--cell-merge PIEL:A=AB,B=AB] [--min-n 30]
 import DuckDB, DataFrames, CSV, Statistics, Dates
 using DataFrames: DataFrame, groupby, combine, nrow, select, innerjoin

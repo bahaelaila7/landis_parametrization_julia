@@ -4,7 +4,7 @@
 seed: 1337
 succession_plugin: "hbad2"
 search_mode: "cmaes"
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"
 output_dir: "${PAN_OUT}/hbad2_calib_simA"
 trials: 12000
 cmaes_lambda: 32

@@ -5,7 +5,7 @@
 seed: 1337
 succession_plugin: "hbad"        # fixed priors from results/hbad (hbad_priors_csv / hbad_coefs_csv default to the repo copies)
 hbad_init: "jitter"             # start candidates: default | jitter | prior
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
 tablename: "curated_cohorts_landis_stdorg"
 output_dir: "${PAN_OUT}/hbad_gafl_smoke_outputs"
 filter_eco_field: "epa_l3"

@@ -2,7 +2,7 @@
 # param_pooling (L3→L2→region) and per-L3 CMA-ES blocks. 8.5.3 (pine coastal plain) + 8.3.4 (Piedmont).
 # Floors/exclusions are 853-specific → OFF until regenerated per L3 (plan A7). Not a production config.
 seed: 1337
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"
 tablename: "curated_cohorts_landis_stdorg"
 output_dir: "${PAN_OUT}/r4_smoke_2l3_outputs"
 filter_eco_field: "epa_l3"

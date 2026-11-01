@@ -1,6 +1,6 @@
 # Region inventory: per L3 → remeasured plots, 4-cell site-class split, top dominant species (AGB at last visit),
 # share of commercial-pine-dominated plots. Drives siteclass_l3s / param_pooling / train_cap choices.
-#   ./julia_gdal.sh --project=. tools/region_inventory.jl data_r4/slim_r4.duckdb [eco_field]
+#   ./julia_gdal.sh --project=. tools/region_inventory.jl data_r4/fia_truth_r4.duckdb [eco_field]
 import DuckDB, DataFrames, CSV
 db = ARGS[1]; ef = length(ARGS) > 1 ? ARGS[2] : "epa_l3"
 con = DuckDB.DBInterface.connect(DuckDB.DB, ":memory:")

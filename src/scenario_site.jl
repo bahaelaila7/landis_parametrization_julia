@@ -88,9 +88,10 @@ _site_table(scen::ScenarioConfig) = get_cached!(scen.cache, :site_table) do
     DuckDB.execute(con, "ATTACH '$(PanCore.sql_quote_path(scen.fia_db))' AS src (READ_ONLY)")
     df = DataFrame(DuckDB.DBInterface.execute(con, """
       WITH k AS (SELECT plt_cn AS key, any_value(epa_l3) AS l3 FROM src.$(Data._ident(scen.cohort_table, "cohort_table")) GROUP BY plt_cn),
-           p AS (SELECT CN, STATECD||'_'||UNITCD||'_'||COUNTYCD||'_'||PLOT AS key, LAT, LON FROM src.PLOT WHERE LAT IS NOT NULL),
+           p AS (SELECT STATECD, UNITCD, COUNTYCD, PLOT, INVYR, STATECD||'_'||UNITCD||'_'||COUNTYCD||'_'||PLOT AS key, LAT, LON FROM src.PLOT WHERE LAT IS NOT NULL),
            pk AS (SELECT p.* FROM p JOIN k USING (key)),
-           c AS (SELECT pk.key, co.SITECLCD AS sc, SUM(co.CONDPROP_UNADJ) AS w FROM src.COND co JOIN pk ON co.PLT_CN = pk.CN
+           c AS (SELECT pk.key, co.SITECLCD AS sc, SUM(co.CONDPROP_UNADJ) AS w FROM src.COND co
+                   JOIN pk ON co.STATECD = pk.STATECD AND co.UNITCD = pk.UNITCD AND co.COUNTYCD = pk.COUNTYCD AND co.PLOT = pk.PLOT AND co.INVYR = pk.INVYR
                  WHERE co.COND_STATUS_CD = 1 AND co.SITECLCD IS NOT NULL GROUP BY ALL),
            r AS (SELECT key, sc, ROW_NUMBER() OVER (PARTITION BY key ORDER BY w DESC, sc) AS rn FROM c),
            ll AS (SELECT key, avg(LAT) AS lat, avg(LON) AS lon FROM pk GROUP BY key)

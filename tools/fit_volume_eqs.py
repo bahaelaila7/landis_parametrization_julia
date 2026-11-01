@@ -6,7 +6,7 @@ Writes data/volume_eqs_r4.csv; prints stats/validation tables (markdown) to stdo
 import os, sys
 import duckdb, numpy as np, pandas as pd
 
-DB = '/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb'
+DB = os.environ.get('PAN_FIA_DB', os.path.join(os.environ.get('WORKSPACE', '/workspace'), 'FIA/truth/fia_truth_r4.duckdb'))
 OUT = '/workspace/landis_scen/data/volume_eqs_r4.csv'
 STATES = (1, 12, 13, 21, 28, 37, 45, 47)
 K = 0.005454154
@@ -18,7 +18,7 @@ def load():
     c = duckdb.connect(DB, read_only=True)
     q = f"""select t.CN tcn, t.PLT_CN plt, t.SPCD spcd, t.SPGRPCD grp, r.SPECIES_SYMBOL sym,
         r.COMMON_NAME cname, t.DIA dia, t.HT ht, t.VOLTSGRS vt, t.VOLBFGRS vb, t.TPA_UNADJ tpa
-        from TREE t join PLOT p on t.PLT_CN=p.CN join REF_SPECIES r on t.SPCD=r.SPCD
+        from TREE t join PLOT p on t.STATECD=p.STATECD and t.UNITCD=p.UNITCD and t.COUNTYCD=p.COUNTYCD and t.PLOT=p.PLOT and t.INVYR=p.INVYR join REF_SPECIES r on t.SPCD=r.SPCD
         where t.STATUSCD=1 and t.DIA>=1.0 and t.HT>0 and p.MEASYEAR>=2010 and p.STATECD in {STATES}"""
     df = c.sql(q).df(); c.close()
     df = df.sort_values('tcn').reset_index(drop=True)

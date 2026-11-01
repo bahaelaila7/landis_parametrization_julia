@@ -176,7 +176,7 @@ function species_composition_main()
   plot_species_composition(
     cohorts_db=joinpath("../poster/fl5_strat4_prob_spinup/pan_outputs_90_2", "cohorts.duckdb"),
     scenario_dir=prefix,
-    fia_db="../FIASQLITE2PGSQL/FIADB.duckdb",
+    fia_db="../FIA/truth/fia_truth_r4.duckdb",
     output_path=joinpath("../poster/fl5_strat4_prob_spinup/pan_outputs_90_2", "species_composition.png"),
     years=[0, 25, 50],
   )

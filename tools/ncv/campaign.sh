@@ -17,7 +17,7 @@ SMOKE="${NCV_SMOKE:-0}"
 R="${NCV_ROOT:-$NCV/runs_local/ncv$([ "$SMOKE" = 1 ] && echo _smoke)}"; mkdir -p "$R"
 H3="${NCV_HBAD3:-$WS/landis_hbad3_ncv}"; H3DATA="$WS/landis_hbad3/results"      # hbad3-ncv code; the R4 interval product + climate/water/forest tables
 export PAN_DATA="${PAN_DATA:-$WS/landis_region4/data_r4}" PAN_OUT="$R"
-DB="$PAN_DATA/slim_r4.duckdb"; PY="$WS/standmap/.venv/bin/python"; TH="${THREADS:-8}"
+DB="$PAN_DATA/fia_truth_r4.duckdb"; PY="$WS/standmap/.venv/bin/python"; TH="${THREADS:-8}"
 JL="./julia_gdal.sh --project=. --threads=$TH"
 MODELS="${1:-all}"; ROLES="${2:-all}"
 [ "$MODELS" = all ] && MODELS="bs,hbad,hbad3p,hbad2,pnet"

@@ -259,7 +259,7 @@ function export_landis_scenario_main()
     biomass_params_path="params.jld2",
     treemap_raster="FL5_22.tif",
     treemap_version=2022,
-    treemap_db_path="../FIASQLITE2PGSQL/FIADB.duckdb",
+    treemap_db_path="../FIA/truth/fia_truth_r4.duckdb",
     climate_config_file="../poster/fl5/biomass-climate.txt",
     downsample=3,
     stratify_eco_mixed=true,

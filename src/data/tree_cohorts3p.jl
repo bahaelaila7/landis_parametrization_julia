@@ -53,7 +53,9 @@ function forest_fractions(con, vis::DataFrame)
     df = DataFrame(DuckDB.execute(con, """
       SELECT p.STATECD AS st, p.UNITCD AS un, p.COUNTYCD AS co, p.PLOT AS pl, make_date(p.MEASYEAR::INT, p.MEASMON::INT, p.MEASDAY::INT) AS md, s.SUBP AS sb,
              sum(CASE WHEN k.COND_STATUS_CD = 1 THEN s.SUBPCOND_PROP ELSE 0 END) AS f, sum(s.SUBPCOND_PROP) AS tot
-      FROM src.SUBP_COND s JOIN src.PLOT p ON p.CN = s.PLT_CN JOIN src.COND k ON k.PLT_CN = s.PLT_CN AND k.CONDID = s.CONDID
+      FROM src.SUBP_COND s
+      JOIN src.PLOT p ON p.STATECD = s.STATECD AND p.UNITCD = s.UNITCD AND p.COUNTYCD = s.COUNTYCD AND p.PLOT = s.PLOT AND p.INVYR = s.INVYR
+      JOIN src.COND k ON k.STATECD = s.STATECD AND k.UNITCD = s.UNITCD AND k.COUNTYCD = s.COUNTYCD AND k.PLOT = s.PLOT AND k.INVYR = s.INVYR AND k.CONDID = s.CONDID
       JOIN vis_f v ON v.st = p.STATECD AND v.un = p.UNITCD AND v.co = p.COUNTYCD AND v.pl = p.PLOT
       WHERE p.MEASYEAR IS NOT NULL AND p.MEASMON IS NOT NULL AND p.MEASDAY IS NOT NULL
       GROUP BY ALL"""))

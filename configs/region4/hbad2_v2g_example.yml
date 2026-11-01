@@ -9,7 +9,7 @@ hbad2_params_dir: ""            # "" = results/hbad2 (the v2g export); a directo
 hbad2_vigour: true              # recruits / planted trees enter as 3 vigour sub-cohorts (zq = -sqrt3, 0, sqrt3; shares 1/6, 2/3, 1/6)
 hbad_priors_csv: ""             # v1 priors: only the REPORTED allometric AGB (c_bio) and the AGB -> state translation of add_cohort!
 hbad_coefs_csv: ""
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
 tablename: "curated_cohorts_landis_stdorg"
 output_dir: "${PAN_OUT}/hbad2_v2g_example_outputs"
 filter_eco_field: "epa_l3"

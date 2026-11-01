@@ -26,7 +26,7 @@ SELECT UPPER(TRIM(sym)) sym, spgrpcd, sh, epa_l3, land_use,
 FROM (
   SELECT sym, spgrpcd, sh, epa_l3, land_use, datediff('year', measdate, nmd) intv,
     CASE WHEN nterm AND ndc='natural' THEN 'died'
-         WHEN nterm AND ndc IN ('harvest_explicit','harvest_inferred','disturbance') THEN 'cens'
+         WHEN nterm AND ndc IN ('silvicultural_death','harvest_inferred','disturbance') THEN 'cens'
          ELSE 'surv' END outcome
   FROM o WHERE dia>=1.0 AND dia<5.0 AND nmd IS NOT NULL
 ) GROUP BY 1,2,3,4,5

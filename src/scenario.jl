@@ -57,7 +57,7 @@ Where the scenario engine reads its data. Every default is resolved when the con
 (`run_scenario` uses the set's) and `climate_preview`.
 """
 Base.@kwdef struct ScenarioConfig
-  fia_db::String = get(ENV, "PAN_FIA_DB", "/workspace/FIA/FIASQLITE2PGSQL/FIADB.duckdb")
+  fia_db::String = get(ENV, "PAN_FIA_DB", joinpath(get(ENV, "WORKSPACE", "/workspace"), "FIA", "truth", "fia_truth_r4.duckdb"))
   cohort_table::String = get(ENV, "PAN_COHORT_TABLE", "curated_cohorts_landis_stdorg")
   soil_csv::String = get(ENV, "PAN_SOIL_CSV", "/workspace/landis_region4/data_r4/plot_soil_r4.csv")
   pnet_climate::String = get(ENV, "PAN_PNET_CLIMATE", "/workspace/landis_region4/data_r4/pnet_climate_r4_l4.jld2")
@@ -156,8 +156,11 @@ function load_scenario_plots(scen::ScenarioConfig, cns::Vector{String})
       SELECT p.CN cn, p.STATECD s, p.UNITCD u, p.COUNTYCD c, p.PLOT p, p.INVYR invyr, p.MEASYEAR my, p.MEASMON mm, p.MEASDAY md, p.LAT lat, p.LON lon
       FROM src.PLOT p JOIN req_cns r ON p.CN = r.cn
       ORDER BY p.CN"""))
+    # natural id (FIA truth D59): the requested CN is resolved to its visit once, above; COND joins on the visit's key
+    DuckDB.register_data_frame(con, DataFrame(cn=pl.cn, s=pl.s, u=pl.u, c=pl.c, p=pl.p, y=pl.invyr), "req_vis")
     sc = DataFrame(DuckDB.DBInterface.execute(con, """
-      WITH cr AS (SELECT co.PLT_CN cn, co.SITECLCD sc, SUM(co.CONDPROP_UNADJ) w FROM src.COND co JOIN req_cns r ON co.PLT_CN = r.cn
+      WITH cr AS (SELECT r.cn cn, co.SITECLCD sc, SUM(co.CONDPROP_UNADJ) w FROM src.COND co
+                    JOIN req_vis r ON co.STATECD = r.s AND co.UNITCD = r.u AND co.COUNTYCD = r.c AND co.PLOT = r.p AND co.INVYR = r.y
                   WHERE co.COND_STATUS_CD = 1 AND co.SITECLCD IS NOT NULL GROUP BY ALL),
            rk AS (SELECT cn, sc, ROW_NUMBER() OVER (PARTITION BY cn ORDER BY w DESC, sc) rn FROM cr)
       SELECT cn, sc FROM rk WHERE rn = 1"""))

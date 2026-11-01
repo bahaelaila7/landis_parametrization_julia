@@ -4,7 +4,7 @@
   L3 of a plot = the most frequent epa_l3 of its curated cohorts (else of its curated trees; plots with neither = "NA").
 Outputs in <out>: folds.csv (statecd, unitcd, countycd, plot, fold, block, l3, lat, lon) and one role file per role (statecd, unitcd, countycd, plot,
   eco, dom, set): split_k<k>.csv (test = fold k, val = fold k mod K + 1, train = the rest) and split_final.csv (val = fold 1, train = the rest, no test).
-  python -I tools/ncv/make_folds.py --db <slim_r4.duckdb> --out <dir> [--k 5] [--block-deg 0.25] [--seed 20261023] [--states 12,13]"""
+  python -I tools/ncv/make_folds.py --db <fia_truth_r4.duckdb> --out <dir> [--k 5] [--block-deg 0.25] [--seed 20261023] [--states 12,13]"""
 import argparse, os, sys
 import numpy as np, pandas as pd, duckdb
 

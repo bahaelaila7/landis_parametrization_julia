@@ -3,7 +3,7 @@
 # Plots of Georgia (13) + Florida (12) in the 7 L3s they contain; species-balanced training (train_cap k=4).
 # Growth params pooled at REGION level (PITA/PIEL keep per-site-cell values); small σ0; plain Sobol start (centre first).
 seed: 1337
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
 tablename: "curated_cohorts_landis_stdorg"
 output_dir: "${PAN_OUT}/gafl_pnet_outputs"
 succession_plugin: "pnet"

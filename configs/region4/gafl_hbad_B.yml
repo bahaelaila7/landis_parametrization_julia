@@ -9,7 +9,7 @@ succession_plugin: "hbad"
 hbad_init: "default"
 hbad_seed_rain: false             # false: only species with a mature (age >= MATURITY) cohort on the site seed; true: every species of the ecoregion
 hbad_prob_estab_csv: "${PAN_DATA}/prob_estab_all_species.csv"   # per-cycle (species, L3) occurrence -> annual p = 1-(1-p)^(1/cycle_years)
-cohorts_db_path: "${PAN_DATA}/slim_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
+cohorts_db_path: "${PAN_DATA}/fia_truth_r4.duckdb"      # tools/build_slim_db_region.jl (state ∩ L3, + PLOT)
 tablename: "curated_cohorts_landis_simB"
 output_dir: "${PAN_OUT}/gafl_hbad_B_outputs"
 filter_eco_field: "epa_l3"
