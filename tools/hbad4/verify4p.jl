@@ -30,8 +30,8 @@ const H4 = HBAD4P
 const NA4 = H4.NATOM
 const ROLE = basename(dirname(normpath(DATA_DIR)))                                           # e.g. k1 (product = …/prep/<role>/product)
 const FIT3P = length(ARGS) >= 1 ? ARGS[1] : get(ENV, "HBAD4_FIT3P", joinpath(DATA_DIR, "..", "..", "..", "hbad3p", ROLE, "fit3p_" * ROLE))
-const SLIM_DB = get(ENV, "HBAD3_SLIM_DB", joinpath(WSROOT, "landis_region4", "data_r4", "slim_r4.duckdb"))
-const FIADB = get(ENV, "HBAD4_FIADB", joinpath(WSROOT, "FIA", "FIASQLITE2PGSQL", "FIADB.duckdb"))
+const SLIM_DB = get(ENV, "HBAD3_SLIM_DB", joinpath(WSROOT, "landis_region4", "data_r4", "fia_truth_r4.duckdb"))
+const FIADB = SLIM_DB   # FIA truth (D59): as-recorded inventory in its `raw` schema
 const ROLE_SPLIT = isempty(SPLIT_CSV) ? joinpath(DATA_DIR, "..", "..", "..", "folds", "split_$(ROLE).csv") : SPLIT_CSV
 const FOLDS_CSV = joinpath(dirname(ROLE_SPLIT), "folds.csv")
 const NSUB = parse(Int, get(ENV, "HBAD4_VERIFY_NSUB", "120"))
@@ -741,7 +741,7 @@ end # section 4
 # ================================================================ 5. data pipeline vs SQL on the raw databases
 if want(5) || want(6) || want(9)
 con = DBInterface.connect(DuckDB.DB, ":memory:")
-DBInterface.execute(con, "ATTACH '$(SLIM_DB)' AS s (READ_ONLY)"); DBInterface.execute(con, "ATTACH '$(FIADB)' AS f (READ_ONLY)")
+DBInterface.execute(con, "ATTACH '$(SLIM_DB)' AS s (READ_ONLY)"); DBInterface.execute(con, "CREATE SCHEMA f"); for t_ in ("PLOT", "COND", "SUBP_COND", "TREE"); DBInterface.execute(con, "CREATE VIEW f.\"$t_\" AS SELECT * FROM s.raw.\"$t_\""); end
 q(sql) = DataFrame(DBInterface.execute(con, sql))
 ivall = vcat([CS.sets[nm].iv for nm in ("train", "val", "test")]...)
 DuckDB.register_data_frame(con, DataFrame(iid=ivall.iid, st=ivall.st, u=ivall.u, c=ivall.c, p=ivall.p, d1=Date.(ivall.d1), d2=Date.(ivall.d2), set=String.(ivall.set)), "ivs")
@@ -757,8 +757,8 @@ v1.key = keyof_.(v1.sym, v1.grp)
 FQ = let fsql = q("""
   SELECT p.STATECD st, p.UNITCD u, p.COUNTYCD c, p.PLOT p, make_date(p.MEASYEAR::INT, p.MEASMON::INT, p.MEASDAY::INT) md, sc.SUBP sb,
          sum(sc.SUBPCOND_PROP) FILTER (WHERE k.COND_STATUS_CD = 1) fs, sum(sc.MICRCOND_PROP) FILTER (WHERE k.COND_STATUS_CD = 1) fm,
-         sum(sc.SUBPCOND_PROP) ts, sum(sc.MICRCOND_PROP) tm, count(DISTINCT p.CN) ncn
-  FROM f.SUBP_COND sc JOIN f.PLOT p ON p.CN = sc.PLT_CN JOIN f.COND k ON k.PLT_CN = sc.PLT_CN AND k.CONDID = sc.CONDID
+         sum(sc.SUBPCOND_PROP) ts, sum(sc.MICRCOND_PROP) tm, count(DISTINCT p.INVYR) ncn
+  FROM f.SUBP_COND sc JOIN f.PLOT p ON p.STATECD = sc.STATECD AND p.UNITCD = sc.UNITCD AND p.COUNTYCD = sc.COUNTYCD AND p.PLOT = sc.PLOT AND p.INVYR = sc.INVYR JOIN f.COND k ON k.STATECD = sc.STATECD AND k.UNITCD = sc.UNITCD AND k.COUNTYCD = sc.COUNTYCD AND k.PLOT = sc.PLOT AND k.INVYR = sc.INVYR AND k.CONDID = sc.CONDID
   WHERE p.STATECD IN (12, 13) AND p.MEASYEAR IS NOT NULL AND p.MEASMON IS NOT NULL AND p.MEASDAY IS NOT NULL GROUP BY ALL""")
   Dict((Int(r.st), Int(r.u), Int(r.c), Int(r.p), Date(r.md), Int(r.sb)) => (r.ncn == 1 && abs(coalesce(r.ts, 0.0) - 1) <= 1e-6 ? clamp(coalesce(r.fs, 0.0), 0, 1) : NaN,
                                                                          r.ncn == 1 && abs(coalesce(r.tm, 0.0) - 1) <= 1e-6 ? clamp(coalesce(r.fm, 0.0), 0, 1) : NaN) for r in eachrow(fsql))
@@ -920,7 +920,7 @@ let v2 = q("""
 end
 let fsum = q("""
     SELECT p.STATECD st, p.UNITCD u, p.COUNTYCD c, p.PLOT p, make_date(p.MEASYEAR::INT, p.MEASMON::INT, p.MEASDAY::INT) md, count(*) n, count(*) FILTER (WHERE t.DIA >= 5) n5
-    FROM f.TREE t JOIN f.PLOT p ON p.CN = t.PLT_CN WHERE p.STATECD IN (12, 13) AND t.STATUSCD = 1 AND t.DIA >= 1.0 AND p.MEASYEAR IS NOT NULL AND p.MEASMON IS NOT NULL AND p.MEASDAY IS NOT NULL GROUP BY ALL""")
+    FROM f.TREE t JOIN f.PLOT p ON p.STATECD = t.STATECD AND p.UNITCD = t.UNITCD AND p.COUNTYCD = t.COUNTYCD AND p.PLOT = t.PLOT AND p.INVYR = t.INVYR WHERE p.STATECD IN (12, 13) AND t.STATUSCD = 1 AND t.DIA >= 1.0 AND p.MEASYEAR IS NOT NULL AND p.MEASMON IS NOT NULL AND p.MEASDAY IS NOT NULL GROUP BY ALL""")
   fd = Dict((Int(r.st), Int(r.u), Int(r.c), Int(r.p), Date(r.md)) => (r.n, r.n5) for r in eachrow(fsum)); nd = 0; nd5 = 0; tot = 0; dif = 0; dif5 = 0; nnot = 0; difs = 0
   for nm in ("train", "val", "test")
     Dn = CS.sets[nm]

@@ -16,7 +16,7 @@ lon = CSV.read("/workspace/species_longevity_ref.csv", DataFrame); lond = Dict(S
 longev = [median([get(lond, s, 300.0) for s in unique(tr.sym[tr.key .== k])]) for k in keys_]
 # ---- traits per key
 st = CSV.read("/workspace/landis_region4/data_r4/shadetol_all_species.csv", DataFrame); std_ = Dict(String(r.sym) => Float64(r.shade_class) for r in eachrow(st))
-db = DBInterface.connect(DuckDB.DB, "/workspace/landis_region4/data_r4/slim_r4.duckdb"; readonly=true)
+db = DBInterface.connect(DuckDB.DB, get(ENV, "PAN_HBAD_DB", normpath(joinpath(@__DIR__, "..", "..", "..", "landis_region4", "data_r4", "fia_truth_r4.duckdb"))); readonly=true)
 rs = DataFrame(DBInterface.execute(db, "SELECT SPECIES_SYMBOL s, CAST(WOOD_SPGR_GREENVOL_DRYWT AS DOUBLE) wd, SFTWD_HRDWD sw FROM REF_SPECIES ORDER BY SPECIES_SYMBOL"))
 wdd = Dict(String(r.s) => r.wd for r in eachrow(rs) if !ismissing(r.wd))
 trn = tr[tr.set .== "train", :]

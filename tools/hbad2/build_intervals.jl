@@ -5,7 +5,7 @@
 # Ingrowth (trees first tallied at v2) is recorded separately (it is a recruitment process, not a change of a v1 cohort).
 #   ./julia_gdal.sh --project=. --threads=2 tools/hbad2/build_intervals.jl
 using DuckDB, DataFrames, CSV, Arrow, Statistics, Dates, Printf
-const DB = "/workspace/landis_region4/data_r4/slim_r4.duckdb"
+const DB = get(ENV, "PAN_HBAD_DB", normpath(joinpath(@__DIR__, "..", "..", "..", "landis_region4", "data_r4", "fia_truth_r4.duckdb")))
 const SPLIT = "/workspace/landis_region4/runs_local/gaflst_split/split_plots.csv"
 const OUT = joinpath(@__DIR__, "..", "..", "results", "hbad2"); mkpath(OUT)
 con = DBInterface.connect(DuckDB.DB, ":memory:")

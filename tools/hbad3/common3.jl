@@ -8,7 +8,7 @@ const SFORM = parse(Int, get(ENV, "HBAD3_SFORM", "1"))    # growth-stress hazard
 const R3DIR = get(ENV, "HBAD3_R3DIR", joinpath(@__DIR__, "..", "..", "results", "hbad3"))   # HBAD3_R3DIR: fit3p_<tag> outputs elsewhere (nested CV)
 # external inputs (read-only), under the workspace root (env WORKSPACE, default: the parent folder of this repo) — tools/hbad3/pipeline3p.env
 const WSROOT = get(ENV, "WORKSPACE", normpath(joinpath(@__DIR__, "..", "..", "..")))
-const SLIM_DB = get(ENV, "HBAD3_SLIM_DB", joinpath(WSROOT, "landis_region4", "data_r4", "slim_r4.duckdb"))
+const SLIM_DB = get(ENV, "HBAD3_SLIM_DB", joinpath(WSROOT, "landis_region4", "data_r4", "fia_truth_r4.duckdb"))
 const SHADETOL_CSV = get(ENV, "HBAD3_SHADETOL_CSV", joinpath(WSROOT, "landis_region4", "data_r4", "shadetol_all_species.csv"))
 const LONGEVITY_CSV = get(ENV, "HBAD3_LONGEVITY_CSV", joinpath(WSROOT, "species_longevity_ref.csv"))
 SITE_SUB && VIGOUR || error("HBAD3 harness expects HBAD2_SITE=subplot and HBAD2_VIGOUR=1")
